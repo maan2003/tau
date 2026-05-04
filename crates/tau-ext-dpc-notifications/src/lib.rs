@@ -11,10 +11,13 @@
 //!   → an `ExtAgentQuery` side-prompt to the agent asking for a one-sentence
 //!   summary; when the matching `ExtAgentQueryResult` arrives (or a 10s
 //!   fallback timer expires) → `user-text-notification = {"urgency": "normal",
-//!   "title": "Agent idle: <host>:<cwd>", "body": "<summary or fallback>"}`.
-//!   The idle timer resets on every user-originated `ui.prompt_submitted` /
-//!   `agent.prompt_submitted`. Tunable via the extension's
-//!   `config.idle_seconds` field in `harness.json5`.
+//!   "title": "Agent idle: <host>:<cwd>", "body": "<summary or fallback>",
+//!   "app_name": "tau"}`. `app_name` follows the schema
+//!   `user-text-notification.sh` emits so downstream consumers can use it as
+//!   the desktop notification's source-app indicator instead of us baking it
+//!   into the title. The idle timer resets on every user-originated
+//!   `ui.prompt_submitted` / `agent.prompt_submitted`. Tunable via the
+//!   extension's `config.idle_seconds` field in `harness.json5`.
 //!
 //! The downstream tooling (typically a terminal multiplexer status
 //! line or a `user-notification.sh` consumer wired to a sound file)
@@ -45,6 +48,13 @@ pub const SOUND_VAR_NAME: &str = "user-notification";
 /// User-var name for text/desktop notifications (matches
 /// `user-text-notification.sh`).
 pub const TEXT_VAR_NAME: &str = "user-text-notification";
+
+/// `app_name` field on the text-notification payload. Mirrors what
+/// `user-text-notification.sh`'s `NOTIFY_APP_NAME` env var sets, so
+/// downstream consumers can route or filter notifications by source
+/// app and surface the source in the desktop notification UI without
+/// us having to re-state it inside the title text.
+pub const NOTIFY_APP_NAME: &str = "tau";
 
 /// Sound key emitted when the user submits a prompt.
 pub const VALUE_AGENT_START: &str = "protoss-probe-ack";
@@ -521,10 +531,15 @@ fn sound_event(value: &str) -> Event {
 }
 
 fn summary_text_event(body: &str) -> Event {
+    // `app_name` matches the schema `user-text-notification.sh`
+    // emits — downstream consumers use it as the desktop
+    // notification's source-app indicator (libnotify's app_name),
+    // so we don't need to re-state "tau" inside the title text.
     let payload = serde_json::json!({
         "urgency": "normal",
         "title": build_title(),
         "body": body,
+        "app_name": NOTIFY_APP_NAME,
     })
     .to_string();
     Event::Osc1337SetUserVar(Osc1337SetUserVar {
@@ -748,6 +763,7 @@ mod tests {
             payload["title"],
         );
         assert_eq!(payload["body"], FALLBACK_BODY);
+        assert_eq!(payload["app_name"], NOTIFY_APP_NAME);
     }
 
     /// When a matching `ExtAgentQueryResult` arrives before the
