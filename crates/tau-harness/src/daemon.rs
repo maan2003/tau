@@ -231,6 +231,7 @@ pub fn send_daemon_message_with_trace(
     peer.send(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: session_id.into(),
         text: message.to_owned(),
+        originator: tau_proto::PromptOriginator::User,
     }))?;
 
     let started_at = Instant::now();

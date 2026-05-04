@@ -11,6 +11,7 @@
 
 pub mod runtime_dir;
 
+mod conversation;
 mod daemon;
 mod debug_log;
 mod dirs;

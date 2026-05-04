@@ -37,6 +37,7 @@ fn store_user_message(store: &mut SessionStore, session_id: &str, text: &str) ->
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: session_id.into(),
                 text: text.to_owned(),
+                originator: tau_proto::PromptOriginator::User,
             }),
         )
         .expect("append session event");
@@ -58,6 +59,7 @@ fn store_agent_message(store: &mut SessionStore, session_id: &str, text: &str) -
                 input_tokens: None,
                 cached_tokens: None,
                 thinking: None,
+                originator: tau_proto::PromptOriginator::User,
             }),
         )
         .expect("append session event");
@@ -128,6 +130,7 @@ fn subscribed_clients_only_receive_matching_events() {
     let report = bus.publish(Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hello".to_owned(),
+        originator: tau_proto::PromptOriginator::User,
     }));
 
     assert_eq!(report.delivered_to, vec![agent_id.clone()]);
@@ -190,6 +193,7 @@ fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
                 input_tokens: None,
                 cached_tokens: None,
                 thinking: None,
+                originator: tau_proto::PromptOriginator::User,
             }),
         )
         .expect("directed route should succeed");
@@ -240,6 +244,7 @@ fn connection_abstraction_is_transport_independent_for_in_memory_clients() {
         input_tokens: None,
         cached_tokens: None,
         thinking: None,
+        originator: tau_proto::PromptOriginator::User,
     }));
     assert_eq!(second_report.delivered_to, vec![agent_id.clone()]);
 
@@ -717,6 +722,7 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
         model: None,
         effort: tau_proto::Effort::Off,
         thinking_summary: tau_proto::ThinkingSummary::Off,
+        originator: tau_proto::PromptOriginator::User,
     };
     let _ = bus.send_to(&agent_id, None, Event::SessionPromptCreated(prompt));
 

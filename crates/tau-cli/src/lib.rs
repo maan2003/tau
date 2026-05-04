@@ -619,6 +619,7 @@ fn terminal_input_loop(
                     .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
                         session_id: session_id.as_str().into(),
                         text: text.to_owned(),
+                        originator: tau_proto::PromptOriginator::User,
                     }))
                     .is_err()
                 {
@@ -714,6 +715,20 @@ fn format_latency(latency: Duration) -> String {
         return format!("{whole}.{fractional}s");
     }
     format!("{}s", latency.as_secs())
+}
+
+/// Returns the originator of any prompt-lifecycle event, or
+/// [`tau_proto::PromptOriginator::User`] for events that don't carry
+/// one (so unrelated events render as before).
+fn originator_of(event: &Event) -> tau_proto::PromptOriginator {
+    match event {
+        Event::UiPromptSubmitted(p) => p.originator.clone(),
+        Event::SessionPromptCreated(p) => p.originator.clone(),
+        Event::AgentPromptSubmitted(s) => s.originator.clone(),
+        Event::AgentResponseUpdated(u) => u.originator.clone(),
+        Event::AgentResponseFinished(f) => f.originator.clone(),
+        _ => tau_proto::PromptOriginator::User,
+    }
 }
 
 fn cache_hit_percent(input_tokens: Option<u64>, cached_tokens: Option<u64>) -> Option<u8> {
@@ -1678,6 +1693,15 @@ impl EventRenderer {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
 
+        // Skip events that belong to a side conversation spawned by an
+        // extension (e.g. the dpc-notifications idle-summarizer). They
+        // travel on the same bus as the user's interactive turn but
+        // must not paint into the user's chat window or perturb its
+        // pending-block bookkeeping.
+        if !originator_of(event).is_user() {
+            return;
+        }
+
         match event {
             Event::SessionStarted(started)
                 if matches!(started.reason, tau_proto::SessionStartReason::New) =>
@@ -2298,6 +2322,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "old prompt".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-0".into(),
@@ -2308,6 +2333,7 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -2323,6 +2349,7 @@ mod tests {
             input_tokens: Some(100),
             cached_tokens: Some(50),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::ToolResult(ToolResult {
             call_id: "call-1".into(),
@@ -2394,6 +2421,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hello".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "> hello"));
@@ -2408,6 +2436,7 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "…"));
@@ -2417,6 +2446,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: "Hi there!".into(),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "Hi there!"));
@@ -2429,6 +2459,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(
@@ -2450,6 +2481,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-0".into(),
@@ -2460,6 +2492,7 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Auto,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
 
@@ -2469,6 +2502,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: String::new(),
             thinking: Some("planning the answer".into()),
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(
@@ -2481,6 +2515,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: "actual answer".into(),
             thinking: Some("planning the answer".into()),
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "actual answer"));
@@ -2510,6 +2545,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: Some("planning the answer".into()),
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         // Thinking should appear above the response in the history.
@@ -2540,6 +2576,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-0".into(),
@@ -2550,6 +2587,7 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Auto,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -2558,6 +2596,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: Some("the_thinking_text".into()),
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "the_thinking_text"));
@@ -2619,6 +2658,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-0".into(),
@@ -2629,6 +2669,7 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Auto,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -2637,6 +2678,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: Some("hidden reasoning".into()),
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "answer"));
@@ -2662,6 +2704,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-0".into(),
@@ -2672,11 +2715,13 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
             text: "hello".into(),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -2685,6 +2730,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         // Just make sure we didn't crash and the response is visible.
@@ -2704,6 +2750,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "first".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-0".into(),
@@ -2714,12 +2761,14 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
 
         // Second prompt queued.
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "second".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
             session_id: "s1".into(),
@@ -2740,6 +2789,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "response one"));
@@ -2754,6 +2804,7 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(
@@ -2771,6 +2822,7 @@ mod tests {
             session_prompt_id: "sp-1".into(),
             text: "response two".into(),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(
@@ -2787,6 +2839,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(
@@ -2816,6 +2869,7 @@ mod tests {
             renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: format!("msg-{i}"),
+                originator: tau_proto::PromptOriginator::User,
             }));
             if i == 0 {
                 renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
@@ -2827,6 +2881,7 @@ mod tests {
                     model: None,
                     effort: tau_proto::Effort::Off,
                     thinking_summary: tau_proto::ThinkingSummary::Off,
+                    originator: tau_proto::PromptOriginator::User,
                 }));
             } else {
                 renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
@@ -2849,12 +2904,14 @@ mod tests {
                     model: None,
                     effort: tau_proto::Effort::Off,
                     thinking_summary: tau_proto::ThinkingSummary::Off,
+                    originator: tau_proto::PromptOriginator::User,
                 }));
             }
             renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
                 session_prompt_id: spid.clone(),
                 text: format!("partial-{i}"),
                 thinking: None,
+                originator: tau_proto::PromptOriginator::User,
             }));
             renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
                 session_prompt_id: spid,
@@ -2863,6 +2920,7 @@ mod tests {
                 input_tokens: None,
                 cached_tokens: None,
                 thinking: None,
+                originator: tau_proto::PromptOriginator::User,
             }));
             sync(&handle);
         }
@@ -2903,6 +2961,7 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "…"));
@@ -2911,6 +2970,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: "Hello".into(),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "Hello …"));
@@ -2922,6 +2982,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "Hello"));
@@ -2951,6 +3012,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "read src/main.rs …"));
@@ -2986,6 +3048,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-0".into(),
@@ -2996,11 +3059,13 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
             text: "hello!".into(),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -3009,6 +3074,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
 
@@ -3279,6 +3345,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-0".into(),
@@ -3289,6 +3356,7 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
 
         // Agent starts streaming response 1.
@@ -3296,6 +3364,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: "Hello".into(),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(
@@ -3308,6 +3377,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
             session_id: "s1".into(),
@@ -3316,6 +3386,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
             session_id: "s1".into(),
@@ -3327,6 +3398,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: "Hello!\n\nHow can I help you today?".into(),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
 
@@ -3338,6 +3410,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(
@@ -3356,11 +3429,13 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-1".into(),
             text: "Hello again!\n\nHow can I help you?".into(),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-1".into(),
@@ -3369,6 +3444,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(
@@ -3387,11 +3463,13 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-2".into(),
             text: "Hi there!\n\nWhat can I help you with?".into(),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-2".into(),
@@ -3400,6 +3478,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
 
@@ -3451,6 +3530,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-0".into(),
@@ -3461,6 +3541,7 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
 
         // Response with emoji followed by text on next line.
@@ -3469,6 +3550,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: response.into(),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -3477,6 +3559,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
 
@@ -3516,6 +3599,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-0".into(),
@@ -3526,6 +3610,7 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
 
         // 3 emoji = 6 columns + "end" = 9 columns total.
@@ -3537,6 +3622,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
 
@@ -3564,6 +3650,7 @@ mod tests {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "overflow please".into(),
+            originator: tau_proto::PromptOriginator::User,
         }));
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-0".into(),
@@ -3574,6 +3661,7 @@ mod tests {
             model: None,
             effort: tau_proto::Effort::Off,
             thinking_summary: tau_proto::ThinkingSummary::Off,
+            originator: tau_proto::PromptOriginator::User,
         }));
 
         let partial = "stream 0\nstream 1\nstream 2\nstream 3\nPARTIAL ONLY";
@@ -3581,6 +3669,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: partial.into(),
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
         assert!(
@@ -3597,6 +3686,7 @@ mod tests {
             input_tokens: None,
             cached_tokens: None,
             thinking: None,
+            originator: tau_proto::PromptOriginator::User,
         }));
         sync(&handle);
 

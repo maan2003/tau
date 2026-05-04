@@ -26,8 +26,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleConfigError,
-    LifecycleHello, LifecycleReady, LifecycleSubscribe, Osc1337SetUserVar, PROTOCOL_VERSION,
+    ClientKind, Event, EventReader, EventSelector, EventWriter, ExtAgentQuery,
+    LifecycleConfigError, LifecycleHello, LifecycleReady, LifecycleSubscribe, Osc1337SetUserVar,
+    PROTOCOL_VERSION,
 };
 
 /// `tracing` target for events emitted from this extension. Matches
@@ -52,6 +53,42 @@ pub const VALUE_AGENT_END: &str = "protoss-upgrade-complete";
 /// text notification, in seconds. Override via the `idle_seconds`
 /// field of the extension's `config` block in `harness.json5`.
 pub const DEFAULT_IDLE_SECONDS: u64 = 60;
+
+/// How long to wait for the agent to summarize the conversation
+/// before falling back to the static idle text. Once the idle window
+/// has elapsed we want to actually notify the user soon, even if the
+/// agent is wedged or the model is unreachable.
+pub const SUMMARY_TIMEOUT_SECONDS: u64 = 10;
+
+/// Instruction sent to the agent as a side prompt when the idle
+/// timer fires. Mirrors the prompt Pi's `idle-notification.ts` uses,
+/// adapted for our harness-mediated query path.
+const SUMMARY_INSTRUCTION: &str = "Summarize in one short sentence: what \
+were you working on, and what do you need from the user now? Keep it \
+under 100 characters. Output only the summary, nothing else.";
+
+/// Static fallback body used when the summary request errors out,
+/// returns empty text, or doesn't arrive within
+/// [`SUMMARY_TIMEOUT_SECONDS`].
+const FALLBACK_BODY: &str = "Agent is waiting for input";
+
+/// Phase of the idle-watch state machine. `WaitingIdle` is the base
+/// "agent finished, count down to nudge" state. When it elapses we
+/// send a side-query to the agent for a one-sentence summary and
+/// transition to `WaitingSummary`; whichever of (result, timeout)
+/// arrives first decides what body the user sees.
+enum IdleState {
+    WaitingIdle { deadline: Instant },
+    WaitingSummary { query_id: String, deadline: Instant },
+}
+
+impl IdleState {
+    fn deadline(&self) -> Instant {
+        match self {
+            Self::WaitingIdle { deadline } | Self::WaitingSummary { deadline, .. } => *deadline,
+        }
+    }
+}
 
 /// User-supplied configuration for this extension. Mirrors the
 /// schema documented next to `DEFAULT_IDLE_SECONDS`.
@@ -93,11 +130,35 @@ enum InMsg {
 
 /// Test-friendly entry point. Lets unit tests drop the idle window
 /// to a few hundred milliseconds so the timeout path is observable
-/// without slowing the suite.
+/// without slowing the suite. Uses [`SUMMARY_TIMEOUT_SECONDS`] for
+/// the summary fallback timer; tests that exercise the fallback path
+/// directly should call [`run_with_idle_and_summary_timeout`] with a
+/// shorter summary timeout instead.
 pub fn run_with_idle<R, W>(
     reader: R,
     writer: W,
+    idle_duration: Duration,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read + Send + 'static,
+    W: Write,
+{
+    run_with_idle_and_summary_timeout(
+        reader,
+        writer,
+        idle_duration,
+        Duration::from_secs(SUMMARY_TIMEOUT_SECONDS),
+    )
+}
+
+/// Test-friendly entry point with an overridable summary fallback
+/// timeout. Useful for exercising the wedged-agent path without
+/// blocking the test suite for [`SUMMARY_TIMEOUT_SECONDS`] seconds.
+pub fn run_with_idle_and_summary_timeout<R, W>(
+    reader: R,
+    writer: W,
     mut idle_duration: Duration,
+    summary_timeout: Duration,
 ) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
@@ -117,6 +178,10 @@ where
             EventSelector::Exact(tau_proto::EventName::UI_PROMPT_SUBMITTED),
             EventSelector::Exact(tau_proto::EventName::LIFECYCLE_CONFIGURE),
             EventSelector::Exact(tau_proto::EventName::LIFECYCLE_DISCONNECT),
+            // Side-query results come back point-to-point from the
+            // harness, but we subscribe defensively so the broadcast
+            // form (if it ever appears) also reaches us.
+            EventSelector::Exact(tau_proto::EventName::EXTENSION_AGENT_QUERY_RESULT),
         ],
     }))?;
     writer.write_event(&Event::LifecycleReady(LifecycleReady {
@@ -153,13 +218,12 @@ where
         }
     });
 
-    let mut idle_deadline: Option<Instant> = None;
+    let mut idle: Option<IdleState> = None;
     let mut input_closed = false;
     let mut waiting_for_final_response = false;
+    let mut next_query_id: u64 = 0;
     loop {
-        let recv_result = match (idle_deadline, input_closed) {
-            // Channel still live; wait either bounded (deadline set)
-            // or unbounded (no deadline) for the next event.
+        let recv_result = match (idle.as_ref().map(IdleState::deadline), input_closed) {
             (Some(deadline), false) => {
                 let wait = deadline.saturating_duration_since(Instant::now());
                 rx.recv_timeout(wait)
@@ -213,11 +277,36 @@ where
                             }
                         }
                     }
-                    Event::AgentPromptSubmitted(_) => {
-                        idle_deadline = None;
+                    Event::AgentPromptSubmitted(submitted) => {
+                        // Skip side-conversation prompts (e.g. our
+                        // own idle-summarizer query). The agent emits
+                        // AgentPromptSubmitted as soon as it accepts
+                        // any prompt — clearing idle here would
+                        // discard the in-flight `WaitingSummary`
+                        // deadline and silently drop the result.
+                        if !submitted.originator.is_user() {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                "skipping non-user AgentPromptSubmitted",
+                            );
+                            continue;
+                        }
+                        idle = None;
                     }
-                    Event::UiPromptSubmitted(_) => {
-                        idle_deadline = None;
+                    Event::UiPromptSubmitted(prompt) => {
+                        // Skip side-conversation prompts (e.g. our
+                        // own idle-summarizer query). Treating them
+                        // as a fresh user turn would clear the
+                        // in-flight `WaitingSummary` deadline and
+                        // drop the result we're about to receive.
+                        if !prompt.originator.is_user() {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                "skipping non-user UiPromptSubmitted",
+                            );
+                            continue;
+                        }
+                        idle = None;
                         if !waiting_for_final_response {
                             writer.write_event(&sound_event(VALUE_AGENT_START))?;
                             writer.flush()?;
@@ -232,7 +321,9 @@ where
                         // isn't actually done yet. Only fire the
                         // end-of-turn sound + idle timer when the
                         // agent returned a final answer with no
-                        // pending tool work.
+                        // pending tool work and the prompt was the
+                        // user's interactive turn (filter side
+                        // queries — those are *our own* responses).
                         if !finished.tool_calls.is_empty() {
                             tracing::trace!(
                                 target: LOG_TARGET,
@@ -241,15 +332,57 @@ where
                             );
                             continue;
                         }
+                        if !finished.originator.is_user() {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                "skipping non-user AgentResponseFinished",
+                            );
+                            continue;
+                        }
                         writer.write_event(&sound_event(VALUE_AGENT_END))?;
                         writer.flush()?;
                         waiting_for_final_response = false;
-                        idle_deadline = Some(Instant::now() + idle_duration);
+                        idle = Some(IdleState::WaitingIdle {
+                            deadline: Instant::now() + idle_duration,
+                        });
                         tracing::debug!(
                             target: LOG_TARGET,
                             seconds = idle_duration.as_secs(),
                             "idle deadline armed",
                         );
+                    }
+                    Event::ExtAgentQueryResult(result) => {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            query_id = %result.query_id,
+                            text_len = result.text.len(),
+                            error = ?result.error,
+                            idle_state = match &idle {
+                                None => "none",
+                                Some(IdleState::WaitingIdle { .. }) => "waiting_idle",
+                                Some(IdleState::WaitingSummary { .. }) => "waiting_summary",
+                            },
+                            "received ExtAgentQueryResult",
+                        );
+                        // Match against the in-flight query id; ignore
+                        // stragglers from cancelled / superseded
+                        // requests.
+                        if let Some(IdleState::WaitingSummary { query_id, .. }) = idle.as_ref()
+                            && result.query_id == *query_id
+                        {
+                            let body = result.text.trim().to_owned();
+                            let body = if body.is_empty() || result.error.is_some() {
+                                FALLBACK_BODY.to_owned()
+                            } else {
+                                body
+                            };
+                            writer.write_event(&summary_text_event(&body))?;
+                            writer.flush()?;
+                            idle = None;
+                            if input_closed {
+                                break;
+                            }
+                        }
                     }
                     Event::LifecycleDisconnect(_) => {
                         tracing::info!(target: LOG_TARGET, "disconnect received, exiting");
@@ -264,25 +397,47 @@ where
             }
             Ok(InMsg::EndOfStream) => {
                 input_closed = true;
-                if idle_deadline.is_none() {
+                if idle.is_none() {
                     break;
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                tracing::info!(
-                    target: LOG_TARGET,
-                    "idle deadline elapsed, emitting text notification",
-                );
-                writer.write_event(&idle_text_event())?;
-                writer.flush()?;
-                idle_deadline = None;
-                if input_closed {
-                    break;
+            Err(mpsc::RecvTimeoutError::Timeout) => match idle.take() {
+                Some(IdleState::WaitingIdle { .. }) => {
+                    let query_id = format!("idle-{next_query_id}");
+                    next_query_id += 1;
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        query_id = %query_id,
+                        "idle deadline elapsed, requesting agent summary",
+                    );
+                    writer.write_event(&Event::ExtAgentQuery(ExtAgentQuery {
+                        query_id: query_id.clone(),
+                        instruction: SUMMARY_INSTRUCTION.to_owned(),
+                    }))?;
+                    writer.flush()?;
+                    idle = Some(IdleState::WaitingSummary {
+                        query_id,
+                        deadline: Instant::now() + summary_timeout,
+                    });
                 }
-            }
+                Some(IdleState::WaitingSummary { .. }) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        "summary timed out, falling back to static text",
+                    );
+                    writer.write_event(&summary_text_event(FALLBACK_BODY))?;
+                    writer.flush()?;
+                    if input_closed {
+                        break;
+                    }
+                }
+                None => {
+                    // Spurious wake-up; nothing to do.
+                }
+            },
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 input_closed = true;
-                if idle_deadline.is_none() {
+                if idle.is_none() {
                     break;
                 }
             }
@@ -299,16 +454,16 @@ fn sound_event(value: &str) -> Event {
     })
 }
 
-fn idle_text_event() -> Event {
-    let body = serde_json::json!({
+fn summary_text_event(body: &str) -> Event {
+    let payload = serde_json::json!({
         "urgency": "normal",
         "title": "Tau",
-        "body": "Agent is waiting for input",
+        "body": body,
     })
     .to_string();
     Event::Osc1337SetUserVar(Osc1337SetUserVar {
         name: TEXT_VAR_NAME.to_owned(),
-        value: body,
+        value: payload,
     })
 }
 
@@ -338,6 +493,7 @@ mod tests {
             .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: "hello".into(),
+                originator: tau_proto::PromptOriginator::User,
             }))
             .expect("write");
         writer
@@ -348,6 +504,7 @@ mod tests {
                 input_tokens: None,
                 cached_tokens: None,
                 thinking: None,
+                originator: tau_proto::PromptOriginator::User,
             }))
             .expect("write");
         // Explicit disconnect so the loop exits without waiting on
@@ -399,6 +556,7 @@ mod tests {
             .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: "hello".into(),
+                originator: tau_proto::PromptOriginator::User,
             }))
             .expect("write");
         // Mid-turn finish: text=None, tool_calls non-empty. No
@@ -415,6 +573,7 @@ mod tests {
                 input_tokens: None,
                 cached_tokens: None,
                 thinking: Some("planning".into()),
+                originator: tau_proto::PromptOriginator::User,
             }))
             .expect("write");
         writer
@@ -450,8 +609,13 @@ mod tests {
     /// and then, after the configured idle window expires with no
     /// further input, the text-notification OSC carrying a JSON
     /// payload that mirrors `user-text-notification.sh`.
+    /// Idle window elapsing must trigger an `ExtAgentQuery` to the
+    /// agent for a one-sentence summary. When no result arrives
+    /// within the summary timeout, the extension falls back to the
+    /// static "Agent is waiting for input" body so the user still
+    /// gets nudged.
     #[test]
-    fn idle_timeout_fires_text_notification() {
+    fn idle_timeout_requests_summary_then_falls_back() {
         let mut input = Vec::new();
         let mut writer = EventWriter::new(&mut input);
         writer
@@ -462,12 +626,19 @@ mod tests {
                 input_tokens: None,
                 cached_tokens: None,
                 thinking: None,
+                originator: tau_proto::PromptOriginator::User,
             }))
             .expect("write");
         writer.flush().expect("flush");
 
         let mut output = Vec::new();
-        run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(50)).expect("run");
+        run_with_idle_and_summary_timeout(
+            Cursor::new(input),
+            &mut output,
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        )
+        .expect("run");
 
         let mut reader = EventReader::new(Cursor::new(output));
         drain_lifecycle(&mut reader);
@@ -480,17 +651,118 @@ mod tests {
         assert_eq!(osc.name, SOUND_VAR_NAME);
         assert_eq!(osc.value, VALUE_AGENT_END);
 
-        // Then, after the (short) idle window, the text notification.
-        let idle = reader.read_event().expect("read").expect("idle event");
-        let Event::Osc1337SetUserVar(osc) = idle else {
-            panic!("expected idle text OSC");
+        // Then, after the (short) idle window, the side-query for a
+        // summary.
+        let query = reader.read_event().expect("read").expect("ext-query event");
+        let Event::ExtAgentQuery(query) = query else {
+            panic!("expected ExtAgentQuery, got {query:?}");
+        };
+        assert!(
+            !query.query_id.is_empty(),
+            "extension must mint a non-empty query_id",
+        );
+        assert!(query.instruction.contains("summarize") || query.instruction.contains("Summarize"));
+
+        // Then, after the (short) summary timeout with no response,
+        // the static fallback text notification.
+        let fallback = reader.read_event().expect("read").expect("fallback event");
+        let Event::Osc1337SetUserVar(osc) = fallback else {
+            panic!("expected fallback OSC, got {fallback:?}");
         };
         assert_eq!(osc.name, TEXT_VAR_NAME);
         let payload: serde_json::Value =
-            serde_json::from_str(&osc.value).expect("idle payload is JSON");
+            serde_json::from_str(&osc.value).expect("fallback payload is JSON");
         assert_eq!(payload["urgency"], "normal");
         assert_eq!(payload["title"], "Tau");
         assert_eq!(payload["body"], "Agent is waiting for input");
+    }
+
+    /// When a matching `ExtAgentQueryResult` arrives before the
+    /// summary timeout, the text notification's body must be the
+    /// agent's summary text rather than the static fallback.
+    ///
+    /// Coordinates with the running extension via a UnixStream pair:
+    /// the test thread reads each emitted event and only writes the
+    /// `ExtAgentQueryResult` *after* observing the `ExtAgentQuery`,
+    /// so the result lands while the extension is in the
+    /// `WaitingSummary` state (not the earlier `WaitingIdle`).
+    #[test]
+    fn summary_result_populates_notification_body() {
+        use std::os::unix::net::UnixStream;
+
+        let (test_side, ext_side) = UnixStream::pair().expect("pair");
+        let ext_reader = ext_side.try_clone().expect("clone");
+        let ext_writer = ext_side;
+        let handle = thread::spawn(move || {
+            run_with_idle_and_summary_timeout(
+                ext_reader,
+                ext_writer,
+                Duration::from_millis(50),
+                Duration::from_secs(5),
+            )
+            .expect("run");
+        });
+
+        let test_writer_stream = test_side.try_clone().expect("clone");
+        let mut writer = EventWriter::new(test_writer_stream);
+        let mut reader = EventReader::new(test_side);
+
+        // Drain the lifecycle handshake.
+        for _ in 0..3 {
+            reader.read_event().expect("read").expect("lifecycle");
+        }
+
+        writer
+            .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+                session_prompt_id: "sp-0".into(),
+                text: Some("done".into()),
+                tool_calls: Vec::new(),
+                input_tokens: None,
+                cached_tokens: None,
+                thinking: None,
+                originator: tau_proto::PromptOriginator::User,
+            }))
+            .expect("write");
+        writer.flush().expect("flush");
+
+        // end-of-turn sound, then the side-query.
+        let _end = reader.read_event().expect("read").expect("end");
+        let query = reader.read_event().expect("read").expect("query");
+        let Event::ExtAgentQuery(query) = query else {
+            panic!("expected ExtAgentQuery, got {query:?}");
+        };
+
+        writer
+            .write_event(&Event::ExtAgentQueryResult(
+                tau_proto::ExtAgentQueryResult {
+                    query_id: query.query_id.clone(),
+                    text: "  refactoring the harness state, awaiting next prompt  ".into(),
+                    error: None,
+                },
+            ))
+            .expect("write");
+        writer.flush().expect("flush");
+
+        let text = reader.read_event().expect("read").expect("text");
+        let Event::Osc1337SetUserVar(osc) = text else {
+            panic!("expected populated text OSC, got {text:?}");
+        };
+        let payload: serde_json::Value = serde_json::from_str(&osc.value).expect("payload is JSON");
+        assert_eq!(
+            payload["body"], "refactoring the harness state, awaiting next prompt",
+            "summary body should be trimmed",
+        );
+
+        // Cleanly disconnect so the extension exits.
+        writer
+            .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                reason: None,
+            }))
+            .expect("write");
+        writer.flush().expect("flush");
+        drop(writer);
+        drop(reader);
+        handle.join().expect("ext thread");
     }
 
     /// A bogus `config` value (one that doesn't match `ExtConfig`)
@@ -555,12 +827,14 @@ mod tests {
                 input_tokens: None,
                 cached_tokens: None,
                 thinking: None,
+                originator: tau_proto::PromptOriginator::User,
             }))
             .expect("write");
         writer
             .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: "another question".into(),
+                originator: tau_proto::PromptOriginator::User,
             }))
             .expect("write");
         writer.flush().expect("flush");
@@ -600,12 +874,14 @@ mod tests {
             .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: "hello".into(),
+                originator: tau_proto::PromptOriginator::User,
             }))
             .expect("write");
         writer
             .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: "internal replay".into(),
+                originator: tau_proto::PromptOriginator::User,
             }))
             .expect("write");
         writer
@@ -616,6 +892,7 @@ mod tests {
                 input_tokens: None,
                 cached_tokens: None,
                 thinking: None,
+                originator: tau_proto::PromptOriginator::User,
             }))
             .expect("write");
         writer

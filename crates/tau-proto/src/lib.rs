@@ -538,6 +538,7 @@ mod tests {
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: "hello".to_owned(),
+                originator: PromptOriginator::User,
             }),
             Event::SessionStarted(SessionStarted {
                 session_id: "s1".into(),
@@ -561,6 +562,7 @@ mod tests {
                 model: None,
                 effort: Effort::Off,
                 thinking_summary: ThinkingSummary::Off,
+                originator: PromptOriginator::User,
             }),
             Event::AgentResponseFinished(AgentResponseFinished {
                 session_prompt_id: "sp-1".into(),
@@ -569,6 +571,7 @@ mod tests {
                 input_tokens: None,
                 cached_tokens: None,
                 thinking: None,
+                originator: PromptOriginator::User,
             }),
             Event::ExtensionStarting(ExtensionStarting {
                 instance_id: 1.into(),

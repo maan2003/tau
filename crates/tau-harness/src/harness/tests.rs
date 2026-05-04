@@ -43,6 +43,7 @@ fn append_user_message_via_event(h: &mut Harness, session_id: &str, text: &str) 
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: session_id.into(),
             text: text.to_owned(),
+            originator: tau_proto::PromptOriginator::User,
         }),
     );
 }
@@ -214,22 +215,25 @@ fn disconnected_tool_completes_pending_call() {
         .to_owned();
     let call_id: ToolCallId = "call-1".into();
     let tool_name: ToolName = "shell".into();
-    h.pending_tool_sessions.insert(call_id.clone(), "s1".into());
+    let cid = h.default_conversation_id.clone();
+    h.tool_conversations.insert(call_id.clone(), cid);
     h.pending_tool_names
         .insert(call_id.clone(), tool_name.clone());
     h.pending_tool_providers
         .insert(call_id.clone(), conn_id.clone().into());
     h.in_flight_tool_kinds
         .insert(call_id.clone(), tau_proto::ToolSideEffects::Mutating);
+    let cid_for_state = h.default_conversation_id.clone();
     h.turn_state = TurnState::ToolsRunning {
         session_id: "s1".into(),
+        conversation_id: cid_for_state,
         remaining_calls: vec![call_id.clone()],
     };
 
     h.handle_disconnect(&conn_id);
 
     assert!(!matches!(h.turn_state, TurnState::ToolsRunning { .. }));
-    assert!(!h.pending_tool_sessions.contains_key(&call_id));
+    assert!(!h.tool_conversations.contains_key(&call_id));
     assert!(!h.pending_tool_providers.contains_key(&call_id));
 
     let branch = h.store.session("s1").expect("session").current_branch();
@@ -779,10 +783,12 @@ fn empty_tool_name_does_not_panic_and_surfaces_error() {
     // Pre-seed as if the agent had just been prompted and is now
     // responding with tool_calls.
     h.selected_model = "test/model".into();
+    let cid = h.default_conversation_id.clone();
     h.turn_state = TurnState::AgentThinking {
         _session_id: "s1".into(),
+        conversation_id: cid.clone(),
     };
-    h.prompt_sessions.insert("sp-x".into(), "s1".into());
+    h.prompt_conversations.insert("sp-x".into(), cid);
 
     let response = AgentResponseFinished {
         session_prompt_id: "sp-x".into(),
@@ -797,6 +803,7 @@ fn empty_tool_name_does_not_panic_and_surfaces_error() {
         input_tokens: None,
         cached_tokens: None,
         thinking: None,
+        originator: tau_proto::PromptOriginator::User,
     };
 
     h.handle_agent_response_finished(response)
@@ -853,10 +860,12 @@ fn empty_tool_call_id_is_normalized_to_synthetic_id() {
     let mut h = echo_harness(&sp).expect("start");
 
     h.selected_model = "test/model".into();
+    let cid = h.default_conversation_id.clone();
     h.turn_state = TurnState::AgentThinking {
         _session_id: "s1".into(),
+        conversation_id: cid.clone(),
     };
-    h.prompt_sessions.insert("sp-x".into(), "s1".into());
+    h.prompt_conversations.insert("sp-x".into(), cid);
 
     let response = AgentResponseFinished {
         session_prompt_id: "sp-x".into(),
@@ -876,6 +885,7 @@ fn empty_tool_call_id_is_normalized_to_synthetic_id() {
         input_tokens: None,
         cached_tokens: None,
         thinking: None,
+        originator: tau_proto::PromptOriginator::User,
     };
 
     h.handle_agent_response_finished(response)
@@ -940,10 +950,12 @@ fn pure_mutating_pure_serializes_through_dispatch_state_machine() {
     // Pre-seed turn state as if the agent had just been prompted
     // and is about to respond with tool calls.
     h.selected_model = "test/model".into();
+    let cid = h.default_conversation_id.clone();
     h.turn_state = TurnState::AgentThinking {
         _session_id: "s1".into(),
+        conversation_id: cid.clone(),
     };
-    h.prompt_sessions.insert("sp-x".into(), "s1".into());
+    h.prompt_conversations.insert("sp-x".into(), cid);
 
     // A `read` of a nonexistent path returns a ToolError (Pure);
     // `write` of a valid path creates the file and returns
@@ -986,6 +998,7 @@ fn pure_mutating_pure_serializes_through_dispatch_state_machine() {
         input_tokens: None,
         cached_tokens: None,
         thinking: None,
+        originator: tau_proto::PromptOriginator::User,
     };
 
     h.handle_agent_response_finished(response)
@@ -1299,6 +1312,7 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
         input_tokens: None,
         cached_tokens: None,
         thinking: None,
+        originator: tau_proto::PromptOriginator::User,
     })
     .expect("persist first agent response");
 
@@ -1347,6 +1361,7 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
         input_tokens: None,
         cached_tokens: None,
         thinking: Some("The user is asking ...".to_owned()),
+        originator: tau_proto::PromptOriginator::User,
     })
     .expect("persist agent response");
 
@@ -1407,8 +1422,10 @@ fn skill_tool_reads_file_content() {
 
     // Directly invoke the skill tool handler.
     append_user_message_via_event(&mut h, "s1", "load skill");
+    let cid_for_state = h.default_conversation_id.clone();
     h.turn_state = TurnState::ToolsRunning {
         session_id: "s1".into(),
+        conversation_id: cid_for_state,
         remaining_calls: vec!["call-skill".into()],
     };
     let call = AgentToolCall {
@@ -1419,7 +1436,8 @@ fn skill_tool_reads_file_content() {
             CborValue::Text("my-skill".to_owned()),
         )]),
     };
-    h.handle_skill_tool_call("s1", &call).expect("skill call");
+    let cid = h.default_conversation_id.clone();
+    h.handle_skill_tool_call(&cid, &call).expect("skill call");
 
     // Verify the tool result was persisted.
     let branch = h.store.session("s1").expect("session").current_branch();
@@ -1450,8 +1468,10 @@ fn skill_tool_returns_error_for_unknown_skill() {
 
     let mut h = echo_harness(&sp).expect("start");
     append_user_message_via_event(&mut h, "s1", "load skill");
+    let cid_for_state = h.default_conversation_id.clone();
     h.turn_state = TurnState::ToolsRunning {
         session_id: "s1".into(),
+        conversation_id: cid_for_state,
         remaining_calls: vec!["call-missing".into()],
     };
     let call = AgentToolCall {
@@ -1462,7 +1482,8 @@ fn skill_tool_returns_error_for_unknown_skill() {
             CborValue::Text("nonexistent".to_owned()),
         )]),
     };
-    h.handle_skill_tool_call("s1", &call).expect("skill call");
+    let cid = h.default_conversation_id.clone();
+    h.handle_skill_tool_call(&cid, &call).expect("skill call");
 
     // Verify a tool error was persisted.
     let branch = h.store.session("s1").expect("session").current_branch();

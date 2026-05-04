@@ -215,6 +215,10 @@ impl EventName {
         Self::from_static(EventCategory::Extension, "agents_md_available");
     pub const EXTENSION_CONTEXT_READY: Self =
         Self::from_static(EventCategory::Extension, "context_ready");
+    pub const EXTENSION_AGENT_QUERY: Self =
+        Self::from_static(EventCategory::Extension, "agent_query");
+    pub const EXTENSION_AGENT_QUERY_RESULT: Self =
+        Self::from_static(EventCategory::Extension, "agent_query_result");
 
     pub const HARNESS_INFO: Self = Self::from_static(EventCategory::Harness, "info");
     pub const HARNESS_MODELS_AVAILABLE: Self =
@@ -786,6 +790,38 @@ pub struct ExtensionContextReady {
     pub session_id: SessionId,
 }
 
+/// An extension's request for the harness to dispatch a side prompt
+/// to the agent.
+///
+/// The harness spawns a fresh conversation off the user's current
+/// branch, treats the side prompt like any other turn (LLM call,
+/// optional tool calls, final response), then routes the agent's
+/// final text back to the requesting extension as
+/// [`ExtAgentQueryResult`] with the same `query_id`.
+///
+/// Side conversations are persisted as real branches in the session
+/// tree but tagged via [`PromptOriginator::Extension`] so UIs can
+/// filter them out.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtAgentQuery {
+    /// Extension-assigned correlation id, echoed back on the result.
+    pub query_id: String,
+    /// User-style instruction text. Appended to the current
+    /// conversation's history as a `User` message before dispatch.
+    pub instruction: String,
+}
+
+/// Reply to an [`ExtAgentQuery`], routed point-to-point back to the
+/// extension that issued it. `text` is the agent's final answer
+/// (empty when `error` is set).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtAgentQueryResult {
+    pub query_id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Extension-defined event payload.
 ///
 /// `name` is the dotted event name used for routing and subscription
@@ -871,10 +907,20 @@ pub struct Ack {
 // ---------------------------------------------------------------------------
 
 /// The user submitted a prompt in the UI.
+///
+/// `originator` is normally [`PromptOriginator::User`] — the field
+/// exists so the harness can re-use this event type when dispatching
+/// side queries spawned by extensions: the appended user-style
+/// instruction also flows as a `UiPromptSubmitted` (so it folds into
+/// the session tree), but UIs and other extensions filter on
+/// `originator.is_user()` to avoid rendering side conversations as
+/// real user turns.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiPromptSubmitted {
     pub session_id: SessionId,
     pub text: String,
+    #[serde(default)]
+    pub originator: PromptOriginator,
 }
 
 /// The user requests switching to a different model.
@@ -1063,6 +1109,39 @@ pub struct SessionUserMessageInjected {
     pub text: String,
 }
 
+/// Who initiated the prompt — the human user via the UI, or an
+/// extension via [`ExtAgentQuery`].
+///
+/// The agent's only obligation is to copy the originator from the
+/// incoming [`SessionPromptCreated`] onto its outgoing
+/// [`AgentResponseFinished`]. The harness reads it on the way back
+/// to decide whether the response is a normal turn (route to UI,
+/// keep `default_conversation` advancing) or a side-query reply
+/// (route an [`ExtAgentQueryResult`] to the requesting extension and
+/// tear the conversation down).
+///
+/// UIs filter on `originator.is_user()` to ignore side conversations.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PromptOriginator {
+    /// Default — interactive prompt submitted through the UI.
+    #[default]
+    User,
+    /// Side prompt requested by an extension via [`ExtAgentQuery`].
+    Extension {
+        name: ExtensionName,
+        query_id: String,
+    },
+}
+
+impl PromptOriginator {
+    /// True iff this prompt is the user's interactive turn.
+    #[must_use]
+    pub const fn is_user(&self) -> bool {
+        matches!(self, Self::User)
+    }
+}
+
 /// The harness persisted a user prompt and assigned it an ID.
 /// Also carries the assembled conversation context for the agent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1083,6 +1162,10 @@ pub struct SessionPromptCreated {
     /// `supportsReasoningSummary`; ignored by everyone else.
     #[serde(default)]
     pub thinking_summary: ThinkingSummary,
+    /// Who asked for this prompt. Defaults to [`PromptOriginator::User`]
+    /// for backward compatibility with old persisted events.
+    #[serde(default)]
+    pub originator: PromptOriginator,
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,6 +1176,12 @@ pub struct SessionPromptCreated {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptSubmitted {
     pub session_prompt_id: SessionPromptId,
+    /// Echo of [`SessionPromptCreated::originator`]. UIs and other
+    /// extensions filter on `originator.is_user()` so the agent
+    /// starting a side conversation doesn't trigger user-facing
+    /// effects like clearing an idle deadline.
+    #[serde(default)]
+    pub originator: PromptOriginator,
 }
 
 /// The agent has new accumulated response text for a prompt.
@@ -1107,6 +1196,11 @@ pub struct AgentResponseUpdated {
     /// prompts (see `assemble_conversation`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// Echo of [`SessionPromptCreated::originator`]. UIs filter on
+    /// `originator.is_user()` so the streaming text from a side
+    /// conversation doesn't paint into the user's chat window.
+    #[serde(default)]
+    pub originator: PromptOriginator,
 }
 
 /// One tool call the agent wants to make.
@@ -1130,6 +1224,11 @@ pub struct AgentResponseFinished {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<AgentToolCall>,
+    /// Echo of [`SessionPromptCreated::originator`]. The agent must
+    /// copy this from the prompt; the harness routes the response
+    /// based on it.
+    #[serde(default)]
+    pub originator: PromptOriginator,
     /// Input tokens consumed by the final request, if the provider
     /// reported usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1257,6 +1356,10 @@ pub enum Event {
     ExtAgentsMdAvailable(ExtAgentsMdAvailable),
     #[serde(rename = "extension.context_ready")]
     ExtensionContextReady(ExtensionContextReady),
+    #[serde(rename = "extension.agent_query")]
+    ExtAgentQuery(ExtAgentQuery),
+    #[serde(rename = "extension.agent_query_result")]
+    ExtAgentQueryResult(ExtAgentQueryResult),
     #[serde(rename = "extension.event")]
     ExtensionEvent(CustomEvent),
 
@@ -1358,6 +1461,8 @@ impl Event {
             Self::ExtSkillAvailable(_) => EventName::EXTENSION_SKILL_AVAILABLE,
             Self::ExtAgentsMdAvailable(_) => EventName::EXTENSION_AGENTS_MD_AVAILABLE,
             Self::ExtensionContextReady(_) => EventName::EXTENSION_CONTEXT_READY,
+            Self::ExtAgentQuery(_) => EventName::EXTENSION_AGENT_QUERY,
+            Self::ExtAgentQueryResult(_) => EventName::EXTENSION_AGENT_QUERY_RESULT,
             Self::ExtensionEvent(event) => event.name.clone(),
             Self::HarnessInfo(_) => EventName::HARNESS_INFO,
             Self::HarnessModelsAvailable(_) => EventName::HARNESS_MODELS_AVAILABLE,

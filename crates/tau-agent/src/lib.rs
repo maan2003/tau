@@ -64,6 +64,7 @@ where
                 // Announce we accepted the prompt.
                 writer.write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
                     session_prompt_id: session_prompt_id.clone(),
+                    originator: prompt.originator.clone(),
                 }))?;
                 writer.flush()?;
 
@@ -93,6 +94,7 @@ where
                                 input_tokens: None,
                                 cached_tokens: None,
                                 thinking: None,
+                                originator: prompt.originator.clone(),
                             },
                         ))?;
                         writer.flush()?;
@@ -285,16 +287,18 @@ fn handle_chat_completions<W: Write>(
         thinking_summary: prompt.thinking_summary,
     };
 
+    let originator = prompt.originator.clone();
     match openai::chat_completion_stream(config, &request, |text_so_far, thinking_so_far| {
         let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: session_prompt_id.into(),
             text: text_so_far.to_owned(),
             thinking: thinking_so_far.map(str::to_owned),
+            originator: originator.clone(),
         }));
         let _ = writer.flush();
     }) {
-        Ok(state) => finish_stream(session_prompt_id, state, writer)?,
-        Err(error) => finish_error(session_prompt_id, error, writer)?,
+        Ok(state) => finish_stream(session_prompt_id, &prompt.originator, state, writer)?,
+        Err(error) => finish_error(session_prompt_id, &prompt.originator, error, writer)?,
     }
     Ok(())
 }
@@ -313,22 +317,25 @@ fn handle_responses<W: Write>(
         thinking_summary: prompt.thinking_summary,
     };
 
+    let originator = prompt.originator.clone();
     match responses::responses_stream(config, &request, |text_so_far, thinking_so_far| {
         let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: session_prompt_id.into(),
             text: text_so_far.to_owned(),
             thinking: thinking_so_far.map(str::to_owned),
+            originator: originator.clone(),
         }));
         let _ = writer.flush();
     }) {
-        Ok(state) => finish_stream(session_prompt_id, state, writer)?,
-        Err(error) => finish_error(session_prompt_id, error, writer)?,
+        Ok(state) => finish_stream(session_prompt_id, &prompt.originator, state, writer)?,
+        Err(error) => finish_error(session_prompt_id, &prompt.originator, error, writer)?,
     }
     Ok(())
 }
 
 fn finish_stream<W: Write>(
     session_prompt_id: &str,
+    originator: &tau_proto::PromptOriginator,
     state: openai::StreamState,
     writer: &mut EventWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
@@ -354,6 +361,7 @@ fn finish_stream<W: Write>(
         input_tokens,
         cached_tokens,
         thinking,
+        originator: originator.clone(),
     }))?;
     writer.flush()?;
     Ok(())
@@ -361,6 +369,7 @@ fn finish_stream<W: Write>(
 
 fn finish_error<W: Write>(
     session_prompt_id: &str,
+    originator: &tau_proto::PromptOriginator,
     error: openai::OpenAiError,
     writer: &mut EventWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
@@ -371,6 +380,7 @@ fn finish_error<W: Write>(
         input_tokens: None,
         cached_tokens: None,
         thinking: None,
+        originator: originator.clone(),
     }))?;
     writer.flush()?;
     Ok(())
@@ -420,6 +430,7 @@ where
                 let spid = prompt.session_prompt_id.clone();
                 writer.write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
                     session_prompt_id: spid.clone(),
+                    originator: prompt.originator.clone(),
                 }))?;
 
                 // If last message is a tool result, return it as text.
@@ -447,6 +458,7 @@ where
                         input_tokens: None,
                         cached_tokens: None,
                         thinking: None,
+                        originator: prompt.originator.clone(),
                     }))?;
                 } else {
                     // Find user text and make a tool call.
@@ -499,6 +511,7 @@ where
                         input_tokens: None,
                         cached_tokens: None,
                         thinking: None,
+                        originator: prompt.originator.clone(),
                     }))?;
                 }
                 writer.flush()?;

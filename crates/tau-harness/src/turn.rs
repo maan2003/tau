@@ -3,6 +3,8 @@
 
 use tau_proto::{SessionId, ToolCallId};
 
+use crate::conversation::ConversationId;
+
 /// Tracks whose turn it is in the agent interaction loop.
 pub(crate) enum TurnState {
     /// Waiting for user input (or queued prompt dispatch).
@@ -15,11 +17,23 @@ pub(crate) enum TurnState {
         waiting_on: std::collections::HashSet<tau_proto::ConnectionId>,
     },
     /// Agent is processing a prompt; we are waiting for its response.
-    AgentThinking { _session_id: SessionId },
+    AgentThinking {
+        _session_id: SessionId,
+        /// The conversation that owns the in-flight prompt. Read off
+        /// this state when the response arrives so the next round
+        /// (after tool results) re-prompts the *right* conversation
+        /// rather than always defaulting to the user's. Currently
+        /// only [`TurnState::ToolsRunning`] consults it (`AgentThinking`
+        /// flows back through `prompt_conversations`), but it's kept
+        /// for symmetry and future per-conversation state work.
+        #[allow(dead_code)]
+        conversation_id: ConversationId,
+    },
     /// Agent requested tool calls; waiting for all results before
     /// sending the next prompt.
     ToolsRunning {
         session_id: SessionId,
+        conversation_id: ConversationId,
         remaining_calls: Vec<ToolCallId>,
     },
 }

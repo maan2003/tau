@@ -20,6 +20,7 @@ use tau_proto::{
     ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest,
 };
 
+use crate::conversation::{Conversation, ConversationId};
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
 use crate::dirs::policy_store_path_from;
@@ -86,11 +87,11 @@ pub(crate) struct Harness {
     /// session id, so we tag the next request popped from this queue
     /// with the recorded session.
     pub(crate) pending_request_sessions: VecDeque<SessionId>,
-    /// `call_id` → `session_id` for every tool call currently in
-    /// flight. Read by `session_id_for_event` to attribute incoming
-    /// `ToolResult` / `ToolError` / `ToolProgress` events back to the
-    /// originating session.
-    pub(crate) pending_tool_sessions: std::collections::HashMap<ToolCallId, SessionId>,
+    /// `call_id` → owning conversation for every tool call currently
+    /// in flight. Read by `session_id_for_event` (via the
+    /// conversation) to attribute incoming `ToolResult` / `ToolError`
+    /// / `ToolProgress` events back to the originating session.
+    pub(crate) tool_conversations: std::collections::HashMap<ToolCallId, ConversationId>,
     /// `call_id` → tool name for in-flight calls. Used for lifecycle
     /// messages and debug formatting where the result event itself
     /// only carries the id.
@@ -128,21 +129,34 @@ pub(crate) struct Harness {
     /// the agent emits a tool call with an empty id. See
     /// `synthesize_call_id` for why.
     pub(crate) next_synthetic_call_id: u64,
-    /// Maps session_prompt_id → session_id for in-flight prompts.
-    pub(crate) prompt_sessions: std::collections::HashMap<SessionPromptId, SessionId>,
+    /// Maps session_prompt_id → owning conversation for in-flight
+    /// prompts. The conversation knows its `session_id`, so older
+    /// `prompt_sessions[spid]` lookups become two hops:
+    /// `prompt_conversations[spid]` → `conversations[cid].session_id`.
+    pub(crate) prompt_conversations: std::collections::HashMap<SessionPromptId, ConversationId>,
+    /// All in-flight conversations keyed by `ConversationId`. The
+    /// user's interactive UI thread is one fixed entry (see
+    /// `default_conversation_id`); side queries from extensions spawn
+    /// additional entries that live until their final response is
+    /// routed back to the requesting extension.
+    pub(crate) conversations: std::collections::HashMap<ConversationId, Conversation>,
+    /// Id of the user's main interactive conversation. Always present
+    /// in `conversations` for the harness's whole lifetime.
+    pub(crate) default_conversation_id: ConversationId,
     /// Whose turn it is in the agent interaction loop.
     pub(crate) turn_state: TurnState,
-    /// Queued user prompts waiting for the current turn to finish.
-    /// Each entry is (session_id, text) and is persisted only when it
-    /// is actually dispatched to the agent.
+    /// Queued prompts waiting for the agent slot to free up.
+    /// Each entry is (conversation_id, text) and is persisted only
+    /// when it is actually dispatched. Holds both interactive user
+    /// prompts (default conversation) and side queries from
+    /// extensions (ext-query conversations).
     //
     // Future: add a steering queue for mid-turn injection. Steering
     // messages would be injected after tool-call turns complete but
     // before the next LLM call, allowing the user to redirect the
     // agent while it's working. See PI_PROMPT_QUEUEING.md for Pi's
     // two-tier (steering + follow-up) design.
-    /// (session_id, text) — text is persisted when dispatched.
-    pub(crate) pending_prompts: VecDeque<(SessionId, String)>,
+    pub(crate) pending_prompts: VecDeque<(ConversationId, String)>,
     /// Append-only event debug log.
     pub(crate) debug_log: Option<DebugEventLog>,
     /// All available models as `"provider/model_id"` strings.
@@ -185,7 +199,7 @@ pub(crate) struct Harness {
     /// only completes once this is empty and `in_flight_tool_kinds` is
     /// empty.
     pub(crate) pending_tool_invocations:
-        VecDeque<(SessionId, AgentToolCall, tau_proto::ToolSideEffects)>,
+        VecDeque<(ConversationId, AgentToolCall, tau_proto::ToolSideEffects)>,
     /// Kind of every tool call currently dispatched but not yet
     /// completed (no `ToolResult`/`ToolError` received). Keyed by
     /// `call_id`. Used by the dispatch state machine to decide whether
@@ -294,6 +308,19 @@ impl Harness {
             selected_model.as_str(),
         );
 
+        let default_conversation_id = ConversationId::new("default");
+        let mut conversations = std::collections::HashMap::new();
+        conversations.insert(
+            default_conversation_id.clone(),
+            Conversation::new(
+                default_conversation_id.clone(),
+                eager_session_id.into(),
+                tau_proto::PromptOriginator::User,
+                None,
+                None,
+            ),
+        );
+
         let mut harness = Self {
             tx,
             rx,
@@ -302,7 +329,7 @@ impl Harness {
             store,
             current_session_id: eager_session_id.into(),
             pending_request_sessions: VecDeque::new(),
-            pending_tool_sessions: std::collections::HashMap::new(),
+            tool_conversations: std::collections::HashMap::new(),
             pending_tool_names: std::collections::HashMap::new(),
             pending_tool_providers: std::collections::HashMap::new(),
             event_log: EventLog::new(),
@@ -313,7 +340,9 @@ impl Harness {
             _next_instance_counter,
             next_session_prompt_id: 0,
             next_synthetic_call_id: 0,
-            prompt_sessions: std::collections::HashMap::new(),
+            prompt_conversations: std::collections::HashMap::new(),
+            conversations,
+            default_conversation_id,
             turn_state: TurnState::Idle,
             pending_prompts: VecDeque::new(),
             debug_log: None,
@@ -445,6 +474,19 @@ impl Harness {
             selected_model.as_str(),
         );
 
+        let default_conversation_id = ConversationId::new("default");
+        let mut conversations = std::collections::HashMap::new();
+        conversations.insert(
+            default_conversation_id.clone(),
+            Conversation::new(
+                default_conversation_id.clone(),
+                eager_session_id.into(),
+                tau_proto::PromptOriginator::User,
+                None,
+                None,
+            ),
+        );
+
         let mut harness = Self {
             tx,
             rx,
@@ -453,7 +495,7 @@ impl Harness {
             store,
             current_session_id: eager_session_id.into(),
             pending_request_sessions: VecDeque::new(),
-            pending_tool_sessions: std::collections::HashMap::new(),
+            tool_conversations: std::collections::HashMap::new(),
             pending_tool_names: std::collections::HashMap::new(),
             pending_tool_providers: std::collections::HashMap::new(),
             event_log: EventLog::new(),
@@ -464,7 +506,9 @@ impl Harness {
             _next_instance_counter,
             next_session_prompt_id: 0,
             next_synthetic_call_id: 0,
-            prompt_sessions: std::collections::HashMap::new(),
+            prompt_conversations: std::collections::HashMap::new(),
+            conversations,
+            default_conversation_id,
             turn_state: TurnState::Idle,
             pending_prompts: VecDeque::new(),
             debug_log: None,
@@ -513,6 +557,77 @@ impl Harness {
     fn log_event(&mut self, harness_event: &HarnessEvent) {
         if let Some(log) = &mut self.debug_log {
             log.log_harness_event(harness_event);
+        }
+    }
+
+    /// Session id of the conversation that owns a given in-flight
+    /// prompt, or `None` if the prompt id is unknown.
+    fn session_id_for_prompt(&self, spid: &SessionPromptId) -> Option<SessionId> {
+        let cid = self.prompt_conversations.get(spid)?;
+        self.conversations.get(cid).map(|c| c.session_id.clone())
+    }
+
+    /// Session id of the conversation that owns a given in-flight
+    /// tool call, or `None` if the call id is unknown.
+    fn session_id_for_tool_call(&self, call_id: &ToolCallId) -> Option<SessionId> {
+        let cid = self.tool_conversations.get(call_id)?;
+        self.conversations.get(cid).map(|c| c.session_id.clone())
+    }
+
+    /// Conversation id that owns a given tool call, if any.
+    #[allow(dead_code)] // used by the ext-query path wired in a follow-up step
+    fn conversation_for_tool_call(&self, call_id: &ToolCallId) -> Option<ConversationId> {
+        self.tool_conversations.get(call_id).cloned()
+    }
+
+    /// Conversation id that owns a given in-flight prompt, if any.
+    fn conversation_for_prompt(&self, spid: &SessionPromptId) -> Option<ConversationId> {
+        self.prompt_conversations.get(spid).cloned()
+    }
+
+    /// Publishes an event for a specific conversation, ensuring the
+    /// session tree's head is positioned at that conversation's local
+    /// cursor first. If the tree head currently belongs to another
+    /// conversation, an explicit `UiNavigateTree` is emitted to bounce
+    /// it back so the new event parents on the right node.
+    ///
+    /// After publishing, the conversation's local head is refreshed
+    /// from the tree's new head — wherever the just-published event
+    /// landed becomes the conversation's next-parent slot.
+    ///
+    /// This helper is what makes branching prompts work: the default
+    /// (user) conversation can keep advancing while a side conversation
+    /// from an extension grows its own branch off some earlier node;
+    /// each side publish brackets its own navigate-then-append.
+    fn publish_for_conversation(&mut self, cid: &ConversationId, event: Event) {
+        let session_id = self
+            .conversations
+            .get(cid)
+            .map(|c| c.session_id.clone())
+            .expect("publish_for_conversation: unknown conversation id");
+        let want_head = self.conversations.get(cid).and_then(|c| c.head);
+        let have_head = self
+            .store
+            .session(session_id.as_str())
+            .and_then(|t| t.head());
+        if want_head != have_head
+            && let Some(target) = want_head
+        {
+            self.publish_event(
+                None,
+                Event::UiNavigateTree(tau_proto::UiNavigateTree {
+                    session_id: session_id.clone(),
+                    node_id: target.0,
+                }),
+            );
+        }
+        self.publish_event(None, event);
+        let new_head = self
+            .store
+            .session(session_id.as_str())
+            .and_then(|t| t.head());
+        if let Some(c) = self.conversations.get_mut(cid) {
+            c.head = new_head;
         }
     }
 
@@ -567,26 +682,19 @@ impl Harness {
             Event::SessionShutdown(shutdown) => Some(shutdown.session_id.clone()),
             Event::SessionPromptCreated(created) => Some(created.session_id.clone()),
             Event::SessionUserMessageInjected(injected) => Some(injected.session_id.clone()),
-            Event::AgentPromptSubmitted(submitted) => self
-                .prompt_sessions
-                .get(&submitted.session_prompt_id)
-                .cloned(),
-            Event::AgentResponseUpdated(updated) => self
-                .prompt_sessions
-                .get(&updated.session_prompt_id)
-                .cloned(),
-            Event::AgentResponseFinished(finished) => self
-                .prompt_sessions
-                .get(&finished.session_prompt_id)
-                .cloned(),
-            Event::ToolRequest(request) => {
-                self.pending_tool_sessions.get(&request.call_id).cloned()
+            Event::AgentPromptSubmitted(submitted) => {
+                self.session_id_for_prompt(&submitted.session_prompt_id)
             }
-            Event::ToolResult(result) => self.pending_tool_sessions.get(&result.call_id).cloned(),
-            Event::ToolError(error) => self.pending_tool_sessions.get(&error.call_id).cloned(),
-            Event::ToolProgress(progress) => {
-                self.pending_tool_sessions.get(&progress.call_id).cloned()
+            Event::AgentResponseUpdated(updated) => {
+                self.session_id_for_prompt(&updated.session_prompt_id)
             }
+            Event::AgentResponseFinished(finished) => {
+                self.session_id_for_prompt(&finished.session_prompt_id)
+            }
+            Event::ToolRequest(request) => self.session_id_for_tool_call(&request.call_id),
+            Event::ToolResult(result) => self.session_id_for_tool_call(&result.call_id),
+            Event::ToolError(error) => self.session_id_for_tool_call(&error.call_id),
+            Event::ToolProgress(progress) => self.session_id_for_tool_call(&progress.call_id),
             Event::ShellCommandFinished(finished) => Some(finished.session_id.clone()),
             Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_) => {
                 Some(self.current_session_id.clone())
@@ -869,7 +977,7 @@ impl Harness {
                 }
             }
             Event::ToolResult(result) => {
-                if self.pending_tool_sessions.contains_key(&result.call_id) {
+                if self.tool_conversations.contains_key(&result.call_id) {
                     let call_id = result.call_id.to_string();
                     self.publish_event(Some(source_id), Event::ToolResult(result));
                     self.clear_tool_call_tracking(&call_id);
@@ -882,7 +990,7 @@ impl Harness {
                 }
             }
             Event::ToolError(error) => {
-                if self.pending_tool_sessions.contains_key(&error.call_id) {
+                if self.tool_conversations.contains_key(&error.call_id) {
                     let call_id = error.call_id.to_string();
                     self.publish_event(Some(source_id), Event::ToolError(error));
                     self.clear_tool_call_tracking(&call_id);
@@ -942,6 +1050,9 @@ impl Harness {
             Event::ExtensionContextReady(ready) => {
                 self.publish_event(Some(source_id), Event::ExtensionContextReady(ready.clone()));
                 self.handle_extension_context_ready(source_id, ready)?;
+            }
+            Event::ExtAgentQuery(query) => {
+                self.handle_ext_agent_query(source_id, query)?;
             }
             Event::AgentPromptSubmitted(_) | Event::AgentResponseUpdated(_) => {
                 self.publish_event(Some(source_id), event);
@@ -1240,26 +1351,31 @@ impl Harness {
     // to the originating session.
 
     /// Records that an extension-originated `ToolRequest` belongs to
-    /// the next session in `pending_request_sessions`. Must run
-    /// *before* the request is published, so `session_id_for_event`
-    /// can attribute the corresponding persisted event.
+    /// the harness's *default* conversation (the user's UI thread).
+    /// Extensions don't currently carry an owning conversation on
+    /// their tool requests; future work could extend the protocol so
+    /// extension-side tools also attribute to a specific conversation.
+    /// Must run *before* the request is published, so
+    /// `session_id_for_event` can attribute the corresponding
+    /// persisted event.
     fn track_tool_request_session(&mut self, request: &ToolRequest) {
-        let session_id = self
-            .pending_request_sessions
-            .pop_front()
-            .unwrap_or_else(|| "default".into());
-        self.pending_tool_sessions
-            .insert(request.call_id.clone(), session_id);
+        // Drain the legacy queue (always empty in current code) for
+        // future-compat, then assign to the default conversation.
+        let _ = self.pending_request_sessions.pop_front();
+        self.tool_conversations.insert(
+            request.call_id.clone(),
+            self.default_conversation_id.clone(),
+        );
         self.pending_tool_names
             .insert(request.call_id.clone(), request.tool_name.clone());
     }
 
-    /// Releases the session/name/provider mappings for a completed
-    /// tool call. Must run *after* the result/error event has been
-    /// published, otherwise `session_id_for_event` would no longer be
-    /// able to attribute the durable record.
+    /// Releases the conversation/name/provider mappings for a
+    /// completed tool call. Must run *after* the result/error event
+    /// has been published, otherwise `session_id_for_event` would no
+    /// longer be able to attribute the durable record.
     fn clear_tool_call_tracking(&mut self, call_id: &str) {
-        self.pending_tool_sessions.remove(call_id);
+        self.tool_conversations.remove(call_id);
         self.pending_tool_names.remove(call_id);
         self.pending_tool_providers.remove(call_id);
     }
@@ -1512,26 +1628,145 @@ impl Harness {
         session_id: SessionId,
         text: String,
     ) -> Result<(), HarnessError> {
-        // `publish_event` flows through `persist_session_event`, which
-        // both writes the event to the durable per-session log and
-        // applies it to the in-memory tree. No separate store-side
-        // append needed.
-        self.publish_event(
-            None,
+        debug_assert_eq!(
+            self.conversations[&self.default_conversation_id].session_id, session_id,
+            "dispatch_user_prompt only valid for the default conversation",
+        );
+        let cid = self.default_conversation_id.clone();
+        self.dispatch_prompt_for_conversation(&cid, text)
+    }
+
+    /// Dispatches one prompt for `cid`: publishes the
+    /// `UiPromptSubmitted` event (head-bounced via
+    /// `publish_for_conversation` so it lands on the conversation's
+    /// branch), enters `AgentThinking`, and asks the agent for a
+    /// completion.
+    ///
+    /// Used for both interactive user prompts on the default
+    /// conversation and side-query prompts spawned by extensions.
+    fn dispatch_prompt_for_conversation(
+        &mut self,
+        cid: &ConversationId,
+        text: String,
+    ) -> Result<(), HarnessError> {
+        let (session_id, originator) = match self.conversations.get(cid) {
+            Some(c) => (c.session_id.clone(), c.originator.clone()),
+            None => {
+                return Err(HarnessError::Participant(format!(
+                    "dispatch_prompt_for_conversation: unknown conversation `{cid}`"
+                )));
+            }
+        };
+        self.publish_for_conversation(
+            cid,
             Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
                 session_id: session_id.clone(),
                 text,
+                originator,
             }),
         );
         self.turn_state = TurnState::AgentThinking {
-            _session_id: session_id.clone(),
+            _session_id: session_id,
+            conversation_id: cid.clone(),
         };
-        self.send_prompt_to_agent(&session_id);
+        self.send_prompt_to_agent_for(cid);
         Ok(())
     }
 
     fn session_initialized(&self, session_id: &SessionId) -> bool {
         self.initialized_sessions.contains(session_id)
+    }
+
+    /// Spawn a fresh side conversation for an extension's
+    /// [`tau_proto::ExtAgentQuery`] and dispatch it (or queue it if
+    /// the agent slot is busy). The conversation branches off the
+    /// user's *default* conversation's current head, so the side
+    /// prompt + response land as a real branch in the session tree;
+    /// the user's main head stays put.
+    fn handle_ext_agent_query(
+        &mut self,
+        source_id: &str,
+        query: tau_proto::ExtAgentQuery,
+    ) -> Result<(), HarnessError> {
+        let extension_name = self
+            .extensions
+            .iter()
+            .find(|e| e.connection_id.as_str() == source_id)
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| source_id.to_owned());
+
+        // Mint a unique conversation id. Format kept human-readable
+        // for /tree and debug logs.
+        let cid = ConversationId::new(format!("extq-{}-{}", extension_name, query.query_id));
+        if self.conversations.contains_key(&cid) {
+            self.emit_info(&format!(
+                "ignoring duplicate ext-query `{}` from `{}` — already in flight",
+                query.query_id, extension_name
+            ));
+            return Ok(());
+        }
+
+        let session_id = self
+            .conversations
+            .get(&self.default_conversation_id)
+            .map(|c| c.session_id.clone())
+            .expect("default conversation always present");
+        let branch_root = self
+            .conversations
+            .get(&self.default_conversation_id)
+            .and_then(|c| c.head);
+
+        let originator = tau_proto::PromptOriginator::Extension {
+            name: extension_name.into(),
+            query_id: query.query_id.clone(),
+        };
+        self.conversations.insert(
+            cid.clone(),
+            Conversation::new(
+                cid.clone(),
+                session_id,
+                originator,
+                branch_root,
+                Some(source_id.into()),
+            ),
+        );
+
+        // Queue the instruction; `try_advance_queue` dispatches when
+        // the agent slot is idle and the model is ready.
+        self.pending_prompts.push_back((cid, query.instruction));
+        self.try_advance_queue();
+        Ok(())
+    }
+
+    /// Resync the session tree's head to the default conversation's
+    /// local head via a `UiNavigateTree` event. Called after a side
+    /// conversation finishes so the user's next interactive prompt
+    /// parents off the main branch instead of the side branch tip.
+    fn snap_to_default_conversation(&mut self) {
+        let session_id = self
+            .conversations
+            .get(&self.default_conversation_id)
+            .map(|c| c.session_id.clone())
+            .expect("default conversation always present");
+        let want = self
+            .conversations
+            .get(&self.default_conversation_id)
+            .and_then(|c| c.head);
+        let have = self
+            .store
+            .session(session_id.as_str())
+            .and_then(|t| t.head());
+        if want != have
+            && let Some(target) = want
+        {
+            self.publish_event(
+                None,
+                Event::UiNavigateTree(tau_proto::UiNavigateTree {
+                    session_id,
+                    node_id: target.0,
+                }),
+            );
+        }
     }
 
     /// Queue a prompt when it cannot be sent directly yet, or dispatch
@@ -1557,8 +1792,9 @@ impl Harness {
             return Ok(PromptSubmission::Rejected { reason });
         }
 
+        let cid = self.default_conversation_id.clone();
         if self.dispatch_blocked() || !self.session_initialized(&session_id) {
-            self.pending_prompts.push_back((session_id, text));
+            self.pending_prompts.push_back((cid, text));
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
         }
@@ -1821,14 +2057,44 @@ impl Harness {
         );
     }
 
+    /// Convenience wrapper that dispatches a prompt for the harness's
+    /// default (user) conversation. Used by tests that want a quick
+    /// "send the next prompt" without going through the full
+    /// dispatch pipeline.
+    #[cfg(test)]
     fn send_prompt_to_agent(&mut self, session_id: &str) -> SessionPromptId {
-        // Linear-prefix invariant: each subsequent prompt for the same
-        // session must be a strict byte-prefix extension of the prior
-        // one. Provider prompt caches (OpenAI, Anthropic, etc.) key
-        // entirely off the prefix bytes, so any per-turn churn in
-        // `system_prompt`, `tools`, or earlier messages busts the
-        // cache. See `linear_session_prompts_strictly_extend_previous_messages`.
-        let tree = self.store.session(session_id);
+        debug_assert_eq!(
+            self.conversations[&self.default_conversation_id]
+                .session_id
+                .as_str(),
+            session_id,
+            "send_prompt_to_agent only valid for the default conversation; \
+             use send_prompt_to_agent_for() for side conversations",
+        );
+        let cid = self.default_conversation_id.clone();
+        self.send_prompt_to_agent_for(&cid)
+    }
+
+    /// Mints a new `SessionPromptId`, registers it with `cid`'s
+    /// conversation, and dispatches a `SessionPromptCreated` to the
+    /// agent. Reads `system_prompt` / `messages` / `tools` from the
+    /// conversation's session tree.
+    ///
+    /// Linear-prefix invariant: each subsequent prompt for the same
+    /// session must be a strict byte-prefix extension of the prior
+    /// one. Provider prompt caches (OpenAI, Anthropic, etc.) key
+    /// entirely off the prefix bytes, so any per-turn churn in
+    /// `system_prompt`, `tools`, or earlier messages busts the cache.
+    /// See `linear_session_prompts_strictly_extend_previous_messages`.
+    fn send_prompt_to_agent_for(&mut self, cid: &ConversationId) -> SessionPromptId {
+        let conv = self
+            .conversations
+            .get(cid)
+            .expect("send_prompt_to_agent_for: unknown conversation id");
+        let session_id = conv.session_id.clone();
+        let originator = conv.originator.clone();
+
+        let tree = self.store.session(session_id.as_str());
         let messages = tree.map(assemble_conversation).unwrap_or_default();
         let tools = self.gather_tool_definitions();
         let cwd = std::env::current_dir()
@@ -1837,8 +2103,11 @@ impl Harness {
         let session_prompt_id: SessionPromptId =
             format!("sp-{}", self.next_session_prompt_id).into();
         self.next_session_prompt_id += 1;
-        self.prompt_sessions
-            .insert(session_prompt_id.clone(), session_id.into());
+        self.prompt_conversations
+            .insert(session_prompt_id.clone(), cid.clone());
+        if let Some(c) = self.conversations.get_mut(cid) {
+            c.in_flight_prompt = Some(session_prompt_id.clone());
+        }
 
         // Publish SessionPromptCreated — both the agent and UI see it.
         let model = if self.selected_model.is_empty() {
@@ -1848,13 +2117,14 @@ impl Harness {
         };
         let event = Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: session_prompt_id.clone(),
-            session_id: session_id.into(),
+            session_id,
             system_prompt: build_system_prompt(&tools, &self.discovered_skills, &cwd),
             messages,
             tools,
             model,
             effort: self.selected_effort,
             thinking_summary: self.selected_thinking_summary,
+            originator,
         });
         self.publish_event(None, event);
 
@@ -1881,34 +2151,83 @@ impl Harness {
             self.update_context_usage(response.input_tokens, response.cached_tokens);
         }
         // Dedupe: under at-least-once delivery the agent may resend a
-        // finished-response after a reconnect. The first delivery removed
-        // the entry from `prompt_sessions`; later ones must be ignored
-        // rather than fall through to the "default" session fallback,
-        // which would silently misroute the duplicate.
-        let Some(session_id) = self
-            .prompt_sessions
-            .get(response.session_prompt_id.as_str())
-            .cloned()
-        else {
+        // finished-response after a reconnect. The first delivery
+        // removed the entry from `prompt_conversations`; later ones
+        // must be ignored rather than fall through to the "default"
+        // session fallback, which would silently misroute the
+        // duplicate.
+        let Some(cid) = self.conversation_for_prompt(&response.session_prompt_id) else {
             self.emit_info(&format!(
                 "discarding duplicate agent response for session_prompt_id={}",
                 response.session_prompt_id
             ));
             return Ok(());
         };
+        let session_id = self
+            .conversations
+            .get(&cid)
+            .expect("conversation_for_prompt returned a known id")
+            .session_id
+            .clone();
 
         // `publish_event` flows the AgentResponseFinished into the
         // durable per-session log; the SessionTree fold appends an
         // `AgentMessage` carrying both `text` and `thinking` (when
-        // text is present). Keep `session_id` looked up above so the
-        // cleanup below still routes correctly even though the publish
-        // path now owns the persistence.
-        let _ = session_id;
+        // text is present).
         self.publish_event(None, Event::AgentResponseFinished(response.clone()));
-        self.prompt_sessions
+        self.prompt_conversations
             .remove(response.session_prompt_id.as_str());
+        if let Some(conv) = self.conversations.get_mut(&cid) {
+            conv.in_flight_prompt = None;
+        }
         self.completed_prompts
             .insert(response.session_prompt_id.clone());
+
+        // Side-conversation handling: if this prompt originated from
+        // an extension via ExtAgentQuery, route the final text back
+        // to the requesting extension as ExtAgentQueryResult and
+        // tear down the side conversation. The agent is single-flight
+        // in v1, so no further tool dispatch can happen for this
+        // conversation; pending_tool_invocations entries (if any) have
+        // already been emitted into the bus and will complete normally.
+        if let tau_proto::PromptOriginator::Extension {
+            ref name,
+            ref query_id,
+        } = response.originator
+            && response.tool_calls.is_empty()
+        {
+            let source = self
+                .conversations
+                .get(&cid)
+                .and_then(|c| c.source_connection.clone());
+            let result = tau_proto::ExtAgentQueryResult {
+                query_id: query_id.clone(),
+                text: response.text.clone().unwrap_or_default(),
+                error: None,
+            };
+            if let Some(source) = source {
+                let _ = self
+                    .bus
+                    .send_to(source.as_str(), None, Event::ExtAgentQueryResult(result));
+            } else {
+                // Should never happen — `source_connection` is set in
+                // `handle_ext_agent_query` when the conversation is
+                // spawned. Surface it via `harness.info` rather than
+                // silently dropping so a future regression is visible.
+                self.emit_info(&format!(
+                    "ext-query result for `{}` (extension `{}`) had no source connection — \
+                     dropping",
+                    query_id, name
+                ));
+            }
+            // Snap the tree head back to the default conversation's
+            // local head so the user's next interactive prompt
+            // continues on the main branch instead of the side branch.
+            self.snap_to_default_conversation();
+            self.conversations.remove(&cid);
+            self.dispatch_next_or_idle(session_id.as_str());
+            return Ok(());
+        }
 
         if !response.tool_calls.is_empty() {
             // Tool calls to execute — agent stays busy. After all
@@ -1946,6 +2265,7 @@ impl Harness {
                 .collect();
             self.turn_state = TurnState::ToolsRunning {
                 session_id: session_id.clone(),
+                conversation_id: cid.clone(),
                 remaining_calls,
             };
             // Enqueue in the order the agent emitted them. Dispatch is
@@ -1953,7 +2273,7 @@ impl Harness {
             // the pure-vs-mutating ordering rule.
             for (call, kind) in normalized_calls {
                 self.pending_tool_invocations
-                    .push_back((session_id.clone(), call, kind));
+                    .push_back((cid.clone(), call, kind));
             }
             self.drain_pending_tool_invocations()?;
         } else {
@@ -2001,10 +2321,18 @@ impl Harness {
             return;
         }
 
-        let Some((session_id, _)) = self.pending_prompts.front() else {
+        let Some((cid, _)) = self.pending_prompts.front() else {
             return;
         };
-        let session_id = session_id.clone();
+        let session_id = match self.conversations.get(cid) {
+            Some(c) => c.session_id.clone(),
+            None => {
+                // Stale entry — conversation already torn down. Drop it
+                // and try the next one on a re-entry.
+                self.pending_prompts.pop_front();
+                return;
+            }
+        };
 
         if !self.session_initialized(&session_id) {
             // Reachable only if the bound session somehow lost its
@@ -2017,8 +2345,8 @@ impl Harness {
             return;
         }
 
-        if let Some((session_id, text)) = self.pending_prompts.pop_front() {
-            if let Err(error) = self.dispatch_user_prompt(session_id, text) {
+        if let Some((cid, text)) = self.pending_prompts.pop_front() {
+            if let Err(error) = self.dispatch_prompt_for_conversation(&cid, text) {
                 self.emit_info(&format!("failed to dispatch queued prompt: {error}"));
                 self.turn_state = TurnState::Idle;
             }
@@ -2170,21 +2498,27 @@ impl Harness {
             false
         };
         if should_send {
-            let session_id = if let TurnState::ToolsRunning { session_id, .. } = &self.turn_state {
-                session_id.clone()
+            let (session_id, conversation_id) = if let TurnState::ToolsRunning {
+                session_id,
+                conversation_id,
+                ..
+            } = &self.turn_state
+            {
+                (session_id.clone(), conversation_id.clone())
             } else {
                 unreachable!("just checked")
             };
             self.turn_state = TurnState::AgentThinking {
-                _session_id: session_id.clone(),
+                _session_id: session_id,
+                conversation_id: conversation_id.clone(),
             };
-            self.send_prompt_to_agent(&session_id);
+            self.send_prompt_to_agent_for(&conversation_id);
         }
     }
 
     fn execute_agent_tool_call(
         &mut self,
-        session_id: &str,
+        cid: &ConversationId,
         call: &AgentToolCall,
     ) -> Result<(), HarnessError> {
         // Agent output is untrusted — hallucinated or streaming-
@@ -2197,7 +2531,7 @@ impl Harness {
             tau_proto::ToolNameMaybe::Valid(name) => name.clone(),
             tau_proto::ToolNameMaybe::Invalid(raw) => {
                 self.reject_invalid_tool_call(
-                    session_id,
+                    cid,
                     &call.id,
                     &call.arguments,
                     format!("invalid tool name {raw:?}: must be non-empty and match [a-zA-Z0-9_]+"),
@@ -2208,16 +2542,15 @@ impl Harness {
 
         // Handle harness-owned tools directly.
         if tool_name.as_str() == "skill" {
-            return self.handle_skill_tool_call(session_id, call);
+            return self.handle_skill_tool_call(cid, call);
         }
 
         let call_id: ToolCallId = call.id.clone().into();
 
-        // Track session attribution before publishing — the publish
-        // path persists the `ToolRequest` into the session log and
-        // folds it into the SessionTree via `apply_event`.
-        self.pending_tool_sessions
-            .insert(call_id.clone(), session_id.into());
+        // Track conversation attribution before publishing — the
+        // publish path persists the `ToolRequest` into the session
+        // log and folds it into the SessionTree via `apply_event`.
+        self.tool_conversations.insert(call_id.clone(), cid.clone());
         self.pending_tool_names
             .insert(call_id.clone(), tool_name.clone());
         let request = ToolRequest {
@@ -2273,19 +2606,20 @@ impl Harness {
     /// call_id …".
     fn reject_invalid_tool_call(
         &mut self,
-        session_id: &str,
+        cid: &ConversationId,
         call_id: &str,
         arguments: &CborValue,
         message: String,
     ) -> Result<(), HarnessError> {
         let placeholder: ToolName = "invalid_tool".into();
         let call_id_owned: ToolCallId = call_id.to_owned().into();
-        // Seed the session mapping so `session_id_for_event` attributes
-        // both the synthetic request and the synthetic error to this
-        // session. A rejected call never reached the normal dispatch
-        // path that would have inserted these entries.
-        self.pending_tool_sessions
-            .insert(call_id_owned.clone(), session_id.into());
+        // Seed the conversation mapping so `session_id_for_event`
+        // attributes both the synthetic request and the synthetic
+        // error to this conversation's session. A rejected call never
+        // reached the normal dispatch path that would have inserted
+        // these entries.
+        self.tool_conversations
+            .insert(call_id_owned.clone(), cid.clone());
         self.pending_tool_names
             .insert(call_id_owned.clone(), placeholder.clone());
         self.publish_event(
@@ -2339,17 +2673,16 @@ impl Harness {
     /// Handle the harness-owned `skill` tool call inline.
     fn handle_skill_tool_call(
         &mut self,
-        session_id: &str,
+        cid: &ConversationId,
         call: &AgentToolCall,
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone().into();
         let tool_name: ToolName = "skill".into();
 
-        // Track the session mapping first so the published request +
-        // result both attribute to this session via
-        // `session_id_for_event`.
-        self.pending_tool_sessions
-            .insert(call_id.clone(), session_id.into());
+        // Track the conversation mapping first so the published
+        // request + result both attribute to this conversation's
+        // session via `session_id_for_event`.
+        self.tool_conversations.insert(call_id.clone(), cid.clone());
         self.pending_tool_names
             .insert(call_id.clone(), tool_name.clone());
         self.publish_event(
