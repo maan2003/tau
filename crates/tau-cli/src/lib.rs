@@ -309,6 +309,7 @@ fn start_daemon(session_id: &str) -> Result<DaemonHandle, CliError> {
         .arg("ext")
         .arg("harness")
         .env("TAU_SESSION_ID", session_id)
+        .env("TAU_VERSION", env!("CARGO_PKG_VERSION"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
