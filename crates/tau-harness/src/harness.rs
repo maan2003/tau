@@ -1543,15 +1543,15 @@ impl Harness {
         }
     }
 
-    /// Replays harness info, extension lifecycle events, and the
-    /// results of eager session discovery to a late-joining client.
+    /// Replays harness info and extension lifecycle events to a
+    /// late-joining client.
     ///
-    /// `ExtAgentsMdAvailable` and `ExtensionContextReady` are replayed
-    /// so that the CLI — which connects after the daemon's eager
-    /// default-session init has already fired — still gets to render
-    /// the "loaded: …" / "session context ready" lines.
-    /// Without replay the events arrive before the subscriber exists
-    /// and would be silently dropped.
+    /// Events that are persisted to the durable per-session log
+    /// (`ExtAgentsMdAvailable`, `ExtensionContextReady`, …) are
+    /// intentionally NOT replayed here — `replay_session_events`
+    /// already delivers them from the durable log on the same
+    /// subscribe. Including them here too caused the CLI to render
+    /// each "loaded: …" / "session context ready" line twice.
     fn replay_harness_info(&mut self, client_id: &str, selectors: &[EventSelector]) {
         let mut cursor = 0;
         while let Some(entry) = self.event_log.get_next_from(cursor) {
@@ -1562,8 +1562,6 @@ impl Harness {
                     | Event::ExtensionStarting(_)
                     | Event::ExtensionReady(_)
                     | Event::ExtensionExited(_)
-                    | Event::ExtAgentsMdAvailable(_)
-                    | Event::ExtensionContextReady(_)
             );
             if dominated && selector_matches_event(selectors, &entry.event) {
                 let _ = self

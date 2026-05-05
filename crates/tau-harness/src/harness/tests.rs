@@ -675,11 +675,15 @@ fn late_joining_ui_client_receives_replayed_session_events() {
 #[test]
 fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
     // The CLI connects after the daemon's eager init has already
-    // fired, so live subscription would miss `ExtAgentsMdAvailable`
-    // and `ExtensionContextReady`. `replay_harness_info` must
-    // replay them from the event log at subscribe time so the UI
-    // still renders the "loaded: …" / "session context ready"
-    // lines.
+    // fired, so live subscription alone would miss
+    // `ExtAgentsMdAvailable` and `ExtensionContextReady`. The
+    // subscribe handler must replay them — currently via the
+    // durable per-session log (`replay_session_events`) — so the UI
+    // still renders the "loaded: …" / "session context ready" lines.
+    //
+    // Each event must arrive exactly once. They used to be replayed
+    // by both `replay_session_events` and `replay_harness_info`,
+    // which made the CLI render every line twice on startup.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -689,8 +693,9 @@ fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
         .to_owned();
 
     // Inject synthetic discovery events as if ext-shell had reported
-    // them during eager init. publish_event appends to the log,
-    // which is what `replay_harness_info` walks.
+    // them during eager init. publish_event appends to the durable
+    // session log because session_id_for_event maps these events to
+    // the current session.
     h.publish_event(
         Some(&tools_conn),
         Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
@@ -732,14 +737,44 @@ fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
     )
     .expect("subscribe");
 
-    // Read from the client side and collect the replayed discovery
-    // events. Other `extension.*` events (starting/ready for fs +
-    // agent extensions) also replay — we ignore them.
+    // Compare what we receive on the wire against what the durable
+    // log holds. The fix collapses two replay paths into one, so each
+    // persisted event must arrive exactly once on the late-joining
+    // client — not zero, not twice.
+    let durable_agents_md = h
+        .store
+        .session_events(h.current_session_id.as_str())
+        .expect("events")
+        .into_iter()
+        .filter(|e| {
+            matches!(
+                &e.event,
+                Event::ExtAgentsMdAvailable(a)
+                    if a.file_path == std::path::Path::new("/test/AGENTS.md")
+            )
+        })
+        .count();
+    let durable_context_ready = h
+        .store
+        .session_events(h.current_session_id.as_str())
+        .expect("events")
+        .into_iter()
+        .filter(|e| matches!(&e.event, Event::ExtensionContextReady(_)))
+        .count();
+    assert_eq!(
+        durable_agents_md, 1,
+        "test setup: synthetic agents_md should land in the durable log exactly once"
+    );
+    assert!(
+        durable_context_ready >= 1,
+        "test setup: at least one context_ready in durable log"
+    );
+
     let mut reader = EventReader::new(BufReader::new(client_end));
-    let mut got_agents_md = false;
-    let mut got_context_ready = false;
+    let mut agents_md_count = 0;
+    let mut context_ready_count = 0;
     let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && !(got_agents_md && got_context_ready) {
+    while Instant::now() < deadline {
         let Ok(Some(event)) = reader.read_event() else {
             break;
         };
@@ -748,21 +783,27 @@ fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
             Event::ExtAgentsMdAvailable(a)
                 if a.file_path == std::path::Path::new("/test/AGENTS.md") =>
             {
-                got_agents_md = true;
+                agents_md_count += 1;
             }
             Event::ExtensionContextReady(_) => {
-                got_context_ready = true;
+                context_ready_count += 1;
             }
             _ => {}
         }
     }
-    assert!(
-        got_agents_md,
-        "late UI client should replay ExtAgentsMdAvailable"
+    assert_eq!(
+        agents_md_count,
+        durable_agents_md,
+        "agents_md replayed count must equal durable log count; \
+         double replay would produce {} but got {agents_md_count}",
+        durable_agents_md * 2,
     );
-    assert!(
-        got_context_ready,
-        "late UI client should replay ExtensionContextReady"
+    assert_eq!(
+        context_ready_count,
+        durable_context_ready,
+        "context_ready replayed count must equal durable log count; \
+         double replay would produce {} but got {context_ready_count}",
+        durable_context_ready * 2,
     );
 
     h.shutdown().expect("shutdown");
