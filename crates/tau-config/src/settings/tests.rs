@@ -125,10 +125,10 @@ fn builtins() -> Vec<BuiltinExtension> {
             config: serde_json::json!({}),
         },
         BuiltinExtension {
-            name: "dpc-notifications",
-            command: vec!["tau".into(), "ext".into(), "ext-dpc-notifications".into()],
+            name: "core-notifications",
+            command: vec!["tau".into(), "ext".into(), "ext-core-notifications".into()],
             role: Some("tool"),
-            enable: false,
+            enable: true,
             config: serde_json::json!({ "idle_seconds": 60 }),
         },
     ]
@@ -138,12 +138,13 @@ fn builtins() -> Vec<BuiltinExtension> {
 fn resolve_extensions_returns_builtins_when_user_config_empty() {
     let s = HarnessSettings::default();
     let resolved = s.resolve_extensions(builtins()).expect("resolve");
-    assert_eq!(resolved.len(), 2);
+    assert_eq!(resolved.len(), 3);
     assert_eq!(resolved[0].name, "core-agent");
     assert_eq!(resolved[0].command, "tau");
     assert_eq!(resolved[0].args, vec!["ext", "agent"]);
     assert_eq!(resolved[0].role.as_deref(), Some("agent"));
     assert_eq!(resolved[1].name, "core-shell");
+    assert_eq!(resolved[2].name, "core-notifications");
 }
 
 #[test]
@@ -164,8 +165,9 @@ fn resolve_extensions_disable_drops_entry() {
         },
     );
     let resolved = s.resolve_extensions(builtins()).expect("resolve");
-    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved.len(), 2);
     assert_eq!(resolved[0].name, "core-agent");
+    assert_eq!(resolved[1].name, "core-notifications");
 }
 
 #[test]
@@ -220,7 +222,7 @@ fn resolve_extensions_adds_user_extension_keys() {
         },
     );
     let resolved = s.resolve_extensions(builtins()).expect("resolve");
-    assert_eq!(resolved.len(), 3);
+    assert_eq!(resolved.len(), 4);
     let mything = resolved
         .iter()
         .find(|e| e.name == "mything")
@@ -268,7 +270,10 @@ fn resolve_extensions_loads_from_json5() {
     let names: Vec<&str> = resolved.iter().map(|e| e.name.as_str()).collect();
     // core-shell dropped (disable). test-dummy enabled. core-agent
     // kept (prefix-wrapped). mything appended.
-    assert_eq!(names, vec!["core-agent", "test-dummy", "mything"]);
+    assert_eq!(
+        names,
+        vec!["core-agent", "test-dummy", "core-notifications", "mything"]
+    );
     let agent = &resolved[0];
     assert_eq!(agent.command, "ssh");
     assert_eq!(agent.args, vec!["host", "tau", "ext", "agent"]);

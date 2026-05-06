@@ -85,7 +85,7 @@ pub enum Command {
     #[command(hide = true, alias = "component")]
     Ext {
         /// Extension name (agent, ext-shell, ext-test-dummy,
-        /// ext-dpc-notifications, harness)
+        /// ext-core-notifications, harness)
         name: String,
     },
 }

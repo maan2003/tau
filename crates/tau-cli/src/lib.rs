@@ -43,7 +43,7 @@ fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
 
 /// Debounce period for `UiPromptDraft` emission while the user is
 /// typing. Kept generous on purpose: the only consumer today
-/// (dpc-notifications) only cares about second-or-better resolution
+/// (core-notifications) only cares about second-or-better resolution
 /// to bump its idle deadline.
 const DRAFT_DEBOUNCE: Duration = Duration::from_secs(1);
 
@@ -1977,7 +1977,7 @@ impl EventRenderer {
         use tau_themes::names;
 
         // Skip events that belong to a side conversation spawned by an
-        // extension (e.g. the dpc-notifications idle-summarizer). They
+        // extension (e.g. the core-notifications idle-summarizer). They
         // travel on the same bus as the user's interactive turn but
         // must not paint into the user's chat window or perturb its
         // pending-block bookkeeping.
@@ -2492,12 +2492,12 @@ pub fn main_with_args() -> std::process::ExitCode {
                     "agent" => tau_agent::run_stdio,
                     "ext-shell" => tau_ext_shell::run_stdio,
                     "ext-test-dummy" => tau_ext_test_dummy::run_stdio,
-                    "ext-dpc-notifications" => tau_ext_dpc_notifications::run_stdio,
+                    "ext-core-notifications" => tau_ext_core_notifications::run_stdio,
                     "ext-websearch-exa" => tau_ext_websearch_exa::run_stdio,
                     "harness" => tau_harness::run_component,
                     _ => {
                         return Err(CliError::Participant(format!(
-                            "unknown extension: {name}\navailable: agent, ext-shell, ext-test-dummy, ext-dpc-notifications, ext-websearch-exa, harness"
+                            "unknown extension: {name}\navailable: agent, ext-shell, ext-test-dummy, ext-core-notifications, ext-websearch-exa, harness"
                         )));
                     }
                 };

@@ -1,4 +1,4 @@
-# tau-ext-dpc-notifications
+# tau-ext-core-notifications
 
 A tau extension that bridges agent activity into iTerm2-style
 [OSC 1337 `SetUserVar`][osc1337] user-variable updates. Mirrors the
@@ -94,7 +94,7 @@ surface typos to the user.
 ```json5
 {
   extensions: {
-    "dpc-notifications": {
+    "core-notifications": {
       enable: true,
       config: {
         // Idle window (seconds) before the extension nudges the
@@ -149,10 +149,10 @@ idle_command: [
 
 ## Tracing
 
-The extension uses the `dpc-notifications` tracing target:
+The extension uses the `core-notifications` tracing target:
 
 ```sh
-TAU_EXT_LOG=dpc-notifications=debug tau …
+TAU_EXT_LOG=core-notifications=debug tau …
 ```
 
 `debug` shows `received ExtAgentQueryResult { idle_state, query_id,

@@ -1474,7 +1474,7 @@ dependencies = [
  "tau-cli-term",
  "tau-cli-term-raw",
  "tau-config",
- "tau-ext-dpc-notifications",
+ "tau-ext-core-notifications",
  "tau-ext-shell",
  "tau-ext-test-dummy",
  "tau-ext-websearch-exa",
@@ -1533,7 +1533,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tau-ext-dpc-notifications"
+name = "tau-ext-core-notifications"
 version = "0.1.0"
 dependencies = [
  "libc",

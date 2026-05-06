@@ -931,7 +931,7 @@ pub struct UiPromptSubmitted {
 ///
 /// Always transient — never persisted to the per-session event log,
 /// never folded into the session tree. Subscribers use it to detect
-/// "user is alive" without polling: e.g. dpc-notifications resets
+/// "user is alive" without polling: e.g. core-notifications resets
 /// its idle deadline on every draft event so the desktop notification
 /// doesn't fire while the user is mid-sentence.
 ///

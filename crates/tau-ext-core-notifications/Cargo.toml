@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-dpc-notifications"
+name = "tau-ext-core-notifications"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -39,8 +39,8 @@ use tau_proto::{
 
 /// `tracing` target for events emitted from this extension. Matches
 /// the convention described in [`tau_extension`]: a short identifier
-/// the user can name in `TAU_EXT_LOG=dpc-notifications=trace`.
-pub const LOG_TARGET: &str = "dpc-notifications";
+/// the user can name in `TAU_EXT_LOG=core-notifications=trace`.
+pub const LOG_TARGET: &str = "core-notifications";
 
 /// User-var name for sound notifications (matches `user-notification.sh`).
 pub const SOUND_VAR_NAME: &str = "user-notification";
@@ -245,7 +245,7 @@ where
 
     writer.write_event(&Event::LifecycleHello(LifecycleHello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-ext-dpc-notifications".into(),
+        client_name: "tau-ext-core-notifications".into(),
         client_kind: ClientKind::Tool,
     }))?;
     writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
@@ -266,7 +266,7 @@ where
         ],
     }))?;
     writer.write_event(&Event::LifecycleReady(LifecycleReady {
-        message: Some("dpc-notifications ready".to_owned()),
+        message: Some("core-notifications ready".to_owned()),
     }))?;
     writer.flush()?;
 

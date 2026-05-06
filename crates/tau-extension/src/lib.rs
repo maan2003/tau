@@ -13,12 +13,12 @@
 //! pass it as `target:` to the `tracing` macros. The convention is:
 //!
 //! ```ignore
-//! pub const LOG_TARGET: &str = "dpc-notifications";
+//! pub const LOG_TARGET: &str = "core-notifications";
 //!
 //! tracing::info!(target: LOG_TARGET, "idle deadline armed");
 //! ```
 //!
-//! Then `TAU_EXT_LOG=dpc-notifications=trace,info` filters that
+//! Then `TAU_EXT_LOG=core-notifications=trace,info` filters that
 //! extension at trace level while leaving everything else at info.
 //! Targets are arbitrary `&'static str` — any name an extension
 //! likes — so use one short, distinctive identifier per extension
