@@ -1205,10 +1205,11 @@ fn format_delegate_progress(
 
 /// Builds the completion display for a finished `delegate` call.
 /// Renders to:
-/// `delegate [task_name] (5L, 220B) ctx: 38%/200k tools: 0/3 ok`
-/// (or with `err: …` when `error_message` is set). The `(NL, NB)`
-/// chip describes the sub-agent's response text — same shape as the
-/// `ls`/`grep`/`find` output stats.
+/// `delegate [task_name] ctx: 38%/200k tools: 3 (5L, 220B) ok`
+/// (or with `err: …` when `error_message` is set). The chip order
+/// mirrors the in-progress line — `ctx:` then `tools:` — so the
+/// transition from running to done shifts only the trailing segments
+/// (`…` → `(NL, NB) ok`) instead of shuffling existing ones around.
 fn format_delegate_completion(
     args: String,
     last_progress: Option<&tau_proto::DelegateProgress>,
@@ -1220,9 +1221,8 @@ fn format_delegate_completion(
         _ => "",
     };
     let mut suffixes: Vec<ToolSuffixSegment> = Vec::new();
-    if !response_text.is_empty() {
-        suffixes.push(output_stats_suffix(response_text));
-    }
+    // Match the in-progress order (`ctx:` → `tools:`) so the line
+    // doesn't visibly reorder when it transitions to done.
     if let Some(progress) = last_progress {
         if progress.ctx_percent.is_some() || progress.ctx_window.is_some() {
             suffixes.push(info_suffix(format_ctx_label(
@@ -1234,6 +1234,9 @@ fn format_delegate_completion(
         // always zero by the time the result lands; total is the
         // bit the user cares about.
         suffixes.push(info_suffix(format!("tools: {}", progress.tools_total)));
+    }
+    if !response_text.is_empty() {
+        suffixes.push(output_stats_suffix(response_text));
     }
     suffixes.push(match error_message {
         Some(msg) if !msg.is_empty() => err_suffix(Some(msg)),
