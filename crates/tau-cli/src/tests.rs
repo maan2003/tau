@@ -795,6 +795,26 @@ fn running_tool_call_shows_ellipsis_until_result() {
 }
 
 #[test]
+fn websearch_tool_result_shows_result_count_and_size() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::ToolResult(ToolResult {
+        call_id: "call-web".into(),
+        tool_name: "websearch_exa".into(),
+        result: CborValue::Text(
+            "Title: One\nURL: https://one.example\n\nTitle: Two\nURL: https://two.example\n".into(),
+        ),
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "websearch_exa (2 results, 5L, 73B) ok"));
+}
+
+#[test]
 fn streaming_block_does_not_duplicate_on_finish() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(

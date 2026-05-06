@@ -1226,6 +1226,24 @@ fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
     info_suffix(format!("({}L, {}B)", text.lines().count(), text.len()))
 }
 
+fn websearch_stats_suffix(text: &str) -> ToolSuffixSegment {
+    let titles = text
+        .lines()
+        .filter(|line| line.starts_with("Title:"))
+        .count();
+    let urls = text.lines().filter(|line| line.starts_with("URL:")).count();
+    let results = if titles < urls { urls } else { titles };
+    if 0 < results {
+        info_suffix(format!(
+            "({results} results, {}L, {}B)",
+            text.lines().count(),
+            text.len()
+        ))
+    } else {
+        output_stats_suffix(text)
+    }
+}
+
 /// Error-path display: `<tool_name> <args> <err>`.
 fn format_tool_error(tool_name: &str, args: String, error_message: &str) -> ToolCallDisplay {
     ToolCallDisplay {
@@ -1345,6 +1363,21 @@ fn format_tool_completion(
                     tool_name: "ls".into(),
                     args: path,
                     suffixes: vec![info_suffix(format!("({count} entries)")), ok_suffix()],
+                }
+            }
+        }
+        "websearch_exa" => {
+            if let Some(msg) = error_message {
+                format_tool_error("websearch_exa", String::new(), msg)
+            } else {
+                let text = match details {
+                    CborValue::Text(text) => text.as_str(),
+                    _ => "",
+                };
+                ToolCallDisplay {
+                    tool_name: "websearch_exa".into(),
+                    args: String::new(),
+                    suffixes: vec![websearch_stats_suffix(text), ok_suffix()],
                 }
             }
         }

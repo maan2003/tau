@@ -63,11 +63,7 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
         EventName::TOOL_REGISTER,
         EventName::LIFECYCLE_READY,
     ] {
-        let event = reader
-            .read_event()
-            .expect("read")
-            .expect("startup event")
-            ;
+        let event = reader.read_event().expect("read").expect("startup event");
         assert_eq!(event.name(), expected);
     }
 }

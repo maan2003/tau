@@ -74,11 +74,7 @@ pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
         },
         BuiltinExtension {
             name: "core-websearch-exa",
-            command: vec![
-                tau_binary,
-                "ext".to_owned(),
-                "ext-websearch-exa".to_owned(),
-            ],
+            command: vec![tau_binary, "ext".to_owned(), "ext-websearch-exa".to_owned()],
             role: Some("tool"),
             enable: true,
             config: serde_json::json!({}),

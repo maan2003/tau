@@ -14,8 +14,7 @@
 
 use std::error::Error;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
-use std::sync::Arc;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use tau_proto::{
@@ -102,9 +101,7 @@ where
             EventSelector::Exact(tau_proto::EventName::LIFECYCLE_DISCONNECT),
         ],
     }))?;
-    writer.write_event(&Event::ToolRegister(ToolRegister {
-        tool: tool_spec(),
-    }))?;
+    writer.write_event(&Event::ToolRegister(ToolRegister { tool: tool_spec() }))?;
     writer.write_event(&Event::LifecycleReady(LifecycleReady {
         message: Some("websearch-exa ready".to_owned()),
     }))?;
@@ -294,9 +291,7 @@ impl Default for HttpSearcher {
 
 impl HttpSearcher {
     fn new(endpoint: String) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(REQUEST_TIMEOUT)
-            .build();
+        let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build();
         Self { endpoint, agent }
     }
 }
