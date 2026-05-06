@@ -332,6 +332,23 @@ where
             Ok(InMsg::Event(event)) => {
                 let (_, inner) = event.peel_log();
                 tracing::trace!(target: LOG_TARGET, name = %inner.name(), "event received");
+                // Sub-agent (`PromptOriginator::Extension`) events
+                // share the bus with the user's interactive turn, but
+                // notifications must only react to the *main* agent.
+                // Reacting to a side conversation's prompt/response
+                // would clear the user's idle deadline (or fire the
+                // end-of-turn chime) on activity that's invisible to
+                // the user. Filter once, at the top, so new event
+                // variants can't accidentally leak sub-agent activity
+                // through a per-branch oversight.
+                if is_sub_agent_event(&inner) {
+                    tracing::trace!(
+                        target: LOG_TARGET,
+                        name = %inner.name(),
+                        "skipping sub-agent event",
+                    );
+                    continue;
+                }
                 match inner {
                     Event::LifecycleConfigure(msg) => {
                         match tau_extension::parse_config::<ExtConfig>(&msg.config) {
@@ -360,35 +377,10 @@ where
                             }
                         }
                     }
-                    Event::AgentPromptSubmitted(submitted) => {
-                        // Skip side-conversation prompts (e.g. our
-                        // own idle-summarizer query). The agent emits
-                        // AgentPromptSubmitted as soon as it accepts
-                        // any prompt — clearing idle here would
-                        // discard the in-flight `WaitingSummary`
-                        // deadline and silently drop the result.
-                        if !submitted.originator.is_user() {
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                "skipping non-user AgentPromptSubmitted",
-                            );
-                            continue;
-                        }
+                    Event::AgentPromptSubmitted(_submitted) => {
                         idle = None;
                     }
-                    Event::UiPromptSubmitted(prompt) => {
-                        // Skip side-conversation prompts (e.g. our
-                        // own idle-summarizer query). Treating them
-                        // as a fresh user turn would clear the
-                        // in-flight `WaitingSummary` deadline and
-                        // drop the result we're about to receive.
-                        if !prompt.originator.is_user() {
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                "skipping non-user UiPromptSubmitted",
-                            );
-                            continue;
-                        }
+                    Event::UiPromptSubmitted(_prompt) => {
                         idle = None;
                         if !waiting_for_final_response {
                             writer.write_event(&sound_event(VALUE_AGENT_START))?;
@@ -423,21 +415,14 @@ where
                         // isn't actually done yet. Only fire the
                         // end-of-turn sound + idle timer when the
                         // agent returned a final answer with no
-                        // pending tool work and the prompt was the
-                        // user's interactive turn (filter side
-                        // queries — those are *our own* responses).
+                        // pending tool work. (Sub-agent finishes are
+                        // already filtered out at the top of the
+                        // dispatch loop.)
                         if !finished.tool_calls.is_empty() {
                             tracing::trace!(
                                 target: LOG_TARGET,
                                 tool_calls = finished.tool_calls.len(),
                                 "skipping mid-turn AgentResponseFinished",
-                            );
-                            continue;
-                        }
-                        if !finished.originator.is_user() {
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                "skipping non-user AgentResponseFinished",
                             );
                             continue;
                         }
@@ -517,6 +502,11 @@ where
                     writer.write_event(&Event::ExtAgentQuery(ExtAgentQuery {
                         query_id: query_id.clone(),
                         instruction: SUMMARY_INSTRUCTION.to_owned(),
+                        // Notifications doesn't implement a tool —
+                        // these fields are only meaningful for the
+                        // `delegate` flow.
+                        tool_call_id: None,
+                        task_name: None,
                     }))?;
                     writer.flush()?;
                     idle = Some(IdleState::WaitingSummary {
@@ -558,6 +548,23 @@ fn sound_event(value: &str) -> Event {
         name: SOUND_VAR_NAME.to_owned(),
         value: value.to_owned(),
     })
+}
+
+/// True when `event` belongs to a side conversation spawned by an
+/// extension (`PromptOriginator::Extension`). Side conversations
+/// share the bus with the user's interactive turn; this extension
+/// must skip them so sub-agent activity (e.g. a `delegate` sub-task
+/// or this extension's own idle-summarizer query) doesn't fire
+/// chimes or perturb the idle timer.
+fn is_sub_agent_event(event: &Event) -> bool {
+    match event {
+        Event::AgentPromptSubmitted(s) => !s.originator.is_user(),
+        Event::AgentResponseUpdated(u) => !u.originator.is_user(),
+        Event::AgentResponseFinished(f) => !f.originator.is_user(),
+        Event::UiPromptSubmitted(p) => !p.originator.is_user(),
+        Event::SessionPromptCreated(p) => !p.originator.is_user(),
+        _ => false,
+    }
 }
 
 /// Build the OSC `SetUserVar` event whose payload is the JSON

@@ -19,7 +19,7 @@
 use std::collections::VecDeque;
 
 use tau_core::NodeId;
-use tau_proto::{ConnectionId, PromptOriginator, SessionId, SessionPromptId};
+use tau_proto::{ConnectionId, PromptOriginator, SessionId, SessionPromptId, ToolCallId};
 
 /// Opaque per-process conversation identifier. Not on the wire — the
 /// harness mints these locally and uses them as routing keys.
@@ -49,6 +49,23 @@ impl std::borrow::Borrow<str> for ConversationId {
     }
 }
 
+/// Per-conversation turn state. There is no global agent slot — the
+/// agent extension serializes its own consumption of
+/// `SessionPromptCreated` events. State per conversation is what gates
+/// dispatch of the *next* prompt for that conversation.
+#[derive(Debug, Default)]
+pub(crate) enum ConversationTurnState {
+    #[default]
+    Idle,
+    AgentThinking {
+        #[allow(dead_code)]
+        session_prompt_id: SessionPromptId,
+    },
+    ToolsRunning {
+        remaining_calls: Vec<ToolCallId>,
+    },
+}
+
 /// One in-flight conversation tracked by the harness.
 ///
 /// The user's main UI thread is the *default* conversation, present
@@ -76,8 +93,34 @@ pub(crate) struct Conversation {
     /// conversation, or `None` if nothing is pending.
     pub(crate) in_flight_prompt: Option<SessionPromptId>,
     /// Per-conversation prompt queue: text waiting to be dispatched
-    /// when the agent slot frees up.
+    /// once this conversation's `turn_state` returns to `Idle`. Other
+    /// conversations dispatch independently; the agent extension
+    /// serializes its own consumption of `SessionPromptCreated`.
     pub(crate) pending_prompts: VecDeque<String>,
+    pub(crate) turn_state: ConversationTurnState,
+    /// For side conversations spawned by a tool-implementing extension
+    /// (currently just `delegate`): the parent agent's tool call id
+    /// that this conversation is fulfilling. Lets the harness emit
+    /// [`tau_proto::DelegateProgress`] under that call id as the
+    /// sub-agent runs. `None` for the default conversation and for
+    /// non-tool ext-queries (e.g. notifications' idle summary).
+    pub(crate) parent_tool_call_id: Option<ToolCallId>,
+    /// Display name supplied by the parent agent for the delegated
+    /// task, surfaced in the UI alongside `parent_tool_call_id`. Only
+    /// set when `parent_tool_call_id` is.
+    pub(crate) task_name: Option<String>,
+    /// Number of tool calls currently in flight on this conversation.
+    pub(crate) tools_in_flight: u32,
+    /// Cumulative tool calls this conversation has started (in-flight
+    /// + completed). Used as the `total` in `DelegateProgress`.
+    pub(crate) tools_total: u32,
+    /// Most recent input-token count this conversation's agent
+    /// reported on a finished response. Used for `DelegateProgress`.
+    pub(crate) context_input_tokens: Option<u64>,
+    /// Most recent percent-of-context-window this conversation's
+    /// agent has used. Computed from `context_input_tokens` and the
+    /// model's window size; `None` when the window is unknown.
+    pub(crate) context_percent_used: Option<u8>,
 }
 
 impl Conversation {
@@ -96,6 +139,13 @@ impl Conversation {
             source_connection,
             in_flight_prompt: None,
             pending_prompts: VecDeque::new(),
+            turn_state: ConversationTurnState::Idle,
+            parent_tool_call_id: None,
+            task_name: None,
+            tools_in_flight: 0,
+            tools_total: 0,
+            context_input_tokens: None,
+            context_percent_used: None,
         }
     }
 }

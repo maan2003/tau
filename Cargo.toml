@@ -5,6 +5,7 @@ members = [
   "crates/tau-cli",
   "crates/tau-config",
   "crates/tau-core",
+  "crates/tau-ext-core-delegate",
   "crates/tau-ext-core-notifications",
   "crates/tau-ext-shell",
   "crates/tau-ext-websearch-exa",
@@ -49,6 +50,7 @@ tau-cli-term = { path = "crates/tau-cli-term" }
 tau-cli-term-raw = { path = "crates/tau-cli-term-raw" }
 tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
+tau-ext-core-delegate = { path = "crates/tau-ext-core-delegate" }
 tau-ext-core-notifications = { path = "crates/tau-ext-core-notifications" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
 tau-ext-websearch-exa = { path = "crates/tau-ext-websearch-exa" }

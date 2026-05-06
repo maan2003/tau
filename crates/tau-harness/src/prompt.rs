@@ -158,12 +158,20 @@ pub(crate) fn chrono_free_date() -> String {
     format!("{y}-{:02}-{:02}", m + 1, remaining + 1)
 }
 
-/// Converts a session tree's current branch into LLM conversation
-/// messages.
-pub(crate) fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessage> {
+/// Converts the branch ending at `head` into LLM conversation
+/// messages. Each conversation tracks its own head; with multiple
+/// side conversations interleaving tree mutations (one delegate's
+/// teardown snapping `tree.head` to the default conv, another
+/// delegate's tool result arriving moments later), `tree.head()` is
+/// not reliable as the prompt-assembly cursor — use the conv's own
+/// head instead.
+pub(crate) fn assemble_conversation_from(
+    tree: &tau_core::SessionTree,
+    head: Option<tau_core::NodeId>,
+) -> Vec<ConversationMessage> {
     let mut messages: Vec<ConversationMessage> = Vec::new();
 
-    for entry in tree.current_branch() {
+    for entry in tree.branch_from(head) {
         match entry {
             SessionEntry::UserMessage { text } => {
                 messages.push(ConversationMessage {

@@ -1149,6 +1149,10 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> ToolCallDisplay {
             args
         }
         "ls" => cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned()),
+        "delegate" => match cbor_text_field(arguments, "task_name") {
+            Some(name) if !name.is_empty() => format!("[{name}]"),
+            _ => String::new(),
+        },
         "skill" => match cbor_text_field(arguments, "action").as_deref() {
             Some("search") => {
                 let query = cbor_text_field(arguments, "query").unwrap_or_default();
@@ -1170,6 +1174,102 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> ToolCallDisplay {
         tool_name: tool_name.to_owned(),
         args,
         suffixes: vec![suffix],
+    }
+}
+
+/// Builds the running display for a `delegate` call once the harness
+/// has reported sub-agent state via `DelegateProgress`. Renders to:
+/// `delegate [task_name] ctx: 38%/200k tools: 1/3 …`.
+fn format_delegate_progress(
+    args: String,
+    progress: &tau_proto::DelegateProgress,
+) -> ToolCallDisplay {
+    let mut suffixes: Vec<ToolSuffixSegment> = Vec::new();
+    if progress.ctx_percent.is_some() || progress.ctx_window.is_some() {
+        suffixes.push(info_suffix(format_ctx_label(
+            progress.ctx_percent,
+            progress.ctx_window,
+        )));
+    }
+    suffixes.push(info_suffix(format!(
+        "tools: {}/{}",
+        progress.tools_in_flight, progress.tools_total,
+    )));
+    suffixes.push(running_suffix_after("x")); // non-empty so a leading space is preserved
+    ToolCallDisplay {
+        tool_name: "delegate".to_owned(),
+        args,
+        suffixes,
+    }
+}
+
+/// Builds the completion display for a finished `delegate` call.
+/// Renders to:
+/// `delegate [task_name] (5L, 220B) ctx: 38%/200k tools: 0/3 ok`
+/// (or with `err: …` when `error_message` is set). The `(NL, NB)`
+/// chip describes the sub-agent's response text — same shape as the
+/// `ls`/`grep`/`find` output stats.
+fn format_delegate_completion(
+    args: String,
+    last_progress: Option<&tau_proto::DelegateProgress>,
+    details: &CborValue,
+    error_message: Option<&str>,
+) -> ToolCallDisplay {
+    let response_text = match details {
+        CborValue::Text(text) => text.as_str(),
+        _ => "",
+    };
+    let mut suffixes: Vec<ToolSuffixSegment> = Vec::new();
+    if !response_text.is_empty() {
+        suffixes.push(output_stats_suffix(response_text));
+    }
+    if let Some(progress) = last_progress {
+        if progress.ctx_percent.is_some() || progress.ctx_window.is_some() {
+            suffixes.push(info_suffix(format_ctx_label(
+                progress.ctx_percent,
+                progress.ctx_window,
+            )));
+        }
+        // Show a single number on completion since "in flight" is
+        // always zero by the time the result lands; total is the
+        // bit the user cares about.
+        suffixes.push(info_suffix(format!("tools: {}", progress.tools_total)));
+    }
+    suffixes.push(match error_message {
+        Some(msg) if !msg.is_empty() => err_suffix(Some(msg)),
+        _ => ok_suffix(),
+    });
+    ToolCallDisplay {
+        tool_name: "delegate".to_owned(),
+        args,
+        suffixes,
+    }
+}
+
+/// Renders the `ctx: ` chip for a `DelegateProgress` snapshot. Falls
+/// back to whichever side of (`%`, `window`) is known.
+fn format_ctx_label(percent: Option<u8>, window: Option<u64>) -> String {
+    let percent_part = percent
+        .map(|p| format!("{p}%"))
+        .unwrap_or_else(|| "?".to_owned());
+    let window_part = window.map(format_window).unwrap_or_default();
+    if window_part.is_empty() {
+        format!("ctx: {percent_part}")
+    } else {
+        format!("ctx: {percent_part}/{window_part}")
+    }
+}
+
+/// Compact rendering of a context-window size. `200000` -> `200k`,
+/// `1_048_576` -> `1.0M`. Approximate; for surfacing alongside a `%`.
+fn format_window(window: u64) -> String {
+    if window >= 1_000_000 {
+        let m = window as f64 / 1_000_000.0;
+        format!("{m:.1}M")
+    } else if window >= 1_000 {
+        format!("{}k", window / 1_000)
+    } else {
+        window.to_string()
     }
 }
 
@@ -1381,6 +1481,11 @@ fn format_tool_completion(
                 }
             }
         }
+        // `delegate` is rendered by `format_delegate_completion`,
+        // which has access to the cached task name + last progress
+        // snapshot. This match arm is unreachable for the running
+        // delegate path; if a synthetic result somehow flows through
+        // the generic fallback it will land in the catch-all below.
         "skill" => {
             // Distinguish search vs load by the result shape: search
             // results carry `query` + `matches`, load results carry
@@ -1668,6 +1773,25 @@ struct EventRenderer {
     /// Live tool-call blocks keyed by call_id. Shown in
     /// above_active while running, moved to history on completion.
     tool_blocks: HashMap<String, tau_cli_term::BlockId>,
+    /// Sticky args (e.g. `[task_name]`) for tool calls whose live
+    /// block needs to be re-rendered on subsequent progress events
+    /// — only `delegate` for now. The original `arguments` aren't
+    /// carried on `DelegateProgress`, so we cache the display label
+    /// when the block is first created.
+    delegate_block_args: HashMap<String, String>,
+    /// Most recent `DelegateProgress` snapshot per delegate call.
+    /// On `ToolResult` we render the completion line with the final
+    /// `ctx: …` / `tools: …` chips so the user sees the delegation
+    /// cost alongside the response stats.
+    delegate_last_progress: HashMap<String, tau_proto::DelegateProgress>,
+    /// Tool call ids issued by sub-agents (side conversations). Their
+    /// lifecycle events (`ToolResult`, `ToolError`, `ToolProgress`)
+    /// share the bus with the main agent's, but the UI filters them
+    /// out: sub-agent activity is rolled up into the parent's
+    /// `delegate` block via `DelegateProgress` instead. Populated when
+    /// the side conv's `AgentResponseFinished` is observed; entries
+    /// removed on the matching result/error.
+    sub_agent_call_ids: std::collections::HashSet<String>,
     /// Live user-shell blocks (from `!`/`!!`) keyed by command_id.
     /// Updated in place as progress chunks arrive, finalized on
     /// `ShellCommandFinished`.
@@ -1790,6 +1914,9 @@ impl EventRenderer {
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
             tool_blocks: HashMap::new(),
+            delegate_block_args: HashMap::new(),
+            delegate_last_progress: HashMap::new(),
+            sub_agent_call_ids: std::collections::HashSet::new(),
             shell_blocks: HashMap::new(),
             extension_blocks: HashMap::new(),
             model_status_block: None,
@@ -1907,6 +2034,9 @@ impl EventRenderer {
         self.last_user_block = None;
         self.queued_user_blocks.clear();
         self.tool_blocks.clear();
+        self.delegate_block_args.clear();
+        self.delegate_last_progress.clear();
+        self.sub_agent_call_ids.clear();
         self.shell_blocks.clear();
         self.extension_blocks.clear();
         self.model_status_block = None;
@@ -1975,6 +2105,21 @@ impl EventRenderer {
     fn handle(&mut self, event: &Event) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
+
+        // Side-conversation `AgentResponseFinished` events get filtered
+        // out by `originator_of(event).is_user()` below — but we still
+        // need to learn which `call_id`s those side conversations
+        // emit, so we can suppress the matching `ToolResult` /
+        // `ToolError` / `ToolProgress` (which carry no originator) on
+        // their way past. Otherwise sub-agent tool activity would
+        // leak into the user's transcript.
+        if let Event::AgentResponseFinished(finished) = event
+            && !finished.originator.is_user()
+        {
+            for call in &finished.tool_calls {
+                self.sub_agent_call_ids.insert(call.id.to_string());
+            }
+        }
 
         // Skip events that belong to a side conversation spawned by an
         // extension (e.g. the core-notifications idle-summarizer). They
@@ -2137,30 +2282,95 @@ impl EventRenderer {
                     }
                 }
 
-                for call in &finished.tool_calls {
-                    let display = format_tool_call(call.name.as_str(), &call.arguments);
-                    let block = render_tool_block(&self.theme, &display);
-                    let id = self.handle.new_block(block);
-                    self.handle.push_above_active(id);
-                    self.tool_blocks.insert(call.id.to_string(), id);
-                }
-                if !finished.tool_calls.is_empty() {
-                    self.handle.redraw();
+                // Only the main agent's tool calls land in the UI as
+                // their own blocks. Sub-agent (side conversation) tool
+                // activity is summarized live under the parent's
+                // `delegate` block via `DelegateProgress` instead, so
+                // the user sees one line per delegation rather than
+                // a flood of nested invocations.
+                if finished.originator.is_user() {
+                    for call in &finished.tool_calls {
+                        let display = format_tool_call(call.name.as_str(), &call.arguments);
+                        let block = render_tool_block(&self.theme, &display);
+                        let id = self.handle.new_block(block);
+                        self.handle.push_above_active(id);
+                        self.tool_blocks.insert(call.id.to_string(), id);
+                        // Cache the rendered args (`[task_name]`) for
+                        // later `DelegateProgress` updates: those
+                        // events don't carry the original tool
+                        // arguments, only task_name + counters.
+                        if call.name.as_str() == "delegate" && !display.args.is_empty() {
+                            self.delegate_block_args
+                                .insert(call.id.to_string(), display.args.clone());
+                        }
+                    }
+                    if !finished.tool_calls.is_empty() {
+                        self.handle.redraw();
+                    }
                 }
                 self.render_model_status();
             }
             Event::ToolProgress(progress) => {
+                if self.sub_agent_call_ids.contains(progress.call_id.as_str()) {
+                    return;
+                }
                 if !self.tool_blocks.contains_key(progress.call_id.as_str()) {
                     let text = tau_harness::format_tool_progress(progress);
                     self.handle
                         .print_output(themed_block(&self.theme, names::TOOL_PROGRESS, text));
                 }
             }
+            Event::ToolDelegateProgress(progress) => {
+                let call_id = progress.call_id.as_str();
+                // Snapshot the latest counters and ctx info regardless
+                // of whether the block is still live; the `ToolResult`
+                // handler reuses them on the completion line.
+                self.delegate_last_progress
+                    .insert(call_id.to_owned(), progress.clone());
+                let Some(&bid) = self.tool_blocks.get(call_id) else {
+                    // Block already torn down (delegate finished or
+                    // never rendered) — nothing to update.
+                    return;
+                };
+                let args = self
+                    .delegate_block_args
+                    .get(call_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        if progress.task_name.is_empty() {
+                            String::new()
+                        } else {
+                            format!("[{}]", progress.task_name)
+                        }
+                    });
+                let display = format_delegate_progress(args, progress);
+                let block = render_tool_block(&self.theme, &display);
+                self.handle.set_block(bid, block);
+            }
             Event::ToolResult(result) => {
-                if let Some(bid) = self.tool_blocks.remove(result.call_id.as_str()) {
+                let call_id = result.call_id.as_str();
+                // Sub-agent tool activity stays out of the user's
+                // transcript — its progress is rolled up under the
+                // parent's `delegate` block by `DelegateProgress`.
+                if self.sub_agent_call_ids.remove(call_id) {
+                    self.delegate_block_args.remove(call_id);
+                    return;
+                }
+                if let Some(bid) = self.tool_blocks.remove(call_id) {
                     self.handle.remove_block(bid);
                 }
-                let display = format_tool_completion(&result.tool_name, &result.result, None);
+                let args = self.delegate_block_args.remove(call_id);
+                let last_progress = self.delegate_last_progress.remove(call_id);
+                let display = if result.tool_name.as_str() == "delegate" {
+                    format_delegate_completion(
+                        args.unwrap_or_default(),
+                        last_progress.as_ref(),
+                        &result.result,
+                        None,
+                    )
+                } else {
+                    format_tool_completion(&result.tool_name, &result.result, None)
+                };
                 if let Some(diff) = extract_diff(&result.result) {
                     let block =
                         render_diff_tool_block(&self.theme, &display, &diff, self.diffs_expanded);
@@ -2176,15 +2386,32 @@ impl EventRenderer {
                 }
             }
             Event::ToolError(error) => {
-                if let Some(bid) = self.tool_blocks.remove(error.call_id.as_str()) {
+                let call_id = error.call_id.as_str();
+                if self.sub_agent_call_ids.remove(call_id) {
+                    self.delegate_block_args.remove(call_id);
+                    self.delegate_last_progress.remove(call_id);
+                    return;
+                }
+                if let Some(bid) = self.tool_blocks.remove(call_id) {
                     self.handle.remove_block(bid);
                 }
+                let args = self.delegate_block_args.remove(call_id);
+                let last_progress = self.delegate_last_progress.remove(call_id);
                 let cbor = error.details.as_ref();
-                let display = format_tool_completion(
-                    &error.tool_name,
-                    cbor.unwrap_or(&CborValue::Null),
-                    Some(&error.message),
-                );
+                let display = if error.tool_name.as_str() == "delegate" {
+                    format_delegate_completion(
+                        args.unwrap_or_default(),
+                        last_progress.as_ref(),
+                        cbor.unwrap_or(&CborValue::Null),
+                        Some(&error.message),
+                    )
+                } else {
+                    format_tool_completion(
+                        &error.tool_name,
+                        cbor.unwrap_or(&CborValue::Null),
+                        Some(&error.message),
+                    )
+                };
                 self.handle
                     .print_output(render_tool_block(&self.theme, &display));
             }
@@ -2492,12 +2719,13 @@ pub fn main_with_args() -> std::process::ExitCode {
                     "agent" => tau_agent::run_stdio,
                     "ext-shell" => tau_ext_shell::run_stdio,
                     "ext-test-dummy" => tau_ext_test_dummy::run_stdio,
+                    "ext-core-delegate" => tau_ext_core_delegate::run_stdio,
                     "ext-core-notifications" => tau_ext_core_notifications::run_stdio,
                     "ext-websearch-exa" => tau_ext_websearch_exa::run_stdio,
                     "harness" => tau_harness::run_component,
                     _ => {
                         return Err(CliError::Participant(format!(
-                            "unknown extension: {name}\navailable: agent, ext-shell, ext-test-dummy, ext-core-notifications, ext-websearch-exa, harness"
+                            "unknown extension: {name}\navailable: agent, ext-shell, ext-test-dummy, ext-core-delegate, ext-core-notifications, ext-websearch-exa, harness"
                         )));
                     }
                 };

@@ -704,6 +704,126 @@ fn user_prompt_during_idle_window_cancels_text_notification() {
     assert!(reader.read_event().expect("read eof").is_none());
 }
 
+/// Sub-agent (`PromptOriginator::Extension`) prompt + response
+/// activity must not perturb the notifications extension. A
+/// `delegate` flow runs an entire side conversation between the
+/// user's prompt and the main agent's final response — none of those
+/// side events should clear the idle timer or fire the end-of-turn
+/// chime, since the user isn't seeing them.
+#[test]
+fn sub_agent_prompts_and_responses_are_ignored() {
+    use tau_proto::{AgentPromptSubmitted, AgentToolCall, CborValue, ToolNameMaybe};
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+
+    // User starts a turn → expect agent_start sound.
+    writer
+        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "delegate something".into(),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("write");
+
+    // Main agent emits a delegate tool_call (mid-turn).
+    writer
+        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-main".into(),
+            text: None,
+            tool_calls: vec![AgentToolCall {
+                id: "delegate-call".into(),
+                name: ToolNameMaybe::from_raw("delegate"),
+                arguments: CborValue::Null,
+            }],
+            input_tokens: None,
+            cached_tokens: None,
+            thinking: None,
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("write");
+
+    // Sub-agent activity — must not clear idle, fire chimes, or
+    // touch `waiting_for_final_response`.
+    writer
+        .write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            session_prompt_id: "sp-side".into(),
+            originator: tau_proto::PromptOriginator::Extension {
+                name: "core-delegate".into(),
+                query_id: "q1".into(),
+            },
+        }))
+        .expect("write");
+    writer
+        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "side instruction".into(),
+            originator: tau_proto::PromptOriginator::Extension {
+                name: "core-delegate".into(),
+                query_id: "q1".into(),
+            },
+        }))
+        .expect("write");
+    writer
+        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-side".into(),
+            text: Some("delegated answer".into()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            thinking: None,
+            originator: tau_proto::PromptOriginator::Extension {
+                name: "core-delegate".into(),
+                query_id: "q1".into(),
+            },
+        }))
+        .expect("write");
+
+    // Main agent finally finishes the user's turn → end sound.
+    writer
+        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-main".into(),
+            text: Some("done".into()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            thinking: None,
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("write");
+    writer
+        .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
+            reason: None,
+        }))
+        .expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+
+    // Expect exactly two OSC events: agent_start (user prompt) and
+    // agent_end (main agent's final response). Sub-agent activity
+    // between them must NOT produce any sounds.
+    let start = reader.read_event().expect("read").expect("start");
+    let Event::Osc1337SetUserVar(osc) = start else {
+        panic!("expected agent_start OSC, got {start:?}");
+    };
+    assert_eq!(osc.value, VALUE_AGENT_START);
+
+    let end = reader.read_event().expect("read").expect("end");
+    let Event::Osc1337SetUserVar(osc) = end else {
+        panic!("expected agent_end OSC, got {end:?}");
+    };
+    assert_eq!(osc.value, VALUE_AGENT_END);
+
+    assert!(
+        reader.read_event().expect("read eof").is_none(),
+        "no further OSC events expected — sub-agent activity must be silent",
+    );
+}
+
 #[test]
 fn duplicate_ui_prompt_submitted_during_same_turn_emits_one_start_sound() {
     let mut input = Vec::new();

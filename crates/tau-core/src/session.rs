@@ -120,8 +120,20 @@ impl SessionTree {
     /// Returns the entries along the current branch (root to head).
     #[must_use]
     pub fn current_branch(&self) -> Vec<&SessionEntry> {
+        self.branch_from(self.head)
+    }
+
+    /// Returns the entries along the branch ending at `head` (root to
+    /// `head`). When `head` is `None` or unknown, returns an empty
+    /// slice. Use this to assemble a prompt for a *specific*
+    /// conversation that may not coincide with the tree's write
+    /// cursor — multiple side conversations can interleave their
+    /// tree mutations, so `tree.head()` is unreliable for that
+    /// purpose.
+    #[must_use]
+    pub fn branch_from(&self, head: Option<NodeId>) -> Vec<&SessionEntry> {
         let mut path = Vec::new();
-        let mut current = self.head;
+        let mut current = head;
         while let Some(id) = current {
             if let Some(node) = self.nodes.get(id.0 as usize) {
                 path.push(&node.entry);

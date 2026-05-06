@@ -62,6 +62,17 @@ pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
             config: serde_json::json!({}),
         },
         BuiltinExtension {
+            name: "core-delegate",
+            command: vec![
+                tau_binary.clone(),
+                "ext".to_owned(),
+                "ext-core-delegate".to_owned(),
+            ],
+            role: Some("tool"),
+            enable: true,
+            config: serde_json::json!({}),
+        },
+        BuiltinExtension {
             name: "core-notifications",
             command: vec![
                 tau_binary.clone(),

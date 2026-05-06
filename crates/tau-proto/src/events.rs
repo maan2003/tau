@@ -203,6 +203,8 @@ impl EventName {
     pub const TOOL_PROGRESS: Self = Self::from_static(EventCategory::Tool, "progress");
     pub const TOOL_CANCEL: Self = Self::from_static(EventCategory::Tool, "cancel");
     pub const TOOL_CANCELLED: Self = Self::from_static(EventCategory::Tool, "cancelled");
+    pub const TOOL_DELEGATE_PROGRESS: Self =
+        Self::from_static(EventCategory::Tool, "delegate_progress");
 
     pub const EXTENSION_STARTING: Self = Self::from_static(EventCategory::Extension, "starting");
     pub const EXTENSION_READY: Self = Self::from_static(EventCategory::Extension, "ready");
@@ -708,6 +710,38 @@ pub struct ToolProgress {
     pub progress: Option<ProgressUpdate>,
 }
 
+/// Live snapshot of a sub-agent spawned by the `delegate` tool.
+///
+/// Emitted by the harness whenever the side conversation backing a
+/// `delegate` invocation makes observable progress: a tool call starts
+/// or finishes, or the sub-agent reports new context-token usage. The
+/// CLI re-renders the running `delegate` tool block to surface this
+/// to the user without persisting per-update history. Transient — not
+/// folded into the durable session log.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DelegateProgress {
+    /// The original parent `delegate` call — the tool block under
+    /// which this update should appear.
+    pub call_id: ToolCallId,
+    /// Display name the parent agent provided for the sub-task.
+    pub task_name: String,
+    /// Most recent percent-of-context-window the sub-agent reported,
+    /// when its model's window size is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_percent: Option<u8>,
+    /// Most recent input-token count the sub-agent reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_input_tokens: Option<u64>,
+    /// Sub-agent's model context window size, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_window: Option<u64>,
+    /// Number of tool calls currently in flight in the sub-agent.
+    pub tools_in_flight: u32,
+    /// Cumulative number of tool calls the sub-agent has started
+    /// during this delegation (including completed and in-flight).
+    pub tools_total: u32,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolCancel {
     pub call_id: ToolCallId,
@@ -810,6 +844,19 @@ pub struct ExtAgentQuery {
     /// User-style instruction text. Appended to the current
     /// conversation's history as a `User` message before dispatch.
     pub instruction: String,
+    /// `ToolCallId` of the tool invocation that triggered this query,
+    /// when the extension is implementing a tool whose live progress
+    /// the harness should attribute back to that call. Used by the
+    /// `delegate` tool: the harness emits [`DelegateProgress`] under
+    /// this id as the side conversation runs. Optional — non-tool
+    /// extensions issuing queries leave it `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<ToolCallId>,
+    /// Human-readable name for the delegated task, surfaced in the
+    /// UI alongside [`DelegateProgress`]. Optional for the same reason
+    /// `tool_call_id` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
 }
 
 /// Reply to an [`ExtAgentQuery`], routed point-to-point back to the
@@ -1361,6 +1408,8 @@ pub enum Event {
     ToolCancel(ToolCancel),
     #[serde(rename = "tool.cancelled")]
     ToolCancelled(ToolCancelled),
+    #[serde(rename = "tool.delegate_progress")]
+    ToolDelegateProgress(DelegateProgress),
 
     // Extension supervision
     #[serde(rename = "extension.starting")]
@@ -1477,6 +1526,7 @@ impl Event {
             Self::ToolProgress(_) => EventName::TOOL_PROGRESS,
             Self::ToolCancel(_) => EventName::TOOL_CANCEL,
             Self::ToolCancelled(_) => EventName::TOOL_CANCELLED,
+            Self::ToolDelegateProgress(_) => EventName::TOOL_DELEGATE_PROGRESS,
             Self::ExtensionStarting(_) => EventName::EXTENSION_STARTING,
             Self::ExtensionReady(_) => EventName::EXTENSION_READY,
             Self::ExtensionExited(_) => EventName::EXTENSION_EXITED,
@@ -1534,6 +1584,7 @@ impl Event {
             self,
             Self::AgentResponseUpdated(_)
                 | Self::ToolProgress(_)
+                | Self::ToolDelegateProgress(_)
                 | Self::ShellCommandProgress(_)
                 | Self::UiPromptDraft(_)
         )

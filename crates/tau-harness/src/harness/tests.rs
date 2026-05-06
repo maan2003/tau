@@ -1,18 +1,24 @@
 use std::io::{BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tau_core::{SessionEntry, ToolActivityOutcome, ToolActivityRecord};
+use tau_core::{
+    Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
+    RoutedEvent, SessionEntry, ToolActivityOutcome, ToolActivityRecord,
+};
 use tau_proto::{
     AgentResponseFinished, AgentToolCall, CborValue, Event, EventReader, EventSelector,
-    EventWriter, LifecycleDisconnect, LifecycleSubscribe, SessionPromptCreated, SessionPromptId,
-    ToolCallId, ToolName, ToolResult, UiPromptSubmitted,
+    EventWriter, ExtAgentQuery, LifecycleDisconnect, LifecycleSubscribe, SessionPromptCreated,
+    SessionPromptId, ToolCallId, ToolName, ToolResult, ToolSideEffects, ToolSpec,
+    UiPromptSubmitted,
 };
 use tempfile::TempDir;
 
 use super::{Harness, default_agent_runner};
+use crate::conversation::ConversationTurnState;
 use crate::daemon::{
     ServeOptions, bind_listener, run_daemon, run_embedded_message_with_echo, send_daemon_message,
     send_daemon_message_with_trace,
@@ -63,6 +69,60 @@ fn echo_harness_for(
         true,
         session_id,
     )
+}
+
+struct TestSink {
+    events: Arc<Mutex<Vec<RoutedEvent>>>,
+}
+
+impl ConnectionSink for TestSink {
+    fn send(&mut self, event: RoutedEvent) -> Result<(), ConnectionSendError> {
+        self.events.lock().expect("sink mutex").push(event);
+        Ok(())
+    }
+}
+
+fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<RoutedEvent>>> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    h.bus.connect(Connection::new(
+        ConnectionMetadata {
+            id: name.into(),
+            name: name.to_owned(),
+            kind: tau_proto::ClientKind::Tool,
+            origin: ConnectionOrigin::InMemory,
+        },
+        Box::new(TestSink {
+            events: Arc::clone(&events),
+        }),
+    ));
+    events
+}
+
+/// Pre-seed the per-conversation `AgentThinking` state for tests that
+/// bypass `dispatch_prompt_for_conversation` and call response handlers
+/// directly.
+fn seed_agent_thinking(h: &mut Harness, cid: &crate::conversation::ConversationId, spid: &str) {
+    h.conversations
+        .get_mut(cid)
+        .expect("conversation present")
+        .turn_state = ConversationTurnState::AgentThinking {
+        session_prompt_id: spid.into(),
+    };
+}
+
+/// Pre-seed the per-conversation `ToolsRunning` state for tests that
+/// bypass the agent-response path and call tool handlers directly.
+fn seed_tools_running(
+    h: &mut Harness,
+    cid: &crate::conversation::ConversationId,
+    remaining: Vec<ToolCallId>,
+) {
+    h.conversations
+        .get_mut(cid)
+        .expect("conversation present")
+        .turn_state = ConversationTurnState::ToolsRunning {
+        remaining_calls: remaining,
+    };
 }
 
 #[test]
@@ -243,23 +303,34 @@ fn disconnected_tool_completes_pending_call() {
     let call_id: ToolCallId = "call-1".into();
     let tool_name: ToolName = "shell".into();
     let cid = h.default_conversation_id.clone();
-    h.tool_conversations.insert(call_id.clone(), cid);
+    h.tool_conversations.insert(call_id.clone(), cid.clone());
     h.pending_tool_names
         .insert(call_id.clone(), tool_name.clone());
     h.pending_tool_providers
         .insert(call_id.clone(), conn_id.clone().into());
     h.in_flight_tool_kinds
         .insert(call_id.clone(), tau_proto::ToolSideEffects::Mutating);
-    let cid_for_state = h.default_conversation_id.clone();
-    h.turn_state = TurnState::ToolsRunning {
-        session_id: "s1".into(),
-        conversation_id: cid_for_state,
-        remaining_calls: vec![call_id.clone()],
-    };
+    if let Some(conv) = h.conversations.get_mut(&cid) {
+        conv.turn_state = ConversationTurnState::ToolsRunning {
+            remaining_calls: vec![call_id.clone()],
+        };
+    }
 
     h.handle_disconnect(&conn_id);
 
-    assert!(!matches!(h.turn_state, TurnState::ToolsRunning { .. }));
+    // Disconnect publishes a ToolError, drops the call from the
+    // conversation's `ToolsRunning` set, and — since that was the
+    // last outstanding call — re-prompts the agent so it can react
+    // to the failure. The conversation therefore transitions
+    // `ToolsRunning -> AgentThinking`, not back to `Idle`.
+    assert!(matches!(h.turn_state, TurnState::Idle));
+    assert!(matches!(
+        h.conversations
+            .get(&h.default_conversation_id)
+            .expect("default conversation")
+            .turn_state,
+        ConversationTurnState::AgentThinking { .. }
+    ));
     assert!(!h.tool_conversations.contains_key(&call_id));
     assert!(!h.pending_tool_providers.contains_key(&call_id));
 
@@ -580,7 +651,11 @@ fn cross_session_prompt_is_rejected() {
         other => panic!("expected Rejected, got {other:?}"),
     }
     assert!(
-        h.pending_prompts.is_empty(),
+        h.conversations
+            .get(&h.default_conversation_id)
+            .expect("default conversation")
+            .pending_prompts
+            .is_empty(),
         "rejected prompt must not queue"
     );
     assert!(
@@ -851,11 +926,17 @@ fn empty_tool_name_does_not_panic_and_surfaces_error() {
     // Pre-seed as if the agent had just been prompted and is now
     // responding with tool_calls.
     h.selected_model = "test/model".into();
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
     let cid = h.default_conversation_id.clone();
-    h.turn_state = TurnState::AgentThinking {
-        _session_id: "s1".into(),
-        conversation_id: cid.clone(),
-    };
+    seed_agent_thinking(&mut h, &cid, "sp-x");
     h.prompt_conversations.insert("sp-x".into(), cid.clone());
     h.publish_for_conversation(
         &cid,
@@ -936,11 +1017,17 @@ fn empty_tool_call_id_is_normalized_to_synthetic_id() {
     let mut h = echo_harness(&sp).expect("start");
 
     h.selected_model = "test/model".into();
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
     let cid = h.default_conversation_id.clone();
-    h.turn_state = TurnState::AgentThinking {
-        _session_id: "s1".into(),
-        conversation_id: cid.clone(),
-    };
+    seed_agent_thinking(&mut h, &cid, "sp-x");
     h.prompt_conversations.insert("sp-x".into(), cid.clone());
     h.publish_for_conversation(
         &cid,
@@ -1035,10 +1122,7 @@ fn pure_mutating_pure_serializes_through_dispatch_state_machine() {
     // and is about to respond with tool calls.
     h.selected_model = "test/model".into();
     let cid = h.default_conversation_id.clone();
-    h.turn_state = TurnState::AgentThinking {
-        _session_id: "s1".into(),
-        conversation_id: cid.clone(),
-    };
+    seed_agent_thinking(&mut h, &cid, "sp-x");
     h.prompt_conversations.insert("sp-x".into(), cid);
 
     // A `read` of a nonexistent path returns a ToolError (Pure);
@@ -1139,10 +1223,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
 
     append_user_message_via_event(&mut h, "s1", "go");
     let cid = h.default_conversation_id.clone();
-    h.turn_state = TurnState::AgentThinking {
-        _session_id: "s1".into(),
-        conversation_id: cid.clone(),
-    };
+    seed_agent_thinking(&mut h, &cid, "sp-x");
     h.prompt_conversations.insert("sp-x".into(), cid);
 
     let write_args = |name: &str| {
@@ -1610,11 +1691,7 @@ fn skill_tool_reads_file_content() {
     // Directly invoke the skill tool handler.
     append_user_message_via_event(&mut h, "s1", "load skill");
     let cid_for_state = h.default_conversation_id.clone();
-    h.turn_state = TurnState::ToolsRunning {
-        session_id: "s1".into(),
-        conversation_id: cid_for_state,
-        remaining_calls: vec!["call-skill".into()],
-    };
+    seed_tools_running(&mut h, &cid_for_state, vec!["call-skill".into()]);
     let call = AgentToolCall {
         id: "call-skill".into(),
         name: "skill".into(),
@@ -1662,11 +1739,7 @@ fn skill_tool_returns_error_for_unknown_skill() {
     let mut h = echo_harness(&sp).expect("start");
     append_user_message_via_event(&mut h, "s1", "load skill");
     let cid_for_state = h.default_conversation_id.clone();
-    h.turn_state = TurnState::ToolsRunning {
-        session_id: "s1".into(),
-        conversation_id: cid_for_state,
-        remaining_calls: vec!["call-missing".into()],
-    };
+    seed_tools_running(&mut h, &cid_for_state, vec!["call-missing".into()]);
     let call = AgentToolCall {
         id: "call-missing".into(),
         name: "skill".into(),
@@ -1839,22 +1912,14 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
     };
 
     // Description match: KW only appears in zqx-alpha's description.
-    h.turn_state = TurnState::ToolsRunning {
-        session_id: "s1".into(),
-        conversation_id: cid.clone(),
-        remaining_calls: vec!["call-1".into()],
-    };
+    seed_tools_running(&mut h, &cid, vec!["call-1".into()]);
     h.handle_skill_tool_call(&cid, &call_search(KW, false, "call-1"))
         .expect("search 1");
     assert_eq!(read_matches(&h, "call-1"), vec!["zqx-alpha"]);
 
     // Default scope must NOT search content: BODY_KW appears only in
     // alpha and beta bodies. With search_content=false → no hits.
-    h.turn_state = TurnState::ToolsRunning {
-        session_id: "s1".into(),
-        conversation_id: cid.clone(),
-        remaining_calls: vec!["call-2".into()],
-    };
+    seed_tools_running(&mut h, &cid, vec!["call-2".into()]);
     h.handle_skill_tool_call(&cid, &call_search(BODY_KW, false, "call-2"))
         .expect("search 2");
     let empty: Vec<String> = Vec::new();
@@ -1862,21 +1927,13 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
 
     // Opt into content search: now alpha and beta both match,
     // sorted alphabetically.
-    h.turn_state = TurnState::ToolsRunning {
-        session_id: "s1".into(),
-        conversation_id: cid.clone(),
-        remaining_calls: vec!["call-3".into()],
-    };
+    seed_tools_running(&mut h, &cid, vec!["call-3".into()]);
     h.handle_skill_tool_call(&cid, &call_search(BODY_KW, true, "call-3"))
         .expect("search 3");
     assert_eq!(read_matches(&h, "call-3"), vec!["zqx-alpha", "zqx-beta"]);
 
     // Name match works case-insensitively.
-    h.turn_state = TurnState::ToolsRunning {
-        session_id: "s1".into(),
-        conversation_id: cid.clone(),
-        remaining_calls: vec!["call-4".into()],
-    };
+    seed_tools_running(&mut h, &cid, vec!["call-4".into()]);
     h.handle_skill_tool_call(&cid, &call_search("ZQX-ALPHA", false, "call-4"))
         .expect("search 4");
     assert_eq!(read_matches(&h, "call-4"), vec!["zqx-alpha"]);
@@ -1889,11 +1946,7 @@ fn skill_tool_unknown_action_returns_error() {
     let mut h = echo_harness(&sp).expect("start");
 
     let cid = h.default_conversation_id.clone();
-    h.turn_state = TurnState::ToolsRunning {
-        session_id: "s1".into(),
-        conversation_id: cid.clone(),
-        remaining_calls: vec!["call-bogus".into()],
-    };
+    seed_tools_running(&mut h, &cid, vec!["call-bogus".into()]);
     let call = AgentToolCall {
         id: "call-bogus".into(),
         name: "skill".into(),
@@ -2120,6 +2173,889 @@ fn switch_session_rebinds_default_conversation() {
     assert_eq!(submission, PromptSubmission::Dispatched);
 
     h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = "test/model".into();
+    let delegate_events = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+    let cid = h.default_conversation_id.clone();
+    let spid: SessionPromptId = "sp-main".into();
+    h.prompt_conversations.insert(spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "delegate something".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "delegate-call".into(),
+            name: "delegate".into(),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("tool response");
+
+    assert!(matches!(h.turn_state, TurnState::Idle));
+    let default_turn = &h
+        .conversations
+        .get(&h.default_conversation_id)
+        .expect("default conversation")
+        .turn_state;
+    assert!(matches!(
+        default_turn,
+        ConversationTurnState::ToolsRunning { .. }
+    ));
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q1".to_owned(),
+            instruction: "side task".to_owned(),
+            tool_call_id: None,
+            task_name: None,
+        },
+    )
+    .expect("query");
+
+    assert!(
+        h.conversations
+            .values()
+            .all(|conv| conv.pending_prompts.is_empty()),
+        "side prompt must dispatch immediately"
+    );
+    assert!(matches!(h.turn_state, TurnState::Idle));
+
+    let side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("side prompt id");
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: side_spid,
+        text: Some("delegated answer".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "conn-delegate".into(),
+            query_id: "q1".to_owned(),
+        },
+    })
+    .expect("side finished");
+
+    assert!(matches!(h.turn_state, TurnState::Idle));
+    let default_turn = &h
+        .conversations
+        .get(&h.default_conversation_id)
+        .expect("default conversation")
+        .turn_state;
+    assert!(matches!(
+        default_turn,
+        ConversationTurnState::ToolsRunning { .. }
+    ));
+    let events = delegate_events.lock().expect("delegate events");
+    let result = events
+        .iter()
+        .find_map(|routed| match &routed.event {
+            Event::ExtAgentQueryResult(result) if result.query_id == "q1" => Some(result),
+            _ => None,
+        })
+        .expect("query result routed");
+    assert_eq!(result.text, "delegated answer");
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = "test/model".into();
+    let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+    let cid = h.default_conversation_id.clone();
+    let spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-x");
+    h.prompt_conversations.insert(spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "delegate something".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "delegate-call".into(),
+            name: "delegate".into(),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("tool response");
+
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q1".to_owned(),
+            instruction: "side task".to_owned(),
+            tool_call_id: None,
+            task_name: None,
+        },
+    )
+    .expect("query");
+
+    let side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("side prompt id");
+    let prompt = read_prompt_created(&h, &side_spid);
+
+    // The parent agent's `delegate` tool_use is still unresolved
+    // (no matching tool_result yet), so replaying it into the
+    // sub-agent's prompt would produce an orphan ToolUse — which
+    // OpenAI rejects with `No tool output found for function call …`.
+    // The harness must rewind to the most recent UserMessage on the
+    // parent's branch and graft the side conversation there.
+    let saw_orphan_tool_use = prompt.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                tau_proto::ContentBlock::ToolUse { id, .. }
+                    if id.as_str() == "delegate-call"
+            )
+        })
+    });
+    assert!(
+        !saw_orphan_tool_use,
+        "side prompt must not replay the parent's unresolved delegate tool_use"
+    );
+
+    let saw_user_framing = prompt.messages.iter().any(|message| {
+        matches!(message.role, tau_proto::ConversationRole::User)
+            && message.content.iter().any(|block| {
+                matches!(block, tau_proto::ContentBlock::Text { text } if text.contains("delegate something"))
+            })
+    });
+    assert!(
+        saw_user_framing,
+        "side prompt should still inherit the user's task framing"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression: a sub-agent's `Pure` tool call must not be gated by the
+/// parent's still-in-flight `Mutating` `delegate` call. The parent's
+/// delegate only resolves once the sub-agent's tools have run, so a
+/// global pure-vs-mutating gate produces a self-deadlock — the main
+/// symptom we hit in `tau-agent-m2dpw4`'s event log.
+#[test]
+fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = "test/model".into();
+    let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+    let websearch_events = connect_test_tool(&mut h, "conn-websearch");
+    h.registry.register(
+        "conn-websearch",
+        ToolSpec {
+            name: "websearch".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Pure,
+        },
+    );
+
+    // Main agent issues `delegate`, putting a Mutating call in flight
+    // on the default conversation.
+    let cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "delegate something".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: main_spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "delegate-call".into(),
+            name: "delegate".into(),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("main response");
+
+    // Delegate extension turns it into an ExtAgentQuery; the harness
+    // spawns a side conversation and dispatches its prompt.
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q1".to_owned(),
+            instruction: "side task".to_owned(),
+            tool_call_id: None,
+            task_name: None,
+        },
+    )
+    .expect("query");
+
+    // Sub-agent now responds with a Pure `websearch` call. Without
+    // per-conversation gating this would queue forever behind the
+    // parent's still-in-flight Mutating `delegate`.
+    let side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("side prompt id");
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: side_spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "websearch-call".into(),
+            name: "websearch".into(),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q1".to_owned(),
+        },
+    })
+    .expect("side response");
+
+    // The Pure call must have been routed to the websearch
+    // extension — the bus sends `ToolInvoke` directly to the
+    // resolved provider, so the test sink sees it there rather
+    // than the broadcast `ToolRequest`.
+    let saw_routed = websearch_events.lock().expect("ws").iter().any(|routed| {
+        matches!(
+            &routed.event,
+            Event::ToolInvoke(invoke) if invoke.call_id.as_str() == "websearch-call"
+        )
+    });
+    assert!(
+        saw_routed,
+        "side conversation's Pure tool must dispatch despite parent's in-flight Mutating delegate"
+    );
+    assert!(
+        h.pending_tool_invocations.is_empty(),
+        "no entries should be left queued"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Two `delegate` calls with `read_only: true` issued in the same
+/// agent turn must be classified as `Pure` and therefore dispatch
+/// concurrently — `delegate` is registered as `Mutating` (the safe
+/// default), but the per-call override on `read_only: true` lets the
+/// agent opt two known-safe delegations into parallel scheduling.
+#[test]
+fn read_only_delegate_calls_dispatch_concurrently() {
+    use tau_proto::{CborValue, ToolNameMaybe};
+
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = "test/model".into();
+    let _ = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+
+    let cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "two read-only lookups".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    let read_only_args = CborValue::Map(vec![(
+        CborValue::Text("read_only".to_owned()),
+        CborValue::Bool(true),
+    )]);
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: main_spid,
+        text: None,
+        tool_calls: vec![
+            AgentToolCall {
+                id: "ro-1".into(),
+                name: ToolNameMaybe::from_raw("delegate"),
+                arguments: read_only_args.clone(),
+            },
+            AgentToolCall {
+                id: "ro-2".into(),
+                name: ToolNameMaybe::from_raw("delegate"),
+                arguments: read_only_args.clone(),
+            },
+        ],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("main response");
+
+    // Both calls should be in flight simultaneously: per-call kind
+    // resolves to `Pure` via `read_only: true`, and `Pure` does not
+    // serialize against other Pure on the same conversation.
+    assert_eq!(h.in_flight_tool_kinds.len(), 2);
+    assert!(
+        h.in_flight_tool_kinds
+            .values()
+            .all(|kind| matches!(kind, tau_proto::ToolSideEffects::Pure)),
+        "both read-only delegates should be classified Pure",
+    );
+    assert!(
+        h.pending_tool_invocations.is_empty(),
+        "no entries should remain queued — Pure+Pure dispatches in parallel",
+    );
+
+    // Sanity: without `read_only` the same two calls must not
+    // parallelize. Reset the harness and replay with bare delegates.
+    let td2 = TempDir::new().expect("tempdir");
+    let sp2 = td2.path().join("state");
+    let mut h2 = echo_harness(&sp2).expect("start");
+    h2.selected_model = "test/model".into();
+    let _ = connect_test_tool(&mut h2, "conn-delegate");
+    h2.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+    let cid2 = h2.default_conversation_id.clone();
+    let spid2: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h2, &cid2, "sp-main");
+    h2.prompt_conversations.insert(spid2.clone(), cid2.clone());
+    h2.publish_for_conversation(
+        &cid2,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "two mutating delegations".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    h2.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid2,
+        text: None,
+        tool_calls: vec![
+            AgentToolCall {
+                id: "mut-1".into(),
+                name: ToolNameMaybe::from_raw("delegate"),
+                arguments: CborValue::Map(Vec::new()),
+            },
+            AgentToolCall {
+                id: "mut-2".into(),
+                name: ToolNameMaybe::from_raw("delegate"),
+                arguments: CborValue::Map(Vec::new()),
+            },
+        ],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("main response");
+    assert_eq!(
+        h2.in_flight_tool_kinds.len(),
+        1,
+        "only first Mutating dispatches"
+    );
+    assert_eq!(
+        h2.pending_tool_invocations.len(),
+        1,
+        "second Mutating queues"
+    );
+}
+
+/// Sub-agent state changes (tool start, response usage, tool finish)
+/// must surface to the user as `DelegateProgress` events keyed on the
+/// parent's `delegate` tool call_id. The CLI uses these to repaint
+/// the running tool block as `delegate [task] ctx: …% tools: a/b …`.
+#[test]
+fn delegate_emits_progress_as_sub_agent_makes_progress() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = "test/model".into();
+    let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+    let _websearch_events = connect_test_tool(&mut h, "conn-websearch");
+    h.registry.register(
+        "conn-websearch",
+        ToolSpec {
+            name: "websearch".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Pure,
+        },
+    );
+
+    let cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "delegate something".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: main_spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "delegate-call".into(),
+            name: "delegate".into(),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("main response");
+
+    let sink = collect_event_sink(&mut h);
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q1".to_owned(),
+            instruction: "side task".to_owned(),
+            tool_call_id: Some("delegate-call".into()),
+            task_name: Some("look it up".to_owned()),
+        },
+    )
+    .expect("query");
+
+    // First snapshot: side conversation just spawned, sub-agent has
+    // not yet acted. Counters at zero, no context info.
+    let initial = pop_delegate_progress(&sink, "delegate-call")
+        .expect("initial DelegateProgress on side conv spawn");
+    assert_eq!(initial.task_name, "look it up");
+    assert_eq!(initial.tools_in_flight, 0);
+    assert_eq!(initial.tools_total, 0);
+
+    let side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("side prompt id");
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: side_spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "websearch-call".into(),
+            name: "websearch".into(),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: Some(1234),
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q1".to_owned(),
+        },
+    })
+    .expect("side response");
+
+    // After the side response finishes (which carries usage) and the
+    // sub-agent's tool starts dispatching, we should observe at
+    // least one `DelegateProgress` reflecting the new state. The
+    // exact emit count is not load-bearing — the *latest* snapshot
+    // is what the UI renders.
+    let latest = drain_delegate_progress(&sink, "delegate-call")
+        .pop()
+        .expect("at least one DelegateProgress after side response");
+    assert_eq!(latest.task_name, "look it up");
+    assert_eq!(latest.tools_in_flight, 1, "websearch is in flight");
+    assert_eq!(latest.tools_total, 1, "websearch counts toward total");
+    assert_eq!(latest.ctx_input_tokens, Some(1234));
+
+    // Complete the sub-agent's tool — counters should drop and a
+    // fresh progress event should show 0 in flight, 1 total.
+    h.handle_extension_event(
+        "conn-websearch",
+        Event::ToolResult(ToolResult {
+            call_id: "websearch-call".into(),
+            tool_name: "websearch".into(),
+            result: CborValue::Text("fake result".to_owned()),
+        }),
+    )
+    .expect("ws result");
+    let after_complete = drain_delegate_progress(&sink, "delegate-call")
+        .pop()
+        .expect("DelegateProgress after sub-tool completion");
+    assert_eq!(after_complete.tools_in_flight, 0);
+    assert_eq!(after_complete.tools_total, 1);
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression: when one side conversation tears down (running
+/// `snap_to_default_conversation`) before another's tool result
+/// arrives, the result must still fold onto the *originating*
+/// conversation's branch. Before this fix, the result landed at
+/// `tree.head` (which `snap_to_default` had moved to the parent
+/// branch), producing orphan ToolUse blocks in subsequent prompts —
+/// the exact `No tool output found for function call …` 400 we hit
+/// in `tau-agent-yvxco1`'s log.
+#[test]
+fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
+    use tau_proto::ToolNameMaybe;
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = "test/model".into();
+    let _ = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+
+    // Set up the main agent's turn that emits a single delegate call.
+    let cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "delegate something".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: main_spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "outer-call".into(),
+            name: ToolNameMaybe::from_raw("delegate"),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("main response");
+
+    // Spawn the outer side conversation.
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-outer".to_owned(),
+            instruction: "outer task".to_owned(),
+            tool_call_id: Some("outer-call".into()),
+            task_name: Some("outer".to_owned()),
+        },
+    )
+    .expect("query");
+
+    // Have the outer sub-agent emit a *nested* delegate. The harness
+    // should issue another ExtAgentQuery for it, which we then ack
+    // with a fresh side conversation. This is the exact pattern that
+    // produced the misplacement: outer side conv runs teardown
+    // (snap_to_default) before nested side conv's tool result lands.
+    let outer_side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("outer side prompt id");
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: outer_side_spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "nested-call".into(),
+            name: ToolNameMaybe::from_raw("delegate"),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q-outer".to_owned(),
+        },
+    })
+    .expect("outer response");
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-nested".to_owned(),
+            instruction: "nested task".to_owned(),
+            tool_call_id: Some("nested-call".into()),
+            task_name: Some("nested".to_owned()),
+        },
+    )
+    .expect("nested query");
+
+    // Nested sub-agent finishes with a final answer. This triggers
+    // side teardown: `snap_to_default_conversation` runs, moving
+    // tree.head back to the main branch. The delegate ext then
+    // publishes a ToolResult for `nested-call` — which must fold on
+    // the *outer* conv's branch (since outer issued nested-call), not
+    // wherever tree.head happens to be.
+    let nested_side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| {
+            (prompt_cid.as_str() != "default" && prompt_cid.as_str() != outer_side_cid_str(&h))
+                .then_some(spid.clone())
+        })
+        .expect("nested side prompt id");
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: nested_side_spid,
+        text: Some("nested answer".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q-nested".to_owned(),
+        },
+    })
+    .expect("nested final");
+
+    // The delegate extension would route the nested ExtAgentQueryResult
+    // back as a ToolResult — simulate that here.
+    h.handle_extension_event(
+        "conn-delegate",
+        Event::ToolResult(ToolResult {
+            call_id: "nested-call".into(),
+            tool_name: "delegate".into(),
+            result: CborValue::Text("nested answer".to_owned()),
+        }),
+    )
+    .expect("nested tool result");
+
+    // Now re-prompt the outer sub-agent and inspect the assembled
+    // messages. The `outer-call` tool_use must NOT appear in the
+    // outer sub-agent's branch — the only ToolUse the outer
+    // sub-agent should see is its own `nested-call` (with a
+    // matching ToolResult).
+    let outer_resume_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| {
+            (prompt_cid.as_str() == outer_side_cid_str(&h)).then_some(spid.clone())
+        })
+        .expect("outer resume prompt id");
+    let prompt = read_prompt_created(&h, &outer_resume_spid);
+
+    let mut tool_uses = Vec::new();
+    let mut tool_results = Vec::new();
+    for message in &prompt.messages {
+        for block in &message.content {
+            match block {
+                tau_proto::ContentBlock::ToolUse { id, .. } => {
+                    tool_uses.push(id.as_str().to_owned())
+                }
+                tau_proto::ContentBlock::ToolResult { tool_use_id, .. } => {
+                    tool_results.push(tool_use_id.as_str().to_owned())
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        !tool_uses.iter().any(|id| id == "outer-call"),
+        "outer sub-agent's prompt must not include the parent's `outer-call` ToolUse; got: {tool_uses:?}",
+    );
+    assert!(
+        tool_uses.iter().any(|id| id == "nested-call"),
+        "outer sub-agent's prompt must include its own `nested-call` ToolUse; got: {tool_uses:?}",
+    );
+    assert!(
+        tool_results.iter().any(|id| id == "nested-call"),
+        "outer sub-agent must see the matching ToolResult for `nested-call`; got: {tool_results:?}",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Find the conversation id of the outer side conversation (the one
+/// whose originator is the delegate extension's first query). Used by
+/// the cross-conversation regression test above to disambiguate
+/// nested-vs-outer side prompt ids.
+fn outer_side_cid_str(h: &Harness) -> &str {
+    h.conversations
+        .iter()
+        .find_map(|(cid, conv)| {
+            matches!(
+                &conv.originator,
+                tau_proto::PromptOriginator::Extension { query_id, .. }
+                    if query_id == "q-outer"
+            )
+            .then_some(cid.as_str())
+        })
+        .unwrap_or("")
+}
+
+/// Subscribe a fresh test sink to `tool.delegate_progress` events and
+/// hand back its accumulator.
+fn collect_event_sink(h: &mut Harness) -> Arc<Mutex<Vec<RoutedEvent>>> {
+    let events = connect_test_tool(h, "test-delegate-progress-sink");
+    h.bus
+        .set_subscriptions(
+            "test-delegate-progress-sink",
+            vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::TOOL_DELEGATE_PROGRESS,
+            )],
+        )
+        .expect("subscribe");
+    events
+}
+
+/// Try to extract the inner event from a `wire.log_event` envelope
+/// (the harness wraps every published event in one for at-least-once
+/// delivery). Returns the event itself for unwrapped variants.
+fn peel_inner_event(event: &Event) -> &Event {
+    match event {
+        Event::LogEvent(env) => &env.event,
+        other => other,
+    }
+}
+
+fn pop_delegate_progress(
+    sink: &Arc<Mutex<Vec<RoutedEvent>>>,
+    call_id: &str,
+) -> Option<tau_proto::DelegateProgress> {
+    let mut events = sink.lock().expect("sink");
+    let pos = events.iter().position(|routed| {
+        matches!(
+            peel_inner_event(&routed.event),
+            Event::ToolDelegateProgress(p) if p.call_id.as_str() == call_id
+        )
+    })?;
+    let removed = events.remove(pos);
+    match removed.event {
+        Event::ToolDelegateProgress(p) => Some(p),
+        Event::LogEvent(env) => match *env.event {
+            Event::ToolDelegateProgress(p) => Some(p),
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    }
+}
+
+fn drain_delegate_progress(
+    sink: &Arc<Mutex<Vec<RoutedEvent>>>,
+    call_id: &str,
+) -> Vec<tau_proto::DelegateProgress> {
+    let mut events = sink.lock().expect("sink");
+    let mut out = Vec::new();
+    events.retain(|routed| match peel_inner_event(&routed.event) {
+        Event::ToolDelegateProgress(p) if p.call_id.as_str() == call_id => {
+            out.push(p.clone());
+            false
+        }
+        _ => true,
+    });
+    out
 }
 
 fn read_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPromptCreated {

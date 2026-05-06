@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use tau_config::Config;
 use tau_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, DefaultSubscriptionPolicy, EventBus,
-    EventLog, PolicyStore, RouteError, SessionStore, ToolRegistry, ToolRouteError,
+    EventLog, NodeId, PolicyStore, RouteError, SessionEntry, SessionStore, SessionTree,
+    ToolRegistry, ToolRouteError,
 };
 use tau_proto::{
     AgentResponseFinished, AgentToolCall, CborValue, ClientKind, Event, EventSelector,
@@ -20,7 +21,7 @@ use tau_proto::{
     ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest,
 };
 
-use crate::conversation::{Conversation, ConversationId};
+use crate::conversation::{Conversation, ConversationId, ConversationTurnState};
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
 use crate::dirs::policy_store_path_from;
@@ -38,7 +39,7 @@ use crate::model::{
     save_harness_state, selected_effort_for_model,
 };
 use crate::prompt::{
-    assemble_conversation, build_system_prompt, cbor_map_bool, cbor_map_text,
+    assemble_conversation_from, build_system_prompt, cbor_map_bool, cbor_map_text,
     render_agents_context_message,
 };
 use crate::settings::load_harness_settings_or_warn;
@@ -144,20 +145,12 @@ pub(crate) struct Harness {
     /// Id of the user's main interactive conversation. Always present
     /// in `conversations` for the harness's whole lifetime.
     pub(crate) default_conversation_id: ConversationId,
-    /// Whose turn it is in the agent interaction loop.
+    /// Global harness state. Currently only tracks per-session init
+    /// (waiting on extensions to announce skills + AGENTS.md). Agent
+    /// turn state is per-conversation; multiple conversations may have
+    /// in-flight prompts simultaneously and the agent extension
+    /// serializes its own consumption of `SessionPromptCreated`.
     pub(crate) turn_state: TurnState,
-    /// Queued prompts waiting for the agent slot to free up.
-    /// Each entry is (conversation_id, text) and is persisted only
-    /// when it is actually dispatched. Holds both interactive user
-    /// prompts (default conversation) and side queries from
-    /// extensions (ext-query conversations).
-    //
-    // Future: add a steering queue for mid-turn injection. Steering
-    // messages would be injected after tool-call turns complete but
-    // before the next LLM call, allowing the user to redirect the
-    // agent while it's working. See PI_PROMPT_QUEUEING.md for Pi's
-    // two-tier (steering + follow-up) design.
-    pub(crate) pending_prompts: VecDeque<(ConversationId, String)>,
     /// Append-only event debug log.
     pub(crate) debug_log: Option<DebugEventLog>,
     /// All available models as `"provider/model_id"` strings.
@@ -346,7 +339,6 @@ impl Harness {
             conversations,
             default_conversation_id,
             turn_state: TurnState::Idle,
-            pending_prompts: VecDeque::new(),
             debug_log: None,
             available_models,
             selected_model,
@@ -513,7 +505,6 @@ impl Harness {
             conversations,
             default_conversation_id,
             turn_state: TurnState::Idle,
-            pending_prompts: VecDeque::new(),
             debug_log: None,
             available_models,
             selected_model,
@@ -603,6 +594,22 @@ impl Harness {
     /// from an extension grows its own branch off some earlier node;
     /// each side publish brackets its own navigate-then-append.
     fn publish_for_conversation(&mut self, cid: &ConversationId, event: Event) {
+        self.publish_for_conversation_from(cid, None, event);
+    }
+
+    /// Like [`publish_for_conversation`] but lets the caller record an
+    /// originating connection on the persisted record (for `tool.result`
+    /// / `tool.error` arriving from extensions). The snap-to-`cid`-head
+    /// step is what keeps cross-conversation tool activity from folding
+    /// onto the wrong tree branch — without it, a sibling side conv that
+    /// just navigated `tree.head` would steal the parent of the next
+    /// tree-folding event.
+    fn publish_for_conversation_from(
+        &mut self,
+        cid: &ConversationId,
+        source: Option<&str>,
+        event: Event,
+    ) {
         let session_id = self
             .conversations
             .get(cid)
@@ -631,7 +638,8 @@ impl Harness {
                 }
             }
         }
-        self.publish_event(None, event);
+        let source_owned = source.map(str::to_owned);
+        self.publish_event(source_owned.as_deref(), event);
         let new_head = self
             .store
             .session(session_id.as_str())
@@ -762,7 +770,7 @@ impl Harness {
     /// Drives the event loop until every configured extension reaches
     /// `ExtensionState::Ready`. Replaces the old `wait_for_startup(n)`:
     /// state transitions are tracked per-extension so the same predicate
-    /// can also gate runtime dispatch in `dispatch_blocked`.
+    /// can also gate runtime dispatch in `dispatch_blocked_for`.
     fn wait_for_extensions_ready(&mut self) -> Result<(), HarnessError> {
         if self.extensions_all_ready() {
             return Ok(());
@@ -993,10 +1001,20 @@ impl Harness {
             Event::ToolResult(result) => {
                 if let Some(cid) = self.tool_conversations.get(&result.call_id).cloned() {
                     let call_id = result.call_id.to_string();
-                    self.publish_event(Some(source_id), Event::ToolResult(result));
-                    self.sync_conversation_head(&cid);
-                    self.clear_tool_call_tracking(&call_id);
+                    // Snap to the owning conversation's head before
+                    // folding the result. Without this, a sibling side
+                    // conv that just ran `snap_to_default_conversation`
+                    // (during its teardown) leaves `tree.head` on the
+                    // *parent* branch — folding the result there
+                    // misplaces it and produces orphan ToolUse blocks
+                    // when the parent conv is later re-prompted.
+                    self.publish_for_conversation_from(
+                        &cid,
+                        Some(source_id),
+                        Event::ToolResult(result),
+                    );
                     self.on_tool_call_complete(&call_id);
+                    self.clear_tool_call_tracking(&call_id);
                 } else {
                     self.emit_info(&format!(
                         "discarding duplicate tool result for call_id={}",
@@ -1007,10 +1025,13 @@ impl Harness {
             Event::ToolError(error) => {
                 if let Some(cid) = self.tool_conversations.get(&error.call_id).cloned() {
                     let call_id = error.call_id.to_string();
-                    self.publish_event(Some(source_id), Event::ToolError(error));
-                    self.sync_conversation_head(&cid);
-                    self.clear_tool_call_tracking(&call_id);
+                    self.publish_for_conversation_from(
+                        &cid,
+                        Some(source_id),
+                        Event::ToolError(error),
+                    );
                     self.on_tool_call_complete(&call_id);
+                    self.clear_tool_call_tracking(&call_id);
                 } else {
                     self.emit_info(&format!(
                         "discarding duplicate tool error for call_id={}",
@@ -1295,12 +1316,24 @@ impl Harness {
                 message: "tool provider disconnected".to_owned(),
                 details: None,
             };
-            // Publish first so `session_id_for_event` can still attribute
-            // the persisted record via `pending_tool_sessions`. Then drop
-            // the call's tracking maps.
-            self.publish_event(None, Event::ToolError(error));
-            self.clear_tool_call_tracking(call_id.as_str());
+            // Publish on the owning conversation's branch so the
+            // synthesized failure folds onto the right node. Without
+            // the snap, sibling side conversations could leave
+            // `tree.head` on the wrong branch and the fold would land
+            // there instead. `on_tool_call_complete` then folds the
+            // failed call into its conversation's `ToolsRunning` set
+            // and re-prompts the agent if the turn is now done.
+            // Tracking maps are cleared *after* that read.
+            if let Some(cid) = self.tool_conversations.get(call_id.as_str()).cloned() {
+                self.publish_for_conversation(&cid, Event::ToolError(error));
+            } else {
+                // No conversation attribution — fall back to the
+                // unsnapped publish so the error still reaches the
+                // bus / log.
+                self.publish_event(None, Event::ToolError(error));
+            }
             self.on_tool_call_complete(call_id.as_str());
+            self.clear_tool_call_tracking(call_id.as_str());
         }
     }
 
@@ -1679,10 +1712,6 @@ impl Harness {
                 originator,
             }),
         );
-        self.turn_state = TurnState::AgentThinking {
-            _session_id: session_id,
-            conversation_id: cid.clone(),
-        };
         self.send_prompt_to_agent_for(cid);
         Ok(())
     }
@@ -1717,11 +1746,13 @@ impl Harness {
     }
 
     /// Spawn a fresh side conversation for an extension's
-    /// [`tau_proto::ExtAgentQuery`] and dispatch it (or queue it if
-    /// the agent slot is busy). The conversation branches off the
-    /// user's *default* conversation's current head, so the side
-    /// prompt + response land as a real branch in the session tree;
-    /// the user's main head stays put.
+    /// [`tau_proto::ExtAgentQuery`] and dispatch it. The harness has no
+    /// global agent slot — the side conversation publishes its own
+    /// `SessionPromptCreated` immediately, and the agent extension
+    /// serializes consumption from the event log. The conversation
+    /// branches off the user's *default* conversation's current head,
+    /// so the side prompt + response land as a real branch in the
+    /// session tree; the user's main head stays put.
     fn handle_ext_agent_query(
         &mut self,
         source_id: &str,
@@ -1750,31 +1781,84 @@ impl Harness {
             .get(&self.default_conversation_id)
             .map(|c| c.session_id.clone())
             .expect("default conversation always present");
-        let branch_root = self
+        // Walk back from the parent's head to the most recent
+        // `UserMessage` node. The parent may be mid-tool-call (e.g.
+        // the delegate tool_use that just triggered this query), and
+        // grafting the side conversation onto that node would replay
+        // an unresolved `ToolUse` into the sub-agent's prompt — OpenAI
+        // rejects that with `No tool output found for function call`.
+        // Branching off the last user message keeps prior completed
+        // turns visible while dropping the parent's in-flight chain.
+        let parent_head = self
             .conversations
             .get(&self.default_conversation_id)
             .and_then(|c| c.head);
+        let branch_root = parent_head.and_then(|head| {
+            self.store
+                .session(session_id.as_str())
+                .and_then(|tree| last_user_message_ancestor(tree, head))
+        });
 
         let originator = tau_proto::PromptOriginator::Extension {
             name: extension_name.into(),
             query_id: query.query_id.clone(),
         };
-        self.conversations.insert(
+        let mut conv = Conversation::new(
             cid.clone(),
-            Conversation::new(
-                cid.clone(),
-                session_id,
-                originator,
-                branch_root,
-                Some(source_id.into()),
-            ),
+            session_id,
+            originator,
+            branch_root,
+            Some(source_id.into()),
         );
+        // For tool-backed extensions (currently just `delegate`)
+        // record the parent call id and task name so subsequent
+        // sub-agent state changes can be surfaced to the user under
+        // that tool block via `DelegateProgress`.
+        conv.parent_tool_call_id = query.tool_call_id;
+        conv.task_name = query.task_name;
+        self.conversations.insert(cid.clone(), conv);
 
-        // Queue the instruction; `try_advance_queue` dispatches when
-        // the agent slot is idle and the model is ready.
-        self.pending_prompts.push_back((cid, query.instruction));
+        // Emit the initial progress snapshot (`tools: 0/0`, no ctx
+        // info yet) so the parent's tool block flips from `…` to the
+        // structured form as soon as the side conversation exists,
+        // without waiting for the sub-agent's first event.
+        self.emit_delegate_progress(&cid);
+
+        // Queue the instruction on its own conversation; if the
+        // harness is globally ready (model selected, extensions ready,
+        // not mid-init) `try_advance_queue` dispatches it on the spot.
+        // The default conversation being mid-tool does not block this
+        // side conversation, since dispatch is per-conversation.
+        if let Some(conv) = self.conversations.get_mut(&cid) {
+            conv.pending_prompts.push_back(query.instruction);
+        }
         self.try_advance_queue();
         Ok(())
+    }
+
+    /// Publish a `DelegateProgress` snapshot for `cid` if it is a side
+    /// conversation backing a `delegate` tool call. No-op for the
+    /// default conversation and for non-tool ext queries.
+    fn emit_delegate_progress(&mut self, cid: &ConversationId) {
+        let Some(conv) = self.conversations.get(cid) else {
+            return;
+        };
+        let (Some(call_id), Some(task_name)) =
+            (conv.parent_tool_call_id.clone(), conv.task_name.clone())
+        else {
+            return;
+        };
+        let ctx_window = model_context_window(&self.model_registry, self.selected_model.as_str());
+        let progress = tau_proto::DelegateProgress {
+            call_id,
+            task_name,
+            ctx_percent: conv.context_percent_used,
+            ctx_input_tokens: conv.context_input_tokens,
+            ctx_window,
+            tools_in_flight: conv.tools_in_flight,
+            tools_total: conv.tools_total,
+        };
+        self.publish_event(None, Event::ToolDelegateProgress(progress));
     }
 
     /// Resync the session tree's head to the default conversation's
@@ -1832,8 +1916,12 @@ impl Harness {
         }
 
         let cid = self.default_conversation_id.clone();
-        if self.dispatch_blocked() || !self.session_initialized(&session_id) {
-            self.pending_prompts.push_back((cid, text));
+        if self.dispatch_blocked_for(&cid) || !self.session_initialized(&session_id) {
+            self.conversations
+                .get_mut(&cid)
+                .expect("default conversation always present")
+                .pending_prompts
+                .push_back(text);
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
         }
@@ -1940,9 +2028,14 @@ impl Harness {
         );
 
         // Drop in-flight work bound to the old session. Pending prompts
-        // for it are abandoned (the user explicitly switched away).
+        // for it are abandoned (the user explicitly switched away), and
+        // each conversation's per-turn state is reset.
         self.turn_state = TurnState::Idle;
-        self.pending_prompts.clear();
+        for conv in self.conversations.values_mut() {
+            conv.pending_prompts.clear();
+            conv.in_flight_prompt = None;
+            conv.turn_state = ConversationTurnState::Idle;
+        }
         self.pending_request_sessions.clear();
         self.pending_tool_invocations.clear();
         self.tool_conversations.clear();
@@ -2161,9 +2254,19 @@ impl Harness {
             .expect("send_prompt_to_agent_for: unknown conversation id");
         let session_id = conv.session_id.clone();
         let originator = conv.originator.clone();
+        // Walk the conversation's *own* branch, not whatever tree.head
+        // currently points at. With multiple side conversations
+        // running concurrently their tree mutations interleave, so
+        // tree.head is an unreliable signal for "where this
+        // conversation lives". Reading from `conv.head` keeps the
+        // assembled prompt scoped to this conversation's history and
+        // prevents orphan ToolUse blocks from cross-branch state.
+        let head = conv.head;
 
         let tree = self.store.session(session_id.as_str());
-        let messages = tree.map(assemble_conversation).unwrap_or_default();
+        let messages = tree
+            .map(|t| assemble_conversation_from(t, head))
+            .unwrap_or_default();
         let tools = self.gather_tool_definitions();
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
@@ -2175,6 +2278,9 @@ impl Harness {
             .insert(session_prompt_id.clone(), cid.clone());
         if let Some(c) = self.conversations.get_mut(cid) {
             c.in_flight_prompt = Some(session_prompt_id.clone());
+            c.turn_state = ConversationTurnState::AgentThinking {
+                session_prompt_id: session_prompt_id.clone(),
+            };
         }
 
         // Publish SessionPromptCreated — both the agent and UI see it.
@@ -2218,6 +2324,14 @@ impl Harness {
         if response.input_tokens.is_some() || response.cached_tokens.is_some() {
             self.update_context_usage(response.input_tokens, response.cached_tokens);
         }
+        // Per-conversation usage: separate from the global tracker
+        // because side conversations shouldn't clobber the user's
+        // status bar, but the harness still needs their context %
+        // to surface via `DelegateProgress`.
+        if let Some(cid) = self.conversation_for_prompt(&response.session_prompt_id) {
+            self.update_conversation_context_usage(&cid, response.input_tokens);
+            self.emit_delegate_progress(&cid);
+        }
         // Dedupe: under at-least-once delivery the agent may resend a
         // finished-response after a reconnect. The first delivery
         // removed the entry from `prompt_conversations`; later ones
@@ -2231,25 +2345,18 @@ impl Harness {
             ));
             return Ok(());
         };
-        let session_id = self
-            .conversations
-            .get(&cid)
-            .expect("conversation_for_prompt returned a known id")
-            .session_id
-            .clone();
-
-        // `publish_event` flows the AgentResponseFinished into the
-        // durable per-session log; the SessionTree fold appends an
-        // `AgentMessage` carrying both `text` and `thinking` (when
-        // text is present). Sync the owning conversation's head so
-        // a subsequent tool dispatch via `publish_for_conversation`
-        // doesn't navigate the tree backward to the pre-response head.
-        self.publish_event(None, Event::AgentResponseFinished(response.clone()));
-        self.sync_conversation_head(&cid);
+        // Publish via the owning conversation's branch — when text is
+        // present the SessionTree fold appends an `AgentMessage` as a
+        // child of `tree.head`, so an unsnapped publish would land on
+        // whichever branch happened to be at `tree.head` (e.g. after
+        // a sibling side conv's teardown ran `snap_to_default`).
+        // `publish_for_conversation` snaps and updates `c.head`.
+        self.publish_for_conversation(&cid, Event::AgentResponseFinished(response.clone()));
         self.prompt_conversations
             .remove(response.session_prompt_id.as_str());
         if let Some(conv) = self.conversations.get_mut(&cid) {
             conv.in_flight_prompt = None;
+            conv.turn_state = ConversationTurnState::Idle;
         }
         self.completed_prompts
             .insert(response.session_prompt_id.clone());
@@ -2257,10 +2364,11 @@ impl Harness {
         // Side-conversation handling: if this prompt originated from
         // an extension via ExtAgentQuery, route the final text back
         // to the requesting extension as ExtAgentQueryResult and
-        // tear down the side conversation. The agent is single-flight
-        // in v1, so no further tool dispatch can happen for this
-        // conversation; pending_tool_invocations entries (if any) have
-        // already been emitted into the bus and will complete normally.
+        // tear down the side conversation. The harness routes tool
+        // calls per-conversation, so any in-flight
+        // pending_tool_invocations entries for this side conversation
+        // have already been emitted into the bus and will complete
+        // normally even after teardown.
         if let tau_proto::PromptOriginator::Extension {
             ref name,
             ref query_id,
@@ -2296,7 +2404,7 @@ impl Harness {
             // continues on the main branch instead of the side branch.
             self.snap_to_default_conversation();
             self.conversations.remove(&cid);
-            self.dispatch_next_or_idle(session_id.as_str());
+            self.try_advance_queue();
             return Ok(());
         }
 
@@ -2325,7 +2433,7 @@ impl Harness {
                     if call.id.as_str().is_empty() {
                         call.id = self.synthesize_call_id();
                     }
-                    let kind = self.resolve_tool_kind(call.name.as_str());
+                    let kind = self.resolve_tool_kind_for_call(&call);
                     (call, kind)
                 })
                 .collect();
@@ -2334,11 +2442,9 @@ impl Harness {
                 .iter()
                 .map(|(call, _)| call.id.clone())
                 .collect();
-            self.turn_state = TurnState::ToolsRunning {
-                session_id: session_id.clone(),
-                conversation_id: cid.clone(),
-                remaining_calls,
-            };
+            if let Some(conv) = self.conversations.get_mut(&cid) {
+                conv.turn_state = ConversationTurnState::ToolsRunning { remaining_calls };
+            }
             // Enqueue in the order the agent emitted them. Dispatch is
             // done by `drain_pending_tool_invocations`, which respects
             // the pure-vs-mutating ordering rule.
@@ -2348,12 +2454,40 @@ impl Harness {
             }
             self.drain_pending_tool_invocations()?;
         } else {
-            // No tool calls — turn is done. Dispatch next queued
-            // prompt if any, otherwise mark agent as idle.
-            self.dispatch_next_or_idle(&session_id);
+            // No tool calls — this conversation's turn is done. Drain
+            // any queued prompts (on this or other conversations) that
+            // are now eligible to dispatch.
+            self.try_advance_queue();
         }
 
         Ok(())
+    }
+
+    /// Update one conversation's `context_input_tokens` /
+    /// `context_percent_used` from a finished agent response. Mirrors
+    /// `update_context_usage` but scoped to a single conversation —
+    /// the global tracker is intentionally only fed by the user's
+    /// default conversation so the status bar stays stable while side
+    /// conversations run.
+    fn update_conversation_context_usage(
+        &mut self,
+        cid: &ConversationId,
+        input_tokens: Option<u64>,
+    ) {
+        let context_window =
+            model_context_window(&self.model_registry, self.selected_model.as_str());
+        let percent_used = match (context_window, input_tokens) {
+            (Some(w), Some(tokens)) => Some(context_percent_used(tokens, w)),
+            _ => None,
+        };
+        if let Some(conv) = self.conversations.get_mut(cid) {
+            if input_tokens.is_some() {
+                conv.context_input_tokens = input_tokens;
+            }
+            if percent_used.is_some() {
+                conv.context_percent_used = percent_used;
+            }
+        }
     }
 
     fn update_context_usage(&mut self, input_tokens: Option<u64>, cached_tokens: Option<u64>) {
@@ -2382,58 +2516,83 @@ impl Harness {
         );
     }
 
-    /// Advances the front of the prompt queue when possible.
+    /// Drains every runnable conversation's pending prompt queue.
     ///
-    /// Session initialization happens before prompt dispatch, so a fresh
-    /// `chat-*` session can discover AGENTS.md and skills before the
-    /// agent sees the first user message.
+    /// There is no global agent slot — the agent extension serializes
+    /// its own consumption of `SessionPromptCreated`. The harness emits
+    /// one prompt per runnable conversation (Idle turn state, non-empty
+    /// queue) and routes responses back via `prompt_conversations`.
+    ///
+    /// Session initialization still happens before prompt dispatch, so
+    /// a fresh `chat-*` session can discover AGENTS.md and skills before
+    /// the agent sees the first user message.
     fn try_advance_queue(&mut self) {
-        if !self.turn_state.is_idle() || !self.extensions_all_ready() {
+        if !self.turn_state.is_idle()
+            || !self.extensions_all_ready()
+            || self.selected_model.is_empty()
+        {
             return;
         }
 
-        let Some((cid, _)) = self.pending_prompts.front() else {
-            return;
-        };
-        let session_id = match self.conversations.get(cid) {
-            Some(c) => c.session_id.clone(),
-            None => {
-                // Stale entry — conversation already torn down. Drop it
-                // and try the next one on a re-entry.
-                self.pending_prompts.pop_front();
+        while let Some(cid) = self.next_runnable_conversation() {
+            let session_id = self
+                .conversations
+                .get(&cid)
+                .map(|c| c.session_id.clone())
+                .expect("runnable conversation exists");
+
+            if !self.session_initialized(&session_id) {
+                // Reachable only if the bound session somehow lost its
+                // `initialized_sessions` entry; treat as a re-init.
+                // Init is global, so stop draining until it completes.
+                self.start_session_init(session_id, tau_proto::SessionStartReason::Initial);
                 return;
             }
-        };
 
-        if !self.session_initialized(&session_id) {
-            // Reachable only if the bound session somehow lost its
-            // `initialized_sessions` entry; treat as a re-init.
-            self.start_session_init(session_id, tau_proto::SessionStartReason::Initial);
-            return;
-        }
-
-        if self.selected_model.is_empty() {
-            return;
-        }
-
-        if let Some((cid, text)) = self.pending_prompts.pop_front() {
+            let text = self
+                .conversations
+                .get_mut(&cid)
+                .and_then(|c| c.pending_prompts.pop_front())
+                .expect("runnable conversation has a prompt");
             if let Err(error) = self.dispatch_prompt_for_conversation(&cid, text) {
                 self.emit_info(&format!("failed to dispatch queued prompt: {error}"));
-                self.turn_state = TurnState::Idle;
+                // Reset the conversation so it doesn't wedge as
+                // AgentThinking with no in-flight prompt.
+                if let Some(conv) = self.conversations.get_mut(&cid) {
+                    conv.in_flight_prompt = None;
+                    conv.turn_state = ConversationTurnState::Idle;
+                }
             }
         }
     }
 
-    /// True when a fresh user prompt should *not* be sent to the agent.
-    ///
-    /// Three conditions can block dispatch:
-    /// - no model selected (handled by the existing /model UI flow);
-    /// - the agent is mid-turn (`turn_state != Idle`);
-    /// - some configured extension is not in `ExtensionState::Ready`.
-    ///
-    /// In-flight turns are *not* affected — only fresh dispatch.
-    fn dispatch_blocked(&self) -> bool {
-        self.selected_model.is_empty() || !self.turn_state.is_idle() || !self.extensions_all_ready()
+    fn next_runnable_conversation(&self) -> Option<ConversationId> {
+        self.conversations
+            .iter()
+            .find(|(_, conv)| {
+                !conv.pending_prompts.is_empty()
+                    && matches!(conv.turn_state, ConversationTurnState::Idle)
+            })
+            .map(|(cid, _)| cid.clone())
+    }
+
+    /// True when a fresh prompt for `cid` should *not* be sent
+    /// immediately. Two layers of gating:
+    /// - global: no model selected, harness mid-init, extensions not yet
+    ///   `Ready`;
+    /// - per-conversation: that conversation already has a prompt in flight or
+    ///   is waiting on tool results.
+    fn dispatch_blocked_for(&self, cid: &ConversationId) -> bool {
+        if self.selected_model.is_empty()
+            || !self.turn_state.is_idle()
+            || !self.extensions_all_ready()
+        {
+            return true;
+        }
+        match self.conversations.get(cid) {
+            Some(conv) => !matches!(conv.turn_state, ConversationTurnState::Idle),
+            None => true,
+        }
     }
 
     /// True iff every configured extension has either reached `Ready`
@@ -2466,12 +2625,6 @@ impl Harness {
         }
     }
 
-    /// Dispatches the next queued prompt or marks the agent as idle.
-    fn dispatch_next_or_idle(&mut self, _completed_session_id: &str) {
-        self.turn_state = TurnState::Idle;
-        self.try_advance_queue();
-    }
-
     /// Mint a fresh synthetic `ToolCallId` for a hallucinated tool
     /// call that arrived with an empty id.
     ///
@@ -2498,51 +2651,108 @@ impl Harness {
             .unwrap_or(tau_proto::ToolSideEffects::Mutating)
     }
 
-    /// Whether any currently in-flight tool call is `Mutating`.
-    fn has_mutating_in_flight(&self) -> bool {
-        self.in_flight_tool_kinds
-            .values()
-            .any(|kind| matches!(kind, tau_proto::ToolSideEffects::Mutating))
+    /// Same as [`resolve_tool_kind`] but lets a tool override its
+    /// registered kind per-call by inspecting the call arguments.
+    ///
+    /// `delegate` registers as `Mutating` (the safe default) but
+    /// accepts a `read_only: bool` argument; when set, the agent is
+    /// asserting the sub-task does no mutation and the harness can
+    /// schedule it as `Pure` — letting two read-only delegations from
+    /// the same turn dispatch concurrently rather than serializing.
+    fn resolve_tool_kind_for_call(&self, call: &AgentToolCall) -> tau_proto::ToolSideEffects {
+        let registered = self.resolve_tool_kind(call.name.as_str());
+        if call.name.as_str() == "delegate"
+            && cbor_map_bool(&call.arguments, "read_only").unwrap_or(false)
+        {
+            return tau_proto::ToolSideEffects::Pure;
+        }
+        registered
     }
 
-    /// State-machine drain: dispatch queued tool invocations in FIFO
-    /// order while the in-flight set allows them through.
+    /// Whether any in-flight tool call belonging to `cid` is `Mutating`.
+    /// The pure-vs-mutating ordering rule is per-conversation: tools
+    /// running for a *different* conversation are an independent thread
+    /// of execution and must not gate this one. (Most importantly: the
+    /// parent agent's mid-flight `delegate` call is `Mutating`, but it
+    /// must not block the sub-agent it spawned from running its own
+    /// `Pure` tools — otherwise delegate deadlocks itself.)
+    fn has_mutating_in_flight_for(&self, cid: &ConversationId) -> bool {
+        self.in_flight_tool_kinds.iter().any(|(call_id, kind)| {
+            matches!(kind, tau_proto::ToolSideEffects::Mutating)
+                && self
+                    .tool_conversations
+                    .get(call_id)
+                    .is_some_and(|owner| owner == cid)
+        })
+    }
+
+    /// Whether `cid` has any tool call currently in flight.
+    fn any_in_flight_for(&self, cid: &ConversationId) -> bool {
+        self.in_flight_tool_kinds.keys().any(|call_id| {
+            self.tool_conversations
+                .get(call_id)
+                .is_some_and(|owner| owner == cid)
+        })
+    }
+
+    /// State-machine drain: dispatch queued tool invocations while the
+    /// per-conversation in-flight set allows them through.
     ///
-    /// Rule:
-    /// - `Pure` head may dispatch when no `Mutating` is in-flight.
-    /// - `Mutating` head may dispatch when the in-flight set is empty.
+    /// Rule (per conversation):
+    /// - `Pure` may dispatch when no same-conversation `Mutating` is in flight.
+    /// - `Mutating` may dispatch when no same-conversation call is in flight at
+    ///   all.
     ///
-    /// Because the queue is FIFO and new calls are only enqueued from
-    /// `handle_agent_response_finished` (one agent turn at a time),
-    /// this gives the agent a sequential read-after-write view even
-    /// though individual `Pure` calls still run concurrently.
+    /// The queue can interleave entries from multiple conversations
+    /// (parent + side conversations spawned mid-turn). We scan it and
+    /// dispatch the first entry whose conversation is currently
+    /// unblocked, repeating until no further progress can be made.
+    /// Within a single conversation the per-turn FIFO order — and
+    /// therefore the read-after-write ordering of Pure-then-Mutating —
+    /// is preserved, because we never skip an entry that is already
+    /// blocked behind an earlier same-conversation entry.
     ///
     /// Call this after enqueuing new work or after any in-flight call
     /// completes.
     fn drain_pending_tool_invocations(&mut self) -> Result<(), HarnessError> {
-        while let Some((_, _, kind)) = self.pending_tool_invocations.front() {
-            let compatible = match *kind {
-                tau_proto::ToolSideEffects::Pure => !self.has_mutating_in_flight(),
-                tau_proto::ToolSideEffects::Mutating => self.in_flight_tool_kinds.is_empty(),
-            };
-            if !compatible {
-                break;
+        loop {
+            let mut blocked_convs: std::collections::HashSet<ConversationId> =
+                std::collections::HashSet::new();
+            let mut next_idx: Option<usize> = None;
+            for (idx, (cid, _call, kind)) in self.pending_tool_invocations.iter().enumerate() {
+                if blocked_convs.contains(cid) {
+                    continue;
+                }
+                let compatible = match *kind {
+                    tau_proto::ToolSideEffects::Pure => !self.has_mutating_in_flight_for(cid),
+                    tau_proto::ToolSideEffects::Mutating => !self.any_in_flight_for(cid),
+                };
+                if compatible {
+                    next_idx = Some(idx);
+                    break;
+                }
+                // Preserve per-conversation FIFO: anything later in the
+                // queue from this conversation must wait behind this
+                // entry, so don't consider those entries either.
+                blocked_convs.insert(cid.clone());
             }
-            let (session_id, call, kind) = self
+            let Some(idx) = next_idx else {
+                return Ok(());
+            };
+            let (cid, call, kind) = self
                 .pending_tool_invocations
-                .pop_front()
-                .expect("front just peeked");
+                .remove(idx)
+                .expect("index just located");
             let call_id: ToolCallId = call.id.clone().into();
             self.in_flight_tool_kinds.insert(call_id.clone(), kind);
             // If dispatch fails synchronously, roll back the in-flight
             // entry so a retry or clean-up is not wedged on a phantom
             // slot.
-            if let Err(error) = self.execute_agent_tool_call(&session_id, &call) {
+            if let Err(error) = self.execute_agent_tool_call(&cid, &call) {
                 self.in_flight_tool_kinds.remove(&call_id);
                 return Err(error);
             }
         }
-        Ok(())
     }
 
     /// Hook called whenever a tool call has finished (result, error,
@@ -2552,38 +2762,61 @@ impl Harness {
     fn on_tool_call_complete(&mut self, call_id: &str) {
         let owned: ToolCallId = call_id.to_owned().into();
         self.in_flight_tool_kinds.remove(&owned);
+        // `tool_conversations` is still populated here: the call
+        // sites clear it *after* this function returns. Decrement
+        // the conversation's in-flight counter and surface the new
+        // state to any UI watching this delegate flow before the
+        // mapping is cleared.
+        let owner = self.tool_conversations.get(call_id).cloned();
+        if let Some(cid) = owner.as_ref()
+            && let Some(conv) = self.conversations.get_mut(cid)
+        {
+            conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
+        }
+        if let Some(cid) = owner {
+            self.emit_delegate_progress(&cid);
+        }
         if let Err(error) = self.drain_pending_tool_invocations() {
             self.emit_info(&format!("queued tool dispatch failed: {error}"));
         }
         self.maybe_complete_agent_turn(call_id);
+        self.try_advance_queue();
+    }
+
+    /// Bump the per-conversation tool counters for a freshly-started
+    /// tool call. Always emits a `DelegateProgress` snapshot when the
+    /// conversation is a delegate side conversation (no-op otherwise),
+    /// so the UI updates the moment the sub-agent starts a new call
+    /// rather than waiting for completion.
+    fn bump_tools_started_for(&mut self, cid: &ConversationId) {
+        if let Some(conv) = self.conversations.get_mut(cid) {
+            conv.tools_in_flight = conv.tools_in_flight.saturating_add(1);
+            conv.tools_total = conv.tools_total.saturating_add(1);
+        }
+        self.emit_delegate_progress(cid);
     }
 
     fn maybe_complete_agent_turn(&mut self, completed_call_id: &str) {
-        let should_send = if let TurnState::ToolsRunning {
-            remaining_calls, ..
-        } = &mut self.turn_state
-        {
-            remaining_calls.retain(|id| id != completed_call_id);
-            remaining_calls.is_empty()
+        let Some(cid) = self.tool_conversations.get(completed_call_id).cloned() else {
+            return;
+        };
+        let should_send = if let Some(conv) = self.conversations.get_mut(&cid) {
+            if let ConversationTurnState::ToolsRunning { remaining_calls } = &mut conv.turn_state {
+                remaining_calls.retain(|id| id.as_str() != completed_call_id);
+                if remaining_calls.is_empty() {
+                    conv.turn_state = ConversationTurnState::Idle;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
         } else {
             false
         };
         if should_send {
-            let (session_id, conversation_id) = if let TurnState::ToolsRunning {
-                session_id,
-                conversation_id,
-                ..
-            } = &self.turn_state
-            {
-                (session_id.clone(), conversation_id.clone())
-            } else {
-                unreachable!("just checked")
-            };
-            self.turn_state = TurnState::AgentThinking {
-                _session_id: session_id,
-                conversation_id: conversation_id.clone(),
-            };
-            self.send_prompt_to_agent_for(&conversation_id);
+            self.send_prompt_to_agent_for(&cid);
         }
     }
 
@@ -2624,6 +2857,7 @@ impl Harness {
         self.tool_conversations.insert(call_id.clone(), cid.clone());
         self.pending_tool_names
             .insert(call_id.clone(), tool_name.clone());
+        self.bump_tools_started_for(cid);
         let request = ToolRequest {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
@@ -2647,8 +2881,8 @@ impl Harness {
                     details: None,
                 };
                 self.publish_for_conversation(cid, Event::ToolError(error));
-                self.clear_tool_call_tracking(call_id.as_str());
                 self.on_tool_call_complete(&call.id);
+                self.clear_tool_call_tracking(call_id.as_str());
             }
             Err(error) => return Err(HarnessError::ToolRoute(error)),
         }
@@ -2710,8 +2944,8 @@ impl Harness {
                 details: None,
             }),
         );
-        self.clear_tool_call_tracking(call_id);
         self.on_tool_call_complete(call_id);
+        self.clear_tool_call_tracking(call_id);
         Ok(())
     }
 
@@ -2785,6 +3019,7 @@ impl Harness {
         self.tool_conversations.insert(call_id.clone(), cid.clone());
         self.pending_tool_names
             .insert(call_id.clone(), tool_name.clone());
+        self.bump_tools_started_for(cid);
         self.publish_for_conversation(
             cid,
             Event::ToolRequest(ToolRequest {
@@ -2818,8 +3053,8 @@ impl Harness {
         // `session_id_for_event` reads `tool_conversations` to
         // attribute the persisted record before we clear it.
         self.publish_for_conversation(cid, result_event);
-        self.clear_tool_call_tracking(call_id.as_str());
         self.on_tool_call_complete(&call.id);
+        self.clear_tool_call_tracking(call_id.as_str());
 
         Ok(())
     }
@@ -2989,7 +3224,8 @@ impl Harness {
                     }
                     let is_final = matches!(
                         &event,
-                        Event::AgentResponseFinished(r) if r.tool_calls.is_empty()
+                        Event::AgentResponseFinished(r)
+                            if r.tool_calls.is_empty() && r.originator.is_user()
                     );
                     let final_text = if let Event::AgentResponseFinished(ref r) = event {
                         r.text.clone()
@@ -3050,6 +3286,25 @@ impl Harness {
             .find(|e| e.name == name)
             .map(|e| e.connection_id.as_str())
     }
+}
+
+/// Walk parent pointers from `start` and return the id of the most
+/// recent `SessionEntry::UserMessage` ancestor (inclusive). Used to
+/// pick a clean branch point for side conversations: any
+/// `AgentMessage` / `ToolActivity` between `start` and that ancestor
+/// belongs to a turn that may still be mid-flight, and replaying it
+/// into a sub-agent's prompt produces orphan tool_use blocks that
+/// providers reject.
+fn last_user_message_ancestor(tree: &SessionTree, start: NodeId) -> Option<NodeId> {
+    let mut current = Some(start);
+    while let Some(id) = current {
+        let node = tree.node(id)?;
+        if matches!(node.entry, SessionEntry::UserMessage { .. }) {
+            return Some(id);
+        }
+        current = node.parent_id;
+    }
+    None
 }
 
 fn selector_matches_event(selectors: &[EventSelector], event: &Event) -> bool {
