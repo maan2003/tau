@@ -1,41 +1,44 @@
-//! Higher-level terminal prompt with fish-like slash-command completion.
+//! Higher-level terminal prompt with slash-command completion.
 //!
-//! Wraps [`tau_cli_term_raw`] and adds:
-//!
-//! - Slash-command registry with descriptions
-//! - Tab-completion menu rendered below the prompt
-//! - Tab / Shift-Tab cycling through matches
-//! - Inline buffer replacement on selection
-//! - Dynamic argument completion (e.g. model names for `/model`)
+//! This crate is now a thin shell around [`tau_cli_term_raw`]: the
+//! raw layer owns the input state machine (history navigation,
+//! completion menu lifecycle, key dispatch). This crate plugs in the
+//! *content* (which candidates exist for a given buffer) and the
+//! *presentation* (how the menu is rendered as a styled block under
+//! the prompt). It also handles `$EDITOR` integration, which doesn't
+//! belong in the raw layer.
 
-mod completion;
+pub mod completion;
 pub mod resolve;
 #[cfg(test)]
 mod tests;
 
 use std::io;
+use std::sync::Arc;
 
-pub use completion::{CommandName, Completer, CompletionData, CompletionItem, SlashCommand};
-use tau_cli_term_raw::Event as RawEvent;
+pub use completion::{CommandName, CompletionData, CompletionItem, SlashCommand};
 #[cfg(test)]
 pub(crate) use tau_cli_term_raw::RawEvent as TestRawEvent;
 pub use tau_cli_term_raw::{
     Align, BlockId, Cell, Color, CursorShape, Span, Style, StyledBlock, StyledText, TermHandle,
 };
+use tau_cli_term_raw::{Candidate, Event as RawEvent};
 use tau_themes::Theme;
 
 /// High-level events surfaced to the caller.
 pub enum Event {
-    /// The user submitted a line (pressed Enter).
+    /// The user submitted a line (pressed Enter, no completion preview).
     Line(String),
     /// The user signalled EOF (Ctrl-D on empty line).
     Eof,
     /// The terminal was resized.
     Resize { width: u16, height: u16 },
-    /// The input buffer changed.
+    /// The input buffer changed (or the completion menu cycled,
+    /// opened, or closed). Caller should redraw any prompt-derived
+    /// UI.
     BufferChanged,
-    /// Shift+Tab pressed outside of completion — caller decides what
-    /// to do with it (Pi-style: cycle effort).
+    /// Shift+Tab pressed outside an open completion menu — caller
+    /// decides what to do with it (Pi-style: cycle effort).
     BackTab,
 }
 
@@ -43,8 +46,11 @@ pub enum Event {
 pub struct HighTerm {
     term: tau_cli_term_raw::Term,
     handle: TermHandle,
-    completer: Completer,
     theme: Theme,
+    /// Block id for the completion menu, allocated lazily on first
+    /// open. Reused across opens; content swapped to empty when the
+    /// menu is hidden.
+    menu_block_id: Option<BlockId>,
 }
 
 impl HighTerm {
@@ -59,17 +65,17 @@ impl HighTerm {
         theme: Theme,
         cursor_shape: CursorShape,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
-        let (term, handle) = tau_cli_term_raw::Term::new(left_prompt, cursor_shape)?;
+        let (mut term, handle) = tau_cli_term_raw::Term::new(left_prompt, cursor_shape)?;
         let handle_clone = handle.clone();
         let data = CompletionData::new();
         let data_clone = data.clone();
-        let completer = Completer::new(commands, data, theme.clone());
+        term.set_completion_source(Some(make_completion_source(commands, data)));
         Ok((
             Self {
                 term,
                 handle,
-                completer,
                 theme,
+                menu_block_id: None,
             },
             handle_clone,
             data_clone,
@@ -78,20 +84,20 @@ impl HighTerm {
 
     #[cfg(test)]
     pub(crate) fn new_for_test(
-        term: tau_cli_term_raw::Term,
+        mut term: tau_cli_term_raw::Term,
         handle: TermHandle,
         commands: Vec<SlashCommand>,
         theme: Theme,
     ) -> (Self, CompletionData) {
         let data = CompletionData::new();
         let data_clone = data.clone();
-        let completer = Completer::new(commands, data, theme.clone());
+        term.set_completion_source(Some(make_completion_source(commands, data)));
         (
             Self {
                 term,
                 handle,
-                completer,
                 theme,
+                menu_block_id: None,
             },
             data_clone,
         )
@@ -107,113 +113,85 @@ impl HighTerm {
         self.handle.redraw();
     }
 
-    /// Clears persistent output, live blocks, and suggestion blocks.
-    pub fn clear_output(&self) {
-        self.handle.clear_output();
-    }
-
     /// Appends persistent output to history.
     pub fn print_output(&self, block: impl Into<StyledBlock>) -> BlockId {
         self.handle.print_output(block)
     }
 
-    /// Blocks until the next high-level event, handling completion
-    /// menu interaction internally.
+    /// Blocks until the next high-level event, syncing the
+    /// completion menu block to the raw term's current state.
     pub fn get_next_event(&mut self) -> io::Result<Event> {
         loop {
             let raw = self.term.get_next_event()?;
 
             match raw {
                 RawEvent::BufferChanged => {
-                    let arrow = self.term.last_key_was_up() || self.term.last_key_was_down();
-                    if arrow
-                        && self.completer.is_active()
-                        && !self.term.last_key_started_history_navigation()
-                        && (!self.term.is_history_navigation_active()
-                            || self.handle.get_buffer() == self.completer.original_buffer()
-                            || self
-                                .completer
-                                .is_preview_buffer(&self.term.last_key_buffer_before()))
-                    {
-                        if self.term.last_key_was_up() {
-                            self.term.move_down();
-                            self.term.reset_history_navigation();
-                            self.term.set_history_navigation_active(false);
-                            self.completer.cycle_selection(-1, &self.handle);
-                        } else {
-                            self.term.move_up();
-                            self.term.reset_history_navigation();
-                            self.term.set_history_navigation_active(false);
-                            self.completer.cycle_selection(1, &self.handle);
-                        }
-                    } else if arrow && self.completer.is_active() {
-                        self.completer.dismiss_menu(&self.handle);
-                        self.term.set_history_navigation_active(true);
-                    } else if !arrow {
-                        self.term.reset_history_navigation();
-                        self.completer.on_buffer_changed(&self.handle);
-                    }
+                    self.sync_menu_block();
                     self.handle.redraw();
                     return Ok(Event::BufferChanged);
                 }
 
-                RawEvent::Tab => {
-                    if self.completer.is_active() {
-                        self.completer.cycle_selection(1, &self.handle);
-                        self.handle.redraw();
-                    }
+                RawEvent::CompletionAccept => {
+                    // Accept-without-submit: the buffer already
+                    // reflects the chosen candidate. Sync the menu
+                    // (now closed) and loop so the user has to press
+                    // Enter again to actually submit.
+                    self.sync_menu_block();
+                    self.handle.redraw();
                     continue;
                 }
 
-                RawEvent::BackTab => {
-                    if self.completer.is_active() {
-                        self.completer.cycle_selection(-1, &self.handle);
-                        self.handle.redraw();
-                        continue;
-                    }
-                    return Ok(Event::BackTab);
-                }
-
-                RawEvent::Escape => {
-                    if self.completer.is_active() {
-                        self.completer.dismiss(&self.handle);
-                        self.handle.redraw();
-                    }
-                    continue;
-                }
+                RawEvent::BackTab => return Ok(Event::BackTab),
 
                 RawEvent::Line(line) => {
-                    self.term.reset_history_navigation();
-                    self.term.clear_last_key_started_history_navigation();
-                    if self.completer.is_active() && self.completer.has_selection() {
-                        self.completer.accept_selection(&self.handle);
-                        self.term.remove_last_history_entry_if_eq(&line);
-                        self.term.reset_history_navigation();
-                        self.term.clear_last_key_started_history_navigation();
-                        self.handle.redraw();
-                        continue;
-                    }
-                    self.completer.dismiss(&self.handle);
+                    self.sync_menu_block();
                     self.handle.redraw();
                     return Ok(Event::Line(line));
                 }
 
                 RawEvent::Eof => {
-                    self.completer.dismiss(&self.handle);
+                    self.sync_menu_block();
                     return Ok(Event::Eof);
                 }
 
                 RawEvent::Resize { width, height } => {
-                    self.completer.rebuild_menu(&self.handle);
+                    self.sync_menu_block();
                     self.handle.redraw();
                     return Ok(Event::Resize { width, height });
                 }
 
                 RawEvent::ExternalEditor => {
-                    self.completer.dismiss(&self.handle);
+                    self.sync_menu_block();
                     self.run_external_editor();
                     self.handle.redraw_sync();
                     return Ok(Event::BufferChanged);
+                }
+            }
+        }
+    }
+
+    /// Updates the suggestion block to match the raw term's
+    /// completion state: renders the menu when one is open, hides
+    /// the block otherwise.
+    fn sync_menu_block(&mut self) {
+        match self.term.completion_state() {
+            Some(view) => {
+                let block = completion::render_menu_block(&view, &self.theme);
+                let id = match self.menu_block_id {
+                    Some(id) => id,
+                    None => {
+                        let id = self.handle.new_block("");
+                        self.handle.push_suggestions(id);
+                        self.menu_block_id = Some(id);
+                        id
+                    }
+                };
+                self.handle.set_block(id, block);
+            }
+            None => {
+                if let Some(id) = self.menu_block_id.take() {
+                    self.handle.remove_suggestions(id);
+                    self.handle.remove_block(id);
                 }
             }
         }
@@ -243,6 +221,16 @@ impl HighTerm {
         );
         self.handle.print_output(block);
     }
+}
+
+fn make_completion_source(
+    commands: Vec<SlashCommand>,
+    data: CompletionData,
+) -> Box<dyn tau_cli_term_raw::CompletionSource> {
+    let commands = Arc::new(commands);
+    Box::new(move |buffer: &str, cursor: usize| -> Vec<Candidate> {
+        completion::build_candidates(&commands, &data, buffer, cursor)
+    })
 }
 
 fn try_run_external_editor(

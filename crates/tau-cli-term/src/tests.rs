@@ -238,13 +238,12 @@ fn arrows_cycle_active_completion_even_when_history_exists() {
 }
 
 #[test]
-fn down_then_up_in_completion_does_not_wrap_past_the_first_match() {
-    // Symmetry probe: Down/Down/Up/Up should land back on the first
-    // match (or back at the un-selected original buffer) — never on
-    // the *last* match. Today `cycle_selection(-1)` from index 0 wraps
-    // to `len - 1` via `rem_euclid`, so this sequence ends on `/quit`
-    // when intuition says `/model` (or `/`). This test pins the
-    // current behavior so a future fix has something to flip.
+fn up_at_first_match_returns_to_original_buffer_then_wraps() {
+    // From idx 0, Up returns to the un-selected state (no preview),
+    // restoring the original buffer the user typed. A *second* Up
+    // wraps around to the last candidate. This is the symmetric,
+    // four-state cycle: None → 0 → 1 → ... → len-1 → 0 → 1 → ...,
+    // with one None reachable on the Up-from-0 boundary.
     let (mut term, handle, input_tx) = new_test_term(vec![
         SlashCommand::new("/model", "Switch model"),
         SlashCommand::new("/quit", "Exit"),
@@ -260,11 +259,10 @@ fn down_then_up_in_completion_does_not_wrap_past_the_first_match() {
         (KeyCode::Down, "/model"),
         (KeyCode::Down, "/quit"),
         (KeyCode::Up, "/model"),
-        // Surprise: from `/model` (idx 0), Up wraps to the last match
-        // rather than dismissing the menu or returning to "/". If you
-        // came here looking for the cause of "Up after Down feels
-        // weird," this is it — `cycle_selection(-1)` doesn't treat
-        // "before the first" as "back to original buffer."
+        // Up from idx 0 → no selection → buffer is restored to what
+        // the user actually typed.
+        (KeyCode::Up, "/"),
+        // Continuing Up from None wraps to the last match.
         (KeyCode::Up, "/quit"),
     ];
     for (i, (key, want)) in sequence.iter().enumerate() {
@@ -285,15 +283,10 @@ fn down_then_up_in_completion_does_not_wrap_past_the_first_match() {
 
 #[test]
 fn arrows_cycle_repeatedly_through_completion_with_history_present() {
-    // Same as the no-history case, but with prior submitted lines. The
-    // raw terminal layer reacts to Down by trying to advance history;
-    // the high-level handler is supposed to undo that with `move_up`
-    // and cycle the completion menu instead. If that undo doesn't
-    // hold up across a second pair of arrow presses (e.g. because
-    // `history_nav_active` gets set by an earlier press and then the
-    // gate at lib.rs:132 misroutes the next arrow into history mode),
-    // the second Down pair would either dismiss the menu or jump out
-    // of the completion list.
+    // With prior submitted lines, Down at the prompt would normally
+    // route to history navigation. The mode-driven dispatch in raw
+    // gives the open completion menu first claim on Up/Down, so the
+    // arrows cycle the menu and the history is never touched.
     let (mut term, handle, input_tx) = new_test_term(vec![
         SlashCommand::new("/model", "Switch model"),
         SlashCommand::new("/quit", "Exit"),
@@ -329,13 +322,9 @@ fn arrows_cycle_repeatedly_through_completion_with_history_present() {
 
 #[test]
 fn arrows_cycle_repeatedly_through_completion_suggestions() {
-    // Going Down twice and then Down twice more should cycle through
-    // the candidate list twice — `cycle_selection` uses `rem_euclid`
-    // so the menu wraps. With two commands `/model`, `/quit`, the
-    // expected buffer after each Down is: /model, /quit, /model,
-    // /quit. A bug where the second pair stops working (e.g. the
-    // completer dismisses itself, or `last_key_was_down` gets stuck)
-    // would surface here.
+    // Down four times should cycle: /model, /quit, /model, /quit.
+    // Wrapping is the normal `(i + 1) mod len` — the None state is
+    // only reachable via Up at idx 0.
     let (mut term, handle, input_tx) = new_test_term(vec![
         SlashCommand::new("/model", "Switch model"),
         SlashCommand::new("/quit", "Exit"),
@@ -392,4 +381,47 @@ fn arrows_still_cycle_active_completion_suggestions() {
         Event::BufferChanged
     ));
     assert_eq!(handle.get_buffer(), "/quit");
+}
+
+#[test]
+fn editing_after_preview_commits_it_as_the_new_original_buffer() {
+    // Once the user has cycled to a candidate and started editing
+    // the previewed text, Esc should drop them back at *the edited
+    // preview*, not at the prefix they originally typed before
+    // opening the menu. This pins the "every edit commits the prior
+    // preview" rule the raw layer documents in `refresh_completion`.
+    let (mut term, handle, input_tx) = new_test_term(vec![
+        SlashCommand::new("/model", "Switch model"),
+        SlashCommand::new("/quit", "Exit"),
+    ]);
+
+    type_text(&mut term, &input_tx, "/m");
+    assert_eq!(handle.get_buffer(), "/m");
+
+    // Cycle to "/model" — buffer now previews the candidate.
+    send_key(&input_tx, KeyCode::Down);
+    assert!(matches!(
+        term.get_next_event().expect("preview /model"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "/model");
+
+    // Backspace edits the preview. The new buffer ("/mode") still
+    // matches "/model" by prefix, so the menu re-opens — but with
+    // "/mode" as the new original.
+    send_key(&input_tx, KeyCode::Backspace);
+    assert!(matches!(
+        term.get_next_event().expect("backspace edits preview"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "/mode");
+
+    // Esc dismisses to the edited preview, not back to "/m".
+    send_key(&input_tx, KeyCode::Esc);
+    assert!(matches!(
+        term.get_next_event()
+            .expect("esc returns to edited preview"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "/mode");
 }

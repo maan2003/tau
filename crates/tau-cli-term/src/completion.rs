@@ -1,22 +1,23 @@
-//! Slash-command and argument completion engine.
+//! Slash-command and argument completion content + menu rendering.
 //!
-//! Contains:
+//! State and lifecycle live in [`tau_cli_term_raw`]; this module
+//! supplies the *content* (which candidates exist for a given buffer)
+//! and the *presentation* (how the menu block is laid out and styled).
+//!
+//! Public types:
 //! - [`SlashCommand`] — static command registration
 //! - [`CompletionItem`] / [`CompletionData`] — dynamic argument completions
-//! - [`Completer`] — state machine, matching, and menu rendering
+//! - [`build_candidates`] — turns the current buffer into a `Vec<Candidate>`
+//! - [`render_menu_block`] — turns a [`CompletionView`] into a [`StyledBlock`]
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use tau_cli_term_raw::{BlockId, Span, StyledBlock, StyledText, TermHandle};
+use tau_cli_term_raw::{Candidate, CompletionView, Span, StyledBlock, StyledText};
 use tau_themes::Theme;
 
 use crate::resolve;
-
-// -----------------------------------------------------------------
-// Public types
-// -----------------------------------------------------------------
 
 /// A slash-command name, always prefixed with `/` (e.g. `"/model"`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -43,9 +44,7 @@ impl fmt::Display for CommandName {
 /// A slash command with its name and description.
 #[derive(Clone, Debug)]
 pub struct SlashCommand {
-    /// The command name (e.g. `"/quit"`).
     pub name: CommandName,
-    /// Short description shown in the completion menu.
     pub description: String,
 }
 
@@ -61,9 +60,7 @@ impl SlashCommand {
 /// A single argument completion candidate.
 #[derive(Clone, Debug)]
 pub struct CompletionItem {
-    /// The completion value (e.g. `"openai/gpt-4o"`).
     pub value: String,
-    /// Optional description shown alongside the value.
     pub description: String,
 }
 
@@ -88,22 +85,14 @@ impl CompletionItem {
 /// Clone this handle and pass it to background threads that need to
 /// update available completions (e.g. when the harness sends a model
 /// list).
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CompletionData {
     inner: Arc<Mutex<HashMap<CommandName, Vec<CompletionItem>>>>,
 }
 
-impl Default for CompletionData {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl CompletionData {
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self::default()
     }
 
     /// Sets the argument completions for a slash command.
@@ -123,335 +112,123 @@ impl CompletionData {
     }
 }
 
-// -----------------------------------------------------------------
-// Internal types
-// -----------------------------------------------------------------
-
-/// Resolved candidate ready for display and insertion.
-struct Candidate {
-    /// Text shown in the left column of the menu.
-    label: String,
-    /// Description shown in the right column.
-    description: String,
-    /// Full buffer text to set when this candidate is accepted.
-    buffer_text: String,
-}
-
-/// Completion state machine.
-struct State {
-    candidates: Vec<Candidate>,
-    selected: Option<usize>,
-    menu_block_id: Option<BlockId>,
-    original_buffer: Option<String>,
-    original_cursor: usize,
-}
-
-impl State {
-    fn new() -> Self {
-        Self {
-            candidates: Vec::new(),
-            selected: None,
-            menu_block_id: None,
-            original_buffer: None,
-            original_cursor: 0,
-        }
-    }
-
-    fn is_active(&self) -> bool {
-        !self.candidates.is_empty()
-    }
-
-    fn reset(&mut self) {
-        self.candidates.clear();
-        self.selected = None;
-        self.original_buffer = None;
-        self.original_cursor = 0;
-    }
-}
-
-// -----------------------------------------------------------------
-// Completer
-// -----------------------------------------------------------------
-
-/// Slash-command and argument completion engine.
+/// Builds the candidate list for the given buffer/cursor.
 ///
-/// Manages the completion lifecycle: filtering candidates from the
-/// static command registry and dynamic [`CompletionData`], rendering
-/// the menu, cycling through selections, and accepting/dismissing.
-pub struct Completer {
-    commands: Vec<SlashCommand>,
-    data: CompletionData,
-    theme: Theme,
-    state: State,
-}
-
-impl Completer {
-    pub(crate) fn new(commands: Vec<SlashCommand>, data: CompletionData, theme: Theme) -> Self {
-        Self {
-            commands,
-            data,
-            theme,
-            state: State::new(),
-        }
+/// - Buffer not starting with `/` → no candidates.
+/// - Buffer with no space → match against the static slash-command registry by
+///   prefix.
+/// - Buffer with `<cmd> <arg-prefix>` → look up the dynamic `CompletionData`
+///   for `<cmd>` and rank prefix matches before substring matches
+///   (case-insensitive).
+pub fn build_candidates(
+    commands: &[SlashCommand],
+    data: &CompletionData,
+    buffer: &str,
+    _cursor: usize,
+) -> Vec<Candidate> {
+    if !buffer.starts_with('/') {
+        return Vec::new();
     }
 
-    /// Returns a reference to the shared completion data.
-    pub fn data(&self) -> &CompletionData {
-        &self.data
-    }
-
-    /// Whether the completion menu is currently shown.
-    pub fn is_active(&self) -> bool {
-        self.state.is_active()
-    }
-
-    /// Whether a candidate is currently highlighted.
-    pub fn has_selection(&self) -> bool {
-        self.state.selected.is_some()
-    }
-
-    /// Update completions based on the current buffer content.
-    pub(crate) fn on_buffer_changed(&mut self, handle: &TermHandle) {
-        let buffer = handle.get_buffer();
-        let cursor = handle.get_cursor();
-
-        if !buffer.starts_with('/') {
-            if self.state.is_active() {
-                self.hide_menu(handle);
-                self.state.reset();
-            }
-            return;
-        }
-
-        let candidates = if let Some(space_pos) = buffer.find(' ') {
-            let cmd = &buffer[..space_pos];
-            let arg_prefix = &buffer[space_pos + 1..];
-            self.build_arg_candidates(cmd, arg_prefix)
-        } else {
-            self.build_cmd_candidates(&buffer)
-        };
-
-        if candidates.is_empty() {
-            if self.state.is_active() {
-                self.hide_menu(handle);
-                self.state.reset();
-            }
-            return;
-        }
-
-        self.state.candidates = candidates;
-        self.state.selected = None;
-        self.state.original_buffer = Some(buffer);
-        self.state.original_cursor = cursor;
-        self.render_menu(handle);
-    }
-
-    /// Cycle the selection by `delta` (+1 = forward, -1 = backward).
-    pub(crate) fn cycle_selection(&mut self, delta: isize, handle: &TermHandle) {
-        if self.state.candidates.is_empty() {
-            return;
-        }
-        let len = self.state.candidates.len();
-        let new_idx = match self.state.selected {
-            None => {
-                if delta > 0 {
-                    0
-                } else {
-                    len - 1
-                }
-            }
-            Some(idx) => ((idx as isize + delta).rem_euclid(len as isize)) as usize,
-        };
-        self.state.selected = Some(new_idx);
-        self.preview_selection(handle);
-        self.render_menu(handle);
-    }
-
-    /// Accept the current selection: set the buffer and dismiss the
-    /// menu. Returns `true` if a selection was active and accepted.
-    pub(crate) fn accept_selection(&mut self, handle: &TermHandle) -> bool {
-        let idx = match self.state.selected {
-            Some(idx) => idx,
-            None => return false,
-        };
-        let buffer_text = self.state.candidates[idx].buffer_text.clone();
-        let cursor = buffer_text.len();
-        handle.set_buffer(buffer_text, cursor);
-        self.hide_menu(handle);
-        self.state.reset();
-        true
-    }
-
-    /// Dismiss the completion menu without accepting.
-    pub(crate) fn dismiss(&mut self, handle: &TermHandle) {
-        if self.state.selected.is_some()
-            && let Some(buffer) = self.state.original_buffer.clone()
-        {
-            handle.set_buffer(buffer, self.state.original_cursor);
-        }
-        self.hide_menu(handle);
-        self.state.reset();
-    }
-
-    pub(crate) fn dismiss_menu(&mut self, handle: &TermHandle) {
-        self.hide_menu(handle);
-        self.state.reset();
-    }
-
-    pub(crate) fn original_buffer(&self) -> String {
-        self.state.original_buffer.clone().unwrap_or_default()
-    }
-
-    pub(crate) fn is_preview_buffer(&self, buffer: &str) -> bool {
-        self.state
-            .selected
-            .and_then(|idx| self.state.candidates.get(idx))
-            .is_some_and(|candidate| candidate.buffer_text == buffer)
-    }
-
-    /// Rebuild the menu at the current size (e.g. after resize).
-    pub(crate) fn rebuild_menu(&mut self, handle: &TermHandle) {
-        if self.state.is_active() {
-            self.render_menu(handle);
-        }
-    }
-
-    // -----------------------------------------------------------------
-    // Candidate building
-    // -----------------------------------------------------------------
-
-    /// Builds command-name candidates from the static registry.
-    fn build_cmd_candidates(&self, prefix: &str) -> Vec<Candidate> {
-        self.commands
-            .iter()
-            .filter(|cmd| cmd.name.as_str().starts_with(prefix))
-            .map(|cmd| Candidate {
-                label: cmd.name.to_string(),
-                description: cmd.description.clone(),
-                buffer_text: cmd.name.to_string(),
-            })
-            .collect()
-    }
-
-    /// Builds argument candidates from dynamic [`CompletionData`].
-    ///
-    /// Uses case-insensitive matching with prefix matches sorted
-    /// before substring matches.
-    fn build_arg_candidates(&self, cmd: &str, arg_prefix: &str) -> Vec<Candidate> {
-        let cmd_name = CommandName::new(cmd);
-        let items = match self.data.get_arg_completions(&cmd_name) {
-            Some(items) => items,
-            None => return Vec::new(),
-        };
-
-        let needle = arg_prefix.to_lowercase();
-        let mut prefix_matches = Vec::new();
-        let mut substr_matches = Vec::new();
-
-        for item in &items {
-            let hay = item.value.to_lowercase();
-            if needle.is_empty() || hay.starts_with(&needle) {
-                prefix_matches.push(Candidate {
-                    label: item.value.clone(),
-                    description: item.description.clone(),
-                    buffer_text: format!("{cmd} {}", item.value),
-                });
-            } else if hay.contains(&needle) {
-                substr_matches.push(Candidate {
-                    label: item.value.clone(),
-                    description: item.description.clone(),
-                    buffer_text: format!("{cmd} {}", item.value),
-                });
-            }
-        }
-
-        prefix_matches.extend(substr_matches);
-        prefix_matches
-    }
-
-    // -----------------------------------------------------------------
-    // Menu rendering
-    // -----------------------------------------------------------------
-
-    fn render_menu(&mut self, handle: &TermHandle) {
-        let selected_style = resolve::resolve(&self.theme, tau_themes::names::COMPLETION_SELECTED);
-        let label_style = resolve::resolve(&self.theme, tau_themes::names::COMPLETION_LABEL);
-        let desc_style = resolve::resolve(&self.theme, tau_themes::names::COMPLETION_DESC);
-
-        let max_label_len = self
-            .state
-            .candidates
-            .iter()
-            .map(|c| c.label.len())
-            .max()
-            .unwrap_or(0);
-
-        let mut spans: Vec<Span> = Vec::new();
-        for (i, candidate) in self.state.candidates.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::plain("\n"));
-            }
-
-            let is_selected = self.state.selected == Some(i);
-            let padding = max_label_len - candidate.label.len() + 2;
-
-            let line_text = if candidate.description.is_empty() {
-                format!("  {}  ", candidate.label)
-            } else {
-                format!(
-                    "  {}{:padding$}{}  ",
-                    candidate.label,
-                    "",
-                    candidate.description,
-                    padding = padding,
-                )
-            };
-
-            if is_selected {
-                spans.push(Span::new(line_text, selected_style));
-            } else {
-                spans.push(Span::plain("  "));
-                spans.push(Span::new(&candidate.label, label_style));
-                if !candidate.description.is_empty() {
-                    spans.push(Span::plain(format!("{:padding$}", "", padding = padding)));
-                    spans.push(Span::new(&candidate.description, desc_style));
-                }
-                spans.push(Span::plain("  "));
-            }
-        }
-
-        let block = StyledBlock::new(StyledText::from(spans));
-        let block_id = self.ensure_menu_block(handle);
-        handle.set_block(block_id, block);
-    }
-
-    fn ensure_menu_block(&mut self, handle: &TermHandle) -> BlockId {
-        if let Some(id) = self.state.menu_block_id {
-            id
-        } else {
-            let id = handle.new_block("");
-            handle.push_suggestions(id);
-            self.state.menu_block_id = Some(id);
-            id
-        }
-    }
-
-    fn hide_menu(&mut self, handle: &TermHandle) {
-        if let Some(id) = self.state.menu_block_id.take() {
-            handle.remove_suggestions(id);
-            handle.remove_block(id);
-        }
-    }
-
-    fn preview_selection(&self, handle: &TermHandle) {
-        let Some(idx) = self.state.selected else {
-            return;
-        };
-        let buffer_text = self.state.candidates[idx].buffer_text.clone();
-        let cursor = buffer_text.len();
-        handle.set_buffer(buffer_text, cursor);
+    if let Some(space_pos) = buffer.find(' ') {
+        let cmd = &buffer[..space_pos];
+        let arg_prefix = &buffer[space_pos + 1..];
+        build_arg_candidates(data, cmd, arg_prefix)
+    } else {
+        build_cmd_candidates(commands, buffer)
     }
 }
 
-#[cfg(test)]
-mod tests;
+fn build_cmd_candidates(commands: &[SlashCommand], prefix: &str) -> Vec<Candidate> {
+    commands
+        .iter()
+        .filter(|cmd| cmd.name.as_str().starts_with(prefix))
+        .map(|cmd| Candidate {
+            label: cmd.name.to_string(),
+            description: cmd.description.clone(),
+            replacement: cmd.name.to_string(),
+        })
+        .collect()
+}
+
+fn build_arg_candidates(data: &CompletionData, cmd: &str, arg_prefix: &str) -> Vec<Candidate> {
+    let cmd_name = CommandName::new(cmd);
+    let Some(items) = data.get_arg_completions(&cmd_name) else {
+        return Vec::new();
+    };
+
+    let needle = arg_prefix.to_lowercase();
+    let mut prefix_matches = Vec::new();
+    let mut substr_matches = Vec::new();
+
+    for item in &items {
+        let hay = item.value.to_lowercase();
+        if needle.is_empty() || hay.starts_with(&needle) {
+            prefix_matches.push(Candidate {
+                label: item.value.clone(),
+                description: item.description.clone(),
+                replacement: format!("{cmd} {}", item.value),
+            });
+        } else if hay.contains(&needle) {
+            substr_matches.push(Candidate {
+                label: item.value.clone(),
+                description: item.description.clone(),
+                replacement: format!("{cmd} {}", item.value),
+            });
+        }
+    }
+
+    prefix_matches.extend(substr_matches);
+    prefix_matches
+}
+
+/// Renders the completion menu as a [`StyledBlock`]: each candidate
+/// on its own line, with the selected entry highlighted.
+pub fn render_menu_block(view: &CompletionView, theme: &Theme) -> StyledBlock {
+    let selected_style = resolve::resolve(theme, tau_themes::names::COMPLETION_SELECTED);
+    let label_style = resolve::resolve(theme, tau_themes::names::COMPLETION_LABEL);
+    let desc_style = resolve::resolve(theme, tau_themes::names::COMPLETION_DESC);
+
+    let max_label_len = view
+        .candidates
+        .iter()
+        .map(|c| c.label.len())
+        .max()
+        .unwrap_or(0);
+
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, candidate) in view.candidates.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::plain("\n"));
+        }
+
+        let is_selected = view.selected == Some(i);
+        let padding = max_label_len - candidate.label.len() + 2;
+
+        let line_text = if candidate.description.is_empty() {
+            format!("  {}  ", candidate.label)
+        } else {
+            format!(
+                "  {}{:padding$}{}  ",
+                candidate.label,
+                "",
+                candidate.description,
+                padding = padding,
+            )
+        };
+
+        if is_selected {
+            spans.push(Span::new(line_text, selected_style));
+        } else {
+            spans.push(Span::plain("  "));
+            spans.push(Span::new(&candidate.label, label_style));
+            if !candidate.description.is_empty() {
+                spans.push(Span::plain(format!("{:padding$}", "", padding = padding)));
+                spans.push(Span::new(&candidate.description, desc_style));
+            }
+            spans.push(Span::plain("  "));
+        }
+    }
+
+    StyledBlock::new(StyledText::from(spans))
+}

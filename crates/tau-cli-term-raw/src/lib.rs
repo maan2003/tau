@@ -41,10 +41,63 @@ impl CursorShape {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum KeyDirection {
-    Up,
-    Down,
+/// A single completion candidate surfaced by a [`CompletionSource`].
+#[derive(Clone, Debug)]
+pub struct Candidate {
+    /// Short text shown in the menu's left column.
+    pub label: String,
+    /// Description shown to the right of the label.
+    pub description: String,
+    /// Buffer contents to install when this candidate is selected
+    /// (preview) or accepted.
+    pub replacement: String,
+}
+
+/// Builds the candidate list for the current buffer.
+///
+/// Called on every buffer mutation (typing, paste, backspace). An
+/// empty result closes the completion menu; a non-empty result opens
+/// it (or refreshes it if already open).
+pub trait CompletionSource: Send + Sync {
+    fn candidates(&self, buffer: &str, cursor: usize) -> Vec<Candidate>;
+}
+
+impl<F> CompletionSource for F
+where
+    F: Fn(&str, usize) -> Vec<Candidate> + Send + Sync,
+{
+    fn candidates(&self, buffer: &str, cursor: usize) -> Vec<Candidate> {
+        (self)(buffer, cursor)
+    }
+}
+
+/// Read-only snapshot of the completion menu state.
+#[derive(Clone, Debug)]
+pub struct CompletionView {
+    pub candidates: Vec<Candidate>,
+    pub selected: Option<usize>,
+}
+
+/// State for input-history navigation. Present only while Up/Down
+/// has recalled a previous line and the user hasn't submitted or
+/// dismissed yet.
+struct HistoryNav {
+    /// Snapshot of `input_history` plus the user's WIP buffer at
+    /// `entries.last()`. Editing in history mode mutates the entry
+    /// at `index`.
+    entries: Vec<String>,
+    /// Current position within `entries`.
+    index: usize,
+}
+
+/// State for an open completion menu.
+struct CompletionMenu {
+    candidates: Vec<Candidate>,
+    /// `None` = menu open but no preview (buffer == `original_buffer`);
+    /// `Some(i)` = candidate `i` is previewed in the buffer.
+    selected: Option<usize>,
+    original_buffer: String,
+    original_cursor: usize,
 }
 
 /// Mutable state shared between the input loop, redraw thread, and
@@ -71,13 +124,12 @@ struct SharedState {
     right_prompt: StyledText,
     buffer: String,
     cursor: usize,
+    /// Append-only log of submitted lines.
     input_history: Vec<String>,
-    history_nav_entries: Vec<String>,
-    history_nav_index: Option<usize>,
-    history_nav_active: bool,
-    last_key_direction: Option<KeyDirection>,
-    last_key_started_history_nav: bool,
-    last_key_buffer_before: String,
+    /// Active history navigation, if any. Independent of `completion`.
+    history_nav: Option<HistoryNav>,
+    /// Active completion menu, if any. Independent of `history_nav`.
+    completion: Option<CompletionMenu>,
     width: usize,
     height: usize,
     /// Set by Term::drop to signal the redraw thread to exit.
@@ -106,75 +158,134 @@ impl SharedState {
         id
     }
 
-    fn reset_history_nav(&mut self) {
-        self.history_nav_entries.clear();
-        self.history_nav_index = None;
-        self.history_nav_active = false;
+    /// Mirrors edits made to `buffer` into the live history-nav slot
+    /// so navigating Down then Up returns to the user's edited copy.
+    /// No-op when not navigating history.
+    fn sync_buffer_to_history_nav(&mut self) {
+        if let Some(nav) = self.history_nav.as_mut() {
+            nav.entries[nav.index] = self.buffer.clone();
+        }
     }
 
-    fn save_buffer_to_history_nav(&mut self) {
-        if let Some(index) = self.history_nav_index {
-            if index < self.history_nav_entries.len() {
-                self.history_nav_entries[index] = self.buffer.clone();
+    /// Cycles the completion menu selection by `delta` (+1 forward,
+    /// -1 backward) and updates the buffer to preview the new
+    /// selection (or restore `original_buffer` when wrapping past the
+    /// ends to `selected = None`). Returns `true` if a menu was open.
+    fn cycle_completion(&mut self, delta: isize) -> bool {
+        let Some(menu) = self.completion.as_mut() else {
+            return false;
+        };
+        let len = menu.candidates.len();
+        if len == 0 {
+            return false;
+        }
+        let new_selected = match menu.selected {
+            None => Some(if delta > 0 { 0 } else { len - 1 }),
+            // Up at the first match drops back to "no preview" so
+            // the user sees their original buffer; pressing Up again
+            // wraps to the last match.
+            Some(0) if delta < 0 => None,
+            Some(i) => Some((i as isize + delta).rem_euclid(len as isize) as usize),
+        };
+        menu.selected = new_selected;
+        match new_selected {
+            None => {
+                self.buffer = menu.original_buffer.clone();
+                self.cursor = menu.original_cursor;
+            }
+            Some(idx) => {
+                self.buffer = menu.candidates[idx].replacement.clone();
+                self.cursor = self.buffer.len();
             }
         }
-    }
-
-    fn apply_history_nav_entry(&mut self, index: usize) {
-        self.buffer = self.history_nav_entries[index].clone();
-        self.cursor = self.buffer.len();
-        self.history_nav_index = Some(index);
-    }
-
-    fn navigate_history(&mut self, delta: isize) -> bool {
-        if self.input_history.is_empty() && self.history_nav_index.is_none() {
-            return false;
-        }
-
-        if self.history_nav_index.is_none() {
-            self.history_nav_entries = self.input_history.clone();
-            self.history_nav_entries.push(self.buffer.clone());
-            self.history_nav_index = Some(self.history_nav_entries.len() - 1);
-        } else if let Some(index) = self.history_nav_index
-            && index + 1 == self.history_nav_entries.len()
-        {
-            self.save_buffer_to_history_nav();
-        }
-
-        let current = self
-            .history_nav_index
-            .expect("history nav index initialized");
-        let new_index = current as isize + delta;
-        if new_index < 0 || self.history_nav_entries.len() as isize <= new_index {
-            return false;
-        }
-
-        self.apply_history_nav_entry(new_index as usize);
-        self.history_nav_active = true;
         true
     }
 
-    fn set_history_nav_active(&mut self, active: bool) {
-        self.history_nav_active = active;
+    /// Closes the completion menu. If a candidate was previewed,
+    /// restores the original buffer; otherwise leaves the buffer
+    /// alone. Returns `true` if a menu was open.
+    fn dismiss_completion(&mut self) -> bool {
+        let Some(menu) = self.completion.take() else {
+            return false;
+        };
+        if menu.selected.is_some() {
+            self.buffer = menu.original_buffer;
+            self.cursor = menu.original_cursor;
+        }
+        true
+    }
+
+    /// Accepts the currently previewed candidate: closes the menu,
+    /// leaves the previewed buffer in place. Returns `true` if a
+    /// candidate was accepted (i.e. the menu had a selection).
+    fn accept_completion(&mut self) -> bool {
+        let Some(menu) = self.completion.as_ref() else {
+            return false;
+        };
+        if menu.selected.is_none() {
+            return false;
+        }
+        // Buffer already matches the previewed replacement; just
+        // close the menu.
+        self.completion = None;
+        true
+    }
+
+    /// Steps history navigation by `delta`. Enters history-nav mode
+    /// from `Editing` if needed (delta == -1 and `input_history` is
+    /// non-empty). Returns `true` if the buffer changed.
+    fn step_history(&mut self, delta: isize) -> bool {
+        if self.history_nav.is_none() {
+            // Only entering on Up makes sense — Down from Editing has
+            // nowhere to go.
+            if delta >= 0 || self.input_history.is_empty() {
+                return false;
+            }
+            let mut entries = self.input_history.clone();
+            entries.push(self.buffer.clone());
+            // Step into the previous entry (one before the WIP slot).
+            let index = entries.len() - 2;
+            self.buffer = entries[index].clone();
+            self.cursor = self.buffer.len();
+            self.history_nav = Some(HistoryNav { entries, index });
+            return true;
+        }
+
+        let nav = self.history_nav.as_mut().expect("checked above");
+        let new_index = nav.index as isize + delta;
+        if new_index < 0 || new_index >= nav.entries.len() as isize {
+            return false;
+        }
+        nav.index = new_index as usize;
+        self.buffer = nav.entries[nav.index].clone();
+        self.cursor = self.buffer.len();
+        true
     }
 }
 
 /// High-level events surfaced to the downstream event loop.
 pub enum Event {
-    /// The user submitted a line (pressed Enter).
+    /// The user submitted a line (pressed Enter outside the
+    /// completion menu, or with no candidate selected).
     Line(String),
     /// The user signalled EOF (Ctrl-D on empty line).
     Eof,
     /// The terminal was resized.
     Resize { width: u16, height: u16 },
-    /// The input buffer changed (character inserted/deleted/cleared).
+    /// The input buffer or completion menu state changed. Fires for
+    /// keystrokes that mutate the buffer and for completion menu
+    /// open/close/cycle. Caller should re-render anything that
+    /// depends on either (typically the menu and the prompt itself).
     BufferChanged,
-    /// The user pressed Tab.
-    Tab,
-    /// The user pressed Shift-Tab (backtab).
+    /// The user pressed Enter with a candidate previewed in the
+    /// menu. The buffer is now the candidate's replacement and the
+    /// menu has been closed. The caller should re-render the menu
+    /// area but typically *should not* submit — a second Enter is
+    /// expected to confirm.
+    CompletionAccept,
+    /// The user pressed Shift-Tab outside an open completion menu.
+    /// Inside a menu it cycles backwards and is consumed internally.
     BackTab,
-    /// The user pressed Escape.
-    Escape,
     /// The user requested an external editor (Ctrl-O / Ctrl-G).
     /// Caller is expected to call [`Term::pause_for_external`], spawn
     /// `$VISUAL`/`$EDITOR`, and call [`Term::resume_after_external`].
@@ -385,12 +496,25 @@ impl TermHandle {
         self.lock().cursor
     }
 
-    /// Replaces the input buffer and cursor position.
+    /// Replaces the input buffer and cursor position. Also clears
+    /// any active history-navigation or completion menu state — an
+    /// external buffer set is treated as a fresh starting point.
     pub fn set_buffer(&self, text: String, cursor: usize) {
         let mut st = self.lock();
         st.cursor = cursor.min(text.len());
         st.buffer = text;
-        st.save_buffer_to_history_nav();
+        st.history_nav = None;
+        st.completion = None;
+    }
+
+    /// Snapshot of the open completion menu, if any. Returns `None`
+    /// when no menu is showing.
+    pub fn completion_state(&self) -> Option<CompletionView> {
+        let st = self.lock();
+        st.completion.as_ref().map(|c| CompletionView {
+            candidates: c.candidates.clone(),
+            selected: c.selected,
+        })
     }
 
     /// Updates the right prompt.
@@ -445,6 +569,9 @@ pub struct Term {
     /// Whether to disable raw mode on drop (false for virtual terms).
     owns_raw_mode: bool,
     cursor_shape: CursorShape,
+    /// Plugged in by callers that want completion. When `None`, the
+    /// completion menu never opens; Tab/Esc are no-ops.
+    completion_source: Option<Box<dyn CompletionSource>>,
 }
 
 impl Term {
@@ -470,12 +597,8 @@ impl Term {
             buffer: String::new(),
             cursor: 0,
             input_history: Vec::new(),
-            history_nav_entries: Vec::new(),
-            history_nav_index: None,
-            history_nav_active: false,
-            last_key_direction: None,
-            last_key_started_history_nav: false,
-            last_key_buffer_before: String::new(),
+            history_nav: None,
+            completion: None,
             width,
             height,
             shutdown: false,
@@ -523,6 +646,7 @@ impl Term {
                 redraw_thread: Some(redraw_thread),
                 owns_raw_mode: true,
                 cursor_shape,
+                completion_source: None,
             },
             handle,
         ))
@@ -553,12 +677,8 @@ impl Term {
             buffer: String::new(),
             cursor: 0,
             input_history: Vec::new(),
-            history_nav_entries: Vec::new(),
-            history_nav_index: None,
-            history_nav_active: false,
-            last_key_direction: None,
-            last_key_started_history_nav: false,
-            last_key_buffer_before: String::new(),
+            history_nav: None,
+            completion: None,
             width,
             height,
             shutdown: false,
@@ -594,6 +714,7 @@ impl Term {
             redraw_thread: Some(redraw_thread),
             owns_raw_mode: false,
             cursor_shape,
+            completion_source: None,
         };
 
         (term, handle, term_input_tx)
@@ -634,16 +755,6 @@ impl Term {
 
             match raw {
                 RawEvent::Key(key) => {
-                    {
-                        let mut st = self.state.lock().expect("term state mutex poisoned");
-                        st.last_key_started_history_nav = st.history_nav_active;
-                        st.last_key_buffer_before = st.buffer.clone();
-                        st.last_key_direction = match key.code {
-                            KeyCode::Up => Some(KeyDirection::Up),
-                            KeyCode::Down => Some(KeyDirection::Down),
-                            _ => None,
-                        };
-                    }
                     if let Some(event) = self.handle_key(key)? {
                         self.redraw.notify();
                         return Ok(event);
@@ -677,8 +788,9 @@ impl Term {
                         let cursor = st.cursor;
                         st.buffer.insert_str(cursor, &text);
                         st.cursor = cursor + text.len();
-                        st.save_buffer_to_history_nav();
+                        st.sync_buffer_to_history_nav();
                     }
+                    self.refresh_completion();
                     self.redraw.notify();
                     return Ok(Event::BufferChanged);
                 }
@@ -706,94 +818,49 @@ impl Term {
         }
     }
 
-    /// Moves the cursor/history as if Up was pressed outside completion.
-    pub fn move_up(&self) {
-        move_up_in_state(&self.state);
-        self.redraw.notify();
-    }
-
-    /// Moves the cursor/history as if Down was pressed outside completion.
-    pub fn move_down(&self) {
-        move_down_in_state(&self.state);
-        self.redraw.notify();
-    }
-
-    /// Returns true if the last raw event read by this terminal was Up.
-    pub fn last_key_was_up(&self) -> bool {
-        self.state
-            .lock()
-            .expect("term state mutex poisoned")
-            .last_key_direction
-            == Some(KeyDirection::Up)
-    }
-
-    /// Returns true if the last raw event read by this terminal was Down.
-    pub fn last_key_was_down(&self) -> bool {
-        self.state
-            .lock()
-            .expect("term state mutex poisoned")
-            .last_key_direction
-            == Some(KeyDirection::Down)
-    }
-
-    /// Returns the input buffer before the current raw key was handled.
-    pub fn last_key_buffer_before(&self) -> String {
-        self.state
-            .lock()
-            .expect("term state mutex poisoned")
-            .last_key_buffer_before
-            .clone()
-    }
-
-    /// Returns true if the current raw key began while input-history navigation
-    /// was active.
-    pub fn last_key_started_history_navigation(&self) -> bool {
-        self.state
-            .lock()
-            .expect("term state mutex poisoned")
-            .last_key_started_history_nav
-    }
-
-    /// Clears the marker for the current raw key's initial history-navigation
-    /// state.
-    pub fn clear_last_key_started_history_navigation(&self) {
-        self.state
-            .lock()
-            .expect("term state mutex poisoned")
-            .last_key_started_history_nav = false;
-    }
-
-    /// Returns true while Up/Down is navigating input history.
-    pub fn is_history_navigation_active(&self) -> bool {
-        self.state
-            .lock()
-            .expect("term state mutex poisoned")
-            .history_nav_active
-    }
-
-    /// Leaves input-history navigation mode without changing the buffer.
-    pub fn reset_history_navigation(&self) {
-        self.state
-            .lock()
-            .expect("term state mutex poisoned")
-            .reset_history_nav();
-    }
-
-    /// Marks whether the current buffer is actively being selected from input
-    /// history.
-    pub fn set_history_navigation_active(&self, active: bool) {
-        self.state
-            .lock()
-            .expect("term state mutex poisoned")
-            .set_history_nav_active(active);
-    }
-
-    /// Removes the most recently submitted input-history entry if it matches
-    /// `line`.
-    pub fn remove_last_history_entry_if_eq(&self, line: &str) {
+    /// Plugs in (or replaces) the completion source. Pass `None` to
+    /// disable completion entirely. Closes the menu if currently open.
+    pub fn set_completion_source(&mut self, source: Option<Box<dyn CompletionSource>>) {
+        self.completion_source = source;
         let mut st = self.state.lock().expect("term state mutex poisoned");
-        if st.input_history.last().is_some_and(|entry| entry == line) {
-            st.input_history.pop();
+        st.completion = None;
+    }
+
+    /// Snapshot of the open completion menu, if any. Returns `None`
+    /// when no menu is showing.
+    pub fn completion_state(&self) -> Option<CompletionView> {
+        let st = self.state.lock().expect("term state mutex poisoned");
+        st.completion.as_ref().map(|c| CompletionView {
+            candidates: c.candidates.clone(),
+            selected: c.selected,
+        })
+    }
+
+    /// Re-evaluates the completion source against the current buffer
+    /// and updates the menu state accordingly. Called from buffer
+    /// mutation paths (typing, paste, backspace, kill-line, etc.).
+    /// Treats every mutation as committing any prior preview: the
+    /// new buffer/cursor become the menu's `original_*` so a later
+    /// Esc returns here, not to a stale earlier state.
+    fn refresh_completion(&self) {
+        let Some(source) = self.completion_source.as_deref() else {
+            return;
+        };
+        let (buffer, cursor) = {
+            let st = self.state.lock().expect("term state mutex poisoned");
+            (st.buffer.clone(), st.cursor)
+        };
+        let candidates = source.candidates(&buffer, cursor);
+        let mut st = self.state.lock().expect("term state mutex poisoned");
+        if candidates.is_empty() {
+            st.completion = None;
+        } else {
+            st.completion = Some(CompletionMenu {
+                candidates,
+                selected: None,
+                original_buffer: buffer,
+                original_cursor: cursor,
+            });
         }
     }
 
@@ -865,13 +932,23 @@ impl Term {
 
         match key.code {
             KeyCode::Enter => {
+                // If a candidate is previewed, accept it but stay on
+                // the line — the buffer already reflects the
+                // replacement (cycling previewed it), so we just
+                // close the menu and surface a distinct event.
+                {
+                    let mut st = self.state.lock().expect("term state mutex poisoned");
+                    if st.accept_completion() {
+                        return Ok(Some(Event::CompletionAccept));
+                    }
+                }
                 let line = {
                     let mut st = self.state.lock().expect("term state mutex poisoned");
-                    st.last_key_started_history_nav = false;
+                    st.completion = None;
+                    st.history_nav = None;
                     st.cursor = st.buffer.len();
                     let line = std::mem::take(&mut st.buffer);
                     st.cursor = 0;
-                    st.reset_history_nav();
                     st.input_history.push(line.clone());
                     line
                 };
@@ -897,7 +974,8 @@ impl Term {
                 }
                 st.buffer.clear();
                 st.cursor = 0;
-                st.reset_history_nav();
+                st.history_nav = None;
+                st.completion = None;
                 drop(st);
                 return Ok(Some(Event::BufferChanged));
             }
@@ -908,8 +986,9 @@ impl Term {
                     let cursor = st.cursor;
                     st.buffer.drain(..cursor);
                     st.cursor = 0;
-                    st.save_buffer_to_history_nav();
+                    st.sync_buffer_to_history_nav();
                 }
+                self.refresh_completion();
                 return Ok(Some(Event::BufferChanged));
             }
 
@@ -925,13 +1004,14 @@ impl Term {
                         let cursor = st.cursor;
                         st.buffer.drain(new_end..cursor);
                         st.cursor = new_end;
-                        st.save_buffer_to_history_nav();
+                        st.sync_buffer_to_history_nav();
                         true
                     } else {
                         false
                     }
                 };
                 if changed {
+                    self.refresh_completion();
                     return Ok(Some(Event::BufferChanged));
                 }
             }
@@ -952,31 +1032,31 @@ impl Term {
             KeyCode::Char(ch) => {
                 {
                     let mut st = self.state.lock().expect("term state mutex poisoned");
-                    st.last_key_direction = None;
                     let cursor = st.cursor;
                     st.buffer.insert(cursor, ch);
                     st.cursor += ch.len_utf8();
-                    st.save_buffer_to_history_nav();
+                    st.sync_buffer_to_history_nav();
                 }
+                self.refresh_completion();
                 return Ok(Some(Event::BufferChanged));
             }
 
             KeyCode::Backspace => {
                 let changed = {
                     let mut st = self.state.lock().expect("term state mutex poisoned");
-                    st.last_key_direction = None;
                     if st.cursor > 0 {
                         let prev = prev_char_boundary(&st.buffer, st.cursor);
                         let cursor = st.cursor;
                         st.buffer.drain(prev..cursor);
                         st.cursor = prev;
-                        st.save_buffer_to_history_nav();
+                        st.sync_buffer_to_history_nav();
                         true
                     } else {
                         false
                     }
                 };
                 if changed {
+                    self.refresh_completion();
                     return Ok(Some(Event::BufferChanged));
                 }
             }
@@ -984,18 +1064,18 @@ impl Term {
             KeyCode::Delete => {
                 let changed = {
                     let mut st = self.state.lock().expect("term state mutex poisoned");
-                    st.last_key_direction = None;
                     if st.cursor < st.buffer.len() {
                         let next = next_char_boundary(&st.buffer, st.cursor);
                         let cursor = st.cursor;
                         st.buffer.drain(cursor..next);
-                        st.save_buffer_to_history_nav();
+                        st.sync_buffer_to_history_nav();
                         true
                     } else {
                         false
                     }
                 };
                 if changed {
+                    self.refresh_completion();
                     return Ok(Some(Event::BufferChanged));
                 }
             }
@@ -1015,12 +1095,35 @@ impl Term {
             }
 
             KeyCode::Up => {
-                move_up_in_state(&self.state);
+                let mut st = self.state.lock().expect("term state mutex poisoned");
+                // Priority: completion menu, then in-buffer cursor
+                // motion, then history navigation. Only one of these
+                // can apply per press — no fallthrough/undo dance.
+                if st.cycle_completion(-1) {
+                    return Ok(Some(Event::BufferChanged));
+                }
+                if let Some(new_cursor) = move_cursor_vertical(&st, -1) {
+                    st.cursor = new_cursor;
+                    return Ok(Some(Event::BufferChanged));
+                }
+                if st.step_history(-1) {
+                    return Ok(Some(Event::BufferChanged));
+                }
                 return Ok(Some(Event::BufferChanged));
             }
 
             KeyCode::Down => {
-                move_down_in_state(&self.state);
+                let mut st = self.state.lock().expect("term state mutex poisoned");
+                if st.cycle_completion(1) {
+                    return Ok(Some(Event::BufferChanged));
+                }
+                if let Some(new_cursor) = move_cursor_vertical(&st, 1) {
+                    st.cursor = new_cursor;
+                    return Ok(Some(Event::BufferChanged));
+                }
+                if st.step_history(1) {
+                    return Ok(Some(Event::BufferChanged));
+                }
                 return Ok(Some(Event::BufferChanged));
             }
 
@@ -1034,15 +1137,29 @@ impl Term {
             }
 
             KeyCode::Tab => {
-                return Ok(Some(Event::Tab));
+                let mut st = self.state.lock().expect("term state mutex poisoned");
+                if st.cycle_completion(1) {
+                    return Ok(Some(Event::BufferChanged));
+                }
+                // Tab outside a menu is a no-op.
             }
 
             KeyCode::BackTab => {
+                {
+                    let mut st = self.state.lock().expect("term state mutex poisoned");
+                    if st.cycle_completion(-1) {
+                        return Ok(Some(Event::BufferChanged));
+                    }
+                }
                 return Ok(Some(Event::BackTab));
             }
 
             KeyCode::Esc => {
-                return Ok(Some(Event::Escape));
+                let mut st = self.state.lock().expect("term state mutex poisoned");
+                if st.dismiss_completion() {
+                    return Ok(Some(Event::BufferChanged));
+                }
+                // Esc outside a menu is a no-op.
             }
 
             _ => {}
@@ -1409,28 +1526,6 @@ fn move_cursor_vertical(st: &SharedState, delta: isize) -> Option<usize> {
         width,
         left_cols,
     ))
-}
-
-fn move_up_in_state(state: &Arc<Mutex<SharedState>>) {
-    let mut st = state.lock().expect("term state mutex poisoned");
-    if st.history_nav_index.is_some() {
-        st.navigate_history(-1);
-    } else if let Some(new_cursor) = move_cursor_vertical(&st, -1) {
-        st.cursor = new_cursor;
-    } else {
-        st.navigate_history(-1);
-    }
-}
-
-fn move_down_in_state(state: &Arc<Mutex<SharedState>>) {
-    let mut st = state.lock().expect("term state mutex poisoned");
-    if st.history_nav_index.is_some() {
-        st.navigate_history(1);
-    } else if let Some(new_cursor) = move_cursor_vertical(&st, 1) {
-        st.cursor = new_cursor;
-    } else {
-        st.navigate_history(1);
-    }
 }
 
 fn term_size() -> (usize, usize) {

@@ -120,8 +120,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 handle.redraw();
             }
-            Event::BufferChanged => {}
-            Event::Tab | Event::BackTab | Event::Escape | Event::ExternalEditor => {}
+            Event::BufferChanged | Event::CompletionAccept => {}
+            Event::BackTab | Event::ExternalEditor => {}
         }
     }
 
