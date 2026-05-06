@@ -215,6 +215,11 @@ impl SessionTree {
                     text: injected.text.clone(),
                 });
             }
+            Event::SessionPromptSteered(steered) => {
+                self.append_node(SessionEntry::UserMessage {
+                    text: steered.text.clone(),
+                });
+            }
             Event::AgentResponseFinished(response) => {
                 if let Some(text) = response.text.as_ref() {
                     self.append_node(SessionEntry::AgentMessage {

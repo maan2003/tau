@@ -255,6 +255,8 @@ impl EventName {
 
     pub const SESSION_PROMPT_QUEUED: Self =
         Self::from_static(EventCategory::Session, "prompt_queued");
+    pub const SESSION_PROMPT_STEERED: Self =
+        Self::from_static(EventCategory::Session, "prompt_steered");
     pub const SESSION_STARTED: Self = Self::from_static(EventCategory::Session, "started");
     pub const SESSION_SHUTDOWN: Self = Self::from_static(EventCategory::Session, "shutdown");
     pub const SESSION_PROMPT_CREATED: Self =
@@ -1128,6 +1130,22 @@ pub struct SessionPromptQueued {
     pub text: String,
 }
 
+/// A previously queued user prompt that the harness folded into the
+/// in-flight turn as a steering message — appended to the next
+/// `SessionPromptCreated` for this conversation alongside tool results,
+/// rather than waiting for the conversation to return to `Idle` and
+/// kicking off a fresh turn.
+///
+/// Folds into the `SessionTree` the same way as `UiPromptSubmitted`
+/// and `SessionUserMessageInjected`: appending one `UserMessage` entry
+/// at the current head. UIs typically react by promoting their
+/// "(queued)" rendering of this prompt to a regular user message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionPromptSteered {
+    pub session_id: SessionId,
+    pub text: String,
+}
+
 /// Why a `SessionStarted` was published. Lets extensions distinguish
 /// "first session of this harness's life" from "user switched to a new
 /// session" (e.g. so they can clear caches).
@@ -1482,6 +1500,8 @@ pub enum Event {
     // Session
     #[serde(rename = "session.prompt_queued")]
     SessionPromptQueued(SessionPromptQueued),
+    #[serde(rename = "session.prompt_steered")]
+    SessionPromptSteered(SessionPromptSteered),
     #[serde(rename = "session.started")]
     SessionStarted(SessionStarted),
     #[serde(rename = "session.shutdown")]
@@ -1557,6 +1577,7 @@ impl Event {
             Self::ShellCommandProgress(_) => EventName::SHELL_COMMAND_PROGRESS,
             Self::ShellCommandFinished(_) => EventName::SHELL_COMMAND_FINISHED,
             Self::SessionPromptQueued(_) => EventName::SESSION_PROMPT_QUEUED,
+            Self::SessionPromptSteered(_) => EventName::SESSION_PROMPT_STEERED,
             Self::SessionStarted(_) => EventName::SESSION_STARTED,
             Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
             Self::SessionPromptCreated(_) => EventName::SESSION_PROMPT_CREATED,

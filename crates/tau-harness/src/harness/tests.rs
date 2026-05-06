@@ -1305,6 +1305,167 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+#[test]
+fn queued_prompt_is_steered_into_next_round_after_tool_result() {
+    // While the agent is mid-turn (a tool is in flight), a fresh user
+    // prompt must queue rather than dispatch. When the tool result
+    // arrives and the harness is about to issue the next-round prompt,
+    // it should drain the queued prompt onto this conversation's
+    // branch as a `SessionPromptSteered` event so it rides the same
+    // `SessionPromptCreated` as the tool results — instead of waiting
+    // for full `Idle` and starting a separate turn.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = "test/model".into();
+
+    let cid = h.default_conversation_id.clone();
+    seed_agent_thinking(&mut h, &cid, "sp-x");
+    h.prompt_conversations.insert("sp-x".into(), cid.clone());
+
+    let write_args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(td.path().join("a.txt").display().to_string()),
+        ),
+        (
+            CborValue::Text("content".to_owned()),
+            CborValue::Text("a".to_owned()),
+        ),
+    ]);
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: "sp-x".into(),
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "c1".into(),
+            name: "write".into(),
+            arguments: write_args,
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("agent response with tool call");
+
+    // The conversation must be in `ToolsRunning` so `submit_user_prompt`
+    // takes the queued path rather than dispatching.
+    assert!(matches!(
+        h.conversations.get(&cid).expect("default").turn_state,
+        ConversationTurnState::ToolsRunning { .. }
+    ));
+
+    let submission = h
+        .submit_user_prompt("s1".into(), "redirect".to_owned())
+        .expect("submit");
+    assert!(
+        matches!(submission, PromptSubmission::Queued),
+        "in-flight turn should force queueing, got {submission:?}"
+    );
+    assert_eq!(
+        h.conversations
+            .get(&cid)
+            .expect("default")
+            .pending_prompts
+            .len(),
+        1,
+        "the steering message should sit in pending_prompts until the next-round seam",
+    );
+
+    drive_harness_until_call_completes(&mut h, "c1");
+
+    assert!(
+        h.conversations
+            .get(&cid)
+            .expect("default")
+            .pending_prompts
+            .is_empty(),
+        "queued prompt must be drained when folded as a steer",
+    );
+
+    // Walk the event log and verify ordering: the SessionPromptSteered
+    // is published before the next-round SessionPromptCreated, and the
+    // latter's `messages` includes the steered text alongside the
+    // original user prompt.
+    let next_round_spid: SessionPromptId = "sp-0".into();
+    let mut cursor = 0;
+    let mut saw_steered = false;
+    let mut saw_next_round = false;
+    while let Some(entry) = h.event_log.get_next_from(cursor) {
+        cursor = entry.seq + 1;
+        match &entry.event {
+            Event::SessionPromptSteered(steered) => {
+                assert_eq!(steered.text, "redirect");
+                assert!(
+                    !saw_next_round,
+                    "steered event must precede the prompt it folds into",
+                );
+                saw_steered = true;
+            }
+            Event::SessionPromptCreated(p) if p.session_prompt_id == next_round_spid => {
+                assert!(
+                    saw_steered,
+                    "next-round prompt must follow the SessionPromptSteered",
+                );
+                saw_next_round = true;
+
+                let user_texts: Vec<String> = p
+                    .messages
+                    .iter()
+                    .filter(|m| matches!(m.role, tau_proto::ConversationRole::User))
+                    .flat_map(|m| {
+                        m.content.iter().filter_map(|b| match b {
+                            tau_proto::ContentBlock::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                    })
+                    .collect();
+                assert!(
+                    user_texts.iter().any(|t| t == "redirect"),
+                    "next-round prompt should fold the steered message into messages; \
+                     user texts were {user_texts:?}",
+                );
+
+                // The steered message must land *after* the tool result
+                // on the same branch — otherwise the model sees its
+                // tool_use replied to with a steer instead of the
+                // ToolResult, which providers reject.
+                let last_tool_result_idx = p.messages.iter().rposition(|m| {
+                    m.content
+                        .iter()
+                        .any(|b| matches!(b, tau_proto::ContentBlock::ToolResult { .. }))
+                });
+                let last_user_idx = p.messages.iter().rposition(|m| {
+                    matches!(m.role, tau_proto::ConversationRole::User)
+                        && m.content.iter().any(|b| {
+                            matches!(
+                                b,
+                                tau_proto::ContentBlock::Text { text } if text == "redirect"
+                            )
+                        })
+                });
+                assert!(
+                    last_tool_result_idx.is_some(),
+                    "next-round prompt must include the tool result"
+                );
+                assert!(
+                    matches!((last_tool_result_idx, last_user_idx),
+                        (Some(t), Some(u)) if u > t),
+                    "steered user message must follow the tool result, not precede it",
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_steered, "expected a SessionPromptSteered event");
+    assert!(
+        saw_next_round,
+        "expected the next-round SessionPromptCreated"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Pumps the harness event loop until the named tool call's result
 /// or error is received and handled. Panics on timeout.
 fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {

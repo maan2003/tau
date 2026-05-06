@@ -696,6 +696,7 @@ impl Harness {
             Event::UiTreeRequest(req) => Some(req.session_id.clone()),
             Event::UiNavigateTree(req) => Some(req.session_id.clone()),
             Event::SessionPromptQueued(queued) => Some(queued.session_id.clone()),
+            Event::SessionPromptSteered(steered) => Some(steered.session_id.clone()),
             Event::SessionStarted(started) => Some(started.session_id.clone()),
             Event::SessionShutdown(shutdown) => Some(shutdown.session_id.clone()),
             Event::SessionPromptCreated(created) => Some(created.session_id.clone()),
@@ -2410,13 +2411,12 @@ impl Harness {
 
         if !response.tool_calls.is_empty() {
             // Tool calls to execute — agent stays busy. After all
-            // tools complete, maybe_complete_agent_turn will send
-            // a new prompt with the results.
-            //
-            // Future: check the steering queue here and inject any
-            // steering messages into the next prompt alongside the
-            // tool results, allowing the user to redirect the agent
-            // mid-turn.
+            // tools complete, maybe_complete_agent_turn drains any
+            // prompts queued via `pending_prompts` (publishing one
+            // `SessionPromptSteered` each, which folds them as
+            // `UserMessage` entries onto this conversation's branch)
+            // and sends a new prompt with the results plus those
+            // steering messages.
             // Normalize empty call_ids to a synthetic one. Models
             // sometimes emit hallucinated tool calls with both a
             // missing name *and* a missing id; an empty id would
@@ -2816,7 +2816,43 @@ impl Harness {
             false
         };
         if should_send {
+            self.fold_pending_prompts_as_steered(&cid);
             self.send_prompt_to_agent_for(&cid);
+        }
+    }
+
+    /// Drain any user prompts queued on `cid` while the agent was in
+    /// flight, and publish a `SessionPromptSteered` event for each. The
+    /// folder in `SessionTree::apply_event` appends them as
+    /// `UserMessage` entries on this conversation's branch, so the
+    /// next-round `SessionPromptCreated` (about to be emitted by the
+    /// caller) picks them up alongside the tool results without any
+    /// extra wiring on the prompt-assembly side.
+    ///
+    /// Called from `maybe_complete_agent_turn` only — fresh prompts
+    /// arriving on an idle conversation go through
+    /// `dispatch_prompt_for_conversation`, which already publishes its
+    /// own `UiPromptSubmitted`. Folding here exists specifically to
+    /// give a queued prompt a chance to ride the next per-round prompt
+    /// rather than waiting for the whole turn to terminate.
+    fn fold_pending_prompts_as_steered(&mut self, cid: &ConversationId) {
+        let session_id = match self.conversations.get(cid) {
+            Some(c) => c.session_id.clone(),
+            None => return,
+        };
+        let pending: Vec<String> = self
+            .conversations
+            .get_mut(cid)
+            .map(|c| c.pending_prompts.drain(..).collect())
+            .unwrap_or_default();
+        for text in pending {
+            self.publish_for_conversation(
+                cid,
+                Event::SessionPromptSteered(tau_proto::SessionPromptSteered {
+                    session_id: session_id.clone(),
+                    text,
+                }),
+            );
         }
     }
 

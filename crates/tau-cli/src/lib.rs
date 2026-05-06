@@ -2163,6 +2163,32 @@ impl EventRenderer {
                         .push_back((queued_id, queued.text.clone()));
                 }
             }
+            Event::SessionPromptSteered(steered) => {
+                // The harness folded a queued prompt into the current
+                // turn's next round (alongside tool results) instead of
+                // waiting for `Idle`. Promote the "(queued)" rendering
+                // to a regular user prompt so the transcript reads
+                // naturally above the agent's continuing response.
+                if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
+                    self.handle.remove_block(queued_id);
+                    self.handle.print_output(themed_block(
+                        &self.theme,
+                        names::USER_PROMPT,
+                        format!("> {text}"),
+                    ));
+                    self.handle.redraw();
+                } else {
+                    // No matching "(queued)" block — fall back to
+                    // rendering the steered text directly so the user
+                    // still sees their message land.
+                    self.handle.print_output(themed_block(
+                        &self.theme,
+                        names::USER_PROMPT,
+                        format!("> {}", steered.text),
+                    ));
+                    self.handle.redraw();
+                }
+            }
             Event::SessionPromptCreated(prompt) => {
                 self.prompt_started_at
                     .insert(prompt.session_prompt_id.to_string(), Instant::now());
