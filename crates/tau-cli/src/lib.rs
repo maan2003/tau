@@ -525,6 +525,11 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         ]);
         handle.print_output(StyledBlock::new(banner));
     }
+    handle.print_output(tau_cli_term::resolve::themed_block(
+        &theme,
+        tau_themes::names::SYSTEM_INFO,
+        format!("ui dir: {}/", ui_logging.dir().display()),
+    ));
 
     handle.redraw();
 

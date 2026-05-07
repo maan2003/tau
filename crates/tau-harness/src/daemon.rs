@@ -300,11 +300,8 @@ pub fn run_harness_daemon(
     let dirs = options.dirs.clone().unwrap_or_default();
     let mut harness = Harness::from_config(config, &state_dir, dirs, eager_session_id)?;
     harness.emit_info(&format!(
-        "event log: {}",
-        state_dir
-            .join(eager_session_id)
-            .join("events.jsonl")
-            .display()
+        "session dir: {}/",
+        state_dir.join(eager_session_id).display()
     ));
 
     // Write marker AFTER extensions are ready.
