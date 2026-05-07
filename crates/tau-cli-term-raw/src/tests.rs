@@ -929,8 +929,7 @@ fn trailing_newline_buffer_grows_prompt_height() {
 #[test]
 fn shift_or_alt_enter_inserts_newline_without_submitting() {
     let buf = SharedBuffer::new();
-    let (term, handle, input_tx) =
-        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
 
     handle.set_buffer("line one".to_owned(), "line one".len());
 

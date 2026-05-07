@@ -39,7 +39,7 @@ use tau_proto::{
 
 /// `tracing` target for events emitted from this extension. Matches
 /// the convention described in [`tau_extension`]: a short identifier
-/// the user can name in `TAU_EXT_LOG=core-notifications=trace`.
+/// the user can name in `TAU_LOG=core-notifications=trace`.
 pub const LOG_TARGET: &str = "core-notifications";
 
 /// User-var name for sound notifications (matches `user-notification.sh`).

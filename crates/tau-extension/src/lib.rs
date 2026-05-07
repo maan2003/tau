@@ -5,7 +5,7 @@
 //! mechanical to copy-paste into each one. Today that's exactly one
 //! thing: a `tracing_subscriber` setup that writes to stderr (which
 //! the harness captures into a per-extension log file) and is
-//! filtered via the `TAU_EXT_LOG` environment variable.
+//! filtered via the `TAU_LOG` environment variable.
 //!
 //! ## Per-extension log targets
 //!
@@ -18,7 +18,7 @@
 //! tracing::info!(target: LOG_TARGET, "idle deadline armed");
 //! ```
 //!
-//! Then `TAU_EXT_LOG=core-notifications=trace,info` filters that
+//! Then `TAU_LOG=core-notifications=trace,info` filters that
 //! extension at trace level while leaving everything else at info.
 //! Targets are arbitrary `&'static str` — any name an extension
 //! likes — so use one short, distinctive identifier per extension
@@ -29,17 +29,15 @@
 //! `RUST_LOG` is reserved for the wider host environment (the
 //! harness, embedded crates, third-party libraries). Extensions
 //! deserve their own knob so users can crank one extension to trace
-//! without flooding stderr with everything else, and so users who
-//! happen to have `RUST_LOG=debug` set globally don't suddenly get
-//! verbose extension output by accident.
+//! without flooding stderr with everything else.
 
 use tracing_subscriber::EnvFilter;
 
 /// Environment variable controlling extension log filtering. Same
 /// syntax as `RUST_LOG` (per-target levels, with a default level).
-pub const ENV_VAR: &str = "TAU_EXT_LOG";
+pub const ENV_VAR: &str = "TAU_LOG";
 
-/// Default filter applied when `TAU_EXT_LOG` is unset or fails to
+/// Default filter applied when `TAU_LOG` is unset or fails to
 /// parse: every target at `info` and above.
 pub const DEFAULT_FILTER: &str = "info";
 

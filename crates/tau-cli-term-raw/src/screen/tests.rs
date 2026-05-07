@@ -76,19 +76,28 @@ fn layout_empty_produces_one_empty_line() {
 
 #[test]
 fn layout_short_produces_one_line() {
-    let lines = layout_lines().content(&StyledText::from("abc")).width(80).call();
+    let lines = layout_lines()
+        .content(&StyledText::from("abc"))
+        .width(80)
+        .call();
     assert_eq!(line_chars(&lines), vec!["abc"]);
 }
 
 #[test]
 fn layout_wraps_at_width() {
-    let lines = layout_lines().content(&StyledText::from("abcde")).width(3).call();
+    let lines = layout_lines()
+        .content(&StyledText::from("abcde"))
+        .width(3)
+        .call();
     assert_eq!(line_chars(&lines), vec!["abc", "de"]);
 }
 
 #[test]
 fn layout_exact_width_is_one_line() {
-    let lines = layout_lines().content(&StyledText::from("abc")).width(3).call();
+    let lines = layout_lines()
+        .content(&StyledText::from("abc"))
+        .width(3)
+        .call();
     assert_eq!(line_chars(&lines), vec!["abc"]);
 }
 
@@ -107,13 +116,19 @@ fn layout_preserves_styles() {
 
 #[test]
 fn layout_handles_newlines() {
-    let lines = layout_lines().content(&StyledText::from("abc\ndef")).width(80).call();
+    let lines = layout_lines()
+        .content(&StyledText::from("abc\ndef"))
+        .width(80)
+        .call();
     assert_eq!(line_chars(&lines), vec!["abc", "def"]);
 }
 
 #[test]
 fn layout_newline_and_wrap() {
-    let lines = layout_lines().content(&StyledText::from("abc\ndef")).width(3).call();
+    let lines = layout_lines()
+        .content(&StyledText::from("abc\ndef"))
+        .width(3)
+        .call();
     assert_eq!(line_chars(&lines), vec!["abc", "def"]);
 }
 

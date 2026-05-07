@@ -23,7 +23,7 @@ use tau_proto::{
 
 /// `tracing` target for events emitted from the agent. Matches the
 /// convention described in [`tau_extension`]: a short identifier the
-/// user can name in `TAU_EXT_LOG=agent=trace` to dump every prompt
+/// user can name in `TAU_LOG=agent=trace` to dump every prompt
 /// the harness hands the agent.
 pub const LOG_TARGET: &str = "agent";
 
@@ -102,7 +102,7 @@ where
                 let session_prompt_id = prompt.session_prompt_id.clone();
 
                 // Full prompt dump for debugging. Off by default;
-                // enable with `TAU_EXT_LOG=agent=trace`. Pretty JSON
+                // enable with `TAU_LOG=agent=trace`. Pretty JSON
                 // is the most readable form for a multi-screen
                 // payload, and the prompt is already fully
                 // serializable.

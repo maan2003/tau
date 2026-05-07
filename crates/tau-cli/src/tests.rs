@@ -1181,25 +1181,16 @@ fn skill_completion_renders_load_paths() {
     assert_eq!(miss.args, "foo-bar-baz");
     assert_eq!(miss.suffixes.len(), 2);
     assert_eq!(miss.suffixes[0].text, "(2 suggestions)");
-    assert!(matches!(
-        miss.suffixes[0].status,
-        super::ToolStatus::Info
-    ));
+    assert!(matches!(miss.suffixes[0].status, super::ToolStatus::Info));
     assert!(miss.suffixes[1].text.contains("unknown skill"));
-    assert!(matches!(
-        miss.suffixes[1].status,
-        super::ToolStatus::Error
-    ));
+    assert!(matches!(miss.suffixes[1].status, super::ToolStatus::Error));
 
     // Plain load error without suggestions (e.g. missing argument)
     // still renders as a plain error.
     let plain_err = CborValue::Null;
     let plain = super::format_tool_completion("skill", &plain_err, Some("missing argument"));
     assert_eq!(plain.suffixes.len(), 1);
-    assert!(matches!(
-        plain.suffixes[0].status,
-        super::ToolStatus::Error
-    ));
+    assert!(matches!(plain.suffixes[0].status, super::ToolStatus::Error));
 }
 
 /// Reproduces the user-reported bug: send 3 prompts during the

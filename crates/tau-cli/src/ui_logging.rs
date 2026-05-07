@@ -6,11 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
 
-const UI_LOG_ENV: &str = "TAU_CLI_LOG";
+const UI_LOG_ENV: &str = "TAU_LOG";
 const DEFAULT_FILTER: &str = "tau_cli=info";
 
 /// Initialize stderr tracing for component subcommands that do not
-/// have their own logging setup. Uses `TAU_CLI_LOG` so startup can be
+/// have their own logging setup. Uses `TAU_LOG` so startup can be
 /// traced across the parent CLI and harness child with one knob.
 pub fn init_stderr_from_env(default_filter: &str) {
     let filter = EnvFilter::try_from_env(UI_LOG_ENV)
@@ -76,7 +76,7 @@ impl UiLogging {
 ///
 /// Logs go to `$XDG_STATE_HOME/tau/uis/<ui-id>/ui.log` (normally
 /// `~/.local/state/tau/uis/<ui-id>/ui.log`). The filter comes from
-/// `TAU_CLI_LOG`, defaulting to `tau_cli=info`.
+/// `TAU_LOG`, defaulting to `tau_cli=info`.
 pub fn init(state_dir: &Path) -> io::Result<UiLogging> {
     let ui_id = mint_ui_id();
     let dir = state_dir.join("uis").join(&ui_id);

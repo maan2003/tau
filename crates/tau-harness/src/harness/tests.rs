@@ -1977,21 +1977,9 @@ fn skill_load_unknown_attaches_split_name_search_suggestions() {
     let mut h = echo_harness(&sp).expect("start");
     h.discovered_skills.clear();
     for (name, desc, path) in [
-        (
-            lang_name.clone(),
-            format!("{TKLANG} helpers"),
-            lang_path,
-        ),
-        (
-            style_name.clone(),
-            format!("{TKSTYLE} guide"),
-            style_path,
-        ),
-        (
-            decoy_name.clone(),
-            "unrelated thing".to_owned(),
-            decoy_path,
-        ),
+        (lang_name.clone(), format!("{TKLANG} helpers"), lang_path),
+        (style_name.clone(), format!("{TKSTYLE} guide"), style_path),
+        (decoy_name.clone(), "unrelated thing".to_owned(), decoy_path),
     ] {
         h.discovered_skills.insert(
             tau_proto::SkillName::from(name.as_str()),
@@ -2041,10 +2029,12 @@ fn skill_load_unknown_attaches_split_name_search_suggestions() {
     let CborValue::Map(entries) = details else {
         panic!("details should be a map: {details:?}");
     };
-    let get = |key: &str| entries.iter().find_map(|(k, v)| match k {
-        CborValue::Text(s) if s == key => Some(v),
-        _ => None,
-    });
+    let get = |key: &str| {
+        entries.iter().find_map(|(k, v)| match k {
+            CborValue::Text(s) if s == key => Some(v),
+            _ => None,
+        })
+    };
     assert_eq!(
         get("name"),
         Some(&CborValue::Text(requested.clone())),
