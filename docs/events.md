@@ -5,37 +5,13 @@ or replies. Every event has a dotted name `<category>.<call>` and a typed
 payload defined in `crates/tau-proto/src/events.rs`. This document groups the
 core events by the component (or class of component) that emits them.
 
+Events are distinct from **messages**: messages are point-to-point control-plane
+traffic (handshake, subscribe/intercept, the `LogEvent`/`Ack` envelope, etc.)
+and never appear on the bus or in the durable session log. See
+[messages.md](messages.md) for the message-side reference.
+
 A few categories don't map to a single emitter — those are grouped by the
 class of function that raises them.
-
-## Lifecycle (handshake)
-
-Exchanged at connection time between a client (extension, agent, UI) and
-the harness. The harness produces some of these too; see notes per event.
-
-- **`lifecycle.hello`** — A participant announces itself just after
-  connecting: protocol version, client name, client kind
-  (`agent` / `tool` / `ui` / `core` / `external`). First message on
-  every connection.
-- **`lifecycle.subscribe`** — A client declares which events it wants the
-  harness to deliver, as a list of selectors (exact name or prefix).
-  Without a subscription, only directed/lifecycle traffic reaches the
-  client.
-- **`lifecycle.intercept`** — A client asks to receive matching emissions
-  *before* they hit the event log, with a priority. Lower priority runs
-  first; the interceptor can rewrite or swallow the event.
-- **`lifecycle.ready`** — Emitted by an extension after its own startup
-  work is done and it's ready to participate. Optional human-readable
-  message.
-- **`lifecycle.disconnect`** — A client (or the harness) signals an
-  intentional disconnect, with an optional reason. Distinct from a
-  socket dying unannounced.
-- **`lifecycle.configure`** — Sent point-to-point by the harness to one
-  extension immediately after that extension's `lifecycle.hello`. Carries
-  the `config: { … }` value from `harness.json5` (or `null` / empty map).
-- **`lifecycle.config_error`** — An extension reports back that the
-  `lifecycle.configure` payload it received was malformed or unusable;
-  the harness surfaces the message like a config parse error.
 
 ## Harness (general)
 
@@ -57,13 +33,6 @@ for control of the emit/intercept pipeline.
 - **`harness.efforts_available`** — Which effort levels are valid for the
   currently selected model. Empty when no model is selected or the
   provider doesn't support reasoning.
-- **`harness.emit`** — A client's *request* to publish an event with
-  harness-owned delivery metadata (transient flag, interception
-  cursor). The inner event is what subscribers ultimately see; this
-  envelope is not the published fact.
-- **`harness.intercepted`** — Directed harness → interceptor delivery of
-  an emission that has not reached the event log yet, so the
-  interceptor can act before subscribers see it.
 
 ## Session (harness session tracker)
 
@@ -141,8 +110,9 @@ processes.
 
 - **`extension.starting`** — A child extension process is being spawned
   (instance id, name, pid).
-- **`extension.ready`** — The extension's `lifecycle.ready` was received
-  and propagated; it is fully online.
+- **`extension.ready`** — The extension's `Ready` message was received
+  by the supervisor, which synthesizes this bus event so subscribers can
+  observe that the extension is fully online.
 - **`extension.exited`** — The child process exited; carries exit code
   and/or signal.
 - **`extension.restarting`** — The supervisor is restarting an extension
@@ -221,15 +191,3 @@ the only consumer. Components without a terminal silently no-op.
   OSC 1337 `SetUserVar` escape sequence. The UI base64-encodes the
   value and tmux-wraps if needed. Useful for surfacing notifications,
   build status, or other state to terminal-side tooling.
-
-## Wire (transport)
-
-Emitted by the harness's at-least-once delivery layer. These wrap real
-events; they are never carried inside another `wire.*` envelope.
-
-- **`wire.log_event`** — The harness's log-delivery envelope around a
-  real bus event, carrying a monotonic `LogEventId`. Receivers process
-  the inner event and ack.
-- **`wire.ack`** — Cumulative acknowledgement that the receiver has
-  processed all log events with id `<= up_to`. Newer acks supersede
-  older ones.
