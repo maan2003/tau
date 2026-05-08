@@ -6,6 +6,53 @@ use tau_proto::{EventName, ToolInvoke};
 
 use super::*;
 
+/// Test-side wrapper around [`FrameReader`] that exposes an `Event`-flavoured
+/// API (peels `LogEvent`, drops other messages).
+struct EventReader<R> {
+    inner: FrameReader<R>,
+}
+
+impl<R: std::io::Read> EventReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner: FrameReader::new(inner),
+        }
+    }
+
+    fn read_event(&mut self) -> Result<Option<Event>, tau_proto::DecodeError> {
+        loop {
+            match self.inner.read_frame()? {
+                None => return Ok(None),
+                Some(frame) => match frame.peel_log().1 {
+                    Frame::Event(event) => return Ok(Some(event)),
+                    Frame::Message(_) => continue,
+                },
+            }
+        }
+    }
+}
+
+/// Test-side wrapper around [`FrameWriter`] that accepts `Event` directly.
+struct EventWriter<W> {
+    inner: FrameWriter<W>,
+}
+
+impl<W: std::io::Write> EventWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner: FrameWriter::new(inner),
+        }
+    }
+
+    fn write_event(&mut self, event: &Event) -> Result<(), tau_proto::EncodeError> {
+        self.inner.write_frame(&Frame::Event(event.clone()))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 struct StubSearcher {
     calls: Mutex<Vec<(String, u32)>>,
     response: Mutex<Result<String, String>>,
@@ -57,15 +104,10 @@ fn spawn_extension(
 }
 
 fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
-    for expected in [
-        EventName::LIFECYCLE_HELLO,
-        EventName::LIFECYCLE_SUBSCRIBE,
-        EventName::TOOL_REGISTER,
-        EventName::LIFECYCLE_READY,
-    ] {
-        let event = reader.read_event().expect("read").expect("startup event");
-        assert_eq!(event.name(), expected);
-    }
+    // The hello/subscribe/ready messages are filtered out by the
+    // test-side `EventReader` wrapper; only the tool register survives.
+    let event = reader.read_event().expect("read").expect("register");
+    assert_eq!(event.name(), EventName::TOOL_REGISTER);
 }
 
 #[test]

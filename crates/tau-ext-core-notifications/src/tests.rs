@@ -1,16 +1,80 @@
 use std::io::Cursor;
 
-use tau_proto::{
-    AgentResponseFinished, Event, EventReader, EventWriter, LifecycleDisconnect, UiPromptSubmitted,
-};
+use tau_proto::{AgentResponseFinished, Event, FrameReader, FrameWriter, UiPromptSubmitted};
 
 use super::*;
 
-fn drain_lifecycle<R: std::io::Read>(reader: &mut EventReader<R>) {
-    // Hello, Subscribe, Ready.
-    for _ in 0..3 {
-        reader.read_event().expect("read").expect("lifecycle event");
+/// Test-side wrapper around [`FrameReader`] that exposes an `Event`-flavoured
+/// API (peels `LogEvent`, drops other messages).
+struct EventReader<R> {
+    inner: FrameReader<R>,
+}
+
+impl<R: std::io::Read> EventReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner: FrameReader::new(inner),
+        }
     }
+
+    fn read_event(&mut self) -> Result<Option<Event>, tau_proto::DecodeError> {
+        loop {
+            match self.inner.read_frame()? {
+                None => return Ok(None),
+                Some(frame) => match frame.peel_log().1 {
+                    Frame::Event(event) => return Ok(Some(event)),
+                    Frame::Message(_) => continue,
+                },
+            }
+        }
+    }
+
+    fn read_frame(&mut self) -> Result<Option<Frame>, tau_proto::DecodeError> {
+        self.inner.read_frame()
+    }
+}
+
+/// Test-side wrapper around [`FrameWriter`] that accepts `Event` directly.
+struct EventWriter<W> {
+    inner: FrameWriter<W>,
+}
+
+impl<W: std::io::Write> EventWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner: FrameWriter::new(inner),
+        }
+    }
+
+    fn write_event(&mut self, event: &Event) -> Result<(), tau_proto::EncodeError> {
+        self.inner.write_frame(&Frame::Event(event.clone()))
+    }
+
+    fn write_frame(&mut self, frame: &Frame) -> Result<(), tau_proto::EncodeError> {
+        self.inner.write_frame(frame)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Build a `Frame::Message(Disconnect)` for tests that previously sent
+/// `Event::LifecycleDisconnect`.
+fn disconnect_frame(reason: Option<String>) -> Frame {
+    Frame::Message(Message::Disconnect(tau_proto::Disconnect { reason }))
+}
+
+/// Build a `Frame::Message(Configure)` for tests that previously sent
+/// `Event::LifecycleConfigure`.
+fn configure_frame(config: tau_proto::CborValue) -> Frame {
+    Frame::Message(Message::Configure(tau_proto::Configure { config }))
+}
+
+fn drain_lifecycle<R: std::io::Read>(_reader: &mut EventReader<R>) {
+    // The hello/subscribe/ready messages are now point-to-point messages
+    // rather than events; the `EventReader` wrapper filters them, so
+    // `drain_lifecycle` becomes a no-op.
 }
 
 #[test]
@@ -38,11 +102,7 @@ fn emits_start_and_end_user_var_in_order() {
     // Explicit disconnect so the loop exits without waiting on
     // the (otherwise long) idle deadline triggered by the
     // `AgentResponseFinished`.
-    writer
-        .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
-            reason: None,
-        }))
-        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
     let mut output = Vec::new();
@@ -104,11 +164,7 @@ fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
             originator: tau_proto::PromptOriginator::User,
         }))
         .expect("write");
-    writer
-        .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
-            reason: None,
-        }))
-        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
     let mut output = Vec::new();
@@ -290,11 +346,7 @@ fn summary_result_populates_notification_body() {
     );
 
     // Cleanly disconnect so the extension exits.
-    writer
-        .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
-            reason: None,
-        }))
-        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
     drop(writer);
     drop(reader);
@@ -389,11 +441,7 @@ fn prompt_draft_extends_idle_deadline() {
     );
 
     // Disconnect to let the extension exit.
-    writer
-        .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
-            reason: None,
-        }))
-        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
     drop(writer);
     drop(reader);
@@ -480,11 +528,7 @@ fn prompt_draft_during_waiting_summary_does_not_cancel() {
     let payload: serde_json::Value = serde_json::from_str(&osc.value).expect("payload is JSON");
     assert_eq!(payload["body"], "the model's summary");
 
-    writer
-        .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
-            reason: None,
-        }))
-        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
     drop(writer);
     drop(reader);
@@ -500,7 +544,6 @@ fn prompt_draft_during_waiting_summary_does_not_cancel() {
 fn idle_command_runs_with_title_body_and_env() {
     use std::os::unix::net::UnixStream;
 
-    use tau_proto::LifecycleConfigure;
     use tempfile::TempDir;
 
     let td = TempDir::new().expect("tempdir");
@@ -541,11 +584,7 @@ fn idle_command_runs_with_title_body_and_env() {
         "idle_seconds": 0,
         "idle_command": ["bash", "-c", cmd, "_marker"],
     }));
-    writer
-        .write_event(&Event::LifecycleConfigure(LifecycleConfigure {
-            config: cfg,
-        }))
-        .expect("write");
+    writer.write_frame(&configure_frame(cfg)).expect("write");
     writer
         .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -592,11 +631,7 @@ fn idle_command_runs_with_title_body_and_env() {
         thread::sleep(Duration::from_millis(20));
     }
 
-    writer
-        .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
-            reason: None,
-        }))
-        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
     drop(writer);
     drop(reader);
@@ -608,8 +643,6 @@ fn idle_command_runs_with_title_body_and_env() {
 /// message, so the harness can surface it to the user.
 #[test]
 fn invalid_config_emits_lifecycle_config_error() {
-    use tau_proto::{LifecycleConfigure, LifecycleDisconnect};
-
     // Build a config CBOR value that doesn't match ExtConfig:
     // an unknown field, which `deny_unknown_fields` rejects.
     let bad_config = tau_proto::json_to_cbor(&serde_json::json!({
@@ -619,33 +652,30 @@ fn invalid_config_emits_lifecycle_config_error() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
-        .write_event(&Event::LifecycleConfigure(LifecycleConfigure {
-            config: bad_config,
-        }))
+        .write_frame(&configure_frame(bad_config))
         .expect("write");
-    writer
-        .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
-            reason: None,
-        }))
-        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
     let mut output = Vec::new();
     run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
 
     let mut reader = EventReader::new(Cursor::new(output));
-    drain_lifecycle(&mut reader);
-
-    let err = reader
-        .read_event()
-        .expect("read")
-        .expect("config error event");
-    match err {
-        Event::LifecycleConfigError(e) => {
-            assert!(!e.message.is_empty(), "config error must carry a message",);
+    // Skip startup messages (hello, subscribe, ready) until we reach
+    // the ConfigError reply.
+    let err_frame = loop {
+        let frame = reader
+            .read_frame()
+            .expect("read")
+            .expect("config error frame");
+        if matches!(frame, Frame::Message(Message::ConfigError(_))) {
+            break frame;
         }
-        other => panic!("expected LifecycleConfigError, got {other:?}"),
-    }
+    };
+    let Frame::Message(Message::ConfigError(e)) = err_frame else {
+        unreachable!()
+    };
+    assert!(!e.message.is_empty(), "config error must carry a message");
 }
 
 /// A user prompt arriving inside the idle window must cancel the
@@ -790,11 +820,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
             originator: tau_proto::PromptOriginator::User,
         }))
         .expect("write");
-    writer
-        .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
-            reason: None,
-        }))
-        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
     let mut output = Vec::new();
@@ -853,11 +879,7 @@ fn duplicate_ui_prompt_submitted_during_same_turn_emits_one_start_sound() {
             originator: tau_proto::PromptOriginator::User,
         }))
         .expect("write");
-    writer
-        .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
-            reason: None,
-        }))
-        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
     let mut output = Vec::new();

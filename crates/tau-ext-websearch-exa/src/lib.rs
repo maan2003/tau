@@ -18,9 +18,9 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use tau_proto::{
-    Ack, CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleHello,
-    LifecycleReady, LifecycleSubscribe, LogEventId, PROTOCOL_VERSION, ToolError, ToolInvoke,
-    ToolRegister, ToolResult, ToolSideEffects, ToolSpec,
+    Ack, CborValue, ClientKind, Event, EventSelector, Frame, FrameReader, FrameWriter, Hello,
+    LogEventId, Message, PROTOCOL_VERSION, Ready, Subscribe, ToolError, ToolInvoke, ToolRegister,
+    ToolResult, ToolSideEffects, ToolSpec,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -87,32 +87,31 @@ where
     R: Read,
     W: Write + Send + 'static,
 {
-    let mut reader = EventReader::new(BufReader::new(reader));
-    let mut writer = EventWriter::new(BufWriter::new(writer));
+    let mut reader = FrameReader::new(BufReader::new(reader));
+    let mut writer = FrameWriter::new(BufWriter::new(writer));
 
-    writer.write_event(&Event::LifecycleHello(LifecycleHello {
+    writer.write_frame(&Frame::Message(Message::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: "tau-ext-websearch-exa".into(),
         client_kind: ClientKind::Tool,
-    }))?;
-    writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
-        selectors: vec![
-            EventSelector::Exact(tau_proto::EventName::TOOL_INVOKE),
-            EventSelector::Exact(tau_proto::EventName::LIFECYCLE_DISCONNECT),
-        ],
-    }))?;
-    writer.write_event(&Event::ToolRegister(ToolRegister { tool: tool_spec() }))?;
-    writer.write_event(&Event::LifecycleReady(LifecycleReady {
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
+        selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_INVOKE)],
+    })))?;
+    writer.write_frame(&Frame::Event(Event::ToolRegister(ToolRegister {
+        tool: tool_spec(),
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Ready(Ready {
         message: Some("websearch-exa ready".to_owned()),
-    }))?;
+    })))?;
     writer.flush()?;
 
-    let (tx, rx) = mpsc::channel::<Event>();
+    let (tx, rx) = mpsc::channel::<Frame>();
 
     let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
-        for event in rx {
+        for frame in rx {
             writer
-                .write_event(&event)
+                .write_frame(&frame)
                 .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
             writer
                 .flush()
@@ -122,17 +121,17 @@ where
     });
 
     loop {
-        let Some(event) = reader.read_event()? else {
+        let Some(frame) = reader.read_frame()? else {
             break;
         };
-        let (log_id, inner) = event.peel_log();
+        let (log_id, inner) = frame.peel_log();
         match inner {
-            Event::ToolInvoke(invoke) => {
+            Frame::Event(Event::ToolInvoke(invoke)) => {
                 let tx = tx.clone();
                 let searcher = Arc::clone(&searcher);
                 std::thread::spawn(move || dispatch_tool_invoke(invoke, searcher.as_ref(), &tx));
             }
-            Event::LifecycleDisconnect(_) => break,
+            Frame::Message(Message::Disconnect(_)) => break,
             _ => {}
         }
         if let Some(id) = log_id {
@@ -148,8 +147,8 @@ where
     Ok(())
 }
 
-fn ack_log_event(id: LogEventId, tx: &mpsc::Sender<Event>) {
-    let _ = tx.send(Event::Ack(Ack { up_to: id }));
+fn ack_log_event(id: LogEventId, tx: &mpsc::Sender<Frame>) {
+    let _ = tx.send(Frame::Message(Message::Ack(Ack { up_to: id })));
 }
 
 fn tool_spec() -> ToolSpec {
@@ -184,14 +183,14 @@ fn tool_spec() -> ToolSpec {
     }
 }
 
-fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::Sender<Event>) {
+fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::Sender<Frame>) {
     if invoke.tool_name.as_str() != TOOL_NAME {
-        let _ = tx.send(Event::ToolError(ToolError {
+        let _ = tx.send(Frame::Event(Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             message: "unknown tool".to_owned(),
             details: None,
-        }));
+        })));
         return;
     }
     let event = match parse_args(&invoke.arguments) {
@@ -232,7 +231,7 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
             details: Some(invoke.arguments),
         }),
     };
-    let _ = tx.send(event);
+    let _ = tx.send(Frame::Event(event));
 }
 
 fn parse_args(arguments: &CborValue) -> Result<(String, u32), String> {

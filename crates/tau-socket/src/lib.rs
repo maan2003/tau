@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 use std::{fmt, fs, thread};
 
-use tau_proto::{DecodeError, Event, EventReader, EventWriter};
+use tau_proto::{DecodeError, Frame, FrameReader, FrameWriter};
 
 /// Errors returned by the Unix socket transport.
 #[derive(Debug)]
@@ -130,8 +130,8 @@ impl Drop for SocketListener {
 
 /// One connected Unix socket peer speaking the protocol.
 pub struct SocketPeer {
-    writer: EventWriter<BufWriter<UnixStream>>,
-    reader_events: Receiver<Result<Event, DecodeError>>,
+    writer: FrameWriter<BufWriter<UnixStream>>,
+    reader_frames: Receiver<Result<Frame, DecodeError>>,
 }
 
 impl SocketPeer {
@@ -145,28 +145,28 @@ impl SocketPeer {
 
     fn new(stream: UnixStream) -> Result<Self, SocketTransportError> {
         let writer_stream = stream.try_clone().map_err(SocketTransportError::Clone)?;
-        let reader_events = spawn_reader(stream);
+        let reader_frames = spawn_reader(stream);
         Ok(Self {
-            writer: EventWriter::new(BufWriter::new(writer_stream)),
-            reader_events,
+            writer: FrameWriter::new(BufWriter::new(writer_stream)),
+            reader_frames,
         })
     }
 
-    /// Sends one protocol event over the Unix socket.
-    pub fn send(&mut self, event: &Event) -> Result<(), SocketTransportError> {
+    /// Sends one protocol frame over the Unix socket.
+    pub fn send(&mut self, frame: &Frame) -> Result<(), SocketTransportError> {
         self.writer
-            .write_event(event)
+            .write_frame(frame)
             .map_err(SocketTransportError::Encode)?;
         self.writer.flush().map_err(SocketTransportError::Flush)
     }
 
-    /// Reads one protocol event, or returns `Ok(None)` on timeout or clean EOF.
+    /// Reads one protocol frame, or returns `Ok(None)` on timeout or clean EOF.
     pub fn recv_timeout(
         &mut self,
         timeout: Duration,
-    ) -> Result<Option<Event>, SocketTransportError> {
-        match self.reader_events.recv_timeout(timeout) {
-            Ok(Ok(event)) => Ok(Some(event)),
+    ) -> Result<Option<Frame>, SocketTransportError> {
+        match self.reader_frames.recv_timeout(timeout) {
+            Ok(Ok(frame)) => Ok(Some(frame)),
             Ok(Err(error)) if is_unexpected_eof(&error) => Ok(None),
             Ok(Err(error)) => Err(SocketTransportError::Decode(error)),
             Err(RecvTimeoutError::Timeout) => Ok(None),
@@ -175,14 +175,14 @@ impl SocketPeer {
     }
 }
 
-fn spawn_reader(stream: UnixStream) -> Receiver<Result<Event, DecodeError>> {
+fn spawn_reader(stream: UnixStream) -> Receiver<Result<Frame, DecodeError>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let mut reader = EventReader::new(BufReader::new(stream));
+        let mut reader = FrameReader::new(BufReader::new(stream));
         loop {
-            match reader.read_event() {
-                Ok(Some(event)) => {
-                    if sender.send(Ok(event)).is_err() {
+            match reader.read_frame() {
+                Ok(Some(frame)) => {
+                    if sender.send(Ok(frame)).is_err() {
                         return;
                     }
                 }

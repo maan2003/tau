@@ -7,12 +7,12 @@ use std::time::{Duration, Instant};
 
 use tau_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
-    RoutedEvent, SessionEntry, ToolActivityOutcome, ToolActivityRecord,
+    RoutedFrame, SessionEntry, ToolActivityOutcome, ToolActivityRecord,
 };
 use tau_proto::{
-    AgentResponseFinished, AgentToolCall, CborValue, Event, EventReader, EventSelector,
-    EventWriter, ExtAgentQuery, InterceptionPriority, LifecycleDisconnect, LifecycleIntercept,
-    LifecycleSubscribe, SessionPromptCreated, SessionPromptId, ToolCallId, ToolName, ToolResult,
+    AgentResponseFinished, AgentToolCall, CborValue, Disconnect, Emit, Event, EventSelector,
+    ExtAgentQuery, Frame, FrameReader, FrameWriter, Intercept, InterceptionPriority, Message,
+    SessionPromptCreated, SessionPromptId, Subscribe, ToolCallId, ToolName, ToolResult,
     ToolSideEffects, ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
 use tempfile::TempDir;
@@ -72,17 +72,17 @@ fn echo_harness_for(
 }
 
 struct TestSink {
-    events: Arc<Mutex<Vec<RoutedEvent>>>,
+    events: Arc<Mutex<Vec<RoutedFrame>>>,
 }
 
 impl ConnectionSink for TestSink {
-    fn send(&mut self, event: RoutedEvent) -> Result<(), ConnectionSendError> {
+    fn send(&mut self, event: RoutedFrame) -> Result<(), ConnectionSendError> {
         self.events.lock().expect("sink mutex").push(event);
         Ok(())
     }
 }
 
-fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<RoutedEvent>>> {
+fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let events = Arc::new(Mutex::new(Vec::new()));
     h.bus.connect(Connection::new(
         ConnectionMetadata {
@@ -365,9 +365,9 @@ fn disconnected_tool_is_removed_cleanly() {
     let _ = h.bus.send_to(
         &conn_id,
         None,
-        Event::LifecycleDisconnect(LifecycleDisconnect {
+        Frame::Message(Message::Disconnect(Disconnect {
             reason: Some("test".to_owned()),
-        }),
+        })),
     );
 
     // Drive event loop until the disconnect arrives.
@@ -385,9 +385,9 @@ fn disconnected_tool_is_removed_cleanly() {
             }
             HarnessEvent::FromConnection {
                 connection_id,
-                event,
+                frame,
             } => {
-                let _ = h.handle_extension_event(&connection_id, event);
+                let _ = h.handle_extension_event(&connection_id, frame);
             }
             _ => {}
         }
@@ -545,15 +545,15 @@ fn daemon_disconnect_reason_is_reported() {
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept");
         let read_stream = stream.try_clone().expect("clone");
-        let mut reader = EventReader::new(BufReader::new(read_stream));
-        let mut writer = EventWriter::new(BufWriter::new(stream));
-        let _ = reader.read_event(); // hello
-        let _ = reader.read_event(); // subscribe
-        let _ = reader.read_event(); // message
+        let mut reader = FrameReader::new(BufReader::new(read_stream));
+        let mut writer = FrameWriter::new(BufWriter::new(stream));
+        let _ = reader.read_frame(); // hello
+        let _ = reader.read_frame(); // subscribe
+        let _ = reader.read_frame(); // message
         writer
-            .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
+            .write_frame(&Frame::Message(Message::Disconnect(Disconnect {
                 reason: Some("test disconnect".to_owned()),
-            }))
+            })))
             .expect("write");
         writer.flush().expect("flush");
     });
@@ -596,9 +596,11 @@ fn agents_context_is_injected_at_session_init() {
     };
     h.handle_extension_event(
         &tools_connection_id,
-        Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
-            session_id: "s1".into(),
-        }),
+        Frame::Event(Event::ExtensionContextReady(
+            tau_proto::ExtensionContextReady {
+                session_id: "s1".into(),
+            },
+        )),
     )
     .expect("ready");
 
@@ -734,29 +736,29 @@ fn late_joining_ui_client_receives_replayed_session_events() {
 
     h.handle_client_event(
         &ui_conn,
-        Event::LifecycleSubscribe(LifecycleSubscribe {
+        Frame::Message(Message::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Prefix("ui.".to_owned()),
                 EventSelector::Prefix("agent.".to_owned()),
             ],
-        }),
+        })),
     )
     .expect("subscribe");
 
-    let mut reader = EventReader::new(BufReader::new(client_end));
+    let mut reader = FrameReader::new(BufReader::new(client_end));
     let mut got_prompt = false;
     let mut got_response = false;
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline && !(got_prompt && got_response) {
-        let Ok(Some(event)) = reader.read_event() else {
+        let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
-        let (_log_id, inner) = event.peel_log();
+        let (_log_id, inner) = frame.peel_log();
         match inner {
-            Event::UiPromptSubmitted(prompt) if prompt.text == "hello replay" => {
+            Frame::Event(Event::UiPromptSubmitted(prompt)) if prompt.text == "hello replay" => {
                 got_prompt = true;
             }
-            Event::AgentResponseFinished(finished)
+            Frame::Event(Event::AgentResponseFinished(finished))
                 if finished
                     .text
                     .as_deref()
@@ -833,9 +835,9 @@ fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
     // Trigger subscribe + replay via the normal client-event path.
     h.handle_client_event(
         &ui_conn,
-        Event::LifecycleSubscribe(LifecycleSubscribe {
+        Frame::Message(Message::Subscribe(Subscribe {
             selectors: vec![EventSelector::Prefix("extension.".to_owned())],
-        }),
+        })),
     )
     .expect("subscribe");
 
@@ -872,15 +874,16 @@ fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
         "test setup: at least one context_ready in durable log"
     );
 
-    let mut reader = EventReader::new(BufReader::new(client_end));
+    let mut reader = FrameReader::new(BufReader::new(client_end));
     let mut agents_md_count = 0;
     let mut context_ready_count = 0;
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
-        let Ok(Some(event)) = reader.read_event() else {
+        let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
-        let (_log_id, inner) = event.peel_log();
+        let (_log_id, inner) = frame.peel_log();
+        let Frame::Event(inner) = inner else { continue };
         match inner {
             Event::ExtAgentsMdAvailable(a)
                 if a.file_path == std::path::Path::new("/test/AGENTS.md") =>
@@ -1480,14 +1483,14 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
         match event {
             HarnessEvent::FromConnection {
                 connection_id,
-                event,
+                frame,
             } => {
-                let is_target = match &event {
-                    Event::ToolResult(r) => r.call_id.as_str() == target_call_id,
-                    Event::ToolError(e) => e.call_id.as_str() == target_call_id,
+                let is_target = match &frame {
+                    Frame::Event(Event::ToolResult(r)) => r.call_id.as_str() == target_call_id,
+                    Frame::Event(Event::ToolError(e)) => e.call_id.as_str() == target_call_id,
                     _ => false,
                 };
-                h.handle_extension_event(&connection_id, event)
+                h.handle_extension_event(&connection_id, frame)
                     .expect("handle");
                 if is_target {
                     return;
@@ -1518,9 +1521,9 @@ fn extension_ack_advances_cursor() {
 
     h.handle_extension_event(
         &tools_id,
-        Event::Ack(tau_proto::Ack {
+        Frame::Message(Message::Ack(tau_proto::Ack {
             up_to: tau_proto::LogEventId::new(7),
-        }),
+        })),
     )
     .expect("ack");
 
@@ -1553,9 +1556,9 @@ fn duplicate_ack_is_ignored() {
     // must not bump it forward either.
     h.handle_extension_event(
         &tools_id,
-        Event::Ack(tau_proto::Ack {
+        Frame::Message(Message::Ack(tau_proto::Ack {
             up_to: tau_proto::LogEventId::new(0),
-        }),
+        })),
     )
     .expect("ack");
 
@@ -2483,11 +2486,11 @@ fn duplicate_tool_result_is_discarded() {
     // Fabricate a tool result for a call_id that is not in pending_tool_sessions.
     let result = h.handle_extension_event(
         "fake-ext",
-        Event::ToolResult(ToolResult {
+        Frame::Event(Event::ToolResult(ToolResult {
             call_id: "orphan-call".into(),
             tool_name: "read".into(),
             result: tau_proto::CborValue::Text("stale data".to_owned()),
-        }),
+        })),
     );
     // Should not error — just emits a warning and discards.
     assert!(result.is_ok());
@@ -2650,9 +2653,11 @@ fn switch_session_rebinds_default_conversation() {
     // actually dispatches (rather than queuing).
     h.handle_extension_event(
         &shell_conn,
-        Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
-            session_id: "s2".into(),
-        }),
+        Frame::Event(Event::ExtensionContextReady(
+            tau_proto::ExtensionContextReady {
+                session_id: "s2".into(),
+            },
+        )),
     )
     .expect("ready");
 
@@ -2769,8 +2774,10 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
     let events = delegate_events.lock().expect("delegate events");
     let result = events
         .iter()
-        .find_map(|routed| match &routed.event {
-            Event::ExtAgentQueryResult(result) if result.query_id == "q1" => Some(result),
+        .find_map(|routed| match &routed.frame {
+            Frame::Event(Event::ExtAgentQueryResult(result)) if result.query_id == "q1" => {
+                Some(result)
+            }
             _ => None,
         })
         .expect("query result routed");
@@ -2983,8 +2990,8 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
     // than the broadcast `ToolRequest`.
     let saw_routed = websearch_events.lock().expect("ws").iter().any(|routed| {
         matches!(
-            &routed.event,
-            Event::ToolInvoke(invoke) if invoke.call_id.as_str() == "websearch-call"
+            &routed.frame,
+            Frame::Event(Event::ToolInvoke(invoke)) if invoke.call_id.as_str() == "websearch-call"
         )
     });
     assert!(
@@ -3259,11 +3266,11 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     // fresh progress event should show 0 in flight, 1 total.
     h.handle_extension_event(
         "conn-websearch",
-        Event::ToolResult(ToolResult {
+        Frame::Event(Event::ToolResult(ToolResult {
             call_id: "websearch-call".into(),
             tool_name: "websearch".into(),
             result: CborValue::Text("fake result".to_owned()),
-        }),
+        })),
     )
     .expect("ws result");
     let after_complete = drain_delegate_progress(&sink, "delegate-call")
@@ -3413,11 +3420,11 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     // back as a ToolResult — simulate that here.
     h.handle_extension_event(
         "conn-delegate",
-        Event::ToolResult(ToolResult {
+        Frame::Event(Event::ToolResult(ToolResult {
             call_id: "nested-call".into(),
             tool_name: "delegate".into(),
             result: CborValue::Text("nested answer".to_owned()),
-        }),
+        })),
     )
     .expect("nested tool result");
 
@@ -3486,7 +3493,7 @@ fn outer_side_cid_str(h: &Harness) -> &str {
 
 /// Subscribe a fresh test sink to `tool.delegate_progress` events and
 /// hand back its accumulator.
-fn collect_event_sink(h: &mut Harness) -> Arc<Mutex<Vec<RoutedEvent>>> {
+fn collect_event_sink(h: &mut Harness) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let events = connect_test_tool(h, "test-delegate-progress-sink");
     h.bus
         .set_subscriptions(
@@ -3499,31 +3506,32 @@ fn collect_event_sink(h: &mut Harness) -> Arc<Mutex<Vec<RoutedEvent>>> {
     events
 }
 
-/// Try to extract the inner event from a `wire.log_event` envelope
-/// (the harness wraps every published event in one for at-least-once
-/// delivery). Returns the event itself for unwrapped variants.
-fn peel_inner_event(event: &Event) -> &Event {
-    match event {
-        Event::LogEvent(env) => &env.event,
-        other => other,
+/// Peel a routed frame to its bus-event payload, unwrapping the
+/// `Message::LogEvent` envelope when present. Returns `None` for
+/// non-event messages (Hello, Ack, …).
+fn peel_inner_event(frame: &Frame) -> Option<&Event> {
+    match frame {
+        Frame::Event(event) => Some(event),
+        Frame::Message(Message::LogEvent(env)) => Some(&env.event),
+        Frame::Message(_) => None,
     }
 }
 
 fn pop_delegate_progress(
-    sink: &Arc<Mutex<Vec<RoutedEvent>>>,
+    sink: &Arc<Mutex<Vec<RoutedFrame>>>,
     call_id: &str,
 ) -> Option<tau_proto::DelegateProgress> {
     let mut events = sink.lock().expect("sink");
     let pos = events.iter().position(|routed| {
         matches!(
-            peel_inner_event(&routed.event),
-            Event::ToolDelegateProgress(p) if p.call_id.as_str() == call_id
+            peel_inner_event(&routed.frame),
+            Some(Event::ToolDelegateProgress(p)) if p.call_id.as_str() == call_id
         )
     })?;
     let removed = events.remove(pos);
-    match removed.event {
-        Event::ToolDelegateProgress(p) => Some(p),
-        Event::LogEvent(env) => match *env.event {
+    match removed.frame {
+        Frame::Event(Event::ToolDelegateProgress(p)) => Some(p),
+        Frame::Message(Message::LogEvent(env)) => match *env.event {
             Event::ToolDelegateProgress(p) => Some(p),
             _ => unreachable!(),
         },
@@ -3532,13 +3540,13 @@ fn pop_delegate_progress(
 }
 
 fn drain_delegate_progress(
-    sink: &Arc<Mutex<Vec<RoutedEvent>>>,
+    sink: &Arc<Mutex<Vec<RoutedFrame>>>,
     call_id: &str,
 ) -> Vec<tau_proto::DelegateProgress> {
     let mut events = sink.lock().expect("sink");
     let mut out = Vec::new();
-    events.retain(|routed| match peel_inner_event(&routed.event) {
-        Event::ToolDelegateProgress(p) if p.call_id.as_str() == call_id => {
+    events.retain(|routed| match peel_inner_event(&routed.frame) {
+        Some(Event::ToolDelegateProgress(p)) if p.call_id.as_str() == call_id => {
             out.push(p.clone());
             false
         }
@@ -3565,13 +3573,13 @@ fn read_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPromptCrea
 }
 
 fn intercepted_payload(
-    events: &Arc<Mutex<Vec<RoutedEvent>>>,
+    events: &Arc<Mutex<Vec<RoutedFrame>>>,
 ) -> (Event, bool, Option<InterceptionPriority>) {
     let events = events.lock().expect("events mutex");
     let intercepted = events
         .iter()
-        .find_map(|routed| match &routed.event {
-            Event::HarnessIntercepted(intercepted) => Some(intercepted),
+        .find_map(|routed| match &routed.frame {
+            Frame::Message(Message::Intercepted(intercepted)) => Some(intercepted),
             _ => None,
         })
         .expect("intercepted event delivered");
@@ -3598,10 +3606,10 @@ fn interception_exact_selector_intercepts_before_log() {
 
     h.handle_extension_event(
         "interceptor",
-        Event::LifecycleIntercept(LifecycleIntercept {
+        Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority(0),
-        }),
+        })),
     )
     .expect("intercept registration");
     let after_registration_seq = h.event_log.next_seq();
@@ -3626,10 +3634,10 @@ fn interception_drop_prevents_final_delivery() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Event::LifecycleIntercept(LifecycleIntercept {
+        Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority(0),
-        }),
+        })),
     )
     .expect("intercept registration");
     let after_registration_seq = h.event_log.next_seq();
@@ -3646,21 +3654,21 @@ fn interception_redelivery_reaches_log_after_last_interceptor() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Event::LifecycleIntercept(LifecycleIntercept {
+        Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority(0),
-        }),
+        })),
     )
     .expect("intercept registration");
     let after_registration_seq = h.event_log.next_seq();
 
     h.handle_extension_event(
         "interceptor",
-        Event::EmitEvent(tau_proto::EmitEvent {
+        Frame::Message(Message::Emit(Emit {
             event: Box::new(draft_event("released")),
             transient: true,
             interception: Some(InterceptionPriority(0)),
-        }),
+        })),
     )
     .expect("redelivery");
 
@@ -3678,21 +3686,21 @@ fn interception_redelivery_can_modify_event() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Event::LifecycleIntercept(LifecycleIntercept {
+        Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority(0),
-        }),
+        })),
     )
     .expect("intercept registration");
     let after_registration_seq = h.event_log.next_seq();
 
     h.handle_extension_event(
         "interceptor",
-        Event::EmitEvent(tau_proto::EmitEvent {
+        Frame::Message(Message::Emit(Emit {
             event: Box::new(draft_event("modified")),
             transient: true,
             interception: Some(InterceptionPriority(0)),
-        }),
+        })),
     )
     .expect("redelivery");
 
@@ -3712,10 +3720,10 @@ fn interception_priority_orders_lower_values_first() {
     for (name, priority) in [("low", 10), ("high", 0)] {
         h.handle_extension_event(
             name,
-            Event::LifecycleIntercept(LifecycleIntercept {
+            Frame::Message(Message::Intercept(Intercept {
                 selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
                 priority: InterceptionPriority(priority),
-            }),
+            })),
         )
         .expect("intercept registration");
     }
@@ -3726,13 +3734,13 @@ fn interception_priority_orders_lower_values_first() {
         high.lock()
             .expect("high events")
             .iter()
-            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+            .any(|event| matches!(event.frame, Frame::Message(Message::Intercepted(_))))
     );
     assert!(
         !low.lock()
             .expect("low events")
             .iter()
-            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+            .any(|event| matches!(event.frame, Frame::Message(Message::Intercepted(_))))
     );
 }
 
@@ -3745,10 +3753,10 @@ fn interception_same_priority_orders_by_component_name_and_redelivery_continues(
     for name in ["beta", "alpha"] {
         h.handle_extension_event(
             name,
-            Event::LifecycleIntercept(LifecycleIntercept {
+            Frame::Message(Message::Intercept(Intercept {
                 selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
                 priority: InterceptionPriority(0),
-            }),
+            })),
         )
         .expect("intercept registration");
     }
@@ -3759,30 +3767,30 @@ fn interception_same_priority_orders_by_component_name_and_redelivery_continues(
             .lock()
             .expect("alpha events")
             .iter()
-            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+            .any(|event| matches!(event.frame, Frame::Message(Message::Intercepted(_))))
     );
     assert!(
         !beta
             .lock()
             .expect("beta events")
             .iter()
-            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+            .any(|event| matches!(event.frame, Frame::Message(Message::Intercepted(_))))
     );
 
     h.handle_extension_event(
         "alpha",
-        Event::EmitEvent(tau_proto::EmitEvent {
+        Frame::Message(Message::Emit(Emit {
             event: Box::new(draft_event("chain")),
             transient: true,
             interception: Some(InterceptionPriority(0)),
-        }),
+        })),
     )
     .expect("redelivery");
     assert!(
         beta.lock()
             .expect("beta events")
             .iter()
-            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+            .any(|event| matches!(event.frame, Frame::Message(Message::Intercepted(_))))
     );
 }
 
@@ -3794,18 +3802,18 @@ fn interception_exact_beats_prefix_even_with_lower_prefix_priority() {
     let prefix = connect_test_tool(&mut h, "prefix");
     h.handle_extension_event(
         "prefix",
-        Event::LifecycleIntercept(LifecycleIntercept {
+        Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Prefix("ui".to_owned())],
             priority: InterceptionPriority(-100),
-        }),
+        })),
     )
     .expect("prefix registration");
     h.handle_extension_event(
         "exact",
-        Event::LifecycleIntercept(LifecycleIntercept {
+        Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority(100),
-        }),
+        })),
     )
     .expect("exact registration");
 
@@ -3816,14 +3824,14 @@ fn interception_exact_beats_prefix_even_with_lower_prefix_priority() {
             .lock()
             .expect("exact events")
             .iter()
-            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+            .any(|event| matches!(event.frame, Frame::Message(Message::Intercepted(_))))
     );
     assert!(
         !prefix
             .lock()
             .expect("prefix events")
             .iter()
-            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+            .any(|event| matches!(event.frame, Frame::Message(Message::Intercepted(_))))
     );
 }
 
@@ -3834,21 +3842,21 @@ fn interception_redelivery_none_restarts_from_beginning() {
     let interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Event::LifecycleIntercept(LifecycleIntercept {
+        Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority(0),
-        }),
+        })),
     )
     .expect("intercept registration");
 
     h.publish_event(None, draft_event("again"));
     h.handle_extension_event(
         "interceptor",
-        Event::EmitEvent(tau_proto::EmitEvent {
+        Frame::Message(Message::Emit(Emit {
             event: Box::new(draft_event("again")),
             transient: true,
             interception: None,
-        }),
+        })),
     )
     .expect("redelivery");
 
@@ -3856,7 +3864,7 @@ fn interception_redelivery_none_restarts_from_beginning() {
         .lock()
         .expect("events")
         .iter()
-        .filter(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+        .filter(|event| matches!(event.frame, Frame::Message(Message::Intercepted(_))))
         .count();
     assert_eq!(count, 2);
 }
@@ -3868,10 +3876,10 @@ fn interception_disconnect_clears_registration() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Event::LifecycleIntercept(LifecycleIntercept {
+        Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority(0),
-        }),
+        })),
     )
     .expect("intercept registration");
     h.handle_disconnect("interceptor");

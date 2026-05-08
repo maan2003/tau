@@ -8,26 +8,26 @@ use tau_proto::{ClientKind, ConnectionId};
 
 use crate::connection::{
     Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
-    RoutedEvent,
+    RoutedFrame,
 };
 
 /// Snapshot-friendly in-memory client inbox for tests and in-process adapters.
 #[derive(Clone, Debug, Default)]
 pub struct MemoryInbox {
-    events: Rc<RefCell<Vec<RoutedEvent>>>,
+    frames: Rc<RefCell<Vec<RoutedFrame>>>,
 }
 
 impl MemoryInbox {
-    /// Returns a snapshot of all delivered events.
+    /// Returns a snapshot of all delivered frames.
     #[must_use]
-    pub fn snapshot(&self) -> Vec<RoutedEvent> {
-        self.events.borrow().clone()
+    pub fn snapshot(&self) -> Vec<RoutedFrame> {
+        self.frames.borrow().clone()
     }
 
-    /// Removes and returns all delivered events.
+    /// Removes and returns all delivered frames.
     #[must_use]
-    pub fn drain(&self) -> Vec<RoutedEvent> {
-        self.events.borrow_mut().drain(..).collect()
+    pub fn drain(&self) -> Vec<RoutedFrame> {
+        self.frames.borrow_mut().drain(..).collect()
     }
 }
 
@@ -37,8 +37,8 @@ pub(crate) struct MemorySink {
 }
 
 impl ConnectionSink for MemorySink {
-    fn send(&mut self, event: RoutedEvent) -> Result<(), ConnectionSendError> {
-        self.inbox.events.borrow_mut().push(event);
+    fn send(&mut self, frame: RoutedFrame) -> Result<(), ConnectionSendError> {
+        self.inbox.frames.borrow_mut().push(frame);
         Ok(())
     }
 }

@@ -9,8 +9,8 @@ use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 
 use tau_proto::{
-    Ack, CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, ExtAgentQuery,
-    LifecycleHello, LifecycleReady, LifecycleSubscribe, LogEventId, PROTOCOL_VERSION, ToolError,
+    Ack, CborValue, ClientKind, Event, EventSelector, ExtAgentQuery, Frame, FrameReader,
+    FrameWriter, Hello, LogEventId, Message, PROTOCOL_VERSION, Ready, Subscribe, ToolError,
     ToolInvoke, ToolRegister, ToolResult, ToolSideEffects, ToolSpec,
 };
 
@@ -29,59 +29,60 @@ where
     R: Read,
     W: Write,
 {
-    let mut reader = EventReader::new(BufReader::new(reader));
-    let mut writer = EventWriter::new(BufWriter::new(writer));
+    let mut reader = FrameReader::new(BufReader::new(reader));
+    let mut writer = FrameWriter::new(BufWriter::new(writer));
 
-    writer.write_event(&Event::LifecycleHello(LifecycleHello {
+    writer.write_frame(&Frame::Message(Message::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: "tau-ext-core-delegate".into(),
         client_kind: ClientKind::Tool,
-    }))?;
-    writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
         selectors: vec![
             EventSelector::Exact(tau_proto::EventName::TOOL_INVOKE),
             EventSelector::Exact(tau_proto::EventName::EXTENSION_AGENT_QUERY_RESULT),
-            EventSelector::Exact(tau_proto::EventName::LIFECYCLE_DISCONNECT),
         ],
-    }))?;
-    writer.write_event(&Event::ToolRegister(ToolRegister { tool: tool_spec() }))?;
-    writer.write_event(&Event::LifecycleReady(LifecycleReady {
+    })))?;
+    writer.write_frame(&Frame::Event(Event::ToolRegister(ToolRegister {
+        tool: tool_spec(),
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Ready(Ready {
         message: Some("core-delegate ready".to_owned()),
-    }))?;
+    })))?;
     writer.flush()?;
 
     let mut pending: HashMap<String, (tau_proto::ToolCallId, tau_proto::ToolName)> = HashMap::new();
     let mut next_query_id: u64 = 0;
 
     loop {
-        let Some(event) = reader.read_event()? else {
+        let Some(frame) = reader.read_frame()? else {
             break;
         };
-        let (log_id, inner) = event.peel_log();
+        let (log_id, inner) = frame.peel_log();
         match inner {
-            Event::ToolInvoke(invoke) => {
+            Frame::Event(Event::ToolInvoke(invoke)) => {
                 handle_tool_invoke(invoke, &mut pending, &mut next_query_id, &mut writer)?
             }
-            Event::ExtAgentQueryResult(result) => {
+            Frame::Event(Event::ExtAgentQueryResult(result)) => {
                 if let Some((call_id, tool_name)) = pending.remove(&result.query_id) {
                     if let Some(error) = result.error {
-                        writer.write_event(&Event::ToolError(ToolError {
+                        writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
                             call_id,
                             tool_name,
                             message: error,
                             details: None,
-                        }))?;
+                        })))?;
                     } else {
-                        writer.write_event(&Event::ToolResult(ToolResult {
+                        writer.write_frame(&Frame::Event(Event::ToolResult(ToolResult {
                             call_id,
                             tool_name,
                             result: CborValue::Text(result.text),
-                        }))?;
+                        })))?;
                     }
                     writer.flush()?;
                 }
             }
-            Event::LifecycleDisconnect(_) => break,
+            Frame::Message(Message::Disconnect(_)) => break,
             _ => {}
         }
         if let Some(id) = log_id {
@@ -95,15 +96,15 @@ fn handle_tool_invoke<W: Write>(
     invoke: ToolInvoke,
     pending: &mut HashMap<String, (tau_proto::ToolCallId, tau_proto::ToolName)>,
     next_query_id: &mut u64,
-    writer: &mut EventWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
     if invoke.tool_name.as_str() != TOOL_NAME {
-        writer.write_event(&Event::ToolError(ToolError {
+        writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             message: "unknown tool".to_owned(),
             details: None,
-        }))?;
+        })))?;
         writer.flush()?;
         return Ok(());
     }
@@ -111,12 +112,12 @@ fn handle_tool_invoke<W: Write>(
     let parsed = match parse_args(&invoke.arguments) {
         Ok(parsed) => parsed,
         Err(message) => {
-            writer.write_event(&Event::ToolError(ToolError {
+            writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 message,
                 details: Some(invoke.arguments),
-            }))?;
+            })))?;
             writer.flush()?;
             return Ok(());
         }
@@ -126,7 +127,7 @@ fn handle_tool_invoke<W: Write>(
     *next_query_id += 1;
     let call_id = invoke.call_id.clone();
     pending.insert(query_id.clone(), (invoke.call_id, invoke.tool_name));
-    writer.write_event(&Event::ExtAgentQuery(ExtAgentQuery {
+    writer.write_frame(&Frame::Event(Event::ExtAgentQuery(ExtAgentQuery {
         query_id,
         instruction: format!("{DELEGATE_PREFIX}{}", parsed.prompt),
         // Hand the parent call_id and the agent-supplied task name to
@@ -135,16 +136,16 @@ fn handle_tool_invoke<W: Write>(
         // render `delegate [name] …`.
         tool_call_id: Some(call_id),
         task_name: Some(parsed.task_name),
-    }))?;
+    })))?;
     writer.flush()?;
     Ok(())
 }
 
 fn ack_log_event<W: Write>(
     id: LogEventId,
-    writer: &mut EventWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
-    writer.write_event(&Event::Ack(Ack { up_to: id }))?;
+    writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
     writer.flush()?;
     Ok(())
 }

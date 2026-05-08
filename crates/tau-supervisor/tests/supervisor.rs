@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use tau_core::ToolRegistry;
 use tau_proto::{
-    CborValue, ClientKind, Event, LifecycleDisconnect, LifecycleHello, LifecycleReady,
-    PROTOCOL_VERSION, ToolInvoke, ToolRegister,
+    CborValue, ClientKind, Disconnect, Event, Frame, Hello, Message, PROTOCOL_VERSION, Ready,
+    ToolInvoke, ToolRegister,
 };
 use tau_supervisor::{ExtensionCommand, SupervisedChild};
 
@@ -37,19 +37,19 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         .expect("hello should arrive");
     assert_eq!(
         hello,
-        Event::LifecycleHello(LifecycleHello {
+        Frame::Message(Message::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: "test-child".into(),
             client_kind: ClientKind::Tool,
-        })
+        }))
     );
 
     child
-        .send(&Event::LifecycleHello(LifecycleHello {
+        .send(&Frame::Message(Message::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: "parent".into(),
             client_kind: ClientKind::Core,
-        }))
+        })))
         .expect("hello should be sent");
 
     let ready = child
@@ -58,9 +58,9 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         .expect("ready should arrive");
     assert_eq!(
         ready,
-        Event::LifecycleReady(LifecycleReady {
+        Frame::Message(Message::Ready(Ready {
             message: Some("ready".to_owned()),
-        })
+        }))
     );
     assert_eq!(
         child.ready_event(42.into(), Some(child.pid())),
@@ -77,22 +77,22 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         .expect("register should arrive");
     assert_eq!(
         register,
-        Event::ToolRegister(ToolRegister {
+        Frame::Event(Event::ToolRegister(ToolRegister {
             tool: tau_proto::ToolSpec {
                 name: "echo".into(),
                 description: Some("Echo test payloads".to_owned()),
                 parameters: None,
                 side_effects: tau_proto::ToolSideEffects::Pure,
             },
-        })
+        }))
     );
 
     child
-        .send(&Event::ToolInvoke(ToolInvoke {
+        .send(&Frame::Event(Event::ToolInvoke(ToolInvoke {
             call_id: "call-1".into(),
             tool_name: "echo".into(),
             arguments: CborValue::Text("hello".to_owned()),
-        }))
+        })))
         .expect("tool invoke should be sent");
     let result = child
         .recv_timeout(Duration::from_secs(1))
@@ -100,17 +100,17 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         .expect("tool result should arrive");
     assert_eq!(
         result,
-        Event::ToolResult(tau_proto::ToolResult {
+        Frame::Event(Event::ToolResult(tau_proto::ToolResult {
             call_id: "call-1".into(),
             tool_name: "echo".into(),
             result: CborValue::Text("hello".to_owned()),
-        })
+        }))
     );
 
     child
-        .send(&Event::LifecycleDisconnect(LifecycleDisconnect {
+        .send(&Frame::Message(Message::Disconnect(Disconnect {
             reason: Some("done".to_owned()),
-        }))
+        })))
         .expect("disconnect should be sent");
     let exit = child
         .wait_for_exit(Duration::from_secs(2))
@@ -144,11 +144,11 @@ fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
         .expect("hello should decode")
         .expect("hello should arrive");
     child
-        .send(&Event::LifecycleHello(LifecycleHello {
+        .send(&Frame::Message(Message::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: "parent".into(),
             client_kind: ClientKind::Core,
-        }))
+        })))
         .expect("hello should be sent");
     let _ready = child
         .recv_timeout(Duration::from_secs(1))
@@ -159,15 +159,15 @@ fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
         .expect("register should decode")
         .expect("register should arrive");
 
-    let Event::ToolRegister(register) = register else {
+    let Frame::Event(Event::ToolRegister(register)) = register else {
         panic!("expected tool register event");
     };
     registry.register(connection_id, register.tool);
 
     child
-        .send(&Event::LifecycleDisconnect(LifecycleDisconnect {
+        .send(&Frame::Message(Message::Disconnect(Disconnect {
             reason: Some("shutdown".to_owned()),
-        }))
+        })))
         .expect("disconnect should be sent");
     let exit = child
         .wait_for_exit(Duration::from_secs(2))
@@ -207,11 +207,11 @@ fn restarted_child_can_reregister_after_disconnect_cleanup() {
             .expect("hello should decode")
             .expect("hello should arrive");
         child
-            .send(&Event::LifecycleHello(LifecycleHello {
+            .send(&Frame::Message(Message::Hello(Hello {
                 protocol_version: PROTOCOL_VERSION,
                 client_name: "parent".into(),
                 client_kind: ClientKind::Core,
-            }))
+            })))
             .expect("hello should be sent");
         let _ready = child
             .recv_timeout(Duration::from_secs(1))
@@ -221,16 +221,16 @@ fn restarted_child_can_reregister_after_disconnect_cleanup() {
             .recv_timeout(Duration::from_secs(1))
             .expect("register should decode")
             .expect("register should arrive");
-        let Event::ToolRegister(register) = register else {
+        let Frame::Event(Event::ToolRegister(register)) = register else {
             panic!("expected tool register event");
         };
         registry.register(connection_id, register.tool);
         assert_eq!(registry.providers_for("echo").len(), 1);
 
         child
-            .send(&Event::LifecycleDisconnect(LifecycleDisconnect {
+            .send(&Frame::Message(Message::Disconnect(Disconnect {
                 reason: Some("restart".to_owned()),
-            }))
+            })))
             .expect("disconnect should be sent");
         let exit = child
             .wait_for_exit(Duration::from_secs(2))

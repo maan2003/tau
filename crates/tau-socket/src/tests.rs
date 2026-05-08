@@ -1,7 +1,7 @@
 use std::thread;
 use std::time::Duration;
 
-use tau_proto::{ClientKind, Event, LifecycleHello, PROTOCOL_VERSION};
+use tau_proto::{ClientKind, Frame, Hello, Message, PROTOCOL_VERSION};
 use tempfile::TempDir;
 
 use super::*;
@@ -17,11 +17,11 @@ fn later_attached_client_can_exchange_protocol_events_over_unix_socket() {
         move || {
             let mut client = SocketPeer::connect(socket_path).expect("client should connect");
             client
-                .send(&Event::LifecycleHello(LifecycleHello {
+                .send(&Frame::Message(Message::Hello(Hello {
                     protocol_version: PROTOCOL_VERSION,
                     client_name: "client".into(),
                     client_kind: ClientKind::Ui,
-                }))
+                })))
                 .expect("client hello should send");
             client
                 .recv_timeout(Duration::from_secs(1))
@@ -37,27 +37,27 @@ fn later_attached_client_can_exchange_protocol_events_over_unix_socket() {
         .expect("hello should arrive");
     assert_eq!(
         hello,
-        Event::LifecycleHello(LifecycleHello {
+        Frame::Message(Message::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: "client".into(),
             client_kind: ClientKind::Ui,
-        })
+        }))
     );
     server
-        .send(&Event::LifecycleHello(LifecycleHello {
+        .send(&Frame::Message(Message::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: "server".into(),
             client_kind: ClientKind::Core,
-        }))
+        })))
         .expect("server hello should send");
 
     let response = client_thread.join().expect("client thread should finish");
     assert_eq!(
         response,
-        Event::LifecycleHello(LifecycleHello {
+        Frame::Message(Message::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: "server".into(),
             client_kind: ClientKind::Core,
-        })
+        }))
     );
 }

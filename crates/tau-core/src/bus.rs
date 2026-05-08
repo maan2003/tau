@@ -4,11 +4,11 @@
 
 use std::collections::HashMap;
 
-use tau_proto::{ConnectionId, Event, EventSelector, LifecycleSubscribe};
+use tau_proto::{ConnectionId, EventSelector, Frame, Message};
 
 use crate::connection::{
     Connection, ConnectionMetadata, ConnectionSink, DeliveryFailure, RouteError, RouteReport,
-    RoutedEvent, VisibilityFilter,
+    RoutedFrame, VisibilityFilter,
 };
 use crate::policy::{DefaultSubscriptionPolicy, SubscriptionPolicy};
 
@@ -22,10 +22,10 @@ impl SubscriptionSet {
         self.selectors = selectors;
     }
 
-    pub(crate) fn matches(&self, event: &Event) -> bool {
+    pub(crate) fn matches(&self, frame: &Frame) -> bool {
         self.selectors
             .iter()
-            .any(|selector| selector_matches(selector, event))
+            .any(|selector| selector_matches(selector, frame))
     }
 
     pub(crate) fn selectors(&self) -> &[EventSelector] {
@@ -33,12 +33,14 @@ impl SubscriptionSet {
     }
 }
 
-fn selector_matches(selector: &EventSelector, event: &Event) -> bool {
+pub(crate) fn selector_matches(selector: &EventSelector, frame: &Frame) -> bool {
     // For event-log deliveries, match against the inner event's name —
-    // subscribers like to subscribe to "session.started", not "wire.log_event".
-    let target_name = match event {
-        Event::LogEvent(env) => env.event.name(),
-        _ => event.name(),
+    // subscribers subscribe to "session.started", not the LogEvent envelope.
+    let target_name = match frame {
+        Frame::Message(Message::LogEvent(env)) => env.event.name(),
+        Frame::Event(event) => event.name(),
+        // Other messages are point-to-point control plane and aren't subscribable.
+        Frame::Message(_) => return false,
     };
     match selector {
         EventSelector::Exact(name) => *name == target_name,
@@ -173,31 +175,27 @@ impl EventBus {
             .map(|entry| entry.subscriptions.selectors())
     }
 
-    /// Broadcasts one event to subscribed and visible clients.
-    pub fn publish(&mut self, event: Event) -> RouteReport {
-        self.publish_from(None, event)
+    /// Broadcasts one frame to subscribed and visible clients.
+    pub fn publish(&mut self, frame: Frame) -> RouteReport {
+        self.publish_from(None, frame)
     }
 
-    /// Broadcasts one event from a specific source connection.
-    pub fn publish_from(&mut self, source_id: Option<&str>, event: Event) -> RouteReport {
-        if let Some(source_id) = source_id {
-            self.maybe_update_subscriptions(source_id, &event);
-        }
-
-        let routed_event = RoutedEvent::new(source_id.map(ConnectionId::from), event);
+    /// Broadcasts one frame from a specific source connection.
+    pub fn publish_from(&mut self, source_id: Option<&str>, frame: Frame) -> RouteReport {
+        let routed = RoutedFrame::new(source_id.map(ConnectionId::from), frame);
         let mut report = RouteReport::default();
 
         for (connection_id, entry) in &mut self.connections {
-            if !entry.subscriptions.matches(&routed_event.event) {
+            if !entry.subscriptions.matches(&routed.frame) {
                 report.skipped_by_subscription.push(connection_id.clone());
                 continue;
             }
-            if !entry.visibility_filter.allows(&routed_event) {
+            if !entry.visibility_filter.allows(&routed) {
                 report.blocked_by_filter.push(connection_id.clone());
                 continue;
             }
 
-            match entry.sink.send(routed_event.clone()) {
+            match entry.sink.send(routed.clone()) {
                 Ok(()) => report.delivered_to.push(connection_id.clone()),
                 Err(error) => report.failed_deliveries.push(DeliveryFailure {
                     connection_id: connection_id.clone(),
@@ -209,14 +207,14 @@ impl EventBus {
         report
     }
 
-    /// Sends one directed event to a specific connection.
+    /// Sends one directed frame to a specific connection.
     pub fn send_to(
         &mut self,
         target_id: &str,
         source_id: Option<&str>,
-        event: Event,
+        frame: Frame,
     ) -> Result<RouteReport, RouteError> {
-        let routed_event = RoutedEvent::new(source_id.map(ConnectionId::from), event);
+        let routed = RoutedFrame::new(source_id.map(ConnectionId::from), frame);
         let entry =
             self.connections
                 .get_mut(target_id)
@@ -225,12 +223,12 @@ impl EventBus {
                 })?;
 
         let mut report = RouteReport::default();
-        if !entry.visibility_filter.allows(&routed_event) {
+        if !entry.visibility_filter.allows(&routed) {
             report.blocked_by_filter.push(target_id.into());
             return Ok(report);
         }
 
-        match entry.sink.send(routed_event) {
+        match entry.sink.send(routed) {
             Ok(()) => report.delivered_to.push(target_id.into()),
             Err(error) => report.failed_deliveries.push(DeliveryFailure {
                 connection_id: target_id.into(),
@@ -244,15 +242,5 @@ impl EventBus {
     fn allocate_connection_id(&mut self) -> ConnectionId {
         self.next_connection_id += 1;
         format!("conn-{}", self.next_connection_id).into()
-    }
-
-    fn maybe_update_subscriptions(&mut self, source_id: &str, event: &Event) {
-        let Event::LifecycleSubscribe(LifecycleSubscribe { selectors }) = event else {
-            return;
-        };
-
-        if let Some(entry) = self.connections.get_mut(source_id) {
-            entry.subscriptions.replace(selectors.clone());
-        }
     }
 }

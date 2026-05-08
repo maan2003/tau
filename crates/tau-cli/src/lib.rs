@@ -22,8 +22,8 @@ mod built_info {
 }
 
 use tau_proto::{
-    CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleDisconnect,
-    LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION, UiPromptDraft, UiPromptSubmitted,
+    CborValue, ClientKind, Disconnect, Event, EventSelector, Frame, FrameReader, FrameWriter,
+    Hello, Message, PROTOCOL_VERSION, Subscribe, UiPromptDraft, UiPromptSubmitted,
 };
 
 /// Shared writer handle: the input loop and the prompt-draft debounce
@@ -33,15 +33,20 @@ use tau_proto::{
 /// instead of risking a long draft burst interleaving with a
 /// `UiPromptSubmitted` mid-byte. Contention is essentially zero —
 /// debounce fires at most once per second per typing burst.
-type WriterHandle = Arc<Mutex<EventWriter<BufWriter<UnixStream>>>>;
+type WriterHandle = Arc<Mutex<FrameWriter<BufWriter<UnixStream>>>>;
 
-/// Lock the writer, write one event and flush. Returns the underlying
+/// Lock the writer, write one frame and flush. Returns the underlying
 /// `io::Error` on failure so callers can use `?` or discard with
 /// `let _ = …`.
-fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
+fn send_frame(writer: &WriterHandle, frame: &Frame) -> io::Result<()> {
     let mut w = writer.lock().expect("writer mutex poisoned");
-    w.write_event(event).map_err(io::Error::other)?;
+    w.write_frame(frame).map_err(io::Error::other)?;
     w.flush()
+}
+
+/// Convenience wrapper around [`send_frame`] for [`Event`] payloads.
+fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
+    send_frame(writer, &Frame::Event(event.clone()))
 }
 
 /// Debounce period for `UiPromptDraft` emission while the user is
@@ -451,22 +456,22 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     let stream = UnixStream::connect(&socket_path)?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "connected to harness daemon socket");
     let read_stream = stream.try_clone()?;
-    let writer: WriterHandle = Arc::new(Mutex::new(EventWriter::new(BufWriter::new(stream))));
+    let writer: WriterHandle = Arc::new(Mutex::new(FrameWriter::new(BufWriter::new(stream))));
 
     // Handshake.
-    send_event(
+    send_frame(
         &writer,
-        &Event::LifecycleHello(LifecycleHello {
+        &Frame::Message(Message::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: "tau-chat".into(),
             client_kind: ClientKind::Ui,
-        }),
+        })),
     )
     .map_err(CliError::Io)?;
-    tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent lifecycle hello");
-    send_event(
+    tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent hello");
+    send_frame(
         &writer,
-        &Event::LifecycleSubscribe(LifecycleSubscribe {
+        &Frame::Message(Message::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Prefix("ui.".to_owned()),
                 EventSelector::Prefix("session.".to_owned()),
@@ -477,10 +482,10 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
                 EventSelector::Prefix("shell.".to_owned()),
                 EventSelector::Prefix("term.".to_owned()),
             ],
-        }),
+        })),
     )
     .map_err(CliError::Io)?;
-    tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent lifecycle subscribe");
+    tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent subscribe");
 
     // Background socket reader — decodes events and sends them to
     // a channel as `RendererCmd::Remote`. The input thread pushes
@@ -490,15 +495,22 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     let (event_tx, event_rx) = mpsc::channel::<RendererCmd>();
     let socket_event_tx = event_tx.clone();
     let _socket_reader = std::thread::spawn(move || {
-        let mut reader = EventReader::new(BufReader::new(read_stream));
+        let mut reader = FrameReader::new(BufReader::new(read_stream));
         loop {
-            match reader.read_event() {
-                Ok(Some(event)) => {
+            match reader.read_frame() {
+                Ok(Some(frame)) => {
                     // Peel the LogEvent wrapper so downstream renderers
                     // see the inner payload directly. The UI is a
                     // best-effort consumer and does not ack.
-                    let (_log_id, inner) = event.peel_log();
-                    if socket_event_tx.send(RendererCmd::Remote(inner)).is_err() {
+                    let (_log_id, inner) = frame.peel_log();
+                    let cmd = match inner {
+                        Frame::Event(event) => RendererCmd::Remote(event),
+                        Frame::Message(Message::Disconnect(d)) => {
+                            RendererCmd::RemoteDisconnect(d.reason)
+                        }
+                        Frame::Message(_) => continue,
+                    };
+                    if socket_event_tx.send(cmd).is_err() {
                         return;
                     }
                 }
@@ -599,6 +611,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         while let Ok(cmd) = renderer_rx.recv() {
             match cmd {
                 RendererCmd::Remote(event) => renderer.handle(&event),
+                RendererCmd::RemoteDisconnect(reason) => renderer.handle_disconnect(reason),
                 RendererCmd::ToggleDiffs => renderer.toggle_diffs_expanded(),
                 RendererCmd::ToggleThinking => renderer.toggle_thinking_visible(),
                 RendererCmd::ToggleCacheStats => renderer.toggle_cache_stats_visible(),
@@ -651,11 +664,11 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         InputLoopExit::Quit => "quit",
         InputLoopExit::Detach => "detach",
     };
-    let _ = send_event(
+    let _ = send_frame(
         &writer,
-        &Event::LifecycleDisconnect(LifecycleDisconnect {
+        &Frame::Message(Message::Disconnect(Disconnect {
             reason: Some(reason.to_owned()),
-        }),
+        })),
     );
 
     // Drop the writer (closes the write half) which will cause the
@@ -705,6 +718,8 @@ enum RendererCmd {
     ToggleThinking,
     ToggleCacheStats,
     Remote(Event),
+    /// The harness sent a `Disconnect` message over the wire.
+    RemoteDisconnect(Option<String>),
     ToggleDiffs,
 }
 
@@ -2293,6 +2308,14 @@ impl EventRenderer {
         format!("{} ", self.submitted_prompt_symbol)
     }
 
+    fn handle_disconnect(&mut self, reason: Option<String>) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+        let reason = reason.as_deref().unwrap_or("disconnected");
+        self.handle
+            .print_output(themed_block(&self.theme, names::SYSTEM_DISCONNECT, reason));
+    }
+
     fn handle(&mut self, event: &Event) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
@@ -2790,14 +2813,6 @@ impl EventRenderer {
                     .collect();
                 self.completion_data
                     .set_arg_completions(tau_cli_term::CommandName::new("/effort"), items);
-            }
-            Event::LifecycleDisconnect(disconnect) => {
-                let reason = disconnect.reason.as_deref().unwrap_or("disconnected");
-                self.handle.print_output(themed_block(
-                    &self.theme,
-                    names::SYSTEM_DISCONNECT,
-                    reason,
-                ));
             }
             _ => {}
         }

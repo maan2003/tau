@@ -1,8 +1,6 @@
 use std::time::Duration;
 
-use tau_proto::{
-    ClientKind, Event, EventSelector, LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION,
-};
+use tau_proto::{ClientKind, EventSelector, Frame, Hello, Message, PROTOCOL_VERSION, Subscribe};
 use tau_socket::SocketPeer;
 use tau_test_support::TestRuntime;
 
@@ -44,24 +42,27 @@ fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
     let mut denied_client =
         SocketPeer::connect(&runtime.socket_path).expect("denied client should connect");
     denied_client
-        .send(&Event::LifecycleHello(LifecycleHello {
+        .send(&Frame::Message(Message::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: "denied-client".into(),
             client_kind: ClientKind::Ui,
-        }))
+        })))
         .expect("hello should send");
     denied_client
-        .send(&Event::LifecycleSubscribe(LifecycleSubscribe {
-            selectors: vec![EventSelector::Prefix("lifecycle.".to_owned())],
-        }))
+        .send(&Frame::Message(Message::Subscribe(Subscribe {
+            // `unknown.` is not an allowed event family — sockets may
+            // only subscribe to the closed-list of well-known categories
+            // declared in `DefaultSubscriptionPolicy::evaluate`.
+            selectors: vec![EventSelector::Prefix("unknown.".to_owned())],
+        })))
         .expect("forbidden subscribe should send");
 
     let denial = denied_client
         .recv_timeout(Duration::from_secs(2))
         .expect("daemon should reply to denied client")
         .expect("disconnect should arrive");
-    let Event::LifecycleDisconnect(disconnect) = denial else {
-        panic!("expected lifecycle disconnect");
+    let Frame::Message(Message::Disconnect(disconnect)) = denial else {
+        panic!("expected disconnect message, got {denial:?}");
     };
     let reason = disconnect
         .reason

@@ -212,11 +212,11 @@ impl ToolRegistry {
             .send_to(
                 &provider_connection_id,
                 Some(requester_id),
-                Event::ToolInvoke(tau_proto::ToolInvoke {
+                tau_proto::Frame::Event(Event::ToolInvoke(tau_proto::ToolInvoke {
                     call_id: request.call_id,
                     tool_name: request.tool_name,
                     arguments: request.arguments,
-                }),
+                })),
             )
             .map_err(ToolRouteError::Route)?;
 

@@ -5,8 +5,8 @@ use rand::Rng;
 #[cfg(test)]
 use rand::{SeedableRng, rngs::StdRng};
 use tau_proto::{
-    ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleHello, LifecycleReady,
-    LifecycleSubscribe, PROTOCOL_VERSION, ToolError, ToolRegister, ToolResult, ToolSideEffects,
+    ClientKind, Event, EventSelector, Frame, FrameReader, FrameWriter, Hello, Message,
+    PROTOCOL_VERSION, Ready, Subscribe, ToolError, ToolRegister, ToolResult, ToolSideEffects,
     ToolSpec,
 };
 
@@ -30,21 +30,18 @@ where
     W: Write,
     T: Rng + ?Sized,
 {
-    let mut reader = EventReader::new(BufReader::new(reader));
-    let mut writer = EventWriter::new(BufWriter::new(writer));
+    let mut reader = FrameReader::new(BufReader::new(reader));
+    let mut writer = FrameWriter::new(BufWriter::new(writer));
 
-    writer.write_event(&Event::LifecycleHello(LifecycleHello {
+    writer.write_frame(&Frame::Message(Message::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: "tau-ext-test-dummy".into(),
         client_kind: ClientKind::Tool,
-    }))?;
-    writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
-        selectors: vec![
-            EventSelector::Exact(tau_proto::EventName::TOOL_INVOKE),
-            EventSelector::Exact(tau_proto::EventName::LIFECYCLE_DISCONNECT),
-        ],
-    }))?;
-    writer.write_event(&Event::ToolRegister(ToolRegister {
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
+        selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_INVOKE)],
+    })))?;
+    writer.write_frame(&Frame::Event(Event::ToolRegister(ToolRegister {
         tool: ToolSpec {
             name: RESTART_TEST_DUMMY_TOOL_NAME.into(),
             description: Some(
@@ -58,40 +55,42 @@ where
             })),
             side_effects: ToolSideEffects::Mutating,
         },
-    }))?;
-    writer.write_event(&Event::LifecycleReady(LifecycleReady {
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Ready(Ready {
         message: Some("test dummy tools ready".to_owned()),
-    }))?;
+    })))?;
     writer.flush()?;
 
     loop {
-        let Some(event) = reader.read_event()? else {
+        let Some(frame) = reader.read_frame()? else {
             break;
         };
-        let (_, inner) = event.peel_log();
+        let (_, inner) = frame.peel_log();
         match inner {
-            Event::ToolInvoke(invoke) if invoke.tool_name == RESTART_TEST_DUMMY_TOOL_NAME => {
+            Frame::Event(Event::ToolInvoke(invoke))
+                if invoke.tool_name == RESTART_TEST_DUMMY_TOOL_NAME =>
+            {
                 if rng.gen_bool(0.5) {
                     writer.flush()?;
                     return Ok(());
                 }
-                writer.write_event(&Event::ToolError(ToolError {
+                writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
                     message: "restarting failed".to_owned(),
                     details: None,
-                }))?;
+                })))?;
                 writer.flush()?;
             }
-            Event::ToolInvoke(invoke) => {
-                writer.write_event(&Event::ToolResult(ToolResult {
+            Frame::Event(Event::ToolInvoke(invoke)) => {
+                writer.write_frame(&Frame::Event(Event::ToolResult(ToolResult {
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
                     result: tau_proto::CborValue::Map(Vec::new()),
-                }))?;
+                })))?;
                 writer.flush()?;
             }
-            Event::LifecycleDisconnect(_) => break,
+            Frame::Message(Message::Disconnect(_)) => break,
             _ => {}
         }
     }

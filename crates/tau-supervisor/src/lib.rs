@@ -14,8 +14,8 @@ use std::{fmt, thread};
 
 use tau_core::{ToolRegistry, ToolRouteError};
 use tau_proto::{
-    DecodeError, Event, EventReader, EventWriter, ExtensionExited, ExtensionName, ExtensionReady,
-    ExtensionStarting, ToolName,
+    DecodeError, Event, ExtensionExited, ExtensionName, ExtensionReady, ExtensionStarting, Frame,
+    FrameReader, FrameWriter, ToolName,
 };
 
 /// One configured supervised extension command.
@@ -129,8 +129,8 @@ impl std::error::Error for SupervisionError {
 pub struct SupervisedChild {
     command: ExtensionCommand,
     child: Child,
-    stdin: EventWriter<BufWriter<ChildStdin>>,
-    stdout_events: Receiver<Result<Event, DecodeError>>,
+    stdin: FrameWriter<BufWriter<ChildStdin>>,
+    stdout_frames: Receiver<Result<Frame, DecodeError>>,
 }
 
 impl SupervisedChild {
@@ -146,13 +146,13 @@ impl SupervisedChild {
 
         let stdin = child.stdin.take().ok_or(SupervisionError::MissingStdin)?;
         let stdout = child.stdout.take().ok_or(SupervisionError::MissingStdout)?;
-        let stdout_events = spawn_stdout_reader(stdout);
+        let stdout_frames = spawn_stdout_reader(stdout);
 
         Ok(Self {
             command,
             child,
-            stdin: EventWriter::new(BufWriter::new(stdin)),
-            stdout_events,
+            stdin: FrameWriter::new(BufWriter::new(stdin)),
+            stdout_frames,
         })
     }
 
@@ -182,19 +182,19 @@ impl SupervisedChild {
         })
     }
 
-    /// Sends one protocol event to the child over stdin.
-    pub fn send(&mut self, event: &Event) -> Result<(), SupervisionError> {
+    /// Sends one protocol frame to the child over stdin.
+    pub fn send(&mut self, frame: &Frame) -> Result<(), SupervisionError> {
         self.stdin
-            .write_event(event)
+            .write_frame(frame)
             .map_err(SupervisionError::Encode)?;
         self.stdin.flush().map_err(SupervisionError::Flush)
     }
 
-    /// Reads one protocol event from the child, or returns `Ok(None)` on
+    /// Reads one protocol frame from the child, or returns `Ok(None)` on
     /// timeout.
-    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Event>, SupervisionError> {
-        match self.stdout_events.recv_timeout(timeout) {
-            Ok(Ok(event)) => Ok(Some(event)),
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, SupervisionError> {
+        match self.stdout_frames.recv_timeout(timeout) {
+            Ok(Ok(frame)) => Ok(Some(frame)),
             Ok(Err(error)) if is_unexpected_eof(&error) => Ok(None),
             Ok(Err(error)) => Err(SupervisionError::Decode(error)),
             Err(RecvTimeoutError::Timeout) => Ok(None),
@@ -270,14 +270,14 @@ impl Drop for SupervisedChild {
     }
 }
 
-fn spawn_stdout_reader(stdout: std::process::ChildStdout) -> Receiver<Result<Event, DecodeError>> {
+fn spawn_stdout_reader(stdout: std::process::ChildStdout) -> Receiver<Result<Frame, DecodeError>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let mut reader = EventReader::new(BufReader::new(stdout));
+        let mut reader = FrameReader::new(BufReader::new(stdout));
         loop {
-            match reader.read_event() {
-                Ok(Some(event)) => {
-                    if sender.send(Ok(event)).is_err() {
+            match reader.read_frame() {
+                Ok(Some(frame)) => {
+                    if sender.send(Ok(frame)).is_err() {
                         return;
                     }
                 }

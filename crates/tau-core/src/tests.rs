@@ -6,16 +6,16 @@ use std::sync::Arc;
 use std::thread;
 
 use tau_proto::{
-    AgentResponseFinished, CborValue, ClientKind, ConnectionId, Event, EventName, EventReader,
-    EventSelector, EventWriter, LifecycleSubscribe, SessionPromptCreated, ToolRegister,
-    ToolRequest, ToolResult, ToolSideEffects, ToolSpec, UiNavigateTree, UiPromptSubmitted,
+    AgentResponseFinished, CborValue, ClientKind, ConnectionId, Event, EventName, EventSelector,
+    Frame, FrameReader, FrameWriter, SessionPromptCreated, ToolRegister, ToolRequest, ToolResult,
+    ToolSideEffects, ToolSpec, UiNavigateTree, UiPromptSubmitted,
 };
 use tempfile::TempDir;
 
 use crate::bus::EventBus;
 use crate::connection::{
     Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
-    RouteError, RoutedEvent,
+    RouteError, RoutedFrame,
 };
 use crate::event_log::EventLog;
 use crate::memory::{MemoryInbox, MemorySink, memory_connection};
@@ -70,14 +70,14 @@ fn store_agent_message(store: &mut SessionStore, session_id: &str, text: &str) -
 }
 
 struct StreamSink {
-    writer: Rc<RefCell<EventWriter<BufWriter<UnixStream>>>>,
+    writer: Rc<RefCell<FrameWriter<BufWriter<UnixStream>>>>,
 }
 
 impl ConnectionSink for StreamSink {
-    fn send(&mut self, event: RoutedEvent) -> Result<(), ConnectionSendError> {
+    fn send(&mut self, routed: RoutedFrame) -> Result<(), ConnectionSendError> {
         let mut writer = self.writer.borrow_mut();
         writer
-            .write_event(&event.event)
+            .write_frame(&routed.frame)
             .map_err(|error| ConnectionSendError::new(error.to_string()))?;
         writer
             .flush()
@@ -89,7 +89,7 @@ fn stream_connection(
     name: &str,
     kind: ClientKind,
     stream: UnixStream,
-) -> (Connection, EventReader<BufReader<UnixStream>>) {
+) -> (Connection, FrameReader<BufReader<UnixStream>>) {
     let writer_stream = stream
         .try_clone()
         .expect("stream clone for writer should succeed");
@@ -101,12 +101,12 @@ fn stream_connection(
             origin: ConnectionOrigin::InMemory,
         },
         Box::new(StreamSink {
-            writer: Rc::new(RefCell::new(EventWriter::new(BufWriter::new(
+            writer: Rc::new(RefCell::new(FrameWriter::new(BufWriter::new(
                 writer_stream,
             )))),
         }),
     );
-    let reader = EventReader::new(BufReader::new(stream));
+    let reader = FrameReader::new(BufReader::new(stream));
     (connection, reader)
 }
 
@@ -127,11 +127,11 @@ fn subscribed_clients_only_receive_matching_events() {
     bus.set_subscriptions(&ui_id, vec![EventSelector::Prefix("tool.".to_owned())])
         .expect("ui subscriptions should be stored");
 
-    let report = bus.publish(Event::UiPromptSubmitted(UiPromptSubmitted {
+    let report = bus.publish(Frame::Event(Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hello".to_owned(),
         originator: tau_proto::PromptOriginator::User,
-    }));
+    })));
 
     assert_eq!(report.delivered_to, vec![agent_id.clone()]);
     assert_eq!(report.skipped_by_subscription, vec![ui_id.clone()]);
@@ -140,40 +140,16 @@ fn subscribed_clients_only_receive_matching_events() {
 }
 
 #[test]
-fn publish_from_updates_subscription_registry_from_lifecycle_subscribe() {
-    let mut bus = EventBus::new();
-
-    let (connection, inbox) = memory_connection("agent", ClientKind::Agent);
-    let connection_id = bus.connect(connection);
-    bus.set_subscriptions(
-        &connection_id,
-        vec![EventSelector::Exact(EventName::LIFECYCLE_SUBSCRIBE)],
-    )
-    .expect("initial subscriptions should be stored");
-
-    let report = bus.publish_from(
-        Some(&connection_id),
-        Event::LifecycleSubscribe(LifecycleSubscribe {
-            selectors: vec![EventSelector::Exact(EventName::UI_PROMPT_SUBMITTED)],
-        }),
-    );
-
-    assert_eq!(report.delivered_to, Vec::<ConnectionId>::new());
-    assert_eq!(
-        bus.subscriptions(&connection_id),
-        Some([EventSelector::Exact(EventName::UI_PROMPT_SUBMITTED)].as_slice())
-    );
-    assert!(inbox.snapshot().is_empty());
-}
-
-#[test]
 fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
     let mut bus = EventBus::new();
 
     let (ui_connection, ui_inbox) = memory_connection("ui", ClientKind::Ui);
     let filtered_connection =
-        ui_connection.with_visibility_filter(Box::new(|event: &RoutedEvent| {
-            event.event.name() == EventName::TOOL_INVOKE
+        ui_connection.with_visibility_filter(Box::new(|routed: &RoutedFrame| {
+            matches!(
+                &routed.frame,
+                Frame::Event(event) if event.name() == EventName::TOOL_INVOKE
+            )
         }));
     let ui_id = bus.connect(filtered_connection);
 
@@ -186,7 +162,7 @@ fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
         .send_to(
             &ui_id,
             Some(&tool_id),
-            Event::AgentResponseFinished(AgentResponseFinished {
+            Frame::Event(Event::AgentResponseFinished(AgentResponseFinished {
                 session_prompt_id: "sp-1".into(),
                 text: Some("hidden".to_owned()),
                 tool_calls: Vec::new(),
@@ -194,7 +170,7 @@ fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
                 cached_tokens: None,
                 thinking: None,
                 originator: tau_proto::PromptOriginator::User,
-            }),
+            })),
         )
         .expect("directed route should succeed");
     assert_eq!(blocked.blocked_by_filter, vec![ui_id.clone()]);
@@ -204,11 +180,11 @@ fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
         .send_to(
             &ui_id,
             Some(&tool_id),
-            Event::ToolInvoke(tau_proto::ToolInvoke {
+            Frame::Event(Event::ToolInvoke(tau_proto::ToolInvoke {
                 call_id: "call-1".into(),
                 tool_name: "echo".into(),
                 arguments: CborValue::Null,
-            }),
+            })),
         )
         .expect("directed route should succeed");
     assert_eq!(delivered.delivered_to, vec![ui_id.clone()]);
@@ -230,22 +206,24 @@ fn connection_abstraction_is_transport_independent_for_in_memory_clients() {
     bus.set_subscriptions(&tool_id, vec![EventSelector::Prefix("tool.".to_owned())])
         .expect("tool subscriptions should be stored");
 
-    let first_report = bus.publish(Event::ToolResult(tau_proto::ToolResult {
+    let first_report = bus.publish(Frame::Event(Event::ToolResult(tau_proto::ToolResult {
         call_id: "call-1".into(),
         tool_name: "echo".into(),
         result: CborValue::Text("done".to_owned()),
-    }));
+    })));
     assert_eq!(first_report.delivered_to, vec![tool_id.clone()]);
 
-    let second_report = bus.publish(Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-1".into(),
-        text: Some("done".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        thinking: None,
-        originator: tau_proto::PromptOriginator::User,
-    }));
+    let second_report = bus.publish(Frame::Event(Event::AgentResponseFinished(
+        AgentResponseFinished {
+            session_prompt_id: "sp-1".into(),
+            text: Some("done".to_owned()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            thinking: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+    )));
     assert_eq!(second_report.delivered_to, vec![agent_id.clone()]);
 
     assert_eq!(tool_inbox.snapshot().len(), 1);
@@ -296,12 +274,12 @@ fn provider_can_register_tool_and_receive_invocations() {
     assert_eq!(delivered_events.len(), 1);
     assert_eq!(delivered_events[0].source_id, Some(agent_id));
     assert_eq!(
-        delivered_events[0].event,
-        Event::ToolInvoke(tau_proto::ToolInvoke {
+        delivered_events[0].frame,
+        Frame::Event(Event::ToolInvoke(tau_proto::ToolInvoke {
             call_id: "call-1".into(),
             tool_name: "echo".into(),
             arguments: CborValue::Text("hello".to_owned()),
-        })
+        }))
     );
 }
 
@@ -654,47 +632,68 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
     )
     .expect("ui subscription should be stored");
 
+    // Read and process the agent's startup frames (hello, subscribe, ready).
+    // Subscribe is now a `Message`, not an `Event`, so we install
+    // subscriptions directly via `set_subscriptions` rather than
+    // republishing the message.
     let agent_hello = agent_reader
-        .read_event()
+        .read_frame()
         .expect("read")
         .expect("agent hello should arrive");
-    assert!(matches!(agent_hello, Event::LifecycleHello(_)));
-    let _ = bus.publish_from(Some(&agent_id), agent_hello);
+    assert!(matches!(
+        agent_hello,
+        Frame::Message(tau_proto::Message::Hello(_))
+    ));
     let agent_subscribe = agent_reader
-        .read_event()
+        .read_frame()
         .expect("read")
         .expect("agent subscribe should arrive");
-    let _ = bus.publish_from(Some(&agent_id), agent_subscribe);
+    if let Frame::Message(tau_proto::Message::Subscribe(sub)) = agent_subscribe {
+        bus.set_subscriptions(&agent_id, sub.selectors)
+            .expect("agent subscriptions should be stored");
+    } else {
+        panic!("expected agent subscribe message");
+    }
     let agent_ready = agent_reader
-        .read_event()
+        .read_frame()
         .expect("read")
         .expect("agent ready should arrive");
-    assert!(matches!(agent_ready, Event::LifecycleReady(_)));
+    assert!(matches!(
+        agent_ready,
+        Frame::Message(tau_proto::Message::Ready(_))
+    ));
 
     let tool_hello = tool_reader
-        .read_event()
+        .read_frame()
         .expect("read")
         .expect("tool hello should arrive");
-    assert!(matches!(tool_hello, Event::LifecycleHello(_)));
-    let _ = bus.publish_from(Some(&tool_id), tool_hello);
+    assert!(matches!(
+        tool_hello,
+        Frame::Message(tau_proto::Message::Hello(_))
+    ));
     let tool_subscribe = tool_reader
-        .read_event()
+        .read_frame()
         .expect("read")
         .expect("tool subscribe should arrive");
-    let _ = bus.publish_from(Some(&tool_id), tool_subscribe);
+    if let Frame::Message(tau_proto::Message::Subscribe(sub)) = tool_subscribe {
+        bus.set_subscriptions(&tool_id, sub.selectors)
+            .expect("tool subscriptions should be stored");
+    } else {
+        panic!("expected tool subscribe message");
+    }
     let mut registered_tool_names = Vec::new();
     loop {
-        let startup_event = tool_reader
-            .read_event()
+        let startup_frame = tool_reader
+            .read_frame()
             .expect("read")
             .expect("tool startup event should arrive");
-        match startup_event {
-            Event::ToolRegister(tool_register) => {
+        match startup_frame {
+            Frame::Event(Event::ToolRegister(tool_register)) => {
                 let register_report = registry.register(&tool_id, tool_register.tool.clone());
                 assert!(register_report.warnings.is_empty());
                 registered_tool_names.push(tool_register.tool.name);
             }
-            Event::LifecycleReady(_) => break,
+            Frame::Message(tau_proto::Message::Ready(_)) => break,
             _ => panic!("unexpected tool startup event"),
         }
     }
@@ -724,15 +723,19 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
         thinking_summary: tau_proto::ThinkingSummary::Off,
         originator: tau_proto::PromptOriginator::User,
     };
-    let _ = bus.send_to(&agent_id, None, Event::SessionPromptCreated(prompt));
+    let _ = bus.send_to(
+        &agent_id,
+        None,
+        Frame::Event(Event::SessionPromptCreated(prompt)),
+    );
 
     // Without a model, the agent should report an error.
     let response = loop {
-        let ev = agent_reader
-            .read_event()
+        let frame = agent_reader
+            .read_frame()
             .expect("read")
             .expect("agent event should arrive");
-        if let Event::AgentResponseFinished(r) = ev {
+        if let Frame::Event(Event::AgentResponseFinished(r)) = frame {
             break r;
         }
     };
@@ -742,17 +745,17 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
     bus.send_to(
         &agent_id,
         Some(&ui_id),
-        Event::LifecycleDisconnect(tau_proto::LifecycleDisconnect {
+        Frame::Message(tau_proto::Message::Disconnect(tau_proto::Disconnect {
             reason: Some("test complete".to_owned()),
-        }),
+        })),
     )
     .expect("agent disconnect should route");
     bus.send_to(
         &tool_id,
         Some(&ui_id),
-        Event::LifecycleDisconnect(tau_proto::LifecycleDisconnect {
+        Frame::Message(tau_proto::Message::Disconnect(tau_proto::Disconnect {
             reason: Some("test complete".to_owned()),
-        }),
+        })),
     )
     .expect("tool disconnect should route");
 

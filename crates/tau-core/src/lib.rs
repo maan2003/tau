@@ -19,7 +19,7 @@ mod tests;
 pub use bus::EventBus;
 pub use connection::{
     AllowAll, Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError,
-    ConnectionSink, DeliveryFailure, RouteError, RouteReport, RoutedEvent, VisibilityFilter,
+    ConnectionSink, DeliveryFailure, RouteError, RouteReport, RoutedFrame, VisibilityFilter,
 };
 pub use event_log::{EventLog, EventSeq, LogEntry};
 pub use memory::{MemoryInbox, memory_connection};

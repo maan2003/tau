@@ -17,8 +17,8 @@ use backon::BackoffBuilder;
 use tau_config::settings::{self, ModelRegistry, ProviderConfig};
 use tau_proto::{
     Ack, AgentPromptSubmitted, AgentResponseFinished, AgentResponseUpdated, ClientKind, Event,
-    EventName, EventReader, EventSelector, EventWriter, LifecycleHello, LifecycleReady,
-    LifecycleSubscribe, PROTOCOL_VERSION,
+    EventName, EventSelector, Frame, FrameReader, FrameWriter, Hello, Message, PROTOCOL_VERSION,
+    Ready, Subscribe,
 };
 
 /// `tracing` target for events emitted from the agent. Matches the
@@ -43,38 +43,35 @@ where
     R: Read + Send + 'static,
     W: Write,
 {
-    let mut writer = EventWriter::new(BufWriter::new(writer));
+    let mut writer = FrameWriter::new(BufWriter::new(writer));
 
     let model_registry = settings::load_models().unwrap_or_default();
     let auth_store = tau_provider::storage::load().unwrap_or_default();
 
-    writer.write_event(&Event::LifecycleHello(LifecycleHello {
+    writer.write_frame(&Frame::Message(Message::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: "tau-agent".into(),
         client_kind: ClientKind::Agent,
-    }))?;
-    writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
-        selectors: vec![
-            EventSelector::Exact(EventName::SESSION_PROMPT_CREATED),
-            EventSelector::Exact(EventName::LIFECYCLE_DISCONNECT),
-        ],
-    }))?;
-    writer.write_event(&Event::LifecycleReady(LifecycleReady {
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
+        selectors: vec![EventSelector::Exact(EventName::SESSION_PROMPT_CREATED)],
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Ready(Ready {
         message: Some("agent ready".to_owned()),
-    }))?;
+    })))?;
     writer.flush()?;
 
-    // Pump events from the reader into a channel. The main loop consumes
-    // from `event_rx`; backoff sleeps use `recv_timeout` on the same
-    // receiver so a `LifecycleDisconnect` (or sender drop on EOF) wakes
+    // Pump frames from the reader into a channel. The main loop consumes
+    // from `frame_rx`; backoff sleeps use `recv_timeout` on the same
+    // receiver so a `Disconnect` message (or sender drop on EOF) wakes
     // us out of a wait we'd otherwise be deaf to.
-    let (event_tx, event_rx) = mpsc::channel::<Event>();
+    let (frame_tx, frame_rx) = mpsc::channel::<Frame>();
     thread::spawn(move || {
-        let mut reader = EventReader::new(BufReader::new(reader));
+        let mut reader = FrameReader::new(BufReader::new(reader));
         loop {
-            match reader.read_event() {
-                Ok(Some(event)) => {
-                    if event_tx.send(event).is_err() {
+            match reader.read_frame() {
+                Ok(Some(frame)) => {
+                    if frame_tx.send(frame).is_err() {
                         return;
                     }
                 }
@@ -83,12 +80,12 @@ where
         }
     });
 
-    let mut deferred: VecDeque<Event> = VecDeque::new();
+    let mut deferred: VecDeque<Frame> = VecDeque::new();
 
     loop {
-        let event = match deferred.pop_front() {
+        let frame = match deferred.pop_front() {
             Some(e) => e,
-            None => match event_rx.recv() {
+            None => match frame_rx.recv() {
                 Ok(e) => e,
                 Err(_) => return Ok(()),
             },
@@ -96,9 +93,9 @@ where
         // Peel the LogEvent envelope. The agent processes one prompt at
         // a time (serial), so acks are trivially in order: ack right
         // after handling whatever is inside.
-        let (log_id, inner) = event.peel_log();
+        let (log_id, inner) = frame.peel_log();
         match inner {
-            Event::SessionPromptCreated(prompt) => {
+            Frame::Event(Event::SessionPromptCreated(prompt)) => {
                 let session_prompt_id = prompt.session_prompt_id.clone();
 
                 // Full prompt dump for debugging. Off by default;
@@ -122,14 +119,16 @@ where
                 }
 
                 // Announce we accepted the prompt.
-                writer.write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
-                    session_prompt_id: session_prompt_id.clone(),
-                    originator: prompt.originator.clone(),
-                }))?;
+                writer.write_frame(&Frame::Event(Event::AgentPromptSubmitted(
+                    AgentPromptSubmitted {
+                        session_prompt_id: session_prompt_id.clone(),
+                        originator: prompt.originator.clone(),
+                    },
+                )))?;
                 writer.flush()?;
 
                 let mut retry_ctx = RetryContext {
-                    event_rx: &event_rx,
+                    frame_rx: &frame_rx,
                     deferred: &mut deferred,
                 };
 
@@ -163,7 +162,7 @@ where
                             Some(m) => format!("cannot resolve model config for: {m}"),
                             None => "no model specified".to_owned(),
                         };
-                        writer.write_event(&Event::AgentResponseFinished(
+                        writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
                             AgentResponseFinished {
                                 session_prompt_id,
                                 text: Some(msg),
@@ -173,16 +172,16 @@ where
                                 thinking: None,
                                 originator: prompt.originator.clone(),
                             },
-                        ))?;
+                        )))?;
                         writer.flush()?;
                     }
                 }
             }
-            Event::LifecycleDisconnect(_) => return Ok(()),
+            Frame::Message(Message::Disconnect(_)) => return Ok(()),
             _ => {}
         }
         if let Some(id) = log_id {
-            writer.write_event(&Event::Ack(Ack { up_to: id }))?;
+            writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
             writer.flush()?;
         }
     }
@@ -194,8 +193,8 @@ where
 /// for events that arrive mid-sleep but belong to a later main-loop
 /// iteration.
 struct RetryContext<'a> {
-    event_rx: &'a Receiver<Event>,
-    deferred: &'a mut VecDeque<Event>,
+    frame_rx: &'a Receiver<Frame>,
+    deferred: &'a mut VecDeque<Frame>,
 }
 
 /// Outcome of an interruptible sleep.
@@ -220,12 +219,12 @@ impl<'a> RetryContext<'a> {
             let Some(remaining) = deadline.checked_duration_since(now) else {
                 return SleepOutcome::Elapsed;
             };
-            match self.event_rx.recv_timeout(remaining) {
+            match self.frame_rx.recv_timeout(remaining) {
                 Err(RecvTimeoutError::Timeout) => return SleepOutcome::Elapsed,
                 Err(RecvTimeoutError::Disconnected) => return SleepOutcome::Aborted,
-                Ok(event) => {
-                    let abort = event.name() == EventName::LIFECYCLE_DISCONNECT;
-                    self.deferred.push_back(event);
+                Ok(frame) => {
+                    let abort = matches!(frame, Frame::Message(Message::Disconnect(_)));
+                    self.deferred.push_back(frame);
                     if abort {
                         return SleepOutcome::Aborted;
                     }
@@ -433,12 +432,12 @@ fn llm_retry_schedule() -> backon::FibonacciBackoff {
 fn with_llm_retry<F, W: Write>(
     session_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut EventWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<BufWriter<W>>,
     retry_ctx: &mut RetryContext<'_>,
     mut call: F,
 ) -> Result<openai::StreamState, openai::OpenAiError>
 where
-    F: FnMut(&mut EventWriter<BufWriter<W>>) -> Result<openai::StreamState, openai::OpenAiError>,
+    F: FnMut(&mut FrameWriter<BufWriter<W>>) -> Result<openai::StreamState, openai::OpenAiError>,
 {
     let mut backoff = llm_retry_schedule();
     let max_attempts = LLM_MAX_RETRIES;
@@ -487,7 +486,7 @@ where
 fn emit_retry_banner<W: Write>(
     session_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut EventWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<BufWriter<W>>,
     error: &openai::OpenAiError,
     delay: Duration,
     attempt: usize,
@@ -500,12 +499,14 @@ fn emit_retry_banner<W: Write>(
         max_attempts,
         error,
     );
-    let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
-        session_prompt_id: session_prompt_id.into(),
-        text: banner,
-        thinking: None,
-        originator: originator.clone(),
-    }));
+    let _ = writer.write_frame(&Frame::Event(Event::AgentResponseUpdated(
+        AgentResponseUpdated {
+            session_prompt_id: session_prompt_id.into(),
+            text: banner,
+            thinking: None,
+            originator: originator.clone(),
+        },
+    )));
     let _ = writer.flush();
 }
 
@@ -513,7 +514,7 @@ fn handle_chat_completions<W: Write>(
     session_prompt_id: &str,
     config: &openai::OpenAiConfig,
     prompt: &tau_proto::SessionPromptCreated,
-    writer: &mut EventWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<BufWriter<W>>,
     retry_ctx: &mut RetryContext<'_>,
 ) -> Result<(), Box<dyn Error>> {
     let request = openai::PromptPayload {
@@ -532,12 +533,14 @@ fn handle_chat_completions<W: Write>(
         retry_ctx,
         |writer| {
             openai::chat_completion_stream(config, &request, |text_so_far, thinking_so_far| {
-                let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
-                    session_prompt_id: session_prompt_id.into(),
-                    text: text_so_far.to_owned(),
-                    thinking: thinking_so_far.map(str::to_owned),
-                    originator: originator.clone(),
-                }));
+                let _ = writer.write_frame(&Frame::Event(Event::AgentResponseUpdated(
+                    AgentResponseUpdated {
+                        session_prompt_id: session_prompt_id.into(),
+                        text: text_so_far.to_owned(),
+                        thinking: thinking_so_far.map(str::to_owned),
+                        originator: originator.clone(),
+                    },
+                )));
                 let _ = writer.flush();
             })
         },
@@ -553,7 +556,7 @@ fn handle_responses<W: Write>(
     session_prompt_id: &str,
     config: &responses::ResponsesConfig,
     prompt: &tau_proto::SessionPromptCreated,
-    writer: &mut EventWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<BufWriter<W>>,
     retry_ctx: &mut RetryContext<'_>,
 ) -> Result<(), Box<dyn Error>> {
     let request = openai::PromptPayload {
@@ -572,12 +575,14 @@ fn handle_responses<W: Write>(
         retry_ctx,
         |writer| {
             responses::responses_stream(config, &request, |text_so_far, thinking_so_far| {
-                let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
-                    session_prompt_id: session_prompt_id.into(),
-                    text: text_so_far.to_owned(),
-                    thinking: thinking_so_far.map(str::to_owned),
-                    originator: originator.clone(),
-                }));
+                let _ = writer.write_frame(&Frame::Event(Event::AgentResponseUpdated(
+                    AgentResponseUpdated {
+                        session_prompt_id: session_prompt_id.into(),
+                        text: text_so_far.to_owned(),
+                        thinking: thinking_so_far.map(str::to_owned),
+                        originator: originator.clone(),
+                    },
+                )));
                 let _ = writer.flush();
             })
         },
@@ -593,7 +598,7 @@ fn finish_stream<W: Write>(
     session_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
     state: openai::StreamState,
-    writer: &mut EventWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
     let text_empty = state.text.is_empty();
     let text_content = state.text.clone();
@@ -610,15 +615,17 @@ fn finish_stream<W: Write>(
     } else {
         Some(text_content)
     };
-    writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: session_prompt_id.into(),
-        text,
-        tool_calls,
-        input_tokens,
-        cached_tokens,
-        thinking,
-        originator: originator.clone(),
-    }))?;
+    writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+        AgentResponseFinished {
+            session_prompt_id: session_prompt_id.into(),
+            text,
+            tool_calls,
+            input_tokens,
+            cached_tokens,
+            thinking,
+            originator: originator.clone(),
+        },
+    )))?;
     writer.flush()?;
     Ok(())
 }
@@ -627,17 +634,19 @@ fn finish_error<W: Write>(
     session_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
     error: openai::OpenAiError,
-    writer: &mut EventWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
-    writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: session_prompt_id.into(),
-        text: Some(format!("LLM error: {error}")),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        thinking: None,
-        originator: originator.clone(),
-    }))?;
+    writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+        AgentResponseFinished {
+            session_prompt_id: session_prompt_id.into(),
+            text: Some(format!("LLM error: {error}")),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            thinking: None,
+            originator: originator.clone(),
+        },
+    )))?;
     writer.flush()?;
     Ok(())
 }
@@ -655,39 +664,38 @@ where
 {
     use tau_proto::{AgentToolCall, CborValue, ContentBlock, ConversationRole};
 
-    let mut reader = EventReader::new(BufReader::new(reader));
-    let mut writer = EventWriter::new(BufWriter::new(writer));
+    let mut reader = FrameReader::new(BufReader::new(reader));
+    let mut writer = FrameWriter::new(BufWriter::new(writer));
 
-    writer.write_event(&Event::LifecycleHello(LifecycleHello {
+    writer.write_frame(&Frame::Message(Message::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: "tau-agent-echo".into(),
         client_kind: ClientKind::Agent,
-    }))?;
-    writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
-        selectors: vec![
-            EventSelector::Exact(EventName::SESSION_PROMPT_CREATED),
-            EventSelector::Exact(EventName::LIFECYCLE_DISCONNECT),
-        ],
-    }))?;
-    writer.write_event(&Event::LifecycleReady(LifecycleReady {
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
+        selectors: vec![EventSelector::Exact(EventName::SESSION_PROMPT_CREATED)],
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Ready(Ready {
         message: Some("echo agent ready".to_owned()),
-    }))?;
+    })))?;
     writer.flush()?;
 
     let mut next_call = 1_u64;
 
     loop {
-        let Some(event) = reader.read_event()? else {
+        let Some(frame) = reader.read_frame()? else {
             return Ok(());
         };
-        let (log_id, inner) = event.peel_log();
+        let (log_id, inner) = frame.peel_log();
         match inner {
-            Event::SessionPromptCreated(prompt) => {
+            Frame::Event(Event::SessionPromptCreated(prompt)) => {
                 let spid = prompt.session_prompt_id.clone();
-                writer.write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
-                    session_prompt_id: spid.clone(),
-                    originator: prompt.originator.clone(),
-                }))?;
+                writer.write_frame(&Frame::Event(Event::AgentPromptSubmitted(
+                    AgentPromptSubmitted {
+                        session_prompt_id: spid.clone(),
+                        originator: prompt.originator.clone(),
+                    },
+                )))?;
 
                 // If last message is a tool result, return it as text.
                 let is_tool_result = prompt.messages.last().is_some_and(|m| {
@@ -707,15 +715,17 @@ where
                             })
                         })
                         .unwrap_or_default();
-                    writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-                        session_prompt_id: spid,
-                        text: Some(text),
-                        tool_calls: Vec::new(),
-                        input_tokens: None,
-                        cached_tokens: None,
-                        thinking: None,
-                        originator: prompt.originator.clone(),
-                    }))?;
+                    writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+                        AgentResponseFinished {
+                            session_prompt_id: spid,
+                            text: Some(text),
+                            tool_calls: Vec::new(),
+                            input_tokens: None,
+                            cached_tokens: None,
+                            thinking: None,
+                            originator: prompt.originator.clone(),
+                        },
+                    )))?;
                 } else {
                     // Find user text and make a tool call.
                     let user_text = prompt
@@ -760,23 +770,25 @@ where
                         }
                     };
 
-                    writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-                        session_prompt_id: spid,
-                        text: None,
-                        tool_calls: vec![tool_call],
-                        input_tokens: None,
-                        cached_tokens: None,
-                        thinking: None,
-                        originator: prompt.originator.clone(),
-                    }))?;
+                    writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+                        AgentResponseFinished {
+                            session_prompt_id: spid,
+                            text: None,
+                            tool_calls: vec![tool_call],
+                            input_tokens: None,
+                            cached_tokens: None,
+                            thinking: None,
+                            originator: prompt.originator.clone(),
+                        },
+                    )))?;
                 }
                 writer.flush()?;
             }
-            Event::LifecycleDisconnect(_) => return Ok(()),
+            Frame::Message(Message::Disconnect(_)) => return Ok(()),
             _ => {}
         }
         if let Some(id) = log_id {
-            writer.write_event(&Event::Ack(Ack { up_to: id }))?;
+            writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
             writer.flush()?;
         }
     }

@@ -2,20 +2,6 @@ use super::*;
 
 fn representative_events() -> Vec<Event> {
     vec![
-        Event::LifecycleHello(LifecycleHello {
-            protocol_version: PROTOCOL_VERSION,
-            client_name: "agent".into(),
-            client_kind: ClientKind::Agent,
-        }),
-        Event::LifecycleSubscribe(LifecycleSubscribe {
-            selectors: vec![
-                EventSelector::Exact(EventName::UI_PROMPT_SUBMITTED),
-                EventSelector::Prefix("tool.".to_owned()),
-            ],
-        }),
-        Event::LifecycleReady(LifecycleReady {
-            message: Some("ready".to_owned()),
-        }),
         Event::ToolRegister(ToolRegister {
             tool: ToolSpec {
                 name: "echo".into(),
@@ -134,7 +120,39 @@ fn representative_events() -> Vec<Event> {
             session_id: Some("s1".into()),
             payload: CborValue::Text("working".to_owned()),
         }),
-        Event::EmitEvent(EmitEvent {
+    ]
+}
+
+fn representative_messages() -> Vec<Message> {
+    vec![
+        Message::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client_name: "agent".into(),
+            client_kind: ClientKind::Agent,
+        }),
+        Message::Subscribe(Subscribe {
+            selectors: vec![
+                EventSelector::Exact(EventName::UI_PROMPT_SUBMITTED),
+                EventSelector::Prefix("tool.".to_owned()),
+            ],
+        }),
+        Message::Intercept(Intercept {
+            selectors: vec![EventSelector::Prefix("tool.".to_owned())],
+            priority: InterceptionPriority(0),
+        }),
+        Message::Ready(Ready {
+            message: Some("ready".to_owned()),
+        }),
+        Message::Disconnect(Disconnect {
+            reason: Some("shutdown".to_owned()),
+        }),
+        Message::Configure(Configure {
+            config: CborValue::Null,
+        }),
+        Message::ConfigError(ConfigError {
+            message: "bad config".to_owned(),
+        }),
+        Message::Emit(Emit {
             event: Box::new(Event::ExtensionEvent(CustomEvent {
                 name: "demo.transient_progress".parse().expect("event name"),
                 session_id: Some("s1".into()),
@@ -143,20 +161,34 @@ fn representative_events() -> Vec<Event> {
             transient: true,
             interception: None,
         }),
-        Event::LogEvent(LogEvent {
+        Message::Intercepted(Intercepted {
+            event: Box::new(Event::SessionStarted(SessionStarted {
+                session_id: "s1".into(),
+                reason: SessionStartReason::Initial,
+            })),
+            transient: false,
+            interception: None,
+        }),
+        Message::LogEvent(LogEvent {
             id: LogEventId::new(42),
             event: Box::new(Event::SessionStarted(SessionStarted {
                 session_id: "s1".into(),
                 reason: SessionStartReason::Initial,
             })),
         }),
-        Event::Ack(Ack {
+        Message::Ack(Ack {
             up_to: LogEventId::new(42),
         }),
-        Event::LifecycleDisconnect(LifecycleDisconnect {
-            reason: Some("shutdown".to_owned()),
-        }),
     ]
+}
+
+fn representative_frames() -> Vec<Frame> {
+    let mut out: Vec<Frame> = representative_events()
+        .into_iter()
+        .map(Frame::Event)
+        .collect();
+    out.extend(representative_messages().into_iter().map(Frame::Message));
+    out
 }
 
 #[test]
@@ -169,36 +201,60 @@ fn event_name_round_trips_from_string() {
 }
 
 #[test]
-fn representative_events_round_trip_through_cbor() {
-    for event in representative_events() {
-        let encoded = encode_event_to_vec(&event).expect("event should encode");
-        let decoded = decode_event_from_slice(&encoded).expect("event should decode");
-        assert_eq!(decoded, event);
+fn representative_frames_round_trip_through_cbor() {
+    for frame in representative_frames() {
+        let encoded = encode_frame_to_vec(&frame).expect("frame should encode");
+        let decoded = decode_frame_from_slice(&encoded).expect("frame should decode");
+        assert_eq!(decoded, frame);
     }
 }
 
 #[test]
-fn multiple_events_can_share_one_stream() {
-    let events = representative_events();
-    let mut writer = EventWriter::new(Vec::new());
-    for event in &events {
-        writer.write_event(event).expect("event should encode");
+fn multiple_frames_can_share_one_stream() {
+    let frames = representative_frames();
+    let mut writer = FrameWriter::new(Vec::new());
+    for frame in &frames {
+        writer.write_frame(frame).expect("frame should encode");
     }
     writer.flush().expect("stream should flush");
 
     let bytes = writer.into_inner();
-    let mut reader = EventReader::new(std::io::Cursor::new(bytes));
+    let mut reader = FrameReader::new(std::io::Cursor::new(bytes));
     let mut decoded = Vec::new();
-    for _ in 0..events.len() {
+    for _ in 0..frames.len() {
         decoded.push(
             reader
-                .read_event()
+                .read_frame()
                 .expect("read should succeed")
-                .expect("event should arrive"),
+                .expect("frame should arrive"),
         );
     }
 
-    assert_eq!(decoded, events);
+    assert_eq!(decoded, frames);
+}
+
+#[test]
+fn message_wire_form_uses_flat_message_tag() {
+    let msg = Message::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+        client_name: "agent".into(),
+        client_kind: ClientKind::Agent,
+    });
+    let json = serde_json::to_value(&msg).expect("serialize");
+    assert_eq!(json["message"], "hello");
+    assert!(json.get("payload").is_some());
+}
+
+#[test]
+fn event_wire_form_uses_dotted_event_tag() {
+    let event = Event::ToolInvoke(ToolInvoke {
+        call_id: "call-1".into(),
+        tool_name: "echo".into(),
+        arguments: CborValue::Text("hi".to_owned()),
+    });
+    let json = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(json["event"], "tool.invoke");
+    assert!(json.get("payload").is_some());
 }
 
 #[test]

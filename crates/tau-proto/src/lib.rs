@@ -1,26 +1,29 @@
 //! Shared protocol types and CBOR stream codec helpers.
 //!
-//! The wire format is a sequence of self-delimiting CBOR items. Each item is a
-//! small map with two keys:
+//! The wire format is a sequence of self-delimiting CBOR items. Each
+//! item is a [`Frame`] — an untagged enum that's either:
 //!
-//! - `event`: a dotted event name such as `tool.invoke`
-//! - `payload`: the typed payload for that event
+//! - a [`Message`]: control-plane point-to-point traffic, encoded as
+//!   `{"message": "<flat_name>", "payload": {...}}`, or
+//! - an [`Event`]: bus-broadcast facts, encoded as `{"event":
+//!   "<category>.<call>", "payload": {...}}`.
 //!
 //! The codec helpers in this crate work with any [`std::io::Read`] or
-//! [`std::io::Write`], so the same protocol layer can be reused for stdio,
-//! Unix sockets, tests, or in-memory transports.
-//!
-//! All event definitions live in [`events`] and are re-exported at the
-//! crate root.
+//! [`std::io::Write`], so the same protocol layer can be reused for
+//! stdio, Unix sockets, tests, or in-memory transports.
 
 mod diff;
 mod events;
+mod frame;
+mod messages;
 
 use std::io::{Cursor, Read, Write};
 
 pub use ciborium::value::Value as CborValue;
 pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary};
 pub use events::*;
+pub use frame::Frame;
+pub use messages::*;
 
 /// First protocol version implemented by this crate.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -328,42 +331,42 @@ impl From<u64> for ExtensionInstanceId {
     }
 }
 
-/// CBOR serialization error used by [`encode_event`] and [`EventWriter`].
+/// CBOR serialization error used by [`encode_frame`] and [`FrameWriter`].
 pub type EncodeError = ciborium::ser::Error<std::io::Error>;
 
-/// CBOR deserialization error used by [`decode_event`] and [`EventReader`].
+/// CBOR deserialization error used by [`decode_frame`] and [`FrameReader`].
 pub type DecodeError = ciborium::de::Error<std::io::Error>;
 
 // ---------------------------------------------------------------------------
 // Codec
 // ---------------------------------------------------------------------------
 
-/// Encodes one event as a self-delimiting CBOR item.
-pub fn encode_event<W>(writer: W, event: &Event) -> Result<(), EncodeError>
+/// Encodes one frame as a self-delimiting CBOR item.
+pub fn encode_frame<W>(writer: W, frame: &Frame) -> Result<(), EncodeError>
 where
     W: Write,
 {
-    ciborium::into_writer(event, writer)
+    ciborium::into_writer(frame, writer)
 }
 
-/// Decodes one event from a self-delimiting CBOR item.
-pub fn decode_event<R>(reader: R) -> Result<Event, DecodeError>
+/// Decodes one frame from a self-delimiting CBOR item.
+pub fn decode_frame<R>(reader: R) -> Result<Frame, DecodeError>
 where
     R: Read,
 {
     ciborium::from_reader(reader)
 }
 
-/// Encodes one event into an owned byte buffer.
-pub fn encode_event_to_vec(event: &Event) -> Result<Vec<u8>, EncodeError> {
+/// Encodes one frame into an owned byte buffer.
+pub fn encode_frame_to_vec(frame: &Frame) -> Result<Vec<u8>, EncodeError> {
     let mut bytes = Vec::new();
-    encode_event(&mut bytes, event)?;
+    encode_frame(&mut bytes, frame)?;
     Ok(bytes)
 }
 
-/// Decodes one event from a byte slice.
-pub fn decode_event_from_slice(bytes: &[u8]) -> Result<Event, DecodeError> {
-    decode_event(Cursor::new(bytes))
+/// Decodes one frame from a byte slice.
+pub fn decode_frame_from_slice(bytes: &[u8]) -> Result<Frame, DecodeError> {
+    decode_frame(Cursor::new(bytes))
 }
 
 /// Convert a `serde_json::Value` into a [`CborValue`].
@@ -397,13 +400,13 @@ pub fn json_to_cbor(v: &serde_json::Value) -> CborValue {
     }
 }
 
-/// Stateful writer for a stream of protocol events.
+/// Stateful writer for a stream of protocol frames.
 #[derive(Debug)]
-pub struct EventWriter<W> {
+pub struct FrameWriter<W> {
     inner: W,
 }
 
-impl<W> EventWriter<W> {
+impl<W> FrameWriter<W> {
     /// Wraps an arbitrary writer.
     #[must_use]
     pub fn new(inner: W) -> Self {
@@ -417,13 +420,13 @@ impl<W> EventWriter<W> {
     }
 }
 
-impl<W> EventWriter<W>
+impl<W> FrameWriter<W>
 where
     W: Write,
 {
-    /// Writes one protocol event to the stream.
-    pub fn write_event(&mut self, event: &Event) -> Result<(), EncodeError> {
-        encode_event(&mut self.inner, event)
+    /// Writes one protocol frame to the stream.
+    pub fn write_frame(&mut self, frame: &Frame) -> Result<(), EncodeError> {
+        encode_frame(&mut self.inner, frame)
     }
 
     /// Flushes the wrapped writer.
@@ -432,13 +435,13 @@ where
     }
 }
 
-/// Stateful reader for a stream of protocol events.
+/// Stateful reader for a stream of protocol frames.
 #[derive(Debug)]
-pub struct EventReader<R> {
+pub struct FrameReader<R> {
     inner: R,
 }
 
-impl<R> EventReader<R> {
+impl<R> FrameReader<R> {
     /// Wraps an arbitrary reader.
     #[must_use]
     pub fn new(inner: R) -> Self {
@@ -452,16 +455,16 @@ impl<R> EventReader<R> {
     }
 }
 
-impl<R> EventReader<R>
+impl<R> FrameReader<R>
 where
     R: Read,
 {
-    /// Reads one protocol event from the stream.
+    /// Reads one protocol frame from the stream.
     ///
     /// Returns `Ok(None)` on clean end-of-stream (EOF at a message
     /// boundary). Returns `Err` only for actual corruption or
     /// truncated data.
-    pub fn read_event(&mut self) -> Result<Option<Event>, DecodeError> {
+    pub fn read_frame(&mut self) -> Result<Option<Frame>, DecodeError> {
         let mut first = [0_u8; 1];
         match self.inner.read_exact(&mut first) {
             Ok(()) => {}

@@ -9,16 +9,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_core::{ConnectionSendError, ConnectionSink};
-use tau_proto::{Event, EventReader, EventWriter, LifecycleDisconnect};
+use tau_proto::{Disconnect, Frame, FrameReader, FrameWriter, Message};
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 /// Internal event type — all reader threads feed this into one channel.
 pub(crate) enum HarnessEvent {
-    /// Decoded event from any connection (extension or client).
+    /// Decoded frame from any connection (extension or client).
     FromConnection {
         connection_id: tau_proto::ConnectionId,
-        event: Event,
+        frame: Frame,
     },
     /// A connection's reader hit EOF or decode error.
     Disconnected {
@@ -30,13 +30,13 @@ pub(crate) enum HarnessEvent {
 
 /// Connection sink — sends to the per-connection writer channel.
 pub(crate) struct ChannelSink {
-    pub(crate) tx: Sender<Event>,
+    pub(crate) tx: Sender<Frame>,
 }
 
 impl ConnectionSink for ChannelSink {
-    fn send(&mut self, event: tau_core::RoutedEvent) -> Result<(), ConnectionSendError> {
+    fn send(&mut self, routed: tau_core::RoutedFrame) -> Result<(), ConnectionSendError> {
         self.tx
-            .send(event.event)
+            .send(routed.frame)
             .map_err(|_| ConnectionSendError::new("writer closed"))
     }
 }
@@ -48,14 +48,14 @@ pub(crate) fn spawn_reader_thread(
     tx: Sender<HarnessEvent>,
 ) {
     thread::spawn(move || {
-        let mut reader = EventReader::new(BufReader::new(stream));
+        let mut reader = FrameReader::new(BufReader::new(stream));
         loop {
-            match reader.read_event() {
-                Ok(Some(event)) => {
+            match reader.read_frame() {
+                Ok(Some(frame)) => {
                     if tx
                         .send(HarnessEvent::FromConnection {
                             connection_id: connection_id.clone(),
-                            event,
+                            frame,
                         })
                         .is_err()
                     {
@@ -85,14 +85,14 @@ pub(crate) enum WriterShutdown {
 pub(crate) fn spawn_writer_thread(
     writer: impl Write + Send + 'static,
     shutdown: WriterShutdown,
-) -> Sender<Event> {
-    let (tx, rx) = mpsc::channel::<Event>();
+) -> Sender<Frame> {
+    let (tx, rx) = mpsc::channel::<Frame>();
     thread::spawn(move || {
-        let mut w = EventWriter::new(BufWriter::new(writer));
+        let mut w = FrameWriter::new(BufWriter::new(writer));
 
-        // Drain events until the channel closes.
-        while let Ok(event) = rx.recv() {
-            if w.write_event(&event).is_err() {
+        // Drain frames until the channel closes.
+        while let Ok(frame) = rx.recv() {
+            if w.write_frame(&frame).is_err() {
                 return;
             }
             if w.flush().is_err() {
@@ -107,9 +107,9 @@ pub(crate) fn spawn_writer_thread(
             }
             WriterShutdown::KillChild(mut child) => {
                 // Best-effort disconnect message.
-                let _ = w.write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                let _ = w.write_frame(&Frame::Message(Message::Disconnect(Disconnect {
                     reason: Some("shutdown".to_owned()),
-                }));
+                })));
                 let _ = w.flush();
                 // Drop the writer → closes stdin → extension sees EOF.
                 drop(w);

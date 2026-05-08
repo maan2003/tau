@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use tau_config::Config;
 use tau_proto::{
-    ClientKind, Event, EventSelector, LifecycleDisconnect, LifecycleHello, LifecycleSubscribe,
-    PROTOCOL_VERSION, UiPromptSubmitted,
+    ClientKind, Disconnect, Event, EventSelector, Frame, Hello, Message, PROTOCOL_VERSION,
+    Subscribe, UiPromptSubmitted,
 };
 use tau_socket::SocketPeer;
 
@@ -214,12 +214,12 @@ pub fn send_daemon_message_with_trace(
     message: &str,
 ) -> Result<InteractionOutcome, HarnessError> {
     let mut peer = SocketPeer::connect(socket_path)?;
-    peer.send(&Event::LifecycleHello(LifecycleHello {
+    peer.send(&Frame::Message(Message::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: "tau-cli".into(),
         client_kind: ClientKind::Ui,
-    }))?;
-    peer.send(&Event::LifecycleSubscribe(LifecycleSubscribe {
+    })))?;
+    peer.send(&Frame::Message(Message::Subscribe(Subscribe {
         selectors: vec![
             EventSelector::Prefix("agent.".to_owned()),
             EventSelector::Prefix("session.".to_owned()),
@@ -227,12 +227,12 @@ pub fn send_daemon_message_with_trace(
             EventSelector::Prefix("extension.".to_owned()),
             EventSelector::Prefix("harness.".to_owned()),
         ],
-    }))?;
-    peer.send(&Event::UiPromptSubmitted(UiPromptSubmitted {
+    })))?;
+    peer.send(&Frame::Event(Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: session_id.into(),
         text: message.to_owned(),
         originator: tau_proto::PromptOriginator::User,
-    }))?;
+    })))?;
 
     let started_at = Instant::now();
     let mut lifecycle_messages = Vec::new();
@@ -241,31 +241,37 @@ pub fn send_daemon_message_with_trace(
         if RESPONSE_TIMEOUT <= started_at.elapsed() {
             return Err(HarnessError::ResponseTimeout);
         }
-        if let Some(event) = peer.recv_timeout(RESPONSE_TIMEOUT)? {
+        if let Some(frame) = peer.recv_timeout(RESPONSE_TIMEOUT)? {
             // UI clients don't ack — they just consume the inner event.
-            let (_log_id, event) = event.peel_log();
-            match event {
-                Event::ToolProgress(p) => progress_messages.push(format_tool_progress(&p)),
-                Event::HarnessInfo(ref info) => {
+            let (_log_id, frame) = frame.peel_log();
+            match frame {
+                Frame::Event(Event::ToolProgress(p)) => {
+                    progress_messages.push(format_tool_progress(&p))
+                }
+                Frame::Event(Event::HarnessInfo(ref info)) => {
                     lifecycle_messages.push(info.message.clone());
                 }
-                Event::ExtensionStarting(_)
-                | Event::ExtensionReady(_)
-                | Event::ExtensionExited(_)
-                | Event::ExtensionRestarting(_) => {
-                    lifecycle_messages.push(format_extension_event(&event));
+                Frame::Event(
+                    ref event @ (Event::ExtensionStarting(_)
+                    | Event::ExtensionReady(_)
+                    | Event::ExtensionExited(_)
+                    | Event::ExtensionRestarting(_)),
+                ) => {
+                    lifecycle_messages.push(format_extension_event(event));
                 }
-                Event::AgentResponseFinished(finished) if finished.tool_calls.is_empty() => {
-                    peer.send(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                Frame::Event(Event::AgentResponseFinished(finished))
+                    if finished.tool_calls.is_empty() =>
+                {
+                    peer.send(&Frame::Message(Message::Disconnect(Disconnect {
                         reason: Some("done".to_owned()),
-                    }))?;
+                    })))?;
                     return Ok(InteractionOutcome {
                         lifecycle_messages,
                         progress_messages,
                         response: finished.text.unwrap_or_default(),
                     });
                 }
-                Event::LifecycleDisconnect(d) => {
+                Frame::Message(Message::Disconnect(d)) => {
                     return Err(HarnessError::Participant(
                         d.reason.unwrap_or_else(|| "daemon disconnected".to_owned()),
                     ));

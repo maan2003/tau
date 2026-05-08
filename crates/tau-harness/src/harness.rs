@@ -15,11 +15,11 @@ use tau_core::{
     ToolRegistry, ToolRouteError,
 };
 use tau_proto::{
-    AgentResponseFinished, AgentToolCall, CborValue, ClientKind, Event, EventSelector,
-    ExtensionName, HarnessContextUsageChanged, HarnessIntercepted, HarnessModelSelected,
-    HarnessModelsAvailable, InterceptionPriority, LifecycleDisconnect, ModelId, SessionId,
-    SessionPromptCreated, SessionPromptId, SessionPromptQueued, ToolCallId, ToolDefinition,
-    ToolError, ToolName, ToolRegister, ToolRequest,
+    AgentResponseFinished, AgentToolCall, CborValue, ClientKind, Disconnect, Event, EventSelector,
+    ExtensionName, Frame, HarnessContextUsageChanged, HarnessModelSelected, HarnessModelsAvailable,
+    Intercepted, InterceptionPriority, Message, ModelId, SessionId, SessionPromptCreated,
+    SessionPromptId, SessionPromptQueued, ToolCallId, ToolDefinition, ToolError, ToolName,
+    ToolRegister, ToolRequest,
 };
 
 use crate::conversation::{Conversation, ConversationId, ConversationTurnState};
@@ -109,7 +109,7 @@ pub(crate) struct Harness {
     pub(crate) event_log: std::sync::Arc<EventLog>,
     /// Writer channels for socket clients, keyed by connection ID.
     /// Used to start follower threads for log-based replay + delivery.
-    pub(crate) client_writers: std::collections::HashMap<tau_proto::ConnectionId, Sender<Event>>,
+    pub(crate) client_writers: std::collections::HashMap<tau_proto::ConnectionId, Sender<Frame>>,
     /// Buffered human-readable lifecycle messages (extension init,
     /// model changes, etc.) surfaced to the UI as part of the next
     /// `InteractionOutcome`.
@@ -815,11 +815,11 @@ impl Harness {
             let _ = self.bus.send_to(
                 interceptor.connection_id.as_str(),
                 None,
-                Event::HarnessIntercepted(HarnessIntercepted {
+                Frame::Message(Message::Intercepted(Intercepted {
                     event: Box::new(event),
                     transient,
                     interception: Some(interceptor.priority),
-                }),
+                })),
             );
             return;
         }
@@ -827,14 +827,14 @@ impl Harness {
         let seq = self
             .event_log
             .append(source.map(tau_proto::ConnectionId::from), event.clone());
-        // Wrap in a `LogEvent` envelope so subscribers get the id and
-        // can ack after processing. Receivers that don't care (UIs)
-        // call `peel_log()` and discard the id.
-        let log_event = Event::LogEvent(tau_proto::LogEvent {
+        // Wrap in a `LogEvent` message envelope so subscribers get the
+        // id and can ack after processing. Receivers that don't care
+        // (UIs) call `Frame::peel_log()` and discard the id.
+        let log_frame = Frame::Message(Message::LogEvent(tau_proto::LogEvent {
             id: tau_proto::LogEventId::new(seq),
             event: Box::new(event),
-        });
-        let _ = self.bus.publish_from(source, log_event);
+        }));
+        let _ = self.bus.publish_from(source, log_frame);
     }
 
     fn persist_session_event(&mut self, source: Option<&str>, event: &Event, transient: bool) {
@@ -909,17 +909,17 @@ impl Harness {
             let remaining = STARTUP_TIMEOUT
                 .checked_sub(started_at.elapsed())
                 .unwrap_or(Duration::ZERO);
-            let event = self
+            let harness_evt = self
                 .rx
                 .recv_timeout(remaining)
                 .map_err(|_| HarnessError::StartupTimeout)?;
-            self.log_event(&event);
-            match event {
+            self.log_event(&harness_evt);
+            match harness_evt {
                 HarnessEvent::FromConnection {
                     connection_id,
-                    event,
+                    frame,
                 } => {
-                    self.handle_extension_event(&connection_id, event)?;
+                    self.handle_extension_event(&connection_id, frame)?;
                 }
                 HarnessEvent::Disconnected { connection_id } => {
                     self.handle_disconnect(&connection_id);
@@ -943,17 +943,17 @@ impl Harness {
             let remaining = STARTUP_TIMEOUT
                 .checked_sub(started_at.elapsed())
                 .unwrap_or(Duration::ZERO);
-            let event = self
+            let harness_evt = self
                 .rx
                 .recv_timeout(remaining)
                 .map_err(|_| HarnessError::StartupTimeout)?;
-            self.log_event(&event);
-            match event {
+            self.log_event(&harness_evt);
+            match harness_evt {
                 HarnessEvent::FromConnection {
                     connection_id,
-                    event,
+                    frame,
                 } => {
-                    self.handle_extension_event(&connection_id, event)?;
+                    self.handle_extension_event(&connection_id, frame)?;
                 }
                 HarnessEvent::Disconnected { connection_id } => {
                     let name = self
@@ -995,12 +995,14 @@ impl Harness {
             if exit_on_disconnect && ever_attached && self.client_writers.is_empty() {
                 break;
             }
-            let Ok(event) = self.rx.recv() else { break };
-            self.log_event(&event);
-            match event {
+            let Ok(harness_evt) = self.rx.recv() else {
+                break;
+            };
+            self.log_event(&harness_evt);
+            match harness_evt {
                 HarnessEvent::FromConnection {
                     connection_id,
-                    event,
+                    frame,
                 } => {
                     let origin = self
                         .bus
@@ -1011,16 +1013,16 @@ impl Harness {
                             // `/detach` → stay alive even after this
                             // UI leaves; a later `tau run --attach`
                             // can pick up right here.
-                            if matches!(event, Event::UiDetachRequest(_)) {
+                            if matches!(&frame, Frame::Event(Event::UiDetachRequest(_))) {
                                 exit_on_disconnect = false;
                             }
-                            let keep = self.handle_client_event(&connection_id, event)?;
+                            let keep = self.handle_client_event(&connection_id, frame)?;
                             if !keep {
                                 let _ = self.bus.disconnect(&connection_id);
                                 served_clients += 1;
                             }
                         }
-                        Some(_) => self.handle_extension_event(&connection_id, event)?,
+                        Some(_) => self.handle_extension_event(&connection_id, frame)?,
                         None => {} // already disconnected
                     }
                 }
@@ -1077,10 +1079,21 @@ impl Harness {
     fn handle_extension_event(
         &mut self,
         source_id: &str,
-        event: Event,
+        frame: Frame,
     ) -> Result<(), HarnessError> {
-        match event {
-            Event::Ack(ack) => {
+        match frame {
+            Frame::Message(msg) => self.handle_extension_message(source_id, msg),
+            Frame::Event(event) => self.handle_extension_event_inner(source_id, event),
+        }
+    }
+
+    fn handle_extension_message(
+        &mut self,
+        source_id: &str,
+        message: Message,
+    ) -> Result<(), HarnessError> {
+        match message {
+            Message::Ack(ack) => {
                 // Cumulative ack: advance the cursor if it moves
                 // forward, ignore otherwise (duplicates, late acks).
                 if let Some(entry) = self
@@ -1093,12 +1106,11 @@ impl Harness {
                     }
                 }
             }
-            Event::LifecycleHello(hello) => {
+            Message::Hello(_hello) => {
                 self.set_extension_state(source_id, ExtensionState::Handshaking);
-                self.publish_event(Some(source_id), Event::LifecycleHello(hello));
                 self.send_lifecycle_configure(source_id);
             }
-            Event::LifecycleConfigError(err) => {
+            Message::ConfigError(err) => {
                 let name = self
                     .extensions
                     .iter()
@@ -1111,12 +1123,10 @@ impl Harness {
                     err.message,
                 ));
             }
-            Event::LifecycleSubscribe(subscribe) => {
-                self.bus
-                    .set_subscriptions(source_id, subscribe.selectors.clone())?;
-                self.publish_event(Some(source_id), Event::LifecycleSubscribe(subscribe));
+            Message::Subscribe(subscribe) => {
+                self.bus.set_subscriptions(source_id, subscribe.selectors)?;
             }
-            Event::LifecycleIntercept(intercept) => {
+            Message::Intercept(intercept) => {
                 let component_name = self
                     .bus
                     .connection(source_id)
@@ -1125,18 +1135,16 @@ impl Harness {
                 self.interceptors.replace_for_connection(
                     source_id,
                     component_name,
-                    intercept.selectors.clone(),
+                    intercept.selectors,
                     intercept.priority,
                 );
-                self.publish_event(Some(source_id), Event::LifecycleIntercept(intercept));
             }
-            Event::LifecycleReady(ready) => {
+            Message::Ready(_ready) => {
                 self.emit_extension_ready(source_id);
-                self.publish_event(Some(source_id), Event::LifecycleReady(ready));
                 self.set_extension_state(source_id, ExtensionState::Ready);
                 self.try_advance_queue();
             }
-            Event::EmitEvent(emit) => {
+            Message::Emit(emit) => {
                 self.publish_event_with_interception(
                     Some(source_id),
                     *emit.event,
@@ -1144,6 +1152,22 @@ impl Harness {
                     emit.interception,
                 );
             }
+            // Messages sent by the harness only — extensions shouldn't
+            // round-trip these. Ignore silently.
+            Message::Configure(_)
+            | Message::Disconnect(_)
+            | Message::Intercepted(_)
+            | Message::LogEvent(_) => {}
+        }
+        Ok(())
+    }
+
+    fn handle_extension_event_inner(
+        &mut self,
+        source_id: &str,
+        event: Event,
+    ) -> Result<(), HarnessError> {
+        match event {
             Event::ToolRegister(ToolRegister { tool }) => {
                 let _ = self.registry.register(source_id, tool);
             }
@@ -1286,21 +1310,28 @@ impl Harness {
         Ok(())
     }
 
-    fn handle_client_event(&mut self, client_id: &str, event: Event) -> Result<bool, HarnessError> {
-        match event {
-            Event::LifecycleHello(hello) => {
-                self.publish_event(Some(client_id), Event::LifecycleHello(hello));
-                Ok(true)
-            }
-            Event::LifecycleSubscribe(subscribe) => {
+    fn handle_client_event(&mut self, client_id: &str, frame: Frame) -> Result<bool, HarnessError> {
+        match frame {
+            Frame::Message(msg) => self.handle_client_message(client_id, msg),
+            Frame::Event(event) => self.handle_client_event_inner(client_id, event),
+        }
+    }
+
+    fn handle_client_message(
+        &mut self,
+        client_id: &str,
+        message: Message,
+    ) -> Result<bool, HarnessError> {
+        match message {
+            Message::Hello(_hello) => Ok(true),
+            Message::Subscribe(subscribe) => {
                 // Policy check via the bus.
                 match self
                     .bus
                     .set_subscriptions(client_id, subscribe.selectors.clone())
                 {
                     Ok(()) => {
-                        let selectors_for_replay = subscribe.selectors.clone();
-                        self.publish_event(Some(client_id), Event::LifecycleSubscribe(subscribe));
+                        let selectors_for_replay = subscribe.selectors;
                         self.replay_session_events(client_id, &selectors_for_replay);
                         self.replay_harness_info(client_id, &selectors_for_replay);
                         Ok(true)
@@ -1309,15 +1340,35 @@ impl Harness {
                         let _ = self.bus.send_to(
                             client_id,
                             None,
-                            Event::LifecycleDisconnect(LifecycleDisconnect {
+                            Frame::Message(Message::Disconnect(Disconnect {
                                 reason: Some(format!("subscription denied: {reason}")),
-                            }),
+                            })),
                         );
                         Ok(false)
                     }
                     Err(other) => Err(HarnessError::Route(other)),
                 }
             }
+            Message::Disconnect(_) => Ok(false),
+            // Other messages from clients are ignored (Configure, Ack,
+            // LogEvent, Intercepted, Emit, ConfigError, Intercept).
+            Message::Ack(_)
+            | Message::Configure(_)
+            | Message::ConfigError(_)
+            | Message::Intercept(_)
+            | Message::Intercepted(_)
+            | Message::Ready(_)
+            | Message::LogEvent(_)
+            | Message::Emit(_) => Ok(true),
+        }
+    }
+
+    fn handle_client_event_inner(
+        &mut self,
+        client_id: &str,
+        event: Event,
+    ) -> Result<bool, HarnessError> {
+        match event {
             Event::UiModelSelect(select) => {
                 if self.available_models.contains(&select.model) {
                     let was_empty = self.selected_model.is_empty();
@@ -1440,7 +1491,6 @@ impl Harness {
                 }
                 Ok(true)
             }
-            Event::LifecycleDisconnect(_) => Ok(false),
             other => {
                 self.publish_event(Some(client_id), other);
                 Ok(true)
@@ -1721,9 +1771,9 @@ impl Harness {
         let _ = self.bus.send_to(
             source_id,
             None,
-            Event::LifecycleConfigure(tau_proto::LifecycleConfigure {
+            Frame::Message(Message::Configure(tau_proto::Configure {
                 config: tau_proto::json_to_cbor(&config_json),
-            }),
+            })),
         );
     }
 
@@ -1751,11 +1801,11 @@ impl Harness {
         };
         for entry in events {
             if selector_matches_event(selectors, &entry.event) {
-                let event = Event::LogEvent(tau_proto::LogEvent {
+                let frame = Frame::Message(Message::LogEvent(tau_proto::LogEvent {
                     id: entry.id,
                     event: Box::new(entry.event),
-                });
-                let _ = self.bus.send_to(client_id, entry.source.as_deref(), event);
+                }));
+                let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
             }
         }
     }
@@ -1781,9 +1831,11 @@ impl Harness {
                     | Event::ExtensionExited(_)
             );
             if dominated && selector_matches_event(selectors, &entry.event) {
-                let _ = self
-                    .bus
-                    .send_to(client_id, entry.source.as_deref(), entry.event);
+                let _ = self.bus.send_to(
+                    client_id,
+                    entry.source.as_deref(),
+                    Frame::Event(entry.event),
+                );
             }
         }
 
@@ -1792,7 +1844,9 @@ impl Harness {
             models: self.available_models.clone(),
         });
         if selector_matches_event(selectors, &models_event) {
-            let _ = self.bus.send_to(client_id, None, models_event);
+            let _ = self
+                .bus
+                .send_to(client_id, None, Frame::Event(models_event));
         }
         let selected_event = Event::HarnessModelSelected(HarnessModelSelected {
             model: self.selected_model.clone(),
@@ -1802,7 +1856,9 @@ impl Harness {
             ),
         });
         if selector_matches_event(selectors, &selected_event) {
-            let _ = self.bus.send_to(client_id, None, selected_event);
+            let _ = self
+                .bus
+                .send_to(client_id, None, Frame::Event(selected_event));
         }
         let context_event = Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
             input_tokens: self.context_input_tokens,
@@ -1810,19 +1866,25 @@ impl Harness {
             percent_used: self.context_percent_used,
         });
         if selector_matches_event(selectors, &context_event) {
-            let _ = self.bus.send_to(client_id, None, context_event);
+            let _ = self
+                .bus
+                .send_to(client_id, None, Frame::Event(context_event));
         }
         let effort_event = Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
             level: self.selected_effort,
         });
         if selector_matches_event(selectors, &effort_event) {
-            let _ = self.bus.send_to(client_id, None, effort_event);
+            let _ = self
+                .bus
+                .send_to(client_id, None, Frame::Event(effort_event));
         }
         let levels = efforts_for_model(&self.model_registry, self.selected_model.as_str());
         let levels_event =
             Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable { levels });
         if selector_matches_event(selectors, &levels_event) {
-            let _ = self.bus.send_to(client_id, None, levels_event);
+            let _ = self
+                .bus
+                .send_to(client_id, None, Frame::Event(levels_event));
         }
     }
 
@@ -2568,9 +2630,11 @@ impl Harness {
                 error: None,
             };
             if let Some(source) = source {
-                let _ = self
-                    .bus
-                    .send_to(source.as_str(), None, Event::ExtAgentQueryResult(result));
+                let _ = self.bus.send_to(
+                    source.as_str(),
+                    None,
+                    Frame::Event(Event::ExtAgentQueryResult(result)),
+                );
             } else {
                 // Should never happen — `source_connection` is set in
                 // `handle_ext_agent_query` when the conversation is
@@ -3601,30 +3665,31 @@ impl Harness {
             let remaining = RESPONSE_TIMEOUT
                 .checked_sub(started_at.elapsed())
                 .unwrap_or(Duration::ZERO);
-            let event = self
+            let harness_evt = self
                 .rx
                 .recv_timeout(remaining)
                 .map_err(|_| HarnessError::ResponseTimeout)?;
-            self.log_event(&event);
-            match event {
+            self.log_event(&harness_evt);
+            match harness_evt {
                 HarnessEvent::FromConnection {
                     connection_id,
-                    event,
+                    frame,
                 } => {
-                    if let Event::ToolProgress(ref progress) = event {
+                    if let Frame::Event(Event::ToolProgress(ref progress)) = frame {
                         progress_messages.push(format_tool_progress(progress));
                     }
                     let is_final = matches!(
-                        &event,
-                        Event::AgentResponseFinished(r)
+                        &frame,
+                        Frame::Event(Event::AgentResponseFinished(r))
                             if r.tool_calls.is_empty() && r.originator.is_user()
                     );
-                    let final_text = if let Event::AgentResponseFinished(ref r) = event {
-                        r.text.clone()
-                    } else {
-                        None
-                    };
-                    self.handle_extension_event(&connection_id, event)?;
+                    let final_text =
+                        if let Frame::Event(Event::AgentResponseFinished(ref r)) = frame {
+                            r.text.clone()
+                        } else {
+                            None
+                        };
+                    self.handle_extension_event(&connection_id, frame)?;
                     if is_final {
                         return Ok(InteractionOutcome {
                             lifecycle_messages: Vec::new(),
@@ -3700,12 +3765,7 @@ fn last_user_message_ancestor(tree: &SessionTree, start: NodeId) -> Option<NodeI
 }
 
 fn selector_matches_event(selectors: &[EventSelector], event: &Event) -> bool {
-    // Match against the inner event for log deliveries (see the
-    // matching helper in tau-core for the same reasoning).
-    let target_name = match event {
-        Event::LogEvent(env) => env.event.name(),
-        _ => event.name(),
-    };
+    let target_name = event.name();
     selectors.iter().any(|selector| match selector {
         EventSelector::Exact(expected) => *expected == target_name,
         EventSelector::Prefix(prefix) => target_name.matches_prefix(prefix),

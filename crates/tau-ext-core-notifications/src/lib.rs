@@ -32,9 +32,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    ClientKind, Event, EventReader, EventSelector, EventWriter, ExtAgentQuery,
-    LifecycleConfigError, LifecycleHello, LifecycleReady, LifecycleSubscribe, Osc1337SetUserVar,
-    PROTOCOL_VERSION,
+    ClientKind, ConfigError, Event, EventSelector, ExtAgentQuery, Frame, FrameReader, FrameWriter,
+    Hello, Message, Osc1337SetUserVar, PROTOCOL_VERSION, Ready, Subscribe,
 };
 
 /// `tracing` target for events emitted from this extension. Matches
@@ -191,10 +190,10 @@ where
 }
 
 /// Inbound message on the main thread's channel: either a decoded
-/// event from the reader thread, or a terminal condition that ends
+/// frame from the reader thread, or a terminal condition that ends
 /// the loop.
 enum InMsg {
-    Event(Event),
+    Frame(Frame),
     EndOfStream,
 }
 
@@ -234,21 +233,21 @@ where
     R: Read + Send + 'static,
     W: Write,
 {
-    let mut writer = EventWriter::new(BufWriter::new(writer));
+    let mut writer = FrameWriter::new(BufWriter::new(writer));
     // Live config — only `idle_command` actually rides on it past
     // the parse: `idle_seconds` is reflected into the local
     // `idle_duration` Duration so we keep sub-second test precision
     // (the wire schema is integer seconds, which is fine for users
-    // but rounds out millisecond test windows). `LifecycleConfigure`
+    // but rounds out millisecond test windows). `Configure`
     // from the harness overwrites both on receipt.
     let mut config = ExtConfig::default();
 
-    writer.write_event(&Event::LifecycleHello(LifecycleHello {
+    writer.write_frame(&Frame::Message(Message::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: "tau-ext-core-notifications".into(),
         client_kind: ClientKind::Tool,
-    }))?;
-    writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
         selectors: vec![
             EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
             EventSelector::Exact(tau_proto::EventName::AGENT_RESPONSE_FINISHED),
@@ -257,30 +256,28 @@ where
             // bumps the idle deadline so the desktop notification
             // doesn't fire while the user is mid-sentence.
             EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT),
-            EventSelector::Exact(tau_proto::EventName::LIFECYCLE_CONFIGURE),
-            EventSelector::Exact(tau_proto::EventName::LIFECYCLE_DISCONNECT),
             // Side-query results come back point-to-point from the
             // harness, but we subscribe defensively so the broadcast
             // form (if it ever appears) also reaches us.
             EventSelector::Exact(tau_proto::EventName::EXTENSION_AGENT_QUERY_RESULT),
         ],
-    }))?;
-    writer.write_event(&Event::LifecycleReady(LifecycleReady {
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Ready(Ready {
         message: Some("core-notifications ready".to_owned()),
-    }))?;
+    })))?;
     writer.flush()?;
 
     // Spawn a reader thread so the main loop can wait on either an
-    // incoming event or an idle deadline via `recv_timeout`. The
+    // incoming frame or an idle deadline via `recv_timeout`. The
     // reader exits naturally when stdin closes, then the channel
     // disconnects and the main loop sees EndOfStream.
     let (tx, rx) = mpsc::channel::<InMsg>();
     let _reader_handle = thread::spawn(move || {
-        let mut reader = EventReader::new(BufReader::new(reader));
+        let mut reader = FrameReader::new(BufReader::new(reader));
         loop {
-            match reader.read_event() {
-                Ok(Some(event)) => {
-                    if tx.send(InMsg::Event(event)).is_err() {
+            match reader.read_frame() {
+                Ok(Some(frame)) => {
+                    if tx.send(InMsg::Frame(frame)).is_err() {
                         break;
                     }
                 }
@@ -329,8 +326,48 @@ where
         };
 
         match recv_result {
-            Ok(InMsg::Event(event)) => {
-                let (_, inner) = event.peel_log();
+            Ok(InMsg::Frame(frame)) => {
+                let (_, inner) = frame.peel_log();
+                // Handle messages first.
+                match inner {
+                    Frame::Message(Message::Configure(msg)) => {
+                        match tau_extension::parse_config::<ExtConfig>(&msg.config) {
+                            Ok(cfg) => {
+                                idle_duration = cfg.idle_duration();
+                                tracing::info!(
+                                    target: LOG_TARGET,
+                                    idle_seconds = idle_duration.as_secs(),
+                                    has_idle_command = cfg.idle_command.is_some(),
+                                    "applied config",
+                                );
+                                config = cfg;
+                            }
+                            Err(message) => {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    error = %message,
+                                    "rejecting config",
+                                );
+                                writer.write_frame(&Frame::Message(Message::ConfigError(
+                                    ConfigError {
+                                        message: message.clone(),
+                                    },
+                                )))?;
+                                writer.flush()?;
+                            }
+                        }
+                        continue;
+                    }
+                    Frame::Message(Message::Disconnect(_)) => {
+                        tracing::info!(target: LOG_TARGET, "disconnect received, exiting");
+                        break;
+                    }
+                    Frame::Message(_) => continue,
+                    Frame::Event(_) => {}
+                }
+                let Frame::Event(inner) = inner else {
+                    continue;
+                };
                 tracing::trace!(target: LOG_TARGET, name = %inner.name(), "event received");
                 // Sub-agent (`PromptOriginator::Extension`) events
                 // share the bus with the user's interactive turn, but
@@ -350,40 +387,13 @@ where
                     continue;
                 }
                 match inner {
-                    Event::LifecycleConfigure(msg) => {
-                        match tau_extension::parse_config::<ExtConfig>(&msg.config) {
-                            Ok(cfg) => {
-                                idle_duration = cfg.idle_duration();
-                                tracing::info!(
-                                    target: LOG_TARGET,
-                                    idle_seconds = idle_duration.as_secs(),
-                                    has_idle_command = cfg.idle_command.is_some(),
-                                    "applied config",
-                                );
-                                config = cfg;
-                            }
-                            Err(message) => {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    error = %message,
-                                    "rejecting config",
-                                );
-                                writer.write_event(&Event::LifecycleConfigError(
-                                    LifecycleConfigError {
-                                        message: message.clone(),
-                                    },
-                                ))?;
-                                writer.flush()?;
-                            }
-                        }
-                    }
                     Event::AgentPromptSubmitted(_submitted) => {
                         idle = None;
                     }
                     Event::UiPromptSubmitted(_prompt) => {
                         idle = None;
                         if !waiting_for_final_response {
-                            writer.write_event(&sound_event(VALUE_AGENT_START))?;
+                            writer.write_frame(&Frame::Event(sound_event(VALUE_AGENT_START)))?;
                             writer.flush()?;
                             waiting_for_final_response = true;
                         }
@@ -426,7 +436,7 @@ where
                             );
                             continue;
                         }
-                        writer.write_event(&sound_event(VALUE_AGENT_END))?;
+                        writer.write_frame(&Frame::Event(sound_event(VALUE_AGENT_END)))?;
                         writer.flush()?;
                         waiting_for_final_response = false;
                         idle = Some(IdleState::WaitingIdle {
@@ -464,7 +474,9 @@ where
                                 body
                             };
                             let title = build_title();
-                            writer.write_event(&summary_text_event_with(&title, &body))?;
+                            writer.write_frame(&Frame::Event(summary_text_event_with(
+                                &title, &body,
+                            )))?;
                             writer.flush()?;
                             spawn_idle_command(&config, &title, &body);
                             idle = None;
@@ -472,10 +484,6 @@ where
                                 break;
                             }
                         }
-                    }
-                    Event::LifecycleDisconnect(_) => {
-                        tracing::info!(target: LOG_TARGET, "disconnect received, exiting");
-                        break;
                     }
                     other => tracing::trace!(
                         target: LOG_TARGET,
@@ -499,7 +507,7 @@ where
                         query_id = %query_id,
                         "idle deadline elapsed, requesting agent summary",
                     );
-                    writer.write_event(&Event::ExtAgentQuery(ExtAgentQuery {
+                    writer.write_frame(&Frame::Event(Event::ExtAgentQuery(ExtAgentQuery {
                         query_id: query_id.clone(),
                         instruction: SUMMARY_INSTRUCTION.to_owned(),
                         // Notifications doesn't implement a tool —
@@ -507,7 +515,7 @@ where
                         // `delegate` flow.
                         tool_call_id: None,
                         task_name: None,
-                    }))?;
+                    })))?;
                     writer.flush()?;
                     idle = Some(IdleState::WaitingSummary {
                         query_id,
@@ -520,7 +528,10 @@ where
                         "summary timed out, falling back to static text",
                     );
                     let title = build_title();
-                    writer.write_event(&summary_text_event_with(&title, FALLBACK_BODY))?;
+                    writer.write_frame(&Frame::Event(summary_text_event_with(
+                        &title,
+                        FALLBACK_BODY,
+                    )))?;
                     writer.flush()?;
                     spawn_idle_command(&config, &title, FALLBACK_BODY);
                     if input_closed {

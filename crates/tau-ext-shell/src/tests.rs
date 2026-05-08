@@ -6,6 +6,68 @@ use tempfile::TempDir;
 
 use super::*;
 
+/// Test-side wrapper around [`FrameReader`] that exposes an `Event`-flavoured
+/// API so the existing tests (which don't care about the message/event split)
+/// can stay mechanical. Messages other than `LogEvent` are skipped.
+struct EventReader<R> {
+    inner: FrameReader<R>,
+}
+
+impl<R: std::io::Read> EventReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner: FrameReader::new(inner),
+        }
+    }
+
+    fn read_event(&mut self) -> Result<Option<Event>, tau_proto::DecodeError> {
+        loop {
+            match self.inner.read_frame()? {
+                None => return Ok(None),
+                Some(frame) => {
+                    let (_log_id, peeled) = frame.peel_log();
+                    match peeled {
+                        Frame::Event(event) => return Ok(Some(event)),
+                        Frame::Message(_) => continue,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Test-side wrapper around [`FrameWriter`] that accepts `Event` directly.
+struct EventWriter<W> {
+    inner: FrameWriter<W>,
+}
+
+impl<W: std::io::Write> EventWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner: FrameWriter::new(inner),
+        }
+    }
+
+    fn write_event(&mut self, event: &Event) -> Result<(), tau_proto::EncodeError> {
+        self.inner.write_frame(&Frame::Event(event.clone()))
+    }
+
+    fn write_frame(&mut self, frame: &Frame) -> Result<(), tau_proto::EncodeError> {
+        self.inner.write_frame(frame)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Build a `Frame::Message(Disconnect)` for tests that previously sent
+/// `Event::LifecycleDisconnect`. Wrapped in this helper to keep the
+/// disruption from the protocol split contained.
+fn disconnect_frame(reason: Option<String>) -> Frame {
+    Frame::Message(Message::Disconnect(tau_proto::Disconnect { reason }))
+}
+
 fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
     match value {
         CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
@@ -37,11 +99,10 @@ fn spawn_extension() -> (
     )
 }
 
-/// Consumes startup events (hello, subscribe, registers, ready).
+/// Consumes startup events (tool registers). The hello/subscribe/ready
+/// messages are filtered out by the test-side `EventReader` wrapper.
 fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
-    for expected in [
-        EventName::LIFECYCLE_HELLO,
-        EventName::LIFECYCLE_SUBSCRIBE,
+    for _expected in [
         EventName::TOOL_REGISTER, // echo
         EventName::TOOL_REGISTER, // read
         EventName::TOOL_REGISTER, // write
@@ -50,13 +111,12 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
         EventName::TOOL_REGISTER, // find
         EventName::TOOL_REGISTER, // ls
         EventName::TOOL_REGISTER, // shell
-        EventName::LIFECYCLE_READY,
     ] {
         let event = reader
             .read_event()
             .expect("read")
             .expect("startup event should arrive");
-        assert_eq!(event.name(), expected);
+        assert_eq!(event.name(), EventName::TOOL_REGISTER);
     }
 }
 
@@ -146,9 +206,7 @@ fn session_started_emits_ready_after_startup() {
     }
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -185,9 +243,7 @@ fn extension_reads_file() {
     );
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -217,9 +273,7 @@ fn extension_read_missing_file_reports_error() {
     assert!(error.message.contains("No such file or directory"));
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -261,9 +315,7 @@ fn extension_writes_file() {
     );
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -306,9 +358,7 @@ fn extension_write_missing_parent_reports_short_error() {
     assert!(error.message.contains("Not a directory"));
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -345,9 +395,7 @@ fn extension_write_directory_reports_short_error() {
     assert!(error.message.contains("Is a directory"));
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -386,9 +434,7 @@ fn extension_writes_file_creates_directories() {
     );
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -434,9 +480,7 @@ fn edit_read_failure_reports_short_reason() {
     assert!(error.message.contains("No such file or directory"));
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -485,9 +529,7 @@ fn edit_errors_use_short_reasons() {
     assert_eq!(error.message, "not found");
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -539,9 +581,7 @@ fn edit_errors_include_path_details() {
     assert_eq!(path, file_path.display().to_string());
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -591,9 +631,7 @@ fn extension_finds_files() {
     assert!(!output.contains("README.md"));
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -632,9 +670,7 @@ fn extension_lists_directory_contents() {
     assert!(output.contains("src/"));
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -670,9 +706,7 @@ fn shell_tool_reports_progress_and_success() {
     );
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }
@@ -705,9 +739,7 @@ fn shell_tool_reports_failures_with_details() {
     assert!(error.details.is_some());
 
     writer
-        .write_event(&Event::LifecycleDisconnect(
-            tau_proto::LifecycleDisconnect { reason: None },
-        ))
+        .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
 }

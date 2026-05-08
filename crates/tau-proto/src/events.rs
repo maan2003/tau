@@ -28,7 +28,6 @@ use crate::{
 /// without losing fidelity.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum EventCategory {
-    Lifecycle,
     Tool,
     Extension,
     Harness,
@@ -40,9 +39,6 @@ pub enum EventCategory {
     /// sequences the UI should write straight through to its
     /// terminal (notifications, OSC user-vars, etc.).
     Term,
-    /// Wire-level transport, used for the at-least-once `LogEvent` /
-    /// `Ack` envelope.
-    Wire,
     /// Any category we don't recognize, kept verbatim.
     Other(String),
 }
@@ -53,7 +49,6 @@ impl EventCategory {
     #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
-            Self::Lifecycle => "lifecycle",
             Self::Tool => "tool",
             Self::Extension => "extension",
             Self::Harness => "harness",
@@ -62,7 +57,6 @@ impl EventCategory {
             Self::Session => "session",
             Self::Agent => "agent",
             Self::Term => "term",
-            Self::Wire => "wire",
             Self::Other(s) => s.as_str(),
         }
     }
@@ -72,7 +66,6 @@ impl EventCategory {
     #[must_use]
     pub fn from_wire(s: &str) -> Self {
         match s {
-            "lifecycle" => Self::Lifecycle,
             "tool" => Self::Tool,
             "extension" => Self::Extension,
             "harness" => Self::Harness,
@@ -81,7 +74,6 @@ impl EventCategory {
             "session" => Self::Session,
             "agent" => Self::Agent,
             "term" => Self::Term,
-            "wire" => Self::Wire,
             other => Self::Other(other.to_owned()),
         }
     }
@@ -185,16 +177,6 @@ impl EventName {
 
     // -- Well-known event names ----------------------------------------
 
-    pub const LIFECYCLE_HELLO: Self = Self::from_static(EventCategory::Lifecycle, "hello");
-    pub const LIFECYCLE_SUBSCRIBE: Self = Self::from_static(EventCategory::Lifecycle, "subscribe");
-    pub const LIFECYCLE_INTERCEPT: Self = Self::from_static(EventCategory::Lifecycle, "intercept");
-    pub const LIFECYCLE_READY: Self = Self::from_static(EventCategory::Lifecycle, "ready");
-    pub const LIFECYCLE_DISCONNECT: Self =
-        Self::from_static(EventCategory::Lifecycle, "disconnect");
-    pub const LIFECYCLE_CONFIGURE: Self = Self::from_static(EventCategory::Lifecycle, "configure");
-    pub const LIFECYCLE_CONFIG_ERROR: Self =
-        Self::from_static(EventCategory::Lifecycle, "config_error");
-
     pub const TOOL_REGISTER: Self = Self::from_static(EventCategory::Tool, "register");
     pub const TOOL_UNREGISTER: Self = Self::from_static(EventCategory::Tool, "unregister");
     pub const TOOL_REQUEST: Self = Self::from_static(EventCategory::Tool, "request");
@@ -234,8 +216,6 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "effort_changed");
     pub const HARNESS_EFFORTS_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "efforts_available");
-    pub const HARNESS_EMIT: Self = Self::from_static(EventCategory::Harness, "emit");
-    pub const HARNESS_INTERCEPTED: Self = Self::from_static(EventCategory::Harness, "intercepted");
 
     pub const UI_PROMPT_SUBMITTED: Self = Self::from_static(EventCategory::Ui, "prompt_submitted");
     pub const UI_MODEL_SELECT: Self = Self::from_static(EventCategory::Ui, "model_select");
@@ -272,9 +252,6 @@ impl EventName {
         Self::from_static(EventCategory::Agent, "response_updated");
     pub const AGENT_RESPONSE_FINISHED: Self =
         Self::from_static(EventCategory::Agent, "response_finished");
-
-    pub const WIRE_LOG_EVENT: Self = Self::from_static(EventCategory::Wire, "log_event");
-    pub const WIRE_ACK: Self = Self::from_static(EventCategory::Wire, "ack");
 }
 
 impl fmt::Display for EventName {
@@ -343,7 +320,7 @@ impl fmt::Display for ParseEventNameError {
 impl std::error::Error for ParseEventNameError {}
 
 // ---------------------------------------------------------------------------
-// Lifecycle events
+// Protocol participant types and selectors
 // ---------------------------------------------------------------------------
 
 /// The type of participant speaking the protocol.
@@ -357,26 +334,12 @@ pub enum ClientKind {
     External,
 }
 
-/// A subscription selector used by `lifecycle.subscribe`.
+/// A subscription selector used by [`crate::Subscribe`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum EventSelector {
     Exact(EventName),
     Prefix(String),
-}
-
-/// Announcement sent by a participant after connecting.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LifecycleHello {
-    pub protocol_version: u32,
-    pub client_name: ExtensionName,
-    pub client_kind: ClientKind,
-}
-
-/// Subscription request describing which events a participant wants.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LifecycleSubscribe {
-    pub selectors: Vec<EventSelector>,
 }
 
 /// Interception priority. Lower numeric values run first.
@@ -385,53 +348,6 @@ pub struct LifecycleSubscribe {
 )]
 #[serde(transparent)]
 pub struct InterceptionPriority(pub i64);
-
-/// Interception request describing which event emissions a participant wants
-/// to handle before they reach the event log and regular subscribers.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LifecycleIntercept {
-    pub selectors: Vec<EventSelector>,
-    pub priority: InterceptionPriority,
-}
-
-/// Readiness notification emitted after startup or handshake.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LifecycleReady {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-/// Disconnect notification with an optional human-readable reason.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LifecycleDisconnect {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-/// Configuration handed to an extension at startup. Sent
-/// point-to-point from the harness to the extension immediately
-/// after the harness sees the extension's
-/// [`LifecycleHello`](crate::LifecycleHello). Carries whatever the
-/// `config: { … }` value was for that extension in `harness.json5`,
-/// or [`CborValue::Null`] / an empty map when no config was
-/// provided.
-///
-/// `Eq` is not derivable because the underlying CBOR value can
-/// contain floats; `PartialEq` is enough for tests.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LifecycleConfigure {
-    pub config: CborValue,
-}
-
-/// Reported by an extension when its
-/// [`LifecycleConfigure`](LifecycleConfigure) value is malformed (or
-/// otherwise unusable). The harness surfaces the message just like
-/// a `harness.json5` parse error so the user can see why their
-/// per-extension config was rejected.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LifecycleConfigError {
-    pub message: String,
-}
 
 // ---------------------------------------------------------------------------
 // Harness informational messages
@@ -905,87 +821,6 @@ pub struct CustomEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Wire transport — at-least-once delivery for event-log entries
-// ---------------------------------------------------------------------------
-
-/// Monotonic id assigned by the harness when an event is appended to its
-/// event log. Receivers acknowledge processing by returning the same id
-/// in [`Ack::up_to`].
-#[derive(
-    Clone, Copy, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(transparent)]
-pub struct LogEventId(pub u64);
-
-impl LogEventId {
-    #[must_use]
-    pub fn new(v: u64) -> Self {
-        Self(v)
-    }
-
-    #[must_use]
-    pub fn get(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for LogEventId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// A bus event delivered through the harness's event log. Receivers
-/// must process the inner event and then send an [`Ack`] referencing
-/// `id` (or any later id, since acks are cumulative).
-///
-/// `event` is boxed because `Event` is recursive through this variant.
-/// It is never another `LogEvent` or `Ack` — only "real" payload
-/// events (e.g., `SessionStarted`, `ExtensionReady`).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LogEvent {
-    pub id: LogEventId,
-    pub event: Box<Event>,
-}
-
-/// Extension/client request to emit one event with harness-owned
-/// delivery metadata.
-///
-/// The inner `event` is the fact that subscribers see. `transient`
-/// controls whether the harness writes it to durable per-session
-/// event history; it is not part of the emitted fact itself.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct EmitEvent {
-    pub event: Box<Event>,
-    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
-    pub transient: bool,
-    /// Redelivery cursor. `None` starts interception from the beginning.
-    /// When set by an interceptor, the harness resumes after that priority
-    /// and the sending component at that priority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interception: Option<InterceptionPriority>,
-}
-
-/// Directed harness → interceptor message carrying an event emission that has
-/// not reached the event log yet.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct HarnessIntercepted {
-    pub event: Box<Event>,
-    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
-    pub transient: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interception: Option<InterceptionPriority>,
-}
-
-/// Receiver → sender acknowledgement that all log events with id
-/// `<= up_to` have been processed. Cumulative — newer acks supersede
-/// older ones.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Ack {
-    pub up_to: LogEventId,
-}
-
-// ---------------------------------------------------------------------------
 // UI events — facts from the user interface
 // ---------------------------------------------------------------------------
 
@@ -1426,22 +1261,6 @@ pub struct ToolDefinition {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload")]
 pub enum Event {
-    // Lifecycle
-    #[serde(rename = "lifecycle.hello")]
-    LifecycleHello(LifecycleHello),
-    #[serde(rename = "lifecycle.subscribe")]
-    LifecycleSubscribe(LifecycleSubscribe),
-    #[serde(rename = "lifecycle.intercept")]
-    LifecycleIntercept(LifecycleIntercept),
-    #[serde(rename = "lifecycle.ready")]
-    LifecycleReady(LifecycleReady),
-    #[serde(rename = "lifecycle.disconnect")]
-    LifecycleDisconnect(LifecycleDisconnect),
-    #[serde(rename = "lifecycle.configure")]
-    LifecycleConfigure(LifecycleConfigure),
-    #[serde(rename = "lifecycle.config_error")]
-    LifecycleConfigError(LifecycleConfigError),
-
     // Tools
     #[serde(rename = "tool.register")]
     ToolRegister(ToolRegister),
@@ -1499,10 +1318,6 @@ pub enum Event {
     HarnessEffortChanged(HarnessEffortChanged),
     #[serde(rename = "harness.efforts_available")]
     HarnessEffortsAvailable(HarnessEffortsAvailable),
-    #[serde(rename = "harness.emit")]
-    EmitEvent(EmitEvent),
-    #[serde(rename = "harness.intercepted")]
-    HarnessIntercepted(HarnessIntercepted),
 
     // UI
     #[serde(rename = "ui.prompt_submitted")]
@@ -1555,12 +1370,6 @@ pub enum Event {
     AgentResponseUpdated(AgentResponseUpdated),
     #[serde(rename = "agent.response_finished")]
     AgentResponseFinished(AgentResponseFinished),
-
-    // Wire transport
-    #[serde(rename = "wire.log_event")]
-    LogEvent(LogEvent),
-    #[serde(rename = "wire.ack")]
-    Ack(Ack),
 }
 
 impl Event {
@@ -1568,13 +1377,6 @@ impl Event {
     #[must_use]
     pub fn name(&self) -> EventName {
         match self {
-            Self::LifecycleHello(_) => EventName::LIFECYCLE_HELLO,
-            Self::LifecycleSubscribe(_) => EventName::LIFECYCLE_SUBSCRIBE,
-            Self::LifecycleIntercept(_) => EventName::LIFECYCLE_INTERCEPT,
-            Self::LifecycleReady(_) => EventName::LIFECYCLE_READY,
-            Self::LifecycleDisconnect(_) => EventName::LIFECYCLE_DISCONNECT,
-            Self::LifecycleConfigure(_) => EventName::LIFECYCLE_CONFIGURE,
-            Self::LifecycleConfigError(_) => EventName::LIFECYCLE_CONFIG_ERROR,
             Self::ToolRegister(_) => EventName::TOOL_REGISTER,
             Self::ToolUnregister(_) => EventName::TOOL_UNREGISTER,
             Self::ToolRequest(_) => EventName::TOOL_REQUEST,
@@ -1601,8 +1403,6 @@ impl Event {
             Self::HarnessContextUsageChanged(_) => EventName::HARNESS_CONTEXT_USAGE_CHANGED,
             Self::HarnessEffortChanged(_) => EventName::HARNESS_EFFORT_CHANGED,
             Self::HarnessEffortsAvailable(_) => EventName::HARNESS_EFFORTS_AVAILABLE,
-            Self::EmitEvent(_) => EventName::HARNESS_EMIT,
-            Self::HarnessIntercepted(_) => EventName::HARNESS_INTERCEPTED,
             Self::UiPromptSubmitted(_) => EventName::UI_PROMPT_SUBMITTED,
             Self::UiPromptDraft(_) => EventName::UI_PROMPT_DRAFT,
             Self::UiModelSelect(_) => EventName::UI_MODEL_SELECT,
@@ -1624,12 +1424,10 @@ impl Event {
             Self::AgentPromptSubmitted(_) => EventName::AGENT_PROMPT_SUBMITTED,
             Self::AgentResponseUpdated(_) => EventName::AGENT_RESPONSE_UPDATED,
             Self::AgentResponseFinished(_) => EventName::AGENT_RESPONSE_FINISHED,
-            Self::LogEvent(_) => EventName::WIRE_LOG_EVENT,
-            Self::Ack(_) => EventName::WIRE_ACK,
         }
     }
 
-    /// Events received through [`EmitEvent`] with transient metadata
+    /// Events received through [`crate::Emit`] with transient metadata
     /// are not written to durable session event logs.
     #[must_use]
     pub const fn is_transient(&self) -> bool {
@@ -1637,7 +1435,7 @@ impl Event {
     }
 
     /// Returns true for protocol events that historically behaved as
-    /// transient when sent directly without an [`EmitEvent`] wrapper.
+    /// transient when sent directly without an [`crate::Emit`] wrapper.
     #[must_use]
     pub const fn defaults_to_transient(&self) -> bool {
         matches!(
@@ -1648,17 +1446,5 @@ impl Event {
                 | Self::ShellCommandProgress(_)
                 | Self::UiPromptDraft(_)
         )
-    }
-
-    /// Peels off a `LogEvent` envelope, returning `(Some(id), inner)`
-    /// for log-delivered events and `(None, self)` for direct ones.
-    /// Receivers that want at-least-once semantics ack the returned id
-    /// after processing the inner event.
-    #[must_use]
-    pub fn peel_log(self) -> (Option<LogEventId>, Self) {
-        match self {
-            Self::LogEvent(env) => (Some(env.id), *env.event),
-            other => (None, other),
-        }
     }
 }

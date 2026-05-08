@@ -7,7 +7,7 @@ use std::error::Error;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{ClientKind, ConnectionId, Event};
+use tau_proto::{ClientKind, ConnectionId, Frame};
 
 /// The origin class of one live connection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -27,46 +27,46 @@ pub struct ConnectionMetadata {
     pub origin: ConnectionOrigin,
 }
 
-/// One protocol event routed through the internal bus.
+/// One protocol frame routed through the internal bus.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RoutedEvent {
+pub struct RoutedFrame {
     pub source_id: Option<ConnectionId>,
-    pub event: Event,
+    pub frame: Frame,
 }
 
-impl RoutedEvent {
-    /// Creates a routed event with an optional source connection.
+impl RoutedFrame {
+    /// Creates a routed frame with an optional source connection.
     #[must_use]
-    pub fn new(source_id: Option<ConnectionId>, event: Event) -> Self {
-        Self { source_id, event }
+    pub fn new(source_id: Option<ConnectionId>, frame: Frame) -> Self {
+        Self { source_id, frame }
     }
 }
 
-/// A sink that accepts routed events for one live connection.
+/// A sink that accepts routed frames for one live connection.
 pub trait ConnectionSink {
-    fn send(&mut self, event: RoutedEvent) -> Result<(), ConnectionSendError>;
+    fn send(&mut self, frame: RoutedFrame) -> Result<(), ConnectionSendError>;
 }
 
 /// A per-connection visibility hook.
 pub trait VisibilityFilter {
-    fn allows(&self, event: &RoutedEvent) -> bool;
+    fn allows(&self, frame: &RoutedFrame) -> bool;
 }
 
 impl<F> VisibilityFilter for F
 where
-    F: Fn(&RoutedEvent) -> bool + 'static,
+    F: Fn(&RoutedFrame) -> bool + 'static,
 {
-    fn allows(&self, event: &RoutedEvent) -> bool {
-        self(event)
+    fn allows(&self, frame: &RoutedFrame) -> bool {
+        self(frame)
     }
 }
 
-/// Visibility filter that allows all routed events.
+/// Visibility filter that allows all routed frames.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AllowAll;
 
 impl VisibilityFilter for AllowAll {
-    fn allows(&self, _event: &RoutedEvent) -> bool {
+    fn allows(&self, _frame: &RoutedFrame) -> bool {
         true
     }
 }

@@ -53,8 +53,8 @@ impl Drop for SemaphoreGuard<'_> {
 }
 
 use tau_proto::{
-    Ack, CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleHello,
-    LifecycleReady, LifecycleSubscribe, LogEventId, PROTOCOL_VERSION, SessionStarted, ToolError,
+    Ack, CborValue, ClientKind, Event, EventSelector, Frame, FrameReader, FrameWriter, Hello,
+    LogEventId, Message, PROTOCOL_VERSION, Ready, SessionStarted, Subscribe, ToolError,
     ToolProgress, ToolRegister, ToolResult, ToolSideEffects, ToolSpec,
 };
 
@@ -93,31 +93,30 @@ where
     R: Read,
     W: Write + Send + 'static,
 {
-    let mut reader = EventReader::new(BufReader::new(reader));
-    let mut writer = EventWriter::new(BufWriter::new(writer));
+    let mut reader = FrameReader::new(BufReader::new(reader));
+    let mut writer = FrameWriter::new(BufWriter::new(writer));
 
-    writer.write_event(&Event::LifecycleHello(LifecycleHello {
+    writer.write_frame(&Frame::Message(Message::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: "tau-ext-shell".into(),
         client_kind: ClientKind::Tool,
-    }))?;
-    writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
         selectors: vec![
             EventSelector::Exact(tau_proto::EventName::TOOL_INVOKE),
             EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
             EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND),
-            EventSelector::Exact(tau_proto::EventName::LIFECYCLE_DISCONNECT),
         ],
-    }))?;
+    })))?;
     if include_echo {
-        writer.write_event(&Event::ToolRegister(ToolRegister {
+        writer.write_frame(&Frame::Event(Event::ToolRegister(ToolRegister {
             tool: ToolSpec {
                 name: ECHO_TOOL_NAME.into(),
                 description: Some("Echo the provided payload unchanged".to_owned()),
                 parameters: None,
                 side_effects: ToolSideEffects::Pure,
             },
-        }))?;
+        })))?;
     }
     for tool in [
         ToolSpec {
@@ -328,24 +327,24 @@ where
             side_effects: ToolSideEffects::Mutating,
         },
     ] {
-        writer.write_event(&Event::ToolRegister(ToolRegister { tool }))?;
+        writer.write_frame(&Frame::Event(Event::ToolRegister(ToolRegister { tool })))?;
     }
 
-    writer.write_event(&Event::LifecycleReady(LifecycleReady {
+    writer.write_frame(&Frame::Message(Message::Ready(Ready {
         message: Some("filesystem and shell tools ready".to_owned()),
-    }))?;
+    })))?;
     writer.flush()?;
 
-    // Response channel: worker threads send events here, writer thread
+    // Response channel: worker threads send frames here, writer thread
     // drains them onto the wire.
-    let (tx, rx) = mpsc::channel::<Event>();
+    let (tx, rx) = mpsc::channel::<Frame>();
     let sem = Arc::new(Semaphore::new(16));
 
-    // Writer thread: drains response events and writes them to the wire.
+    // Writer thread: drains response frames and writes them to the wire.
     let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
-        for event in rx {
+        for frame in rx {
             writer
-                .write_event(&event)
+                .write_frame(&frame)
                 .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
             writer
                 .flush()
@@ -361,14 +360,14 @@ where
     // ToolResult/ToolError correlated by call_id is the implicit reply.
     //
     // Other subscribed events (SessionStarted) come wrapped as
-    // `Event::LogEvent` and require an `Ack` after processing.
+    // `Message::LogEvent` and require an `Ack` after processing.
     loop {
-        let Some(event) = reader.read_event()? else {
+        let Some(frame) = reader.read_frame()? else {
             break;
         };
-        let (log_id, inner) = event.peel_log();
+        let (log_id, inner) = frame.peel_log();
         match inner {
-            Event::ToolInvoke(invoke) => {
+            Frame::Event(Event::ToolInvoke(invoke)) => {
                 let tx = tx.clone();
                 let sem = Arc::clone(&sem);
                 std::thread::spawn(move || {
@@ -376,10 +375,10 @@ where
                     dispatch_tool_invoke(invoke, include_echo, &tx);
                 });
             }
-            Event::SessionStarted(started) => {
+            Frame::Event(Event::SessionStarted(started)) => {
                 dispatch_session_started(started, &tx);
             }
-            Event::UiShellCommand(cmd) => {
+            Frame::Event(Event::UiShellCommand(cmd)) => {
                 // User-initiated `!`/`!!` — run on a worker thread
                 // and stream chunks out via the same tx writer.
                 let tx = tx.clone();
@@ -389,7 +388,7 @@ where
                     dispatch_user_shell_command(cmd, &tx);
                 });
             }
-            Event::LifecycleDisconnect(_) => break,
+            Frame::Message(Message::Disconnect(_)) => break,
             _ => {}
         }
         if let Some(id) = log_id {
@@ -410,17 +409,17 @@ where
 fn dispatch_tool_invoke(
     invoke: tau_proto::ToolInvoke,
     include_echo: bool,
-    tx: &mpsc::Sender<Event>,
+    tx: &mpsc::Sender<Frame>,
 ) {
     let events = execute_tool(invoke, include_echo);
     for event in events {
-        let _ = tx.send(event);
+        let _ = tx.send(Frame::Event(event));
     }
 }
 
-fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<Event>) {
+fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<Frame>) {
     for event in build_session_started_events(started) {
-        let _ = tx.send(event);
+        let _ = tx.send(Frame::Event(event));
     }
 }
 
@@ -428,7 +427,7 @@ fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<Event>) {
 /// stderr back as `ShellCommandProgress` chunks while they arrive and
 /// emitting `ShellCommandFinished` with the full (truncated-tail)
 /// output when the child exits.
-fn dispatch_user_shell_command(cmd: tau_proto::UiShellCommand, tx: &mpsc::Sender<Event>) {
+fn dispatch_user_shell_command(cmd: tau_proto::UiShellCommand, tx: &mpsc::Sender<Frame>) {
     use std::io::Read;
 
     let mut child_cmd = Command::new("sh");
@@ -442,7 +441,7 @@ fn dispatch_user_shell_command(cmd: tau_proto::UiShellCommand, tx: &mpsc::Sender
     let mut child = match child_cmd.spawn() {
         Ok(child) => child,
         Err(err) => {
-            let _ = tx.send(Event::ShellCommandFinished(
+            let _ = tx.send(Frame::Event(Event::ShellCommandFinished(
                 tau_proto::ShellCommandFinished {
                     command_id: cmd.command_id,
                     session_id: cmd.session_id,
@@ -452,7 +451,7 @@ fn dispatch_user_shell_command(cmd: tau_proto::UiShellCommand, tx: &mpsc::Sender
                     exit_code: None,
                     cancelled: false,
                 },
-            ));
+            )));
             return;
         }
     };
@@ -467,7 +466,7 @@ fn dispatch_user_shell_command(cmd: tau_proto::UiShellCommand, tx: &mpsc::Sender
         mut pipe: R,
         stream: tau_proto::ShellStream,
         command_id: tau_proto::ShellCommandId,
-        tx: mpsc::Sender<Event>,
+        tx: mpsc::Sender<Frame>,
     ) -> std::thread::JoinHandle<String> {
         std::thread::spawn(move || {
             let mut captured = String::new();
@@ -478,13 +477,13 @@ fn dispatch_user_shell_command(cmd: tau_proto::UiShellCommand, tx: &mpsc::Sender
                     Ok(n) => {
                         let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
                         captured.push_str(&chunk);
-                        let _ = tx.send(Event::ShellCommandProgress(
+                        let _ = tx.send(Frame::Event(Event::ShellCommandProgress(
                             tau_proto::ShellCommandProgress {
                                 command_id: command_id.clone(),
                                 stream,
                                 chunk,
                             },
-                        ));
+                        )));
                     }
                 }
             }
@@ -542,7 +541,7 @@ fn dispatch_user_shell_command(cmd: tau_proto::UiShellCommand, tx: &mpsc::Sender
     }
     let truncated = truncate_tail(&merged);
 
-    let _ = tx.send(Event::ShellCommandFinished(
+    let _ = tx.send(Frame::Event(Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
             command_id: cmd.command_id,
             session_id: cmd.session_id,
@@ -552,11 +551,11 @@ fn dispatch_user_shell_command(cmd: tau_proto::UiShellCommand, tx: &mpsc::Sender
             exit_code,
             cancelled: false,
         },
-    ));
+    )));
 }
 
-fn ack_log_event(id: LogEventId, tx: &mpsc::Sender<Event>) {
-    let _ = tx.send(Event::Ack(Ack { up_to: id }));
+fn ack_log_event(id: LogEventId, tx: &mpsc::Sender<Frame>) {
+    let _ = tx.send(Frame::Message(Message::Ack(Ack { up_to: id })));
 }
 
 fn build_session_started_events(started: SessionStarted) -> Vec<Event> {

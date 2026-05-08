@@ -32,14 +32,18 @@ impl DebugEventLog {
         let entry = match harness_event {
             HarnessEvent::FromConnection {
                 connection_id,
-                event,
+                frame,
             } => {
-                let event_json = serde_json::to_value(event).unwrap_or_default();
+                let frame_json = serde_json::to_value(frame).unwrap_or_default();
+                let name = match frame {
+                    tau_proto::Frame::Event(event) => event.name().to_string(),
+                    tau_proto::Frame::Message(_) => "<message>".to_owned(),
+                };
                 serde_json::json!({
                     "type": "from_connection",
                     "source": connection_id,
-                    "event_name": event.name().to_string(),
-                    "event": event_json,
+                    "event_name": name,
+                    "event": frame_json,
                 })
             }
             HarnessEvent::Disconnected { connection_id } => {
