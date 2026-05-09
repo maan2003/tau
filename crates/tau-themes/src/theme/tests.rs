@@ -118,6 +118,44 @@ fn multiple_spans_resolve_independently() {
 }
 
 #[test]
+fn nested_spans_inherit_and_override_styles() {
+    let theme: Theme = Theme::parse(
+        r#"{
+                styles: {
+                    outer: { fg: "red", bg: "dark_blue", bold: true },
+                    inner: { fg: "green", italic: true },
+                }
+            }"#,
+    )
+    .expect("valid theme");
+
+    let mut text = ThemedText::new();
+    let outer = text.add_style("outer");
+    let inner = text.add_style("inner");
+    text.push_tree(SpanTree::span(
+        outer,
+        vec![
+            SpanTree::text("outer "),
+            SpanTree::span(inner, vec![SpanTree::text("inner")]),
+        ],
+    ));
+
+    let resolved = theme.resolve(&text);
+    assert_eq!(resolved.len(), 2);
+    assert_eq!(resolved[0].text, "outer ");
+    assert_eq!(resolved[0].style.fg, Some(Color::Red));
+    assert_eq!(resolved[0].style.bg, Some(Color::DarkBlue));
+    assert!(resolved[0].style.bold);
+    assert!(!resolved[0].style.italic);
+
+    assert_eq!(resolved[1].text, "inner");
+    assert_eq!(resolved[1].style.fg, Some(Color::Green));
+    assert_eq!(resolved[1].style.bg, Some(Color::DarkBlue));
+    assert!(resolved[1].style.bold);
+    assert!(resolved[1].style.italic);
+}
+
+#[test]
 fn builtin_theme_parses() {
     let theme = Theme::builtin();
 

@@ -3,7 +3,7 @@
 //! Converts theme styles into terminal-renderable styles.
 
 use tau_cli_term_raw::{Color, Span, Style, StyledBlock, StyledText};
-use tau_themes::{StyleName, Theme, ThemeStyle};
+use tau_themes::{ResolvedSpan, StyleName, Theme, ThemeStyle, ThemedText};
 
 /// Resolves a style name through a theme into a terminal [`Style`].
 pub fn resolve(theme: &Theme, name: &str) -> Style {
@@ -21,20 +21,32 @@ pub fn convert_style(ts: ThemeStyle) -> Style {
     }
 }
 
+/// Resolves themed text into terminal styled text.
+pub fn themed_text(theme: &Theme, text: &ThemedText) -> StyledText {
+    StyledText::from(
+        theme
+            .resolve(text)
+            .into_iter()
+            .map(resolved_span)
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn resolved_span(span: ResolvedSpan<'_>) -> Span {
+    Span::new(span.text.to_owned(), convert_style(span.style))
+}
+
 /// Creates a [`StyledBlock`] using a theme style.
 ///
 /// The style's foreground/bold/etc. apply to the text span; the
 /// style's background fills the full block width.
 pub fn themed_block(theme: &Theme, name: &str, text: impl Into<String>) -> StyledBlock {
+    let mut themed = ThemedText::new();
+    let style = themed.add_style(name);
+    themed.push(style, text);
+
     let ts = theme.resolve_style(&StyleName::new(name));
-    let span_style = Style {
-        fg: ts.fg.map(convert_color),
-        bg: None,
-        bold: ts.bold,
-        underline: ts.underline,
-        italic: ts.italic,
-    };
-    let mut block = StyledBlock::new(StyledText::from(Span::new(text, span_style)));
+    let mut block = StyledBlock::new(themed_text(theme, &themed));
     if let Some(bg) = ts.bg {
         block = block.bg(convert_color(bg));
     }

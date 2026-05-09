@@ -6,7 +6,7 @@
 //!
 //! # Modules
 //!
-//! - [`text`] — [`ThemedText`], [`ThemedSpan`], [`StyleIdx`]
+//! - [`text`] — [`ThemedText`], [`ThemedSpan`], [`SpanTree`], [`StyleIdx`]
 //! - [`color`] — [`Color`] enum with JSON5-friendly deserialization
 //! - [`theme`] — [`ThemeStyle`], [`Theme`], resolution
 
@@ -16,5 +16,5 @@ pub mod text;
 pub mod theme;
 
 pub use color::Color;
-pub use text::{StyleIdx, StyleName, ThemedSpan, ThemedText};
+pub use text::{SpanTree, StyleIdx, StyleName, ThemedSpan, ThemedText};
 pub use theme::{ResolvedSpan, Theme, ThemeStyle};

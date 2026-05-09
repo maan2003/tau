@@ -1,7 +1,7 @@
 //! Themed text representation.
 //!
-//! [`ThemedText`] pairs style *names* with text spans. The actual
-//! visual attributes are resolved later via a [`Theme`](crate::Theme).
+//! [`ThemedText`] pairs style *names* with a tree of text spans. The
+//! actual visual attributes are resolved later via a [`Theme`](crate::Theme).
 
 use std::fmt;
 
@@ -53,27 +53,60 @@ impl StyleIdx {
     }
 }
 
-/// A span of text tagged with a style index.
-#[derive(Clone, Debug)]
-pub struct ThemedSpan {
-    pub style_idx: StyleIdx,
-    pub text: String,
+/// A tree of text and styled child spans.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpanTree<S> {
+    Text(String),
+    Span { style: S, text: Vec<Self> },
 }
+
+impl<S> SpanTree<S> {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text(text.into())
+    }
+
+    pub fn span(style: S, text: Vec<Self>) -> Self {
+        Self::Span { style, text }
+    }
+}
+
+/// Backwards-compatible alias for a styled tree node.
+pub type ThemedSpan = SpanTree<StyleIdx>;
 
 /// Themed text: a list of style names plus spans that reference them
 /// by index.
 ///
 /// The indirection (`StyleIdx` → `StyleName`) avoids repeating
-/// style-name strings in every span.
-#[derive(Clone, Debug, Default)]
+/// style-name strings in every span. The spans form a tree so inner
+/// styles can refine outer styles.
+#[derive(Clone, Debug)]
 pub struct ThemedText {
     styles: Vec<StyleName>,
-    spans: Vec<ThemedSpan>,
+    spans: SpanTree<StyleIdx>,
+}
+
+impl Default for ThemedText {
+    fn default() -> Self {
+        Self {
+            styles: Vec::new(),
+            spans: SpanTree::Span {
+                style: StyleIdx::DEFAULT,
+                text: Vec::new(),
+            },
+        }
+    }
 }
 
 impl ThemedText {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn from_spans(spans: SpanTree<StyleIdx>) -> Self {
+        Self {
+            styles: Vec::new(),
+            spans,
+        }
     }
 
     /// Registers a style name and returns its index.
@@ -87,12 +120,20 @@ impl ThemedText {
         StyleIdx(idx as u16)
     }
 
-    /// Appends a span with the given style index.
+    /// Appends a span with the given style index at the root level.
     pub fn push(&mut self, idx: StyleIdx, text: impl Into<String>) {
-        self.spans.push(ThemedSpan {
-            style_idx: idx,
-            text: text.into(),
+        self.push_tree(SpanTree::Span {
+            style: idx,
+            text: vec![SpanTree::Text(text.into())],
         });
+    }
+
+    /// Appends a tree at the root level.
+    pub fn push_tree(&mut self, span: SpanTree<StyleIdx>) {
+        match &mut self.spans {
+            SpanTree::Span { text, .. } => text.push(span),
+            SpanTree::Text(_) => unreachable!("ThemedText root is always a span"),
+        }
     }
 
     /// Appends a span with the default (no formatting) style.
@@ -105,8 +146,8 @@ impl ThemedText {
         &self.styles
     }
 
-    /// Returns the spans.
-    pub fn spans(&self) -> &[ThemedSpan] {
+    /// Returns the span tree.
+    pub fn spans(&self) -> &SpanTree<StyleIdx> {
         &self.spans
     }
 

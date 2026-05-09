@@ -18,12 +18,13 @@ pub const AGENT_THINKING: &str = "agent.thinking";
 // Tool-call blocks are composed of three spans: the tool name at the
 // start, its arguments in the middle, and a status suffix at the end.
 // Each span has its own style so a theme can paint them differently.
+pub const TOOL_OUTPUT: &str = "tool.output";
 pub const TOOL_NAME: &str = "tool.name";
 pub const TOOL_ARGS: &str = "tool.args";
 pub const TOOL_STATUS_SUCCESS: &str = "tool.status.success";
 pub const TOOL_STATUS_ERROR: &str = "tool.status.error";
 pub const TOOL_STATUS_INFO: &str = "tool.status.info";
-pub const TOOL_PROGRESS: &str = "tool.progress";
+pub const SHELL_OUTPUT: &str = "shell.output";
 
 /// Streaming-`…` indicator appended to in-progress agent responses,
 /// thinking blocks, and running tool-call lines. Painted independently

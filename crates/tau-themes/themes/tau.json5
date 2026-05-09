@@ -14,15 +14,17 @@
     "agent.thinking":       { fg: "dark_grey", italic: true },
 
     // -- Tool execution --
-    // A tool-call block is composed of three spans: name, args, status.
-    // The name is colored; args are left unstyled; status is tinted
-    // based on outcome.
+    // A tool-call block is a `tool.output` span with nested name,
+    // args, and status spans. Nested styles override only attributes
+    // they specify, so theme authors can put shared styling on the
+    // whole tool line and refine individual parts below.
+    "tool.output":          { },
     "tool.name":            { fg: "yellow" },
     "tool.args":            { },
     "tool.status.success":  { fg: "green" },
     "tool.status.error":    { fg: "red" },
     "tool.status.info":     { fg: "blue" },
-    "tool.progress":        { fg: "dark_yellow" },
+    "shell.output":         { },
     "progress.indicator":   { bold: true },
 
     // -- Extensions --

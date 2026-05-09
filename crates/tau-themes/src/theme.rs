@@ -9,7 +9,7 @@ use std::path::Path;
 use std::{fmt, io};
 
 use crate::color::Color;
-use crate::text::{StyleName, ThemedText};
+use crate::text::{SpanTree, StyleIdx, StyleName, ThemedText};
 
 /// Visual attributes for a style.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
@@ -20,6 +20,18 @@ pub struct ThemeStyle {
     pub bold: bool,
     pub underline: bool,
     pub italic: bool,
+}
+
+impl ThemeStyle {
+    fn override_with(self, inner: Self) -> Self {
+        Self {
+            fg: inner.fg.or(self.fg),
+            bg: inner.bg.or(self.bg),
+            bold: self.bold || inner.bold,
+            underline: self.underline || inner.underline,
+            italic: self.italic || inner.italic,
+        }
+    }
 }
 
 /// A theme: a mapping from style names to visual attributes.
@@ -68,21 +80,46 @@ impl Theme {
 
     /// Resolves a [`ThemedText`] into spans with concrete styles.
     pub fn resolve<'a>(&self, themed: &'a ThemedText) -> Vec<ResolvedSpan<'a>> {
-        themed
-            .spans()
-            .iter()
-            .map(|span| {
-                let style = themed
-                    .style_name(span.style_idx)
-                    .map(|name| self.resolve_style(name))
-                    .unwrap_or_default();
-                ResolvedSpan {
-                    text: &span.text,
-                    style,
-                }
-            })
-            .collect()
+        let mut out = Vec::new();
+        let mut stack = Vec::new();
+        self.resolve_tree(themed, themed.spans(), &mut stack, &mut out);
+        out
     }
+
+    fn resolve_tree<'a>(
+        &self,
+        themed: &'a ThemedText,
+        span: &'a SpanTree<StyleIdx>,
+        stack: &mut Vec<ThemeStyle>,
+        out: &mut Vec<ResolvedSpan<'a>>,
+    ) {
+        match span {
+            SpanTree::Text(text) => out.push(ResolvedSpan {
+                text,
+                style: effective_style(stack),
+            }),
+            SpanTree::Span { style, text } => {
+                stack.push(
+                    themed
+                        .style_name(*style)
+                        .map(|name| self.resolve_style(name))
+                        .unwrap_or_default(),
+                );
+                for child in text {
+                    self.resolve_tree(themed, child, stack, out);
+                }
+                stack.pop();
+            }
+        }
+    }
+}
+
+fn effective_style(stack: &[ThemeStyle]) -> ThemeStyle {
+    let mut effective = ThemeStyle::default();
+    for style in stack {
+        effective = effective.override_with(*style);
+    }
+    effective
 }
 
 /// A span of text with resolved style attributes.

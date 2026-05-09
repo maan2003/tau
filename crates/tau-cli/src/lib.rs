@@ -1781,17 +1781,24 @@ fn render_tool_block(
     theme: &tau_themes::Theme,
     display: &ToolCallDisplay,
 ) -> tau_cli_term::StyledBlock {
-    use tau_cli_term::resolve::resolve;
-    use tau_cli_term::{Span, StyledBlock, StyledText};
-    use tau_themes::names;
+    use tau_cli_term::StyledBlock;
+    use tau_cli_term::resolve::themed_text;
+    use tau_themes::{SpanTree, ThemedText, names};
 
-    let name_style = resolve(theme, names::TOOL_NAME);
-    let args_style = resolve(theme, names::TOOL_ARGS);
+    let mut themed = ThemedText::new();
+    let output = themed.add_style(names::TOOL_OUTPUT);
+    let name = themed.add_style(names::TOOL_NAME);
+    let args = themed.add_style(names::TOOL_ARGS);
 
-    let mut spans = vec![Span::new(display.tool_name.clone(), name_style)];
+    let mut children = vec![SpanTree::span(
+        name,
+        vec![SpanTree::text(display.tool_name.clone())],
+    )];
     if !display.args.is_empty() {
-        spans.push(Span::new(" ", args_style));
-        spans.push(Span::new(display.args.clone(), args_style));
+        children.push(SpanTree::span(
+            args,
+            vec![SpanTree::text(" "), SpanTree::text(display.args.clone())],
+        ));
     }
     for suffix in &display.suffixes {
         let status_name = match suffix.status {
@@ -1802,20 +1809,25 @@ fn render_tool_block(
             ToolStatus::DiffAdded => names::DIFF_ADDED,
             ToolStatus::DiffRemoved => names::DIFF_REMOVED,
         };
-        let status_style = resolve(theme, status_name);
+        let status = themed.add_style(status_name);
         if !suffix.no_leading_space && !suffix.text.starts_with(':') {
-            spans.push(Span::new(" ", args_style));
+            children.push(SpanTree::span(args, vec![SpanTree::text(" ")]));
         }
-        spans.push(Span::new(suffix.text.clone(), status_style));
+        children.push(SpanTree::span(
+            status,
+            vec![SpanTree::text(suffix.text.clone())],
+        ));
     }
-    StyledBlock::new(StyledText::from(spans))
+    themed.push_tree(SpanTree::span(output, children));
+
+    StyledBlock::new(themed_text(theme, &themed))
 }
 
 /// Like [`render_tool_block`] but appends an expanded unified-diff
 /// body when `expanded` is true and `diff` has hunks. The first line
-/// is always the existing three-span tool header (with `+N/-M` chip);
-/// the body, if rendered, comes after a `\n` so `layout_lines` wraps
-/// each diff line independently.
+/// is the themed tool header (with `+N/-M` chip); the body, if
+/// rendered, comes after a `\n` so `layout_lines` wraps each diff line
+/// independently.
 fn render_diff_tool_block(
     theme: &tau_themes::Theme,
     display: &ToolCallDisplay,
@@ -2566,7 +2578,7 @@ impl EventRenderer {
                 if !self.tool_blocks.contains_key(progress.call_id.as_str()) {
                     let text = tau_harness::format_tool_progress(progress);
                     self.handle
-                        .print_output(themed_block(&self.theme, names::TOOL_PROGRESS, text));
+                        .print_output(themed_block(&self.theme, names::SHELL_OUTPUT, text));
                 }
             }
             Event::ToolDelegateProgress(progress) => {
