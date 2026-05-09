@@ -2642,6 +2642,19 @@ fn switch_session_rebinds_default_conversation() {
     h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
         .expect("switch");
 
+    let mut saw_session_dir = false;
+    let mut cursor = 0;
+    while let Some(entry) = h.event_log.get_next_from(cursor) {
+        cursor = entry.seq + 1;
+        if let Event::HarnessInfo(info) = &entry.event
+            && info.message.contains("/s2/")
+            && info.message.starts_with("session dir: ")
+        {
+            saw_session_dir = true;
+        }
+    }
+    assert!(saw_session_dir, "switch must announce the new session dir");
+
     assert_eq!(h.current_session_id.as_str(), "s2");
     assert_eq!(
         h.conversations[&cid].session_id.as_str(),

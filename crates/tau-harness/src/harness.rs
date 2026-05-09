@@ -2714,8 +2714,13 @@ impl Harness {
         // Send the new debug log to the new session's dir, so each
         // session is self-contained.
         let _ = self.enable_debug_log(&self.dirs_state_dir().join(new_session_id.as_str()));
-
-        self.start_session_init(new_session_id, reason);
+        self.start_session_init(new_session_id.clone(), reason);
+        self.emit_info(&format!(
+            "session dir: {}/",
+            self.dirs_state_dir()
+                .join(new_session_id.as_str())
+                .display()
+        ));
         Ok(())
     }
 
