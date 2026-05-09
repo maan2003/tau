@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use tau_cli_term_raw::{Candidate, CompletionView, Span, StyledBlock, StyledText};
@@ -114,7 +115,8 @@ impl CompletionData {
 
 /// Builds the candidate list for the given buffer/cursor.
 ///
-/// - Buffer not starting with `/` → no candidates.
+/// - Buffer starting with `./` or `../` → filesystem path candidates.
+/// - Buffer not starting with `/` → no slash-command candidates.
 /// - Buffer with no space → match against the static slash-command registry by
 ///   prefix.
 /// - Buffer with `<cmd> <arg-prefix>` → look up the dynamic `CompletionData`
@@ -124,8 +126,12 @@ pub fn build_candidates(
     commands: &[SlashCommand],
     data: &CompletionData,
     buffer: &str,
-    _cursor: usize,
+    cursor: usize,
 ) -> Vec<Candidate> {
+    if let Some(path_token) = filesystem_path_token(buffer, cursor) {
+        return build_filesystem_candidates(&path_token);
+    }
+
     if !buffer.starts_with('/') {
         return Vec::new();
     }
@@ -149,6 +155,88 @@ fn build_cmd_candidates(commands: &[SlashCommand], prefix: &str) -> Vec<Candidat
             replacement: cmd.name.to_string(),
         })
         .collect()
+}
+
+struct PathToken<'a> {
+    prefix: &'a str,
+    before: &'a str,
+    after: &'a str,
+}
+
+fn filesystem_path_token(buffer: &str, cursor: usize) -> Option<PathToken<'_>> {
+    let before_cursor = buffer.get(..cursor)?;
+    let after_cursor = buffer.get(cursor..)?;
+    let token_start = before_cursor
+        .char_indices()
+        .rev()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx + ch.len_utf8()))
+        .unwrap_or(0);
+    let token_end = after_cursor
+        .char_indices()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(cursor + idx))
+        .unwrap_or(buffer.len());
+    let prefix = &buffer[token_start..cursor];
+    if is_filesystem_prefix(prefix) {
+        Some(PathToken {
+            prefix,
+            before: &buffer[..token_start],
+            after: &buffer[token_end..],
+        })
+    } else {
+        None
+    }
+}
+
+fn is_filesystem_prefix(buffer: &str) -> bool {
+    buffer.starts_with("./") || buffer.starts_with("../")
+}
+
+fn build_filesystem_candidates(path_token: &PathToken<'_>) -> Vec<Candidate> {
+    let prefix = path_token.prefix;
+    let path = Path::new(prefix);
+    let (dir, partial) = if prefix.ends_with('/') {
+        (path, "")
+    } else {
+        let Some(parent) = path.parent() else {
+            return Vec::new();
+        };
+        let partial = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let dir = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        (dir, partial)
+    };
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(partial) {
+            continue;
+        }
+        if !partial.starts_with('.') && name.starts_with('.') {
+            continue;
+        }
+
+        let is_dir = entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false);
+        let replacement = dir.join(name).to_string_lossy().into_owned();
+        candidates.push(Candidate {
+            label: replacement.clone(),
+            description: if is_dir { "directory" } else { "file" }.to_owned(),
+            replacement: format!("{}{}{}", path_token.before, replacement, path_token.after),
+        });
+    }
+
+    candidates.sort_by(|a, b| a.label.cmp(&b.label));
+    candidates
 }
 
 fn build_arg_candidates(data: &CompletionData, cmd: &str, arg_prefix: &str) -> Vec<Candidate> {
