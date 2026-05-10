@@ -9,7 +9,7 @@ use tau_proto::{
     SessionStartReason, SessionStarted, ToolResult, UiPromptSubmitted,
 };
 
-use super::EventRenderer;
+use super::{DraftSlot, EventRenderer, should_send_draft_snapshot};
 
 /// Writer that feeds bytes into a vt100::Parser. Bytes are
 /// buffered per-write and flushed atomically to the parser on
@@ -66,6 +66,57 @@ fn setup(w: u16, h: u16) -> (Term, TermHandle, VtWriter) {
 
 fn sync(handle: &TermHandle) {
     handle.redraw_sync();
+}
+
+#[test]
+fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
+    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    {
+        let (mtx, _cv) = &handle;
+        let mut slot = mtx.lock().expect("draft slot mutex poisoned");
+        slot.pending = Some((
+            slot.epoch,
+            tau_proto::UiPromptDraft {
+                session_id: "s1".into(),
+                text: "old".into(),
+            },
+        ));
+    }
+
+    let (epoch, _draft) = {
+        let (mtx, _cv) = &handle;
+        mtx.lock()
+            .expect("draft slot mutex poisoned")
+            .pending
+            .take()
+            .expect("pending draft")
+    };
+    {
+        let (mtx, _cv) = &handle;
+        let mut slot = mtx.lock().expect("draft slot mutex poisoned");
+        slot.epoch = slot.epoch.wrapping_add(1);
+        slot.pending = None;
+    }
+
+    assert!(!should_send_draft_snapshot(&handle, epoch));
+}
+
+#[test]
+fn current_draft_snapshot_is_sent_when_epoch_matches() {
+    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+
+    assert!(should_send_draft_snapshot(&handle, 0));
+}
+
+#[test]
+fn draft_snapshot_is_dropped_after_shutdown() {
+    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    {
+        let (mtx, _cv) = &handle;
+        mtx.lock().expect("draft slot mutex poisoned").done = true;
+    }
+
+    assert!(!should_send_draft_snapshot(&handle, 0));
 }
 
 #[test]

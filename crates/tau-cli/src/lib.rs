@@ -74,7 +74,8 @@ const DRAFT_DEBOUNCE: Duration = Duration::from_secs(1);
 /// true` is the shutdown signal.
 #[derive(Default)]
 struct DraftSlot {
-    pending: Option<UiPromptDraft>,
+    pending: Option<(u64, UiPromptDraft)>,
+    epoch: u64,
     done: bool,
 }
 
@@ -106,10 +107,12 @@ fn debounce_loop(handle: DraftHandle, writer: WriterHandle) {
             }
             g.pending.take()
         };
-        if let Some(draft) = snapshot {
-            // Best-effort: a write failure means the socket is gone,
-            // and the input loop will notice on its next write.
-            let _ = send_event(&writer, &Event::UiPromptDraft(draft));
+        if let Some((epoch, draft)) = snapshot {
+            if should_send_draft_snapshot(handle.as_ref(), epoch) {
+                // Best-effort: a write failure means the socket is gone,
+                // and the input loop will notice on its next write.
+                let _ = send_event(&writer, &Event::UiPromptDraft(draft));
+            }
         }
         // Coalesce subsequent typing into one event per window. Wake
         // early on shutdown so we don't spend a second sleeping after
@@ -122,6 +125,12 @@ fn debounce_loop(handle: DraftHandle, writer: WriterHandle) {
             return;
         }
     }
+}
+
+fn should_send_draft_snapshot(handle: &(Mutex<DraftSlot>, Condvar), epoch: u64) -> bool {
+    let (mtx, _cv) = handle;
+    let g = mtx.lock().expect("draft slot mutex poisoned");
+    !g.done && g.epoch == epoch
 }
 
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -963,6 +972,19 @@ fn terminal_input_loop(
                     continue;
                 }
 
+                // Submission terminates the in-flight draft window —
+                // the buffer just got cleared by the user pressing
+                // Enter, so any pending draft is now stale. Invalidate
+                // before sending the submission so a debounce thread that
+                // already took an older snapshot can't emit it afterward.
+                {
+                    let (mtx, cv) = &**draft_handle;
+                    if let Ok(mut g) = mtx.lock() {
+                        g.epoch = g.epoch.wrapping_add(1);
+                        g.pending = None;
+                        cv.notify_one();
+                    }
+                }
                 if send_event(
                     writer,
                     &Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -975,15 +997,6 @@ fn terminal_input_loop(
                 .is_err()
                 {
                     return Ok(InputLoopExit::Quit);
-                }
-                // Submission terminates the in-flight draft window —
-                // the buffer just got cleared by the user pressing
-                // Enter, so any pending draft is now stale.
-                {
-                    let (mtx, _cv) = &**draft_handle;
-                    if let Ok(mut g) = mtx.lock() {
-                        g.pending = None;
-                    }
                 }
             }
             TermEvent::Eof => return Ok(InputLoopExit::Quit),
@@ -998,10 +1011,13 @@ fn terminal_input_loop(
                 let text = term.handle().get_buffer();
                 let (mtx, cv) = &**draft_handle;
                 if let Ok(mut g) = mtx.lock() {
-                    g.pending = Some(UiPromptDraft {
-                        session_id: session_id.as_str().into(),
-                        text,
-                    });
+                    g.pending = Some((
+                        g.epoch,
+                        UiPromptDraft {
+                            session_id: session_id.as_str().into(),
+                            text,
+                        },
+                    ));
                     tracing::trace!(target: "tau_cli::ui", "prompt draft updated");
                     cv.notify_one();
                 }
