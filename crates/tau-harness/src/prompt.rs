@@ -3,7 +3,7 @@
 //! [`tau_core::SessionTree`] into provider-shaped [`ConversationMessage`]s.
 
 use tau_core::{SessionEntry, ToolActivityOutcome};
-use tau_proto::{CborValue, ContentBlock, ConversationMessage, ConversationRole, ToolDefinition};
+use tau_proto::{CborValue, ContentBlock, ConversationMessage, ConversationRole};
 
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 
@@ -17,35 +17,15 @@ use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 /// UTC. cwd is threaded in from the caller so the caller owns the
 /// source of truth.
 pub(crate) fn build_system_prompt(
-    tools: &[ToolDefinition],
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     cwd: &str,
 ) -> String {
+    // Tool definitions are delivered out-of-band via the provider's
+    // tool-use channel, so we don't restate them here.
     let mut prompt = String::from(
         "You are an expert coding assistant operating inside Tau, \
-         a coding agent harness. TAU_VERSION contains Tau's release \
-         version, and TAU_BUILD contains Tau's git revision for this \
-         build. You help users by reading files, executing commands, \
+         a coding agent harness. You help users by reading files, executing commands, \
          editing code, and writing new files.\n\n",
-    );
-
-    // Available tools section.
-    if !tools.is_empty() {
-        prompt.push_str("Available tools:\n");
-        for tool in tools {
-            let desc = tool.description.as_deref().unwrap_or("(no description)");
-            prompt.push_str(&format!("- {}: {desc}\n", tool.name));
-        }
-        prompt.push('\n');
-    }
-
-    // Guidelines.
-    prompt.push_str(
-        "Guidelines:\n\
-         - Be concise in your responses.\n\
-         - Show file paths clearly when working with files.\n\
-         - When asked to read a file, use the read tool.\n\
-         - When asked to run a command, use the shell tool.\n",
     );
 
     // Available skills section.
@@ -53,8 +33,8 @@ pub(crate) fn build_system_prompt(
     prompt_skills.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
     if !prompt_skills.is_empty() {
         prompt.push_str(
-            "\nThe following skills provide specialized instructions for specific tasks.\n\
-             Use the skill tool to load a skill when the task matches its description.\n\n\
+            "\nSkills provide specialized instructions for specific tasks.\n\
+             Below are skills you should be initially aware of. Use the skill tool to load a skill, and search for more skills.\n\n\
              <available_skills>\n",
         );
         for (name, skill) in &prompt_skills {
@@ -295,7 +275,7 @@ mod tests {
     #[test]
     fn build_system_prompt_mentions_tau_version_and_build() {
         let skills = std::collections::HashMap::new();
-        let prompt = build_system_prompt(&[], &skills, "/tmp/work");
+        let prompt = build_system_prompt(&skills, "/tmp/work");
         assert!(prompt.contains("TAU_VERSION contains Tau's release version"));
         assert!(prompt.contains("TAU_BUILD contains Tau's git revision"));
     }

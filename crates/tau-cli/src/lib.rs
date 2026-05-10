@@ -3208,6 +3208,14 @@ pub fn main_with_args() -> std::process::ExitCode {
                 tau_provider::run(&args).map_err(|e| CliError::Participant(e.to_string()))
             }
 
+            cli::Command::Dev { command } => match command {
+                cli::DevCommand::DumpInitialPrompt { out, message } => {
+                    tau_harness::dump_initial_prompt(&out, &message)?;
+                    println!("wrote {}", out.display());
+                    Ok(())
+                }
+            },
+
             cli::Command::Ext { name } => {
                 ui_logging::init_stderr_from_env("tau_harness=info,tau_cli=info");
                 let runner: fn() -> Result<(), Box<dyn std::error::Error>> = match name.as_str() {

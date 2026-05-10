@@ -27,6 +27,13 @@ mod session_cleanup;
 mod settings;
 mod turn;
 
+pub fn dump_initial_prompt(
+    out_path: &std::path::Path,
+    user_message: &str,
+) -> Result<(), HarnessError> {
+    harness::Harness::dump_initial_prompt(out_path, user_message)
+}
+
 pub use tau_core::{SessionMeta, list_session_metas};
 
 pub use crate::daemon::{

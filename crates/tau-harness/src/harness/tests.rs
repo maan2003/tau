@@ -17,7 +17,7 @@ use tau_proto::{
 };
 use tempfile::TempDir;
 
-use super::{Harness, default_agent_runner};
+use super::Harness;
 use crate::conversation::ConversationTurnState;
 use crate::daemon::{
     ServeOptions, bind_listener, run_daemon_with_echo, run_embedded_message_with_echo,
@@ -1703,7 +1703,7 @@ fn build_system_prompt_includes_skills() {
             add_to_prompt: true,
         },
     );
-    let prompt = build_system_prompt(&[], &skills, "/tmp/work");
+    let prompt = build_system_prompt(&skills, "/tmp/work");
     assert!(prompt.contains("<available_skills>"));
     assert!(prompt.contains("<name>brave-search</name>"));
     assert!(prompt.contains("Web search via Brave API"));
@@ -1723,7 +1723,7 @@ fn build_system_prompt_excludes_hidden_skills() {
             add_to_prompt: false,
         },
     );
-    let prompt = build_system_prompt(&[], &skills, "/tmp/work");
+    let prompt = build_system_prompt(&skills, "/tmp/work");
     assert!(!prompt.contains("<available_skills>"));
     assert!(!prompt.contains("hidden"));
 }
@@ -2498,78 +2498,6 @@ fn duplicate_tool_result_is_discarded() {
     );
     // Should not error — just emits a warning and discards.
     assert!(result.is_ok());
-}
-
-/// One-shot dump of the system prompt + first user turn the agent
-/// receives, written to `tmp/initial_prompt.txt` at the repo root.
-/// Uses the user's real `TauDirs::default()` config so cwd, skills
-/// discovered by the shell extension, and the actual tool list
-/// match what a real session would see (extensions defined in
-/// `harness.json5` are not spawned by the embedded path, so only
-/// shell-registered tools appear).
-///
-/// Run with:
-///   cargo test -p tau-harness dump_initial_prompt_to_tmp -- --ignored
-/// --nocapture
-#[test]
-#[ignore = "writes tmp/initial_prompt.txt; run with --ignored"]
-fn dump_initial_prompt_to_tmp() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = Harness::new_with_agent(
-        &sp,
-        tau_config::settings::TauDirs::default(),
-        default_agent_runner,
-        false,
-        "s1",
-    )
-    .expect("start harness");
-    h.selected_model = "test/model".into();
-
-    append_user_message_via_event(&mut h, "s1", "hello");
-
-    let spid = h.send_prompt_to_agent("s1");
-    let prompt = read_prompt_created(&h, &spid);
-
-    let mut out = String::new();
-    out.push_str("================ MODEL / EFFORT ================\n");
-    out.push_str(&format!(
-        "model:  {}\n",
-        prompt
-            .model
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "(none)".to_owned())
-    ));
-    out.push_str(&format!("effort: {:?}\n\n", prompt.effort));
-
-    out.push_str("================ SYSTEM PROMPT ================\n");
-    out.push_str(&prompt.system_prompt);
-    if !prompt.system_prompt.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push('\n');
-
-    out.push_str("================ MESSAGES ================\n");
-    out.push_str(&serde_json::to_string_pretty(&prompt.messages).expect("messages json"));
-    out.push_str("\n\n");
-
-    out.push_str("================ TOOLS ================\n");
-    out.push_str(&serde_json::to_string_pretty(&prompt.tools).expect("tools json"));
-    out.push('\n');
-
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate dir has workspace parent")
-        .parent()
-        .expect("workspace crates dir has repo parent")
-        .to_path_buf();
-    let dest = repo_root.join("tmp").join("initial_prompt.txt");
-    std::fs::create_dir_all(dest.parent().expect("dump path has parent")).expect("create tmp/");
-    std::fs::write(&dest, &out).expect("write dump");
-    eprintln!("wrote {}", dest.display());
-
-    h.shutdown().expect("shutdown");
 }
 
 #[test]

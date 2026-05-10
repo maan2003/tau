@@ -291,21 +291,3 @@ fn fails_when_response_has_no_text_content() {
     let err = decode_mcp_text_result(body).expect_err("should fail");
     assert!(err.contains("no text content"), "err: {err}");
 }
-
-/// Live smoke test against the real Exa keyless free tier. Ignored by
-/// default so CI / `cargo test` doesn't consume the user's monthly
-/// quota; run with `cargo test -p tau-ext-websearch-exa -- --ignored`
-/// to exercise the full HTTP path against `mcp.exa.ai`.
-#[test]
-#[ignore = "hits the real Exa MCP endpoint; consumes free-tier quota"]
-fn live_exa_query_returns_text() {
-    let searcher = HttpSearcher::default();
-    let text = searcher
-        .search("blog post about the Rust borrow checker", 1)
-        .expect("live exa query");
-    assert!(!text.is_empty(), "exa returned empty text");
-    assert!(
-        text.contains("Title:") || text.contains("URL:"),
-        "exa response missing expected formatting: {text}",
-    );
-}

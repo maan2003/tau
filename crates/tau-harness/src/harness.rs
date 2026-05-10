@@ -3083,7 +3083,7 @@ impl Harness {
         let event = Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: session_prompt_id.clone(),
             session_id,
-            system_prompt: build_system_prompt(&tools, &self.discovered_skills, &cwd),
+            system_prompt: build_system_prompt(&self.discovered_skills, &cwd),
             messages,
             tools,
             model,
@@ -3813,23 +3813,13 @@ impl Harness {
                      before tackling any request that touches a tool, command, \
                      framework, or domain you are not deeply familiar with — or \
                      anything the user might have an opinionated way of doing — \
-                     run `search` first. A 1-second search beats a guess that \
-                     the user has to correct. Two actions:\n\
-                     - `search`: find skills whose name or description match \
-                     one or more keywords. `query` accepts a single string or \
-                     an array of strings; with an array, each term is searched \
-                     independently and results are merged and ranked by how \
-                     many terms hit. When a task could plausibly map to \
+                     run `search` first. Most skills are NOT pre-advertised in \
+                     <available_skills>, so a missing entry there is no reason \
+                     to skip the search. When a task could plausibly map to \
                      several names (\"commit\", \"git commit\", \"version \
-                     control\"), pass them all as an array — the top-ranked \
-                     hit is usually the right skill. Returns a list of \
-                     {name, description, hit_count}. Set \
-                     `search_content: true` to also grep skill bodies. Most \
-                     skills are NOT pre-advertised in <available_skills>, so \
-                     a missing entry there is no reason to skip the search.\n\
-                     - `load`: fetch a skill's full content by exact name. \
-                     Use this once `search` (or <available_skills>) gives you \
-                     a name."
+                     control\"), pass them all as a `query` array — hits are \
+                     merged and ranked by how many terms matched. Use \
+                     `action: load` once you have an exact skill name."
                         .to_owned(),
                 ),
                 parameters: Some(serde_json::json!({
@@ -3847,7 +3837,7 @@ impl Harness {
                         "query": {
                             "type": ["string", "array"],
                             "items": {"type": "string"},
-                            "description": "(action=search) One or more keywords/phrases to match (case-insensitive substring) against skill names and descriptions. Pass a single string for one term, or an array of strings to search several terms at once — hits are merged and ranked by how many terms matched."
+                            "description": "(action=search) One or more keywords matched case-insensitively against skill names and descriptions. Single string or array of strings."
                         },
                         "search_content": {
                             "type": "boolean",
@@ -4284,6 +4274,94 @@ impl Harness {
                     }
                 }
                 HarnessEvent::NewClient(_) => {}
+            }
+        }
+    }
+
+    pub(crate) fn dump_initial_prompt(
+        out_path: &Path,
+        user_message: &str,
+    ) -> Result<(), HarnessError> {
+        let tempdir = tempfile::TempDir::new()?;
+        let state_dir = tempdir.path().join("state");
+        let mut harness = Self::new_with_agent(
+            &state_dir,
+            tau_config::settings::TauDirs::default(),
+            default_agent_runner,
+            false,
+            "s1",
+        )?;
+        harness.selected_model = "test/model".into();
+
+        let cid = harness.default_conversation_id.clone();
+        harness.publish_event_for_conversation(
+            &cid,
+            None,
+            Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+                session_id: "s1".into(),
+                text: user_message.to_owned(),
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            }),
+        );
+
+        let prompt_id = harness.send_prompt_to_agent_for(&cid);
+        let prompt = harness.read_session_prompt_created(&prompt_id)?;
+        let mut out = String::new();
+        out.push_str("================ MODEL / EFFORT ================\n");
+        out.push_str(&format!(
+            "model:  {}\n",
+            prompt
+                .model
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "(none)".to_owned())
+        ));
+        out.push_str(&format!("effort: {:?}\n\n", prompt.effort));
+
+        out.push_str("================ SYSTEM PROMPT ================\n");
+        out.push_str(&prompt.system_prompt);
+        if !prompt.system_prompt.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+
+        out.push_str("================ MESSAGES ================\n");
+        out.push_str(
+            &serde_json::to_string_pretty(&prompt.messages)
+                .map_err(|e| HarnessError::Participant(e.to_string()))?,
+        );
+        out.push_str("\n\n");
+
+        out.push_str("================ TOOLS ================\n");
+        out.push_str(
+            &serde_json::to_string_pretty(&prompt.tools)
+                .map_err(|e| HarnessError::Participant(e.to_string()))?,
+        );
+        out.push('\n');
+
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(out_path, out)?;
+        harness.shutdown()?;
+        Ok(())
+    }
+
+    fn read_session_prompt_created(
+        &self,
+        prompt_id: &SessionPromptId,
+    ) -> Result<SessionPromptCreated, HarnessError> {
+        let mut cursor = 0;
+        loop {
+            let entry = self.event_log.get_next_from(cursor).ok_or_else(|| {
+                HarnessError::Participant("prompt event missing from log".to_owned())
+            })?;
+            cursor = entry.seq + 1;
+            if let Event::SessionPromptCreated(prompt) = entry.event
+                && &prompt.session_prompt_id == prompt_id
+            {
+                return Ok(prompt);
             }
         }
     }

@@ -88,6 +88,13 @@ pub enum Command {
         args: Vec<String>,
     },
 
+    /// Developer-only commands.
+    #[command(hide = true, hide_possible_values = true)]
+    Dev {
+        #[command(subcommand)]
+        command: DevCommand,
+    },
+
     /// Run an internal extension as a standalone process (used by the
     /// harness to spawn extensions from the unified binary).
     #[command(hide = true, alias = "component")]
@@ -95,5 +102,19 @@ pub enum Command {
         /// Extension name (agent, ext-shell, ext-test-dummy,
         /// ext-std-notifications, harness)
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DevCommand {
+    /// Dump the initial provider prompt built from local config.
+    DumpInitialPrompt {
+        /// Output path.
+        #[arg(long, default_value = "tmp/initial_prompt.txt")]
+        out: PathBuf,
+
+        /// Synthetic first user message.
+        #[arg(long, default_value = "hello")]
+        message: String,
     },
 }
