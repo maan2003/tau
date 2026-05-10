@@ -93,8 +93,15 @@ serde = { version = "1", features = ["derive"] }
 similar = "2"
 tempfile = "3"
 toml = "0.9"
-tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std"] }
+tracing = { version = "0.1", default-features = false, features = [
+  "std",
+  "attributes",
+] }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "env-filter",
+  "fmt",
+  "std",
+] }
 vt100 = "0.16"
 
 [profile.ci]
@@ -102,3 +109,7 @@ debug = "line-tables-only"
 incremental = false
 inherits = "dev"
 lto = "off"
+
+[profile.release]
+debug = "line-tables-only"
+lto = "fat"
