@@ -662,12 +662,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         ]);
         handle.print_output(StyledBlock::new(banner));
     }
-    handle.print_output(system_path_block(
-        &theme,
-        "ui dir: ",
-        &ui_logging.dir(),
-        "/",
-    ));
+    handle.print_output(system_path_block(&theme, "ui dir: ", ui_logging.dir(), "/"));
 
     handle.redraw();
 
@@ -1851,13 +1846,14 @@ fn format_shell_completion(details: &CborValue, error_message: Option<&str>) -> 
     };
 
     let status = cbor_int_field(details, "status");
-    let mut suffixes = Vec::new();
-    suffixes.push(output_stats_suffix(&combined));
-    suffixes.push(match status {
-        Some(0) => ok_suffix(),
-        Some(code) => err_suffix(Some(&code.to_string())),
-        None => info_suffix("ok?".to_owned()),
-    });
+    let suffixes = vec![
+        output_stats_suffix(&combined),
+        match status {
+            Some(0) => ok_suffix(),
+            Some(code) => err_suffix(Some(&code.to_string())),
+            None => info_suffix("ok?".to_owned()),
+        },
+    ];
     ToolCallDisplay {
         tool_name: "shell".into(),
         args: cmd,

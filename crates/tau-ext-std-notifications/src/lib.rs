@@ -193,7 +193,7 @@ where
 /// frame from the reader thread, or a terminal condition that ends
 /// the loop.
 enum InMsg {
-    Frame(Frame),
+    Frame(Box<Frame>),
     EndOfStream,
 }
 
@@ -277,7 +277,7 @@ where
         loop {
             match reader.read_frame() {
                 Ok(Some(frame)) => {
-                    if tx.send(InMsg::Frame(frame)).is_err() {
+                    if tx.send(InMsg::Frame(Box::new(frame))).is_err() {
                         break;
                     }
                 }

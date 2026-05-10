@@ -316,29 +316,39 @@ fn resolve_backend(
                 prompt_cache_retention,
             }))
         }
-        "api-key" | "none" | _ => {
-            // Standard Chat Completions API.
-            let base_url = provider.base_url.clone().or_else(|| {
-                // Check auth.json for API key providers without base_url.
-                use tau_provider::storage::Credentials;
-                match auth_store.providers.get(provider_name)? {
-                    Credentials::ApiKey { .. } => Some("https://api.openai.com/v1".to_owned()),
-                    _ => None,
-                }
-            })?;
-            let api_key = provider.api_key.clone().unwrap_or_default();
-            let prompt_cache_key = prompt_cache_key(provider, &base_url, model_id);
-            let prompt_cache_retention = prompt_cache_retention(provider, &base_url);
-            Some(BackendConfig::ChatCompletions(openai::OpenAiConfig {
-                base_url,
-                api_key,
-                model_id: model_id.to_owned(),
-                supports_reasoning_effort: provider.compat.supports_reasoning_effort,
-                prompt_cache_key,
-                prompt_cache_retention,
-            }))
+        "api-key" | "none" => {
+            chat_completions_backend(provider_name, provider, auth_store, model_id)
         }
+        _ => chat_completions_backend(provider_name, provider, auth_store, model_id),
     }
+}
+
+fn chat_completions_backend(
+    provider_name: &str,
+    provider: &ProviderConfig,
+    auth_store: &tau_provider::storage::AuthStore,
+    model_id: &str,
+) -> Option<BackendConfig> {
+    // Standard Chat Completions API.
+    let base_url = provider.base_url.clone().or_else(|| {
+        // Check auth.json for API key providers without base_url.
+        use tau_provider::storage::Credentials;
+        match auth_store.providers.get(provider_name)? {
+            Credentials::ApiKey { .. } => Some("https://api.openai.com/v1".to_owned()),
+            _ => None,
+        }
+    })?;
+    let api_key = provider.api_key.clone().unwrap_or_default();
+    let prompt_cache_key = prompt_cache_key(provider, &base_url, model_id);
+    let prompt_cache_retention = prompt_cache_retention(provider, &base_url);
+    Some(BackendConfig::ChatCompletions(openai::OpenAiConfig {
+        base_url,
+        api_key,
+        model_id: model_id.to_owned(),
+        supports_reasoning_effort: provider.compat.supports_reasoning_effort,
+        prompt_cache_key,
+        prompt_cache_retention,
+    }))
 }
 
 fn prompt_cache_key(provider: &ProviderConfig, base_url: &str, model_id: &str) -> Option<String> {
