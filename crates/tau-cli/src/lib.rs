@@ -442,13 +442,12 @@ fn start_daemon(
         .env("TAU_VERSION", env!("CARGO_PKG_VERSION"))
         .env("TAU_BUILD", build_revision())
         .envs(build_last_modified().map(|date| ("TAU_LAST_MODIFIED", date)))
-        // Default-enable harness startup debug in the child process so
-        // `tau` captures timing without requiring an env var. Users
+        // Default-enable info logging in the child process so `tau`
+        // captures harness logs without requiring an env var. Users
         // can still override/filter with `TAU_LOG`.
         .env(
             "TAU_LOG",
-            std::env::var("TAU_LOG")
-                .unwrap_or_else(|_| "tau_harness::startup=debug,tau_cli=info".to_owned()),
+            std::env::var("TAU_LOG").unwrap_or_else(|_| "tau_harness=info,tau_cli=info".to_owned()),
         )
         .stdin(Stdio::null())
         .stdout(output.stdout)
