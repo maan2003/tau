@@ -1872,6 +1872,68 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
 }
 
 #[test]
+fn resumed_harness_replays_persisted_session_history() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+
+    {
+        let mut h = echo_harness_for("s1", &sp).expect("start");
+        h.selected_model = "test/model".into();
+
+        h.submit_user_prompt("s1".into(), "remember potato".to_owned())
+            .expect("submit first prompt");
+        let spid = h
+            .prompt_conversations
+            .keys()
+            .next()
+            .expect("first session prompt id")
+            .clone();
+        h.handle_agent_response_finished(AgentResponseFinished {
+            session_prompt_id: spid,
+            text: Some("remembered potato".to_owned()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            thinking: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+        .expect("persist agent response");
+
+        h.shutdown().expect("shutdown");
+    }
+
+    let mut resumed = echo_harness_for("s1", &sp).expect("resume");
+    resumed.selected_model = "test/model".into();
+
+    resumed
+        .submit_user_prompt("s1".into(), "what was it?".to_owned())
+        .expect("submit resumed prompt");
+    let spid = resumed
+        .prompt_conversations
+        .keys()
+        .next()
+        .expect("resumed session prompt id")
+        .clone();
+    let prompt = read_prompt_created(&resumed, &spid);
+    let serialized = serde_json::to_string(&prompt.messages).expect("json");
+
+    assert!(
+        serialized.contains("remember potato"),
+        "resumed prompt must replay persisted user message: {serialized}",
+    );
+    assert!(
+        serialized.contains("remembered potato"),
+        "resumed prompt must replay persisted agent response: {serialized}",
+    );
+    assert!(
+        serialized.contains("what was it?"),
+        "resumed prompt must include the new prompt: {serialized}",
+    );
+
+    resumed.shutdown().expect("shutdown");
+}
+
+#[test]
 fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     // Linear-prefix and prompt-cache hygiene depends on
     // `assemble_conversation` ignoring the persisted thinking
@@ -2676,7 +2738,7 @@ fn switch_session_rebinds_default_conversation() {
         cursor = entry.seq + 1;
         if let Event::HarnessInfo(info) = &entry.event
             && info.message.contains("/s2/")
-            && info.message.starts_with("session dir: ")
+            && info.message.starts_with("session new: ")
         {
             saw_session_dir = true;
         }

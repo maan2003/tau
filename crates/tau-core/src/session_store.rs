@@ -381,10 +381,20 @@ impl SessionStore {
         &self.state_dir
     }
 
-    /// Returns one session tree if it exists.
+    /// Returns one session tree if it exists, loading a persisted log
+    /// on demand.
+    pub fn load_session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Option<&SessionTree>, SessionStoreError> {
+        self.load_session_if_needed(session_id)?;
+        Ok(self.sessions.get(&SessionId::from(session_id)))
+    }
+
+    /// Returns one already-loaded session tree if it exists.
     #[must_use]
     pub fn session(&self, session_id: &str) -> Option<&SessionTree> {
-        self.sessions.get(session_id)
+        self.sessions.get(&SessionId::from(session_id))
     }
 
     /// Returns all known sessions.

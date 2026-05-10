@@ -2064,6 +2064,15 @@ fn render_harness_info(
     use tau_themes::names;
 
     if info.level == tau_proto::HarnessInfoLevel::Normal {
+        if let Some((status, path)) = info
+            .message
+            .strip_prefix("session ")
+            .and_then(|rest| rest.split_once(": "))
+            .and_then(|(status, path)| path.strip_suffix('/').map(|path| (status, path)))
+            && matches!(status, "initial" | "new" | "resumed")
+        {
+            return session_status_block(theme, status, Path::new(path), "/");
+        }
         if let Some(path) = info
             .message
             .strip_prefix("session dir: ")
@@ -2078,6 +2087,25 @@ fn render_harness_info(
         tau_proto::HarnessInfoLevel::Important => names::SYSTEM_INFO_IMPORTANT,
     };
     themed_block(theme, style_name, &info.message)
+}
+
+fn session_status_block(
+    theme: &tau_themes::Theme,
+    status: &str,
+    path: &Path,
+    suffix: &str,
+) -> tau_cli_term::StyledBlock {
+    use tau_themes::{ThemedText, names};
+
+    let mut text = ThemedText::new();
+    let lifecycle = text.add_style(names::EXTENSION_LIFECYCLE);
+    let status_style = text.add_style(names::SYSTEM_STATUS);
+    let path_style = text.add_style(names::SYSTEM_PATH);
+    text.push(lifecycle, "session ");
+    text.push(status_style, status);
+    text.push(lifecycle, ": ");
+    text.push(path_style, format!("{}{}", display_path(path), suffix));
+    tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }
 
 fn system_path_block(

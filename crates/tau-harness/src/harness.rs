@@ -533,7 +533,10 @@ impl Harness {
         );
 
         let default_conversation_id = ConversationId::new("default");
-        let default_head = store.session(eager_session_id).and_then(|tree| tree.head());
+        let mut store = store;
+        let default_head = store
+            .load_session(eager_session_id)?
+            .and_then(|tree| tree.head());
         let mut conversations = std::collections::HashMap::new();
         conversations.insert(
             default_conversation_id.clone(),
@@ -718,7 +721,10 @@ impl Harness {
         );
 
         let default_conversation_id = ConversationId::new("default");
-        let default_head = store.session(eager_session_id).and_then(|tree| tree.head());
+        let mut store = store;
+        let default_head = store
+            .load_session(eager_session_id)?
+            .and_then(|tree| tree.head());
         let mut conversations = std::collections::HashMap::new();
         conversations.insert(
             default_conversation_id.clone(),
@@ -2818,7 +2824,7 @@ impl Harness {
         let default_id = self.default_conversation_id.clone();
         let new_head = self
             .store
-            .session(new_session_id.as_str())
+            .load_session(new_session_id.as_str())?
             .and_then(|t| t.head());
         self.conversations.clear();
         self.conversations.insert(
@@ -2843,8 +2849,13 @@ impl Harness {
         // session is self-contained.
         let _ = self.enable_debug_log(&self.dirs_state_dir().join(new_session_id.as_str()));
         self.start_session_init(new_session_id.clone(), reason);
+        let session_status = match reason {
+            tau_proto::SessionStartReason::Initial => "initial",
+            tau_proto::SessionStartReason::New => "new",
+            tau_proto::SessionStartReason::Resume => "resumed",
+        };
         self.emit_info(&format!(
-            "session dir: {}/",
+            "session {session_status}: {}/",
             self.dirs_state_dir()
                 .join(new_session_id.as_str())
                 .display()
