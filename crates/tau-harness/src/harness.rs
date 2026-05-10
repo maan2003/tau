@@ -223,6 +223,9 @@ pub(crate) struct Harness {
     /// only when this set is empty.
     pub(crate) in_flight_tool_kinds:
         std::collections::HashMap<ToolCallId, tau_proto::ToolSideEffects>,
+    /// Prompt ids canceled by `/cancel`. Late agent events for these
+    /// prompts are ignored and never folded into session state.
+    pub(crate) canceled_prompts: std::collections::HashSet<SessionPromptId>,
     /// Directory layout (config + state) the harness reads and writes.
     pub(crate) dirs: tau_config::settings::TauDirs,
 }
@@ -580,6 +583,7 @@ impl Harness {
             completed_prompts: std::collections::HashSet::new(),
             pending_tool_invocations: VecDeque::new(),
             in_flight_tool_kinds: std::collections::HashMap::new(),
+            canceled_prompts: std::collections::HashSet::new(),
             dirs,
         };
 
@@ -764,6 +768,7 @@ impl Harness {
             completed_prompts: std::collections::HashSet::new(),
             pending_tool_invocations: VecDeque::new(),
             in_flight_tool_kinds: std::collections::HashMap::new(),
+            canceled_prompts: std::collections::HashSet::new(),
             dirs,
         };
 
@@ -1241,6 +1246,7 @@ impl Harness {
             Event::UiSwitchSession(req) => Some(req.new_session_id.clone()),
             Event::UiTreeRequest(req) => Some(req.session_id.clone()),
             Event::UiNavigateTree(req) => Some(req.session_id.clone()),
+            Event::UiCancelPrompt(req) => Some(req.session_id.clone()),
             Event::SessionPromptQueued(queued) => Some(queued.session_id.clone()),
             Event::SessionPromptSteered(steered) => Some(steered.session_id.clone()),
             Event::SessionStarted(started) => Some(started.session_id.clone()),
@@ -1892,11 +1898,53 @@ impl Harness {
                 }
                 Ok(true)
             }
+            Event::UiCancelPrompt(req) => {
+                self.handle_cancel_prompt(&req.session_id);
+                Ok(true)
+            }
             other => {
                 self.publish_event(Some(client_id), other);
                 Ok(true)
             }
         }
+    }
+
+    fn handle_cancel_prompt(&mut self, session_id: &SessionId) {
+        if session_id != &self.current_session_id {
+            return;
+        }
+        let cid = self.default_conversation_id.clone();
+        let Some(conv) = self.conversations.get_mut(&cid) else {
+            return;
+        };
+        let Some(prompt_id) = conv.in_flight_prompt.take() else {
+            self.emit_info("no in-flight prompt to cancel");
+            return;
+        };
+        self.canceled_prompts.insert(prompt_id.clone());
+        self.prompt_conversations.remove(&prompt_id);
+        conv.pending_prompts.clear();
+        conv.turn_state = ConversationTurnState::Idle;
+
+        let pending_call_ids: std::collections::HashSet<ToolCallId> = self
+            .pending_tool_invocations
+            .iter()
+            .filter_map(|(call_cid, call, _)| {
+                if call_cid == &cid {
+                    Some(call.id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.pending_tool_invocations
+            .retain(|(call_cid, _, _)| call_cid != &cid);
+        for call_id in pending_call_ids {
+            self.clear_tool_call_tracking(call_id.as_str());
+        }
+
+        self.emit_info("cancelled current prompt");
+        self.try_advance_queue();
     }
 
     fn handle_disconnect(&mut self, connection_id: &str) {
@@ -2982,6 +3030,11 @@ impl Harness {
         &mut self,
         response: AgentResponseFinished,
     ) -> Result<(), HarnessError> {
+        if self.canceled_prompts.remove(&response.session_prompt_id) {
+            self.prompt_conversations
+                .remove(response.session_prompt_id.as_str());
+            return Ok(());
+        }
         if response.input_tokens.is_some() || response.cached_tokens.is_some() {
             self.update_context_usage(response.input_tokens, response.cached_tokens);
         }

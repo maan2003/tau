@@ -226,6 +226,7 @@ impl EventName {
     pub const UI_TREE_REQUEST: Self = Self::from_static(EventCategory::Ui, "tree_request");
     pub const UI_NAVIGATE_TREE: Self = Self::from_static(EventCategory::Ui, "navigate_tree");
     pub const UI_PROMPT_DRAFT: Self = Self::from_static(EventCategory::Ui, "prompt_draft");
+    pub const UI_CANCEL_PROMPT: Self = Self::from_static(EventCategory::Ui, "cancel_prompt");
 
     pub const TERM_OSC1337_SET_USER_VAR: Self =
         Self::from_static(EventCategory::Term, "osc1337_set_user_var");
@@ -930,6 +931,13 @@ pub struct UiNavigateTree {
     pub node_id: u64,
 }
 
+/// The user typed `/cancel`: stop advancing the current in-flight
+/// prompt at the next harness boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiCancelPrompt {
+    pub session_id: SessionId,
+}
+
 /// Which stream a [`ShellCommandProgress`] chunk came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1360,6 +1368,8 @@ pub enum Event {
     UiTreeRequest(UiTreeRequest),
     #[serde(rename = "ui.navigate_tree")]
     UiNavigateTree(UiNavigateTree),
+    #[serde(rename = "ui.cancel_prompt")]
+    UiCancelPrompt(UiCancelPrompt),
 
     // Term (terminal-output side effects)
     #[serde(rename = "term.osc1337_set_user_var")]
@@ -1434,6 +1444,7 @@ impl Event {
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiTreeRequest(_) => EventName::UI_TREE_REQUEST,
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
+            Self::UiCancelPrompt(_) => EventName::UI_CANCEL_PROMPT,
             Self::Osc1337SetUserVar(_) => EventName::TERM_OSC1337_SET_USER_VAR,
             Self::ShellCommandProgress(_) => EventName::SHELL_COMMAND_PROGRESS,
             Self::ShellCommandFinished(_) => EventName::SHELL_COMMAND_FINISHED,

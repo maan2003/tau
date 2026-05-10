@@ -550,6 +550,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     // Terminal setup.
     let commands = vec![
         SlashCommand::new("/quit", "Exit the chat session"),
+        SlashCommand::new("/cancel", "Cancel the current in-flight prompt"),
         SlashCommand::new(
             "/detach",
             "Leave the UI but keep the harness running for later reattach",
@@ -796,6 +797,15 @@ fn terminal_input_loop(
                 }
                 if text == "/quit" {
                     return Ok(InputLoopExit::Quit);
+                }
+                if text == "/cancel" {
+                    let _ = send_event(
+                        writer,
+                        &Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+                            session_id: session_id.as_str().into(),
+                        }),
+                    );
+                    continue;
                 }
                 if text == "/detach" {
                     // Tell the harness to stay alive after we leave,
