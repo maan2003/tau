@@ -3486,6 +3486,388 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression: nested extension-agent queries must branch from the
+/// conversation that issued the nested tool call. Branching from the
+/// default conversation can replay unrelated in-flight ToolUse blocks
+/// from the main branch into the nested sub-agent prompt, which OpenAI
+/// rejects with `No tool output found for function call …`.
+#[test]
+fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
+    use tau_proto::ToolNameMaybe;
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = "test/model".into();
+    let _ = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+
+    let default_cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &default_cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), default_cid.clone());
+    h.publish_for_conversation(
+        &default_cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "delegate something".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: main_spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "outer-call".into(),
+            name: ToolNameMaybe::from_raw("delegate"),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("main response");
+
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-outer".to_owned(),
+            instruction: "outer task".to_owned(),
+            tool_call_id: Some("outer-call".into()),
+            task_name: Some("outer".to_owned()),
+        },
+    )
+    .expect("outer query");
+
+    let outer_side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("outer side prompt id");
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: outer_side_spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "nested-call".into(),
+            name: ToolNameMaybe::from_raw("delegate"),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q-outer".to_owned(),
+        },
+    })
+    .expect("outer response");
+
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-nested".to_owned(),
+            instruction: "nested task".to_owned(),
+            tool_call_id: Some("nested-call".into()),
+            task_name: Some("nested".to_owned()),
+        },
+    )
+    .expect("nested query");
+
+    let nested_side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| {
+            (prompt_cid.as_str() != "default" && prompt_cid.as_str() != outer_side_cid_str(&h))
+                .then_some(spid.clone())
+        })
+        .expect("nested side prompt id");
+    let prompt = read_prompt_created(&h, &nested_side_spid);
+
+    let mut tool_uses = Vec::new();
+    for message in &prompt.messages {
+        for block in &message.content {
+            if let tau_proto::ContentBlock::ToolUse { id, .. } = block {
+                tool_uses.push(id.as_str().to_owned());
+            }
+        }
+    }
+    assert!(
+        !tool_uses.iter().any(|id| id == "outer-call"),
+        "nested sub-agent's prompt must not include the default branch's unresolved `outer-call`; got: {tool_uses:?}",
+    );
+    assert!(
+        !tool_uses.iter().any(|id| id == "nested-call"),
+        "nested sub-agent starts before its parent call has a result, so it must not include `nested-call`; got: {tool_uses:?}",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn completed_side_conversation_tool_result_reprompts_parent() {
+    use tau_proto::ToolNameMaybe;
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = "test/model".into();
+    let _ = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+
+    let cid = h.default_conversation_id.clone();
+    let spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-main");
+    h.prompt_conversations.insert(spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "delegate something".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "outer-call".into(),
+            name: ToolNameMaybe::from_raw("delegate"),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("main response");
+
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-outer".to_owned(),
+            instruction: "outer task".to_owned(),
+            tool_call_id: Some("outer-call".into()),
+            task_name: Some("outer".to_owned()),
+        },
+    )
+    .expect("query");
+
+    let side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("side prompt id");
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: side_spid,
+        text: Some("outer answer".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q-outer".to_owned(),
+        },
+    })
+    .expect("side final");
+
+    h.handle_extension_event(
+        "conn-delegate",
+        Frame::Event(Event::ToolResult(ToolResult {
+            call_id: "outer-call".into(),
+            tool_name: "delegate".into(),
+            result: CborValue::Text("outer answer".to_owned()),
+        })),
+    )
+    .expect("delegate result");
+
+    let main_resume_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() == "default").then_some(spid.clone()))
+        .expect("main resume prompt id");
+    let prompt = read_prompt_created(&h, &main_resume_spid);
+    let mut tool_results = Vec::new();
+    for message in &prompt.messages {
+        for block in &message.content {
+            if let tau_proto::ContentBlock::ToolResult { tool_use_id, .. } = block {
+                tool_results.push(tool_use_id.as_str().to_owned());
+            }
+        }
+    }
+    assert!(
+        tool_results.iter().any(|id| id == "outer-call"),
+        "parent conversation must be re-prompted with delegate ToolResult; got: {tool_results:?}",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn recursive_delegate_prompt_contains_only_leaf_instruction() {
+    use tau_proto::ToolNameMaybe;
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = "test/model".into();
+    let _ = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+
+    let default_cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &default_cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), default_cid.clone());
+    h.publish_for_conversation(
+        &default_cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "ROOT: ask top delegate to delegate again".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: main_spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "top-call".into(),
+            name: ToolNameMaybe::from_raw("delegate"),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("main response");
+
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-top".to_owned(),
+            instruction: "TOP: delegate exactly two more subtasks".to_owned(),
+            tool_call_id: Some("top-call".into()),
+            task_name: Some("top".to_owned()),
+        },
+    )
+    .expect("top query");
+
+    let top_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("top prompt id");
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: top_spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "leaf-call".into(),
+            name: ToolNameMaybe::from_raw("delegate"),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q-top".to_owned(),
+        },
+    })
+    .expect("top response");
+
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-leaf".to_owned(),
+            instruction: "LEAF: do one terminal search only".to_owned(),
+            tool_call_id: Some("leaf-call".into()),
+            task_name: Some("leaf".to_owned()),
+        },
+    )
+    .expect("leaf query");
+
+    let leaf_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| {
+            matches!(
+                h.conversations
+                    .get(prompt_cid)
+                    .map(|conv| &conv.originator),
+                Some(tau_proto::PromptOriginator::Extension { query_id, .. }) if query_id == "q-leaf"
+            )
+            .then_some(spid.clone())
+        })
+        .expect("leaf prompt id");
+    let prompt = read_prompt_created(&h, &leaf_spid);
+    let rendered = prompt
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            tau_proto::ContentBlock::Text { text } => Some(text.as_str()),
+            tau_proto::ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        rendered.contains("LEAF: do one terminal search only"),
+        "leaf prompt must include its own instruction; got: {rendered}",
+    );
+    assert!(
+        !rendered.contains("TOP: delegate exactly two more subtasks"),
+        "leaf prompt must not inherit parent recursive instruction; got: {rendered}",
+    );
+    assert!(
+        !rendered.contains("ROOT: ask top delegate to delegate again"),
+        "leaf prompt must not inherit ancestor task framing; got: {rendered}",
+    );
+
+    let mut tool_uses = Vec::new();
+    for message in &prompt.messages {
+        for block in &message.content {
+            if let tau_proto::ContentBlock::ToolUse { id, .. } = block {
+                tool_uses.push(id.as_str().to_owned());
+            }
+        }
+    }
+    assert!(
+        tool_uses.is_empty(),
+        "leaf prompt must not inherit unresolved ancestor tool calls; got: {tool_uses:?}",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Find the conversation id of the outer side conversation (the one
 /// whose originator is the delegate extension's first query). Used by
 /// the cross-conversation regression test above to disambiguate
