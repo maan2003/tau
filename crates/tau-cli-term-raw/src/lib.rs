@@ -1448,6 +1448,13 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         .preserve_last_newline(true)
         .call();
 
+    let left_cols = st.left_prompt.char_count();
+    let (buffer_cursor_row, cursor_col) =
+        buffer_position_for_byte(&st.buffer, st.cursor, width, left_cols);
+    while input_lines.len() <= buffer_cursor_row {
+        input_lines.push(Vec::new());
+    }
+
     if !st.right_prompt.is_empty() && !input_lines.is_empty() {
         let first_line = &input_lines[0];
         let right_cells = st.right_prompt.to_cells();
@@ -1463,9 +1470,6 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         }
     }
 
-    let left_cols = st.left_prompt.char_count();
-    let (buffer_cursor_row, cursor_col) =
-        buffer_position_for_byte(&st.buffer, st.cursor, width, left_cols);
     let cursor_row = above_end + buffer_cursor_row;
 
     all_lines.extend(input_lines);

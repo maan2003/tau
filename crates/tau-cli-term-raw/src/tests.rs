@@ -992,6 +992,21 @@ fn trailing_newline_buffer_grows_prompt_height() {
 }
 
 #[test]
+fn prompt_grows_when_cursor_wraps_at_exact_width() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(5, 5, 20);
+
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(5, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+
+    handle.set_buffer("abc".to_owned(), "abc".len());
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_eq!(vt100_rows(&parser, 5), vec!["> abc", "", "", "", ""]);
+    assert_eq!(parser.screen().cursor_position(), (1, 0));
+}
+
+#[test]
 fn shift_or_alt_enter_inserts_newline_without_submitting() {
     let buf = SharedBuffer::new();
     let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
