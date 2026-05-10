@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tau_cli_picker::{PickerItem, pick};
 use tau_config::settings::CliBindingAction;
-use tau_harness::{SessionEntry, SessionLaunchStatus, SessionTree, runtime_dir};
+use tau_harness::{SessionLaunchStatus, runtime_dir};
 
 const RESUME_PICKER_LIMIT: usize = 10;
 
@@ -351,14 +351,12 @@ fn pick_resume_session(cwd: &Path) -> Result<Option<String>, CliError> {
         return Ok(metas.first().map(|(sid, _)| sid.as_str().to_owned()));
     }
 
-    let store = tau_harness::open_session_store(&state_dir)?;
     let rows = metas
         .into_iter()
-        .map(|(sid, _meta)| {
+        .map(|(sid, meta)| {
             let locked = tau_harness::session_is_locked(&state_dir, sid.as_str()).unwrap_or(false);
-            let preview = store
-                .session(sid.as_str())
-                .and_then(latest_user_prompt_preview)
+            let preview = meta
+                .latest_user_prompt_preview
                 .map(|p| format!(" — {p}"))
                 .unwrap_or_default();
             let id = sid.as_str().to_owned();
@@ -389,29 +387,6 @@ fn pick_resume_session(cwd: &Path) -> Result<Option<String>, CliError> {
     let selection =
         pick("Resume session", &items).map_err(|e| CliError::Participant(e.to_string()))?;
     Ok(Some(rows[selection].0.clone()))
-}
-
-fn latest_user_prompt_preview(session: &SessionTree) -> Option<String> {
-    session
-        .current_branch()
-        .into_iter()
-        .rev()
-        .find_map(|e| match e {
-            SessionEntry::UserMessage { text } => Some(preview_text(&text, 48)),
-            _ => None,
-        })
-}
-
-fn preview_text(text: &str, max: usize) -> String {
-    let single_line: String = text
-        .chars()
-        .map(|c| if c == '\n' { ' ' } else { c })
-        .collect();
-    if single_line.chars().count() < max + 1 {
-        single_line
-    } else {
-        format!("{}…", single_line.chars().take(max).collect::<String>())
-    }
 }
 
 struct DaemonOutput {
@@ -830,11 +805,13 @@ fn run_chat(
         &mut term,
         &writer,
         &mut active_session_id,
-        effort_state,
-        theme,
-        event_tx,
-        editor_context,
-        &draft_handle,
+        TerminalInputLoopCtx {
+            effort_state,
+            theme,
+            renderer_tx: event_tx,
+            editor_context,
+            draft_handle: draft_handle.clone(),
+        },
     )?;
 
     // Tell the debounce thread to exit and wait for it so we don't
@@ -913,15 +890,19 @@ enum RendererCmd {
     ToggleDiffs,
 }
 
+struct TerminalInputLoopCtx {
+    effort_state: Arc<std::sync::atomic::AtomicU8>,
+    theme: tau_themes::Theme,
+    renderer_tx: mpsc::Sender<RendererCmd>,
+    editor_context: Arc<Mutex<tau_cli_term::EditorContext>>,
+    draft_handle: DraftHandle,
+}
+
 fn terminal_input_loop(
     term: &mut tau_cli_term::HighTerm,
     writer: &WriterHandle,
     session_id: &mut String,
-    effort_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    theme: tau_themes::Theme,
-    renderer_tx: std::sync::mpsc::Sender<RendererCmd>,
-    editor_context: std::sync::Arc<std::sync::Mutex<tau_cli_term::EditorContext>>,
-    draft_handle: &DraftHandle,
+    ctx: TerminalInputLoopCtx,
 ) -> Result<InputLoopExit, CliError> {
     // Cloned `TermHandle` so we can `print_output` for client-side
     // validation errors (`/effort foo`, `/tree blah`) from this
@@ -931,7 +912,11 @@ fn terminal_input_loop(
     let print_local = |message: &str| {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
-        local_handle.print_output(themed_block(&theme, names::SYSTEM_INFO, message.to_owned()));
+        local_handle.print_output(themed_block(
+            &ctx.theme,
+            names::SYSTEM_INFO,
+            message.to_owned(),
+        ));
     };
     use tau_cli_term::Event as TermEvent;
 
@@ -942,7 +927,7 @@ fn terminal_input_loop(
                 if text.is_empty() {
                     continue;
                 }
-                if let Ok(mut context) = editor_context.lock() {
+                if let Ok(mut context) = ctx.editor_context.lock() {
                     context.previous_prompt = Some(text.to_owned());
                 }
                 if text == "/quit" {
@@ -1024,15 +1009,15 @@ fn terminal_input_loop(
                     continue;
                 }
                 if text == "/show-diff" {
-                    let _ = renderer_tx.send(RendererCmd::ToggleDiffs);
+                    let _ = ctx.renderer_tx.send(RendererCmd::ToggleDiffs);
                     continue;
                 }
                 if text == "/show-thinking" {
-                    let _ = renderer_tx.send(RendererCmd::ToggleThinking);
+                    let _ = ctx.renderer_tx.send(RendererCmd::ToggleThinking);
                     continue;
                 }
                 if text == "/show-cache-stats" {
-                    let _ = renderer_tx.send(RendererCmd::ToggleCacheStats);
+                    let _ = ctx.renderer_tx.send(RendererCmd::ToggleCacheStats);
                     continue;
                 }
                 if let Some(model) = text.strip_prefix("/model ") {
@@ -1076,7 +1061,7 @@ fn terminal_input_loop(
                 // before sending the submission so a debounce thread that
                 // already took an older snapshot can't emit it afterward.
                 {
-                    let (mtx, cv) = &**draft_handle;
+                    let (mtx, cv) = &*ctx.draft_handle;
                     if let Ok(mut g) = mtx.lock() {
                         g.epoch = g.epoch.wrapping_add(1);
                         g.pending = None;
@@ -1107,7 +1092,7 @@ fn terminal_input_loop(
                 // coalesce a typing burst into one `UiPromptDraft`
                 // per `DRAFT_DEBOUNCE` window.
                 let text = term.handle().get_buffer();
-                let (mtx, cv) = &**draft_handle;
+                let (mtx, cv) = &*ctx.draft_handle;
                 if let Ok(mut g) = mtx.lock() {
                     g.pending = Some((
                         g.epoch,
@@ -1127,7 +1112,7 @@ fn terminal_input_loop(
                 // send the request. The harness echoes back and the
                 // renderer updates the status block.
                 let current =
-                    effort_from_u8(effort_state.load(std::sync::atomic::Ordering::Relaxed));
+                    effort_from_u8(ctx.effort_state.load(std::sync::atomic::Ordering::Relaxed));
                 let next = current.next();
                 let _ = send_event(
                     writer,

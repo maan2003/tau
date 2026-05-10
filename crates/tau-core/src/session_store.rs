@@ -351,7 +351,7 @@ impl SessionStore {
             parent_node_id: parent_node_id.flatten(),
         };
         append_cbor_record(&events_path, &record)?;
-        touch_meta(&session_dir.join("meta.json"))?;
+        touch_meta_for_event(&session_dir.join("meta.json"), &event)?;
 
         let sid: SessionId = session_id.into();
         let tree = self
@@ -493,16 +493,38 @@ fn write_meta(path: &Path, meta: &SessionMeta) -> Result<(), SessionStoreError> 
     })
 }
 
-/// Updates `last_touched` on the session's meta sidecar (creating it
-/// with `created_at = now` if absent).
-fn touch_meta(path: &Path) -> Result<(), SessionStoreError> {
+fn touch_meta_for_event(path: &Path, event: &Event) -> Result<(), SessionStoreError> {
     let now = unix_now();
     let mut meta = read_meta(path).unwrap_or_default();
     if meta.created_at == 0 {
         meta.created_at = now;
     }
     meta.last_touched = now;
+    if let Some(text) = user_prompt_text(event) {
+        meta.latest_user_prompt_preview = Some(preview_text(text, 48));
+    }
     write_meta(path, &meta)
+}
+
+fn user_prompt_text(event: &Event) -> Option<&str> {
+    match event {
+        Event::UiPromptSubmitted(prompt) => Some(&prompt.text),
+        Event::SessionUserMessageInjected(injected) => Some(&injected.text),
+        Event::SessionPromptSteered(steered) => Some(&steered.text),
+        _ => None,
+    }
+}
+
+fn preview_text(text: &str, max: usize) -> String {
+    let single_line: String = text
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
+    if single_line.chars().count() < max + 1 {
+        single_line
+    } else {
+        format!("{}…", single_line.chars().take(max).collect::<String>())
+    }
 }
 
 fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), SessionStoreError> {

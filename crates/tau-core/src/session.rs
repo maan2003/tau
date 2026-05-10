@@ -347,4 +347,7 @@ pub struct SessionMeta {
     pub created_at: u64,
     /// Unix epoch seconds of the most recent append.
     pub last_touched: u64,
+    /// Preview of the latest user-authored prompt, used by the resume picker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_user_prompt_preview: Option<String>,
 }
