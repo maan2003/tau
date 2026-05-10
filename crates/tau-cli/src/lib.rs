@@ -8,7 +8,7 @@ mod ui_logging;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::OpenOptions;
-use std::io::{self, BufReader, BufWriter};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -317,10 +317,17 @@ fn find_most_recent_session(cwd: &Path) -> Option<String> {
         .map(|(sid, _)| sid.as_str().to_owned())
 }
 
+struct DaemonOutput {
+    stdout: Stdio,
+    stderr: Stdio,
+    log_path: PathBuf,
+    start_offset: u64,
+}
+
 fn resolve_daemon(
     attach: bool,
     session_id: &str,
-    daemon_stderr: Option<Stdio>,
+    daemon_output: Option<DaemonOutput>,
 ) -> Result<DaemonHandle, CliError> {
     tracing::debug!(target: "tau_cli::startup", attach, session_id, "resolving harness daemon");
     let project_root = std::env::current_dir()?;
@@ -333,7 +340,7 @@ fn resolve_daemon(
     }
     start_daemon(
         session_id,
-        daemon_stderr.expect("daemon stderr for spawned harness"),
+        daemon_output.expect("daemon output for spawned harness"),
     )
 }
 
@@ -391,8 +398,16 @@ fn display_path(path: &Path) -> String {
     }
 }
 
+fn read_daemon_output_since(path: &Path, start_offset: u64) -> io::Result<String> {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    file.seek(SeekFrom::Start(start_offset))?;
+    let mut output = String::new();
+    file.read_to_string(&mut output)?;
+    Ok(output)
+}
+
 /// Spawns a new harness daemon and waits for its socket to be ready.
-fn start_daemon(session_id: &str, stderr: Stdio) -> Result<DaemonHandle, CliError> {
+fn start_daemon(session_id: &str, output: DaemonOutput) -> Result<DaemonHandle, CliError> {
     let tau_binary = std::env::current_exe()?;
     tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), session_id, "spawning harness daemon");
 
@@ -412,8 +427,8 @@ fn start_daemon(session_id: &str, stderr: Stdio) -> Result<DaemonHandle, CliErro
                 .unwrap_or_else(|_| "tau_harness::startup=debug,tau_cli=info".to_owned()),
         )
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(stderr)
+        .stdout(output.stdout)
+        .stderr(output.stderr)
         .spawn()?;
 
     tracing::debug!(target: "tau_cli::startup", pid = child.id(), "harness daemon spawned");
@@ -431,7 +446,13 @@ fn start_daemon(session_id: &str, stderr: Stdio) -> Result<DaemonHandle, CliErro
         }
         if let Some(status) = child.try_wait()? {
             tracing::debug!(target: "tau_cli::startup", pid = child.id(), %status, elapsed_ms = started_at.elapsed().as_millis(), "harness daemon exited before marker");
-            return Err(CliError::DaemonExited(format!("exit status: {status}")));
+            let captured = read_daemon_output_since(&output.log_path, output.start_offset)?;
+            let mut message = format!("exit status: {status}");
+            if !captured.trim().is_empty() {
+                message.push_str("\n\nHarness output:\n");
+                message.push_str(captured.trim_end());
+            }
+            return Err(CliError::DaemonExited(message));
         }
         if DAEMON_START_TIMEOUT <= started_at.elapsed() {
             tracing::debug!(target: "tau_cli::startup", pid = child.id(), elapsed_ms = started_at.elapsed().as_millis(), "harness daemon start timed out");
@@ -463,18 +484,33 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     );
 
     let startup_started_at = Instant::now();
-    let daemon_stderr = if attach {
+    let daemon_output = if attach {
         None
     } else {
-        Some(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(ui_logging.log_path())
-                .map(Stdio::from)?,
-        )
+        let start_offset = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(ui_logging.log_path())?
+            .metadata()?
+            .len();
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(ui_logging.log_path())
+            .map(Stdio::from)?;
+        let stderr = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(ui_logging.log_path())
+            .map(Stdio::from)?;
+        Some(DaemonOutput {
+            stdout,
+            stderr,
+            log_path: ui_logging.log_path().to_owned(),
+            start_offset,
+        })
     };
-    let daemon = resolve_daemon(attach, session_id, daemon_stderr)?;
+    let daemon = resolve_daemon(attach, session_id, daemon_output)?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness daemon resolved");
     let socket_path = daemon.socket_path();
 
