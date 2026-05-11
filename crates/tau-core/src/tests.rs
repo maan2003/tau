@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::io::{BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::thread;
 
 use tau_proto::{
@@ -17,7 +16,6 @@ use crate::connection::{
     Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
     RouteError, RoutedFrame,
 };
-use crate::event_log::EventLog;
 use crate::memory::{MemoryInbox, MemorySink, memory_connection};
 use crate::policy::{DefaultSubscriptionPolicy, PolicyStore, SubscriptionApproval};
 use crate::session::{NodeId, SessionEntry, ToolActivityOutcome, ToolActivityRecord};
@@ -475,6 +473,59 @@ fn explicit_parent_preserved_across_replay() {
 }
 
 #[test]
+fn next_event_id_is_cached_across_appends_and_reopen() {
+    // Regression for the O(N)-per-append re-decode bug: the next
+    // event id should be tracked incrementally on the in-memory
+    // `SessionTree` rather than recomputed by re-reading the on-disk
+    // log, and it should be re-initialised correctly on reopen from
+    // the highest persisted id.
+    let tempdir = TempDir::new().expect("tempdir");
+    let store_path = tempdir.path().join("state");
+    let session_id = "incrementing-session";
+
+    {
+        let mut store = SessionStore::open(&store_path).expect("open");
+        for i in 0..16 {
+            let outcome = store
+                .append_session_event(
+                    session_id,
+                    None,
+                    Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+                        session_id: session_id.into(),
+                        text: format!("msg-{i}"),
+                        originator: tau_proto::PromptOriginator::User,
+                        ctx_id: None,
+                    }),
+                )
+                .expect("append");
+            assert_eq!(outcome.id.get(), i);
+        }
+        let tree = store.session(session_id).expect("loaded");
+        assert_eq!(tree.next_event_id().get(), 16);
+    }
+
+    let mut reopened = SessionStore::open(&store_path).expect("reopen");
+    let tree = reopened.session(session_id).expect("loaded");
+    assert_eq!(tree.next_event_id().get(), 16);
+
+    // The next append on the reopened store should pick up where we
+    // left off — no gap, no collision.
+    let outcome = reopened
+        .append_session_event(
+            session_id,
+            None,
+            Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+                session_id: session_id.into(),
+                text: "after-reopen".to_owned(),
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            }),
+        )
+        .expect("append after reopen");
+    assert_eq!(outcome.id.get(), 16);
+}
+
+#[test]
 fn session_tree_persists_across_reopen() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let store_path = tempdir.path().join("state");
@@ -837,156 +888,4 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
 
     agent_thread.join().expect("agent thread should finish");
     tool_thread.join().expect("tool thread should finish");
-}
-
-// -----------------------------------------------------------------------
-// EventLog tests
-// -----------------------------------------------------------------------
-
-#[test]
-fn event_log_append_and_get() {
-    let log = EventLog::new();
-    let seq = log.append(
-        Some("conn-1".into()),
-        Event::HarnessInfo(tau_proto::HarnessInfo {
-            message: "hello".to_owned(),
-
-            level: tau_proto::HarnessInfoLevel::Normal,
-        }),
-    );
-    assert_eq!(seq, 0);
-    assert_eq!(log.next_seq(), 1);
-
-    let entry = log.get_next_from(0).expect("entry should exist");
-    assert_eq!(entry.seq, 0);
-    assert_eq!(entry.source, Some("conn-1".into()));
-
-    assert!(log.get_next_from(1).is_none());
-}
-
-#[test]
-fn event_log_get_next_from_skips_earlier() {
-    let log = EventLog::new();
-    log.append(
-        None,
-        Event::HarnessInfo(tau_proto::HarnessInfo {
-            message: "a".to_owned(),
-
-            level: tau_proto::HarnessInfoLevel::Normal,
-        }),
-    );
-    log.append(
-        None,
-        Event::HarnessInfo(tau_proto::HarnessInfo {
-            message: "b".to_owned(),
-
-            level: tau_proto::HarnessInfoLevel::Normal,
-        }),
-    );
-    log.append(
-        None,
-        Event::HarnessInfo(tau_proto::HarnessInfo {
-            message: "c".to_owned(),
-
-            level: tau_proto::HarnessInfoLevel::Normal,
-        }),
-    );
-
-    let entry = log.get_next_from(1).expect("entry should exist");
-    assert_eq!(entry.seq, 1);
-    let Event::HarnessInfo(info) = &entry.event else {
-        panic!("expected HarnessInfo");
-    };
-    assert_eq!(info.message, "b");
-}
-
-#[test]
-fn event_log_wait_next_from_blocks_then_returns() {
-    let log = EventLog::new();
-    let log2 = Arc::clone(&log);
-
-    let handle = thread::spawn(move || {
-        thread::sleep(std::time::Duration::from_millis(20));
-        log2.append(
-            None,
-            Event::HarnessInfo(tau_proto::HarnessInfo {
-                message: "delayed".to_owned(),
-
-                level: tau_proto::HarnessInfoLevel::Normal,
-            }),
-        );
-    });
-
-    let entry = log.wait_next_from(0);
-    assert_eq!(entry.seq, 0);
-    handle.join().expect("append thread");
-}
-
-#[test]
-fn event_log_wait_next_from_returns_immediately_if_available() {
-    let log = EventLog::new();
-    log.append(
-        None,
-        Event::HarnessInfo(tau_proto::HarnessInfo {
-            message: "already here".to_owned(),
-
-            level: tau_proto::HarnessInfoLevel::Normal,
-        }),
-    );
-
-    let entry = log.wait_next_from(0);
-    assert_eq!(entry.seq, 0);
-}
-
-#[test]
-fn event_log_prune_below_removes_old_entries() {
-    let log = EventLog::new();
-    for i in 0..5 {
-        log.append(
-            None,
-            Event::HarnessInfo(tau_proto::HarnessInfo {
-                message: format!("msg-{i}"),
-
-                level: tau_proto::HarnessInfoLevel::Normal,
-            }),
-        );
-    }
-    assert_eq!(log.next_seq(), 5);
-
-    log.prune_below(3);
-
-    assert!(log.get_next_from(0).is_some());
-    // The first available entry should be seq 3.
-    let entry = log.get_next_from(0).expect("entry after prune");
-    assert_eq!(entry.seq, 3);
-
-    // Entries 0, 1, 2 are gone.
-    assert!(log.get_next_from(2).map(|e| e.seq) == Some(3));
-}
-
-#[test]
-fn event_log_multiple_waiters_wake_on_append() {
-    let log = EventLog::new();
-    let mut handles = Vec::new();
-    for _ in 0..3 {
-        let log = Arc::clone(&log);
-        handles.push(thread::spawn(move || {
-            let entry = log.wait_next_from(0);
-            entry.seq
-        }));
-    }
-
-    thread::sleep(std::time::Duration::from_millis(20));
-    log.append(
-        None,
-        Event::HarnessInfo(tau_proto::HarnessInfo {
-            message: "wake all".to_owned(),
-
-            level: tau_proto::HarnessInfoLevel::Normal,
-        }),
-    );
-
-    for h in handles {
-        assert_eq!(h.join().expect("waiter thread"), 0);
-    }
 }

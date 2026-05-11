@@ -170,6 +170,12 @@ pub struct SessionStore {
 impl SessionStore {
     /// Opens the session store rooted at `state_dir`, eagerly loading
     /// every session subdirectory found there.
+    ///
+    /// Cost is O(total bytes across every session's `events.cbor`),
+    /// so this is intended for read-only inspection callers (e.g.
+    /// `tau session list`) that genuinely need every tree resident in
+    /// memory. Daemon startup should use [`Self::open_lazy`] and
+    /// load individual trees on demand via [`Self::load_session`].
     pub fn open(state_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
         let state_dir = state_dir.into();
         let mut store = Self::open_lazy(state_dir.clone())?;
@@ -264,6 +270,13 @@ impl SessionStore {
                 source,
             })?;
         if FileExt::try_lock_exclusive(&file).is_err() {
+            // Read the holder's `pid=...` line from the same fd we
+            // just tried to lock. flock is released by the kernel on
+            // process exit, so reaching this branch implies the
+            // holder is alive (modulo a thin race window where the
+            // holder has the lock but hasn't yet written its pid; in
+            // that case `holder` is empty, which Display handles
+            // fine).
             let mut holder = String::new();
             let _ = file.read_to_string(&mut holder);
             return Err(SessionStoreError::Locked {
@@ -340,7 +353,17 @@ impl SessionStore {
             }
         })?;
         let events_path = session_dir.join("events.cbor");
-        let next_id = next_session_event_id(&events_path)?;
+
+        let sid: SessionId = session_id.into();
+        let tree = self
+            .sessions
+            .entry(sid.clone())
+            .or_insert_with(|| SessionTree::from_events(sid, &[]));
+        // Cached: `from_events` populated this from the highest
+        // persisted id at load time; we keep it advanced below.
+        // Avoids re-reading and re-decoding the entire on-disk log
+        // on every write.
+        let next_id = tree.next_event_id();
         let record = PersistedSessionEvent {
             id: next_id,
             source,
@@ -353,12 +376,8 @@ impl SessionStore {
         append_cbor_record(&events_path, &record)?;
         touch_meta_for_event(&session_dir.join("meta.json"), &event)?;
 
-        let sid: SessionId = session_id.into();
-        let tree = self
-            .sessions
-            .entry(sid.clone())
-            .or_insert_with(|| SessionTree::from_events(sid, &[]));
         let folded_node_id = tree.apply_event_at(parent_node_id, &event);
+        tree.advance_next_event_id();
 
         Ok(AppendOutcome {
             id: next_id,
@@ -428,8 +447,12 @@ impl SessionStore {
 
 /// Lists session metadata across `state_dir` without taking any flocks.
 ///
-/// Sessions whose `meta.json` is missing or malformed are skipped silently;
-/// the goal is best-effort discovery for `-r` resumption, not strict listing.
+/// Sessions whose `meta.json` is missing are skipped silently (the
+/// session may have just been created and not yet touched). A
+/// `meta.json` that *exists* but fails to parse is also skipped, but
+/// emits a warning to stderr so a corrupt sidecar does not become
+/// invisible to operators. The goal is best-effort discovery for
+/// `-r` resumption, not strict listing.
 pub fn list_session_metas(state_dir: &Path) -> io::Result<Vec<(SessionId, SessionMeta)>> {
     let mut out = Vec::new();
     if !state_dir.exists() {
@@ -445,8 +468,16 @@ pub fn list_session_metas(state_dir: &Path) -> io::Result<Vec<(SessionId, Sessio
             continue;
         };
         let meta_path = path.join("meta.json");
-        let Ok(meta) = read_meta(&meta_path) else {
-            continue;
+        let meta = match read_meta(&meta_path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                eprintln!(
+                    "tau: skipping session {name}: failed to read {}: {error}",
+                    meta_path.display()
+                );
+                continue;
+            }
         };
         out.push((SessionId::from(name), meta));
     }
@@ -552,7 +583,12 @@ fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), Sessi
             path: path.to_path_buf(),
             source,
         })?;
-    file.flush().map_err(|source| SessionStoreError::Write {
+    // Durability: sync_data() guards against the failure mode where
+    // the kernel acknowledged the write (length + payload bytes
+    // visible) but a crash before flush leaves a torn record on
+    // disk. read_cbor_records would then either error or — pre-bound
+    // — try to allocate a garbage length on the next read.
+    file.sync_data().map_err(|source| SessionStoreError::Write {
         path: path.to_path_buf(),
         source,
     })
@@ -569,13 +605,14 @@ fn load_session_events(path: &Path) -> Result<Vec<PersistedSessionEvent>, Sessio
     Ok(events)
 }
 
-fn next_session_event_id(path: &Path) -> Result<LogEventId, SessionStoreError> {
-    let events = load_session_events(path)?;
-    Ok(events
-        .last()
-        .map(|record| LogEventId::new(record.id.get() + 1))
-        .unwrap_or_else(|| LogEventId::new(0)))
-}
+/// Largest individual CBOR record we'll allocate from the
+/// length-prefix on disk. A torn or corrupt log can have garbage in
+/// the 8-byte length header; without a sanity bound a single
+/// `vec![0; record_length]` could try to allocate up to
+/// `usize::MAX` bytes. 64 MiB is generous compared to any session
+/// event we actually persist (largest are tool results, which live
+/// in the same KB-to-MB range as user-visible chat content).
+const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 
 fn read_cbor_records<T, F>(path: &Path, mut handle: F) -> Result<(), SessionStoreError>
 where
@@ -599,8 +636,20 @@ where
             }
         }
 
-        let record_length = u64::from_le_bytes(length_bytes) as usize;
-        let mut record_bytes = vec![0_u8; record_length];
+        let record_length = u64::from_le_bytes(length_bytes);
+        if record_length > MAX_RECORD_BYTES {
+            return Err(SessionStoreError::Read {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "record length {record_length} exceeds maximum {MAX_RECORD_BYTES} \
+                         (likely a corrupt or torn write)"
+                    ),
+                ),
+            });
+        }
+        let mut record_bytes = vec![0_u8; record_length as usize];
         file.read_exact(&mut record_bytes)
             .map_err(|source| SessionStoreError::Read {
                 path: path.to_path_buf(),

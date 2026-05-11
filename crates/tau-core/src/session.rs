@@ -13,6 +13,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tau_proto::{ConnectionId, Event, LogEventId, SessionId, ToolCallId, ToolName};
 
+/// Default starting `LogEventId` for a tree with no events.
+const FIRST_EVENT_ID: u64 = 0;
+
 /// One persisted chat or tool activity entry belonging to a session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SessionEntry {
@@ -88,6 +91,13 @@ pub struct SessionTree {
     pub(crate) session_id: SessionId,
     pub(crate) nodes: Vec<SessionNode>,
     pub(crate) head: Option<NodeId>,
+    /// Id the next durable event appended to this session's log
+    /// should receive. Cached here so that
+    /// [`SessionStore::append_session_event_at`] doesn't have to
+    /// re-decode the entire on-disk log on every write to look at
+    /// the last id (the previous behaviour was O(N) per append,
+    /// quadratic over a long session).
+    pub(crate) next_event_id: LogEventId,
 }
 
 impl SessionTree {
@@ -196,6 +206,7 @@ impl SessionTree {
             session_id,
             nodes: Vec::new(),
             head: None,
+            next_event_id: LogEventId::new(FIRST_EVENT_ID),
         };
         for entry in events {
             // Persisted records store the inner `Option<NodeId>` only
@@ -206,8 +217,24 @@ impl SessionTree {
             // across daemon restarts — acceptable today since side
             // conversations are not resumed across restarts.
             tree.apply_event_at(entry.parent_node_id.map(Some), &entry.event);
+            tree.next_event_id = LogEventId::new(entry.id.get() + 1);
         }
         tree
+    }
+
+    /// Returns the id the next durable event appended to this
+    /// session's log should receive. Maintained incrementally by
+    /// [`SessionStore::append_session_event_at`]; on replay,
+    /// initialised from the highest persisted event id.
+    #[must_use]
+    pub fn next_event_id(&self) -> LogEventId {
+        self.next_event_id
+    }
+
+    /// Bumps the cached next-event-id after a successful append.
+    /// Crate-internal — only the session store mutates this.
+    pub(crate) fn advance_next_event_id(&mut self) {
+        self.next_event_id = LogEventId::new(self.next_event_id.get() + 1);
     }
 
     /// Incrementally apply one durable event to the tree. Mirrors the
@@ -329,6 +356,19 @@ impl SessionTree {
 /// used to do. Older records without this field deserialize as
 /// `None` and replay against the live `tree.head()` — matching the
 /// legacy single-cursor fold and so back-compatible.
+///
+/// Lossy round-trip on the tri-state: the in-memory API distinguishes
+/// `None` (inherit head) from `Some(None)` (explicit-root, e.g. a
+/// fresh sub-agent context), but only the inner `Option<NodeId>` is
+/// persisted — `Some(None)` collapses to `None` on disk. On replay,
+/// both look like "inherit head", so sessions branched via
+/// explicit-root publishes lose that distinction across daemon
+/// restarts.
+//
+// TODO(sub-agent-resume): when sub-agent contexts need to be resumed
+// across restarts, persist the tri-state explicitly (e.g. an enum
+// `{Inherit, Root, Under(NodeId)}`) instead of `Option<NodeId>`. See
+// also `SessionTree::from_events`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PersistedSessionEvent {
     pub id: LogEventId,

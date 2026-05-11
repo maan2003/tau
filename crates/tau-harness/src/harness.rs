@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use tau_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, DefaultSubscriptionPolicy, EventBus,
-    EventLog, PolicyStore, RouteError, SessionStore, ToolRegistry, ToolRouteError,
+    PolicyStore, RouteError, SessionStore, ToolRegistry, ToolRouteError,
 };
 use tau_proto::{
     AgentResponseFinished, AgentToolCall, CborValue, ClientKind, Disconnect, Event, EventName,
@@ -30,6 +30,7 @@ use crate::error::HarnessError;
 use crate::event::{
     ChannelSink, HarnessEvent, WriterShutdown, spawn_reader_thread, spawn_writer_thread,
 };
+use crate::event_log::EventLog;
 use crate::extension::{
     ExtensionEntry, ExtensionState, extension_stderr_log_path, spawn_in_process, spawn_supervised,
 };
@@ -470,7 +471,11 @@ impl Harness {
             EventBus::with_subscription_policy(Box::new(DefaultSubscriptionPolicy::with_store(
                 PolicyStore::open(policy_store_path_from(&state_dir))?,
             )));
-        let store = SessionStore::open(&state_dir)?;
+        // Lazy: only the eager session's tree is needed up front
+        // (loaded below via `store.load_session`); other sessions
+        // load on first access. Avoids a startup walk over every
+        // historical session dir.
+        let store = SessionStore::open_lazy(&state_dir)?;
 
         let own_pid = std::process::id();
         let mut _next_instance_counter: u64 = 0;

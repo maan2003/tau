@@ -18,6 +18,7 @@ mod dirs;
 mod discovery;
 mod error;
 mod event;
+mod event_log;
 mod extension;
 mod format;
 mod harness;

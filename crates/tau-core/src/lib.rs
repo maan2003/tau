@@ -6,7 +6,6 @@
 
 mod bus;
 mod connection;
-mod event_log;
 mod memory;
 mod policy;
 mod session;
@@ -21,7 +20,6 @@ pub use connection::{
     AllowAll, Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError,
     ConnectionSink, DeliveryFailure, RouteError, RouteReport, RoutedFrame, VisibilityFilter,
 };
-pub use event_log::{EventLog, EventSeq, LogEntry};
 pub use memory::{MemoryInbox, memory_connection};
 pub use policy::{
     DefaultSubscriptionPolicy, PolicyStore, SubscriptionApproval, SubscriptionPolicy,

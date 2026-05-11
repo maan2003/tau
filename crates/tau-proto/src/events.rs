@@ -355,6 +355,14 @@ pub struct InterceptionPriority(pub i64);
 /// Identifier of a node in the per-session tree. Lives on the wire
 /// because tree-folding events stamp their `parent_node_id` so the
 /// fold doesn't have to consult a shared write cursor.
+///
+/// Ids are valid only against the tree that produced them. The
+/// in-memory `SessionTree` uses `NodeId.0` as a positional index into
+/// its node vector and assigns ids by insertion order, so the same
+/// numeric id can refer to different nodes across different trees.
+/// Replaying the same persisted event log yields the same ids only
+/// because the fold is deterministic; an id that originated in one
+/// session (or in a sub-agent's tree) is meaningless in another.
 #[derive(
     Clone, Copy, Debug, Default, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]

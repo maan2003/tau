@@ -185,29 +185,34 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
     ) -> Result<(), SubscriptionPolicyError> {
         if connection.origin == ConnectionOrigin::Socket {
             // Closed list of categories a socket client is allowed to
-            // subscribe to. The unknown `EventCategory::Other` and the
-            // wire-level `Wire` family are rejected outright — UI
-            // clients should not see at-least-once envelope plumbing.
+            // subscribe to. The unknown `EventCategory::Other` is
+            // rejected outright. Adding a new `EventCategory` variant
+            // upstream forces this match to be revisited (no `_` arm).
             fn category_allowed(category: &tau_proto::EventCategory) -> bool {
                 use tau_proto::EventCategory as C;
-                matches!(
-                    category,
+                match category {
                     C::Tool
-                        | C::Extension
-                        | C::Agent
-                        | C::Session
-                        | C::Ui
-                        | C::Harness
-                        | C::Shell
-                        | C::Term
-                )
+                    | C::Extension
+                    | C::Agent
+                    | C::Session
+                    | C::Ui
+                    | C::Harness
+                    | C::Shell
+                    | C::Term => true,
+                    C::Other(_) => false,
+                }
             }
             for selector in selectors {
                 let allowed = match selector {
                     EventSelector::Exact(name) => category_allowed(&name.category),
                     EventSelector::Prefix(prefix) => {
                         // The category portion of the prefix must
-                        // resolve to a known, allowed category.
+                        // resolve to a known, allowed category. A
+                        // bare prefix like "tool" (no dot) falls
+                        // through the `unwrap_or` and is parsed as a
+                        // category directly — relies on
+                        // `EventCategory::from_wire` recognizing the
+                        // bare category strings.
                         let category_str = prefix.split_once('.').map(|(c, _)| c).unwrap_or(prefix);
                         let category = tau_proto::EventCategory::from_wire(category_str);
                         category_allowed(&category)
