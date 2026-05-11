@@ -1,11 +1,18 @@
-//! Shared infrastructure for tau extensions.
+//! Optional building blocks for tau extension processes.
 //!
-//! This crate is meant to be a thin support layer for extension
-//! processes — anything that every extension wants but is too
-//! mechanical to copy-paste into each one. Today that's exactly one
-//! thing: a `tracing_subscriber` setup that writes to stderr (which
-//! the harness captures into a per-extension log file) and is
-//! filtered via the `TAU_LOG` environment variable.
+//! Three independent utilities, each opt-in:
+//!
+//! - [`Handshake`] writes the standard Hello/Subscribe/Intercept/
+//!   ToolRegister/Ready prelude every extension opens its session with.
+//! - [`init_logging`] installs a stderr `tracing_subscriber` filtered by the
+//!   `TAU_LOG` env var.
+//! - [`parse_config`] decodes the harness-supplied `LifecycleConfigure.config`
+//!   into a typed struct, flattening `ciborium::value::Error`'s debug shape
+//!   into a one-line message.
+//!
+//! Nothing here is required — an extension may use one helper, all
+//! three, or none. The crate exists only to hold pieces that more
+//! than one extension would otherwise copy-paste.
 //!
 //! ## Per-extension log targets
 //!
@@ -30,6 +37,19 @@
 //! harness, embedded crates, third-party libraries). Extensions
 //! deserve their own knob so users can crank one extension to trace
 //! without flooding stderr with everything else.
+//!
+//! ## Recommended shape for [`parse_config`] config structs
+//!
+//! Declare the extension's config struct with
+//! `#[serde(default, deny_unknown_fields)]` so missing fields fall
+//! back to `Default` while unknown fields surface as actionable
+//! errors instead of being silently dropped:
+//!
+//! ```ignore
+//! #[derive(serde::Deserialize, Default)]
+//! #[serde(default, deny_unknown_fields)]
+//! struct MyConfig { /* fields */ }
+//! ```
 
 mod handshake;
 
@@ -51,8 +71,9 @@ pub const DEFAULT_FILTER: &str = "info";
 ///
 /// Safe to call once per process. If a subscriber is already
 /// installed (e.g. by another `init_logging` call, or tests), the
-/// duplicate-init error is silently ignored so the program keeps
-/// running with whatever subscriber was set first.
+/// duplicate-init error is logged to stderr but otherwise tolerated
+/// so the program keeps running with whatever subscriber was set
+/// first.
 pub fn init_logging() {
     let filter =
         EnvFilter::try_from_env(ENV_VAR).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
@@ -63,14 +84,22 @@ pub fn init_logging() {
         .with_ansi(false)
         .with_target(true)
         .with_level(true)
-        // The harness already records the wall-clock time the
-        // extension wrote each line via the file's mtime / log
-        // sentinels; including a per-event timestamp is still useful
-        // for sub-second ordering.
+        // Wall-clock timestamps (not monotonic) — they're chosen for
+        // human readability when correlating an extension log against
+        // harness logs, user actions, or external services. NTP
+        // step-backs are a known caveat; in-process ordering can fall
+        // back to log file line order.
         .with_timer(tracing_subscriber::fmt::time::SystemTime)
         .finish();
 
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    if let Err(err) = tracing::subscriber::set_global_default(subscriber) {
+        // Stderr is the right channel here — by definition the global
+        // tracing subscriber may not be ready to capture our own
+        // logs. Visible iff the existing subscriber is silent on
+        // stderr, which is fine: a duplicate-init in tests is benign,
+        // a duplicate-init in production is rare and worth surfacing.
+        eprintln!("tau-extension: failed to install tracing subscriber: {err}");
+    }
 }
 
 /// Decode the harness-provided `LifecycleConfigure.config` value into
@@ -78,36 +107,15 @@ pub fn init_logging() {
 ///
 /// `Err` carries a human-readable message suitable for stuffing
 /// straight into `LifecycleConfigError { message }` — the harness
-/// surfaces it verbatim to the user. Avoids the noisy
-/// `Semantic(None, "…")` shape `ciborium::de::Error` produces from
-/// its derived `Debug` (which is what its `Display` falls back to).
-///
-/// Errors are flattened to one of:
-/// - `<message>` for a plain semantic error (the most common case — missing
-///   field, unknown field, type mismatch);
-/// - `<message> (at offset N)` if `ciborium` reported one;
-/// - prefixed with `CBOR syntax error` / `IO error` for the rarer
-///   transport-level cases.
+/// surfaces it verbatim to the user. `ciborium::value::Error::Custom`'s
+/// `Display` is `{:?}` (so it would render as `Custom("...")`); we
+/// unwrap it to just the inner serde message.
 pub fn parse_config<C: serde::de::DeserializeOwned>(
     value: &tau_proto::CborValue,
 ) -> Result<C, String> {
-    let mut bytes = Vec::new();
-    ciborium::ser::into_writer(value, &mut bytes)
-        .map_err(|e| format!("failed to re-encode config payload: {e}"))?;
-    ciborium::de::from_reader::<C, _>(&bytes[..]).map_err(format_de_error)
-}
-
-fn format_de_error(error: ciborium::de::Error<std::io::Error>) -> String {
-    use ciborium::de::Error;
-    match error {
-        Error::Io(e) => format!("IO error reading config: {e}"),
-        Error::Syntax(offset) => format!("CBOR syntax error at offset {offset}"),
-        Error::Semantic(offset, msg) => match offset {
-            Some(o) => format!("{msg} (at offset {o})"),
-            None => msg,
-        },
-        Error::RecursionLimitExceeded => "config nesting too deep".to_owned(),
-    }
+    value.deserialized().map_err(|e| match e {
+        ciborium::value::Error::Custom(msg) => msg,
+    })
 }
 
 #[cfg(test)]
