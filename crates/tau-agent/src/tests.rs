@@ -3,8 +3,8 @@ use super::*;
 #[test]
 fn no_config_resolves_none() {
     let models = ModelRegistry::default();
-    let auth = tau_provider::storage::AuthStore::default();
-    assert!(resolve_backend("fake/model", &models, &auth).is_none());
+    let mut auth = tau_provider::storage::AuthStore::default();
+    assert!(resolve_backend("fake/model", &models, &mut auth).is_none());
 }
 
 #[test]

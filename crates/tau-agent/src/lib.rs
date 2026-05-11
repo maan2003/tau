@@ -11,7 +11,7 @@ use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use backon::BackoffBuilder;
 use tau_config::settings::{self, ModelRegistry, ProviderConfig};
@@ -46,7 +46,6 @@ where
     let mut writer = FrameWriter::new(BufWriter::new(writer));
 
     let model_registry = settings::load_models().unwrap_or_default();
-    let auth_store = tau_provider::storage::load().unwrap_or_default();
 
     writer.write_frame(&Frame::Message(Message::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
@@ -133,10 +132,13 @@ where
                 };
 
                 // Resolve backend from the model specified in the prompt.
+                // Reload auth on every prompt so `tau provider login` or
+                // `/provider-auth` takes effect without restarting Tau.
+                let mut auth_store = tau_provider::storage::load().unwrap_or_default();
                 let backend = prompt
                     .model
                     .as_deref()
-                    .and_then(|m| resolve_backend(m, &model_registry, &auth_store));
+                    .and_then(|m| resolve_backend(m, &model_registry, &mut auth_store));
 
                 match backend {
                     Some(BackendConfig::ChatCompletions(cfg)) => {
@@ -248,7 +250,7 @@ enum BackendConfig {
 fn resolve_backend(
     model: &str,
     models: &ModelRegistry,
-    auth_store: &tau_provider::storage::AuthStore,
+    auth_store: &mut tau_provider::storage::AuthStore,
 ) -> Option<BackendConfig> {
     let (provider_name, model_id) = model.split_once('/')?;
     let provider = models.providers.get(provider_name)?;
@@ -264,14 +266,37 @@ fn resolve_backend(
     match auth_type {
         "openai-codex" => {
             // Codex subscription → Responses API via chatgpt.com.
-            use tau_provider::storage::Credentials;
-            let creds = auth_store.providers.get(provider_name)?;
-            let (access_token, account_id) = match creds {
+            use tau_provider::storage::{Credentials, ProviderKind};
+            let (access_token, account_id) = match auth_store.providers.get(provider_name)? {
                 Credentials::Oauth {
                     access_token,
+                    refresh_token,
+                    expires_at_ms,
                     account_id,
                     ..
-                } => (access_token.clone(), account_id.clone()),
+                } => {
+                    let mut access_token = access_token.clone();
+                    let mut account_id = account_id.clone();
+                    if oauth_token_should_refresh(&access_token, *expires_at_ms) {
+                        if let Ok(tokens) = tau_provider::oauth::openai_codex_refresh(refresh_token)
+                        {
+                            access_token = tokens.access_token.clone();
+                            account_id = tokens.account_id.clone();
+                            auth_store.providers.insert(
+                                provider_name.to_owned(),
+                                Credentials::Oauth {
+                                    provider_kind: ProviderKind::OpenaiCodex,
+                                    access_token: tokens.access_token,
+                                    refresh_token: tokens.refresh_token,
+                                    expires_at_ms: tokens.expires_at_ms,
+                                    account_id: tokens.account_id,
+                                },
+                            );
+                            let _ = tau_provider::storage::save(auth_store);
+                        }
+                    }
+                    (access_token, account_id)
+                }
                 _ => return None,
             };
             Some(BackendConfig::Responses(responses::ResponsesConfig {
@@ -324,10 +349,36 @@ fn resolve_backend(
     }
 }
 
+fn oauth_token_should_refresh(access_token: &str, expires_at_ms: u64) -> bool {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis() as u64;
+
+    if let Some(issued_at_ms) = jwt_issued_at_ms(access_token) {
+        let lifetime_ms = expires_at_ms.saturating_sub(issued_at_ms);
+        let refresh_at_ms = issued_at_ms.saturating_add(lifetime_ms / 2);
+        if refresh_at_ms <= now_ms {
+            return true;
+        }
+    }
+
+    // Fallback for tokens without an `iat` claim: refresh a little early to avoid
+    // expiry during a long streaming response.
+    expires_at_ms <= now_ms + Duration::from_secs(5 * 60).as_millis() as u64
+}
+
+fn jwt_issued_at_ms(jwt: &str) -> Option<u64> {
+    let payload = jwt.split('.').nth(1)?;
+    let payload = tau_provider::oauth::base64_url_safe_no_pad_decode(payload)?;
+    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    claims.get("iat")?.as_u64().map(|secs| secs * 1000)
+}
+
 fn chat_completions_backend(
     provider_name: &str,
     provider: &ProviderConfig,
-    auth_store: &tau_provider::storage::AuthStore,
+    auth_store: &mut tau_provider::storage::AuthStore,
     model_id: &str,
 ) -> Option<BackendConfig> {
     // Standard Chat Completions API.

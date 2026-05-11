@@ -189,6 +189,11 @@ fn parse_openai_token_response(json: &serde_json::Value) -> Result<OAuthTokens, 
     })
 }
 
+/// Decode URL-safe base64 without padding.
+pub fn base64_url_safe_no_pad_decode(input: &str) -> Option<Vec<u8>> {
+    URL_SAFE_NO_PAD.decode(input).ok()
+}
+
 /// Decode JWT payload (no verification) to extract OpenAI account ID.
 fn extract_openai_account_id(jwt: &str) -> Option<String> {
     let parts: Vec<&str> = jwt.split('.').collect();

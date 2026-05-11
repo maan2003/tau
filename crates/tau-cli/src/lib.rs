@@ -699,6 +699,10 @@ fn run_chat(
             "Toggle expanded vs compact display of file edit diffs",
         ),
         SlashCommand::new(
+            "/provider-auth",
+            "Refresh OAuth for a provider (runs `tau provider login [name]`)",
+        ),
+        SlashCommand::new(
             "/show-cache-stats",
             "Toggle provider prompt-cache hit stats in the status bar",
         ),
@@ -1011,6 +1015,17 @@ fn terminal_input_loop(
                     print_local("/effort <level> — one of: off, minimal, low, medium, high, xhigh");
                     continue;
                 }
+                if let Some(provider) = text.strip_prefix("/provider-auth ") {
+                    let provider = provider.trim();
+                    if !provider.is_empty() {
+                        run_provider_auth(provider, &print_local);
+                    }
+                    continue;
+                }
+                if text == "/provider-auth" {
+                    run_provider_auth("", &print_local);
+                    continue;
+                }
                 if text == "/show-diff" {
                     let _ = ctx.renderer_tx.send(RendererCmd::ToggleDiffs);
                     continue;
@@ -1265,6 +1280,18 @@ fn format_token_count(tokens: u64) -> String {
 /// Mint a fresh `command_id` and emit a `UiShellCommand` for a
 /// `!`/`!!` line. Returns `Err` only on write failure (same caller
 /// pattern as the other slash commands — input loop keeps going).
+fn run_provider_auth(provider: &str, print_local: &impl Fn(&str)) {
+    print_local("starting provider auth; follow prompts in the terminal");
+    let mut args = vec!["provider".to_owned(), "login".to_owned()];
+    if !provider.is_empty() {
+        args.push(provider.to_owned());
+    }
+    match tau_provider::run(&args) {
+        Ok(()) => print_local("provider auth refreshed; new prompts will use updated credentials"),
+        Err(error) => print_local(&format!("provider auth failed: {error}")),
+    }
+}
+
 fn send_shell_command(
     writer: &WriterHandle,
     session_id: &str,
