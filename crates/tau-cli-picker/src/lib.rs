@@ -30,6 +30,7 @@ pub enum PickerError {
     Io(io::Error),
     Empty,
     NoEnabledItems,
+    Cancelled,
 }
 
 impl fmt::Display for PickerError {
@@ -38,6 +39,7 @@ impl fmt::Display for PickerError {
             Self::Io(source) => write!(f, "I/O error: {source}"),
             Self::Empty => f.write_str("picker has no items"),
             Self::NoEnabledItems => f.write_str("picker has no enabled items"),
+            Self::Cancelled => f.write_str("picker cancelled"),
         }
     }
 }
@@ -90,7 +92,7 @@ fn pick_with_key_reader(
             }
             PickerKey::Cancelled => {
                 screen.update(&mut writer, &[], (0, 0))?;
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "picker cancelled").into());
+                return Err(PickerError::Cancelled);
             }
             PickerKey::Ignored => {}
         }

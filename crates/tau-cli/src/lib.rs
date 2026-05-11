@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tau_cli_picker::{PickerItem, pick};
+use tau_cli_picker::{PickerError, PickerItem, pick};
 use tau_config::settings::CliBindingAction;
 use tau_harness::{SessionLaunchStatus, runtime_dir};
 
@@ -384,8 +384,11 @@ fn pick_resume_session(cwd: &Path) -> Result<Option<String>, CliError> {
             }
         })
         .collect::<Vec<_>>();
-    let selection =
-        pick("Resume session", &items).map_err(|e| CliError::Participant(e.to_string()))?;
+    let selection = match pick("Resume session", &items) {
+        Ok(selection) => selection,
+        Err(PickerError::Cancelled) => return Ok(None),
+        Err(e) => return Err(CliError::Participant(e.to_string())),
+    };
     Ok(Some(rows[selection].0.clone()))
 }
 
