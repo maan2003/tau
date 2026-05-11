@@ -357,7 +357,7 @@ fn post_form(url: &str, body: &str) -> Result<serde_json::Value, io::Error> {
         .post(url)
         .set("Content-Type", "application/x-www-form-urlencoded")
         .send_string(body)
-        .map_err(|e| io::Error::other(e.to_string()))?;
+        .map_err(|e| map_ureq_error(url, e))?;
     read_json(resp)
 }
 
@@ -373,8 +373,55 @@ fn post_form_with_accept(
         .set("Content-Type", "application/x-www-form-urlencoded")
         .set("Accept", accept)
         .send_string(body)
-        .map_err(|e| io::Error::other(e.to_string()))?;
+        .map_err(|e| map_ureq_error(url, e))?;
     read_json(resp)
+}
+
+/// Convert a `ureq::Error` into an `io::Error`, including the response body
+/// when the server returned a non-2xx status. Most OAuth providers return
+/// a JSON body like `{"error": "...", "error_description": "..."}` that
+/// is essential for diagnosing the failure.
+fn map_ureq_error(url: &str, err: ureq::Error) -> io::Error {
+    match err {
+        ureq::Error::Status(code, resp) => {
+            let content_type = resp.content_type().to_string();
+            let body = resp.into_string().unwrap_or_default();
+            let detail = format_error_body(&content_type, &body);
+            let msg = if detail.is_empty() {
+                format!("{url}: HTTP {code} (empty response body)")
+            } else {
+                format!("{url}: HTTP {code}: {detail}")
+            };
+            io::Error::other(msg)
+        }
+        ureq::Error::Transport(t) => io::Error::other(format!("{url}: {t}")),
+    }
+}
+
+/// Pretty-print an error body. If it parses as JSON with `error` /
+/// `error_description` fields (OAuth 2.0 standard), surface those; otherwise
+/// return the raw body trimmed of trailing whitespace.
+fn format_error_body(content_type: &str, body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if content_type.contains("json")
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        let err = v.get("error").and_then(|e| e.as_str());
+        let desc = v
+            .get("error_description")
+            .or_else(|| v.get("message"))
+            .and_then(|e| e.as_str());
+        match (err, desc) {
+            (Some(e), Some(d)) => return format!("{e}: {d}"),
+            (Some(e), None) => return e.to_string(),
+            (None, Some(d)) => return d.to_string(),
+            (None, None) => {}
+        }
+    }
+    trimmed.to_string()
 }
 
 /// Read a ureq response body as JSON.
