@@ -1625,11 +1625,7 @@ fn extension_ack_advances_cursor() {
     )
     .expect("ack");
 
-    let tools = h
-        .extensions
-        .iter()
-        .find(|e| e.connection_id.as_str() == tools_id)
-        .expect("entry");
+    let tools = h.extensions.get(tools_id.as_str()).expect("entry");
     assert_eq!(tools.last_acked, tau_proto::LogEventId::new(7));
     h.shutdown().expect("shutdown");
 }
@@ -1645,8 +1641,7 @@ fn duplicate_ack_is_ignored() {
         .to_owned();
     let before = h
         .extensions
-        .iter()
-        .find(|e| e.connection_id.as_str() == tools_id)
+        .get(tools_id.as_str())
         .expect("entry")
         .last_acked;
 
@@ -1662,8 +1657,7 @@ fn duplicate_ack_is_ignored() {
 
     let after = h
         .extensions
-        .iter()
-        .find(|e| e.connection_id.as_str() == tools_id)
+        .get(tools_id.as_str())
         .expect("entry")
         .last_acked;
     assert_eq!(before, after, "stale ack should not change cursor");

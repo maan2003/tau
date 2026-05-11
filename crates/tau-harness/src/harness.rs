@@ -112,9 +112,16 @@ pub(crate) struct Harness {
     /// model changes, etc.) surfaced to the UI as part of the next
     /// `InteractionOutcome`.
     pub(crate) lifecycle_messages: Vec<String>,
-    /// Every spawned or in-process extension. Indexed by position;
-    /// supervises restart, shutdown, and per-extension ack state.
-    pub(crate) extensions: Vec<ExtensionEntry>,
+    /// Every spawned or in-process extension, keyed by current
+    /// `ConnectionId`. Supervises restart, shutdown, and per-extension
+    /// ack state. Lookups by connection id (the hot per-event path —
+    /// every `Ack`, `Hello`, `Ready`, `Disconnected`) are O(1).
+    pub(crate) extensions: std::collections::HashMap<tau_proto::ConnectionId, ExtensionEntry>,
+    /// Spawn-order list of connection ids into `extensions`. Drives
+    /// the deterministic "start every extension" and shutdown loops
+    /// that a `HashMap` alone can't supply, and is updated in place
+    /// whenever a supervised extension respawns with a fresh id.
+    pub(crate) extension_order: Vec<tau_proto::ConnectionId>,
     /// Connection id assigned to the agent extension. Other code paths
     /// branch on this to special-case agent traffic (e.g. tool-call
     /// emission, session prompt routing).
@@ -346,6 +353,13 @@ impl Harness {
             ),
         );
 
+        let extension_order: Vec<tau_proto::ConnectionId> =
+            extensions.iter().map(|e| e.connection_id.clone()).collect();
+        let extensions: std::collections::HashMap<tau_proto::ConnectionId, ExtensionEntry> =
+            extensions
+                .into_iter()
+                .map(|e| (e.connection_id.clone(), e))
+                .collect();
         let mut harness = Self {
             tx,
             rx,
@@ -361,6 +375,7 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
+            extension_order,
             next_session_prompt_id: 0,
             next_synthetic_call_id: 0,
             prompt_conversations: std::collections::HashMap::new(),
@@ -401,8 +416,12 @@ impl Harness {
             .store
             .record_session_meta(eager_session_id, std::env::current_dir().ok())?;
 
-        for i in 0..harness.extensions.len() {
-            let name = harness.extensions[i].name.clone();
+        let names: Vec<String> = harness
+            .extension_order
+            .iter()
+            .filter_map(|id| harness.extensions.get(id).map(|e| e.name.clone()))
+            .collect();
+        for name in names {
             harness.emit_extension_starting(&name);
         }
         harness.wait_for_extensions_ready()?;
@@ -530,6 +549,13 @@ impl Harness {
             ),
         );
 
+        let extension_order: Vec<tau_proto::ConnectionId> =
+            extensions.iter().map(|e| e.connection_id.clone()).collect();
+        let extensions: std::collections::HashMap<tau_proto::ConnectionId, ExtensionEntry> =
+            extensions
+                .into_iter()
+                .map(|e| (e.connection_id.clone(), e))
+                .collect();
         let mut harness = Self {
             tx,
             rx,
@@ -545,6 +571,7 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
+            extension_order,
             next_session_prompt_id: 0,
             next_synthetic_call_id: 0,
             prompt_conversations: std::collections::HashMap::new(),
@@ -584,8 +611,12 @@ impl Harness {
             .record_session_meta(eager_session_id, std::env::current_dir().ok())?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session metadata recorded");
 
-        for i in 0..harness.extensions.len() {
-            let name = harness.extensions[i].name.clone();
+        let names: Vec<String> = harness
+            .extension_order
+            .iter()
+            .filter_map(|id| harness.extensions.get(id).map(|e| e.name.clone()))
+            .collect();
+        for name in names {
             harness.emit_extension_starting(&name);
         }
         harness.wait_for_extensions_ready()?;
@@ -1084,14 +1115,10 @@ impl Harness {
             Message::Ack(ack) => {
                 // Cumulative ack: advance the cursor if it moves
                 // forward, ignore otherwise (duplicates, late acks).
-                if let Some(entry) = self
-                    .extensions
-                    .iter_mut()
-                    .find(|e| e.connection_id.as_str() == source_id)
+                if let Some(entry) = self.extensions.get_mut(source_id)
+                    && ack.up_to.get() > entry.last_acked.get()
                 {
-                    if ack.up_to.get() > entry.last_acked.get() {
-                        entry.last_acked = ack.up_to;
-                    }
+                    entry.last_acked = ack.up_to;
                 }
             }
             Message::Hello(_hello) => {
@@ -1101,8 +1128,7 @@ impl Harness {
             Message::ConfigError(err) => {
                 let name = self
                     .extensions
-                    .iter()
-                    .find(|e| e.connection_id.as_str() == source_id)
+                    .get(source_id)
                     .map(|e| e.name.clone())
                     .unwrap_or_else(|| "extension".to_owned());
                 self.emit_info_important(&format!(
@@ -1639,24 +1665,21 @@ impl Harness {
         &mut self,
         connection_id: &str,
     ) -> Result<(), HarnessError> {
-        let Some(index) = self
-            .extensions
-            .iter()
-            .position(|e| e.connection_id.as_str() == connection_id)
-        else {
+        let Some(entry) = self.extensions.get_mut(connection_id) else {
             return Ok(());
         };
-        let Some(config) = self.extensions[index].supervised_config.clone() else {
+        let Some(config) = entry.supervised_config.clone() else {
             return Ok(());
         };
-        if self.extensions[index].kind == ClientKind::Agent {
+        if entry.kind == ClientKind::Agent {
             return Ok(());
         }
 
-        self.extensions[index].restart_attempt += 1;
-        let attempt = self.extensions[index].restart_attempt;
-        let instance_id = self.extensions[index].instance_id;
-        let name = self.extensions[index].name.clone();
+        entry.restart_attempt += 1;
+        let attempt = entry.restart_attempt;
+        let instance_id = entry.instance_id;
+        let name = entry.name.clone();
+        let kind = entry.kind.clone();
         self.publish_event(
             Some("harness"),
             Event::ExtensionRestarting(tau_proto::ExtensionRestarting {
@@ -1668,7 +1691,6 @@ impl Harness {
             }),
         );
 
-        let kind = self.extensions[index].kind.clone();
         let log_path = extension_stderr_log_path(
             &self.dirs_state_dir(),
             self.current_session_id.as_str(),
@@ -1676,10 +1698,23 @@ impl Harness {
         );
         let (new_connection_id, child_pid) =
             spawn_supervised(&config, kind, Some(log_path), &mut self.bus, &self.tx)?;
-        self.extensions[index].connection_id = new_connection_id;
-        self.extensions[index].pid = Some(child_pid);
-        self.extensions[index].state = ExtensionState::Spawning;
-        self.extensions[index].last_acked = tau_proto::LogEventId::default();
+
+        // Re-key the entry under the freshly-minted connection id and
+        // patch its in-place state. The `extension_order` slot stays in
+        // place so spawn-order semantics survive the respawn.
+        let old_key = tau_proto::ConnectionId::from(connection_id);
+        let mut moved = self
+            .extensions
+            .remove(&old_key)
+            .expect("entry was present moments ago");
+        moved.connection_id = new_connection_id.clone();
+        moved.pid = Some(child_pid);
+        moved.state = ExtensionState::Spawning;
+        moved.last_acked = tau_proto::LogEventId::default();
+        self.extensions.insert(new_connection_id.clone(), moved);
+        if let Some(slot) = self.extension_order.iter_mut().find(|id| **id == old_key) {
+            *slot = new_connection_id;
+        }
         self.emit_extension_starting(&name);
         Ok(())
     }
@@ -1729,13 +1764,11 @@ impl Harness {
     // -----------------------------------------------------------------------
 
     fn find_extension_by_name(&self, name: &str) -> Option<&ExtensionEntry> {
-        self.extensions.iter().find(|e| e.name == name)
+        self.extensions.values().find(|e| e.name == name)
     }
 
     fn find_extension_by_connection(&self, connection_id: &str) -> Option<&ExtensionEntry> {
-        self.extensions
-            .iter()
-            .find(|e| e.connection_id == connection_id)
+        self.extensions.get(connection_id)
     }
 
     fn emit_extension_starting(&mut self, extension_name: &str) {
@@ -1825,8 +1858,7 @@ impl Harness {
     fn send_lifecycle_configure(&mut self, source_id: &str) {
         let config_json = self
             .extensions
-            .iter()
-            .find(|e| e.connection_id.as_str() == source_id)
+            .get(source_id)
             .and_then(|e| e.supervised_config.as_ref())
             .map(|cfg| cfg.config.clone())
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
@@ -1968,8 +2000,7 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let extension_name = self
             .extensions
-            .iter()
-            .find(|e| e.connection_id.as_str() == source_id)
+            .get(source_id)
             .map(|e| e.name.clone())
             .unwrap_or_else(|| source_id.to_owned());
 
@@ -2882,7 +2913,7 @@ impl Harness {
     /// provider still completes correctly — `handle_disconnect`
     /// removes the entry from the `waiting_on` set.
     fn extensions_all_ready(&self) -> bool {
-        self.extensions.iter().all(|e| {
+        self.extensions.values().all(|e| {
             matches!(
                 e.state,
                 ExtensionState::Ready | ExtensionState::Disconnected
@@ -2893,11 +2924,7 @@ impl Harness {
     /// Update an extension's lifecycle state, looked up by connection id.
     /// No-op if no entry matches (e.g. for socket clients).
     fn set_extension_state(&mut self, connection_id: &str, new_state: ExtensionState) {
-        if let Some(entry) = self
-            .extensions
-            .iter_mut()
-            .find(|e| e.connection_id.as_str() == connection_id)
-        {
+        if let Some(entry) = self.extensions.get_mut(connection_id) {
             entry.state = new_state;
         }
     }
@@ -3445,19 +3472,25 @@ impl Harness {
         // Disconnect all extensions from the bus.  Dropping the
         // ChannelSink closes the writer channel, which triggers each
         // writer thread's shutdown sequence (send disconnect, close
-        // stdin, wait/kill child).
-        for ext in &self.extensions {
-            let _ = self.bus.disconnect(&ext.connection_id);
+        // stdin, wait/kill child). Walk `extension_order` so shutdown
+        // honours spawn order.
+        for id in &self.extension_order {
+            let _ = self.bus.disconnect(id);
         }
 
         // Join in-process extension threads.
-        for i in 0..self.extensions.len() {
-            if let Some(handle) = self.extensions[i].in_process_thread.take() {
-                let name = self.extensions[i].name.clone();
-                let result = handle.join().map_err(|_| HarnessError::ThreadJoin(name))?;
+        let order = self.extension_order.clone();
+        for id in &order {
+            let Some(entry) = self.extensions.get_mut(id) else {
+                continue;
+            };
+            let name = entry.name.clone();
+            if let Some(handle) = entry.in_process_thread.take() {
+                let result = handle
+                    .join()
+                    .map_err(|_| HarnessError::ThreadJoin(name.clone()))?;
                 result.map_err(HarnessError::Participant)?;
             }
-            let name = self.extensions[i].name.clone();
             self.emit_extension_exited(&name);
         }
         Ok(())
@@ -3466,7 +3499,7 @@ impl Harness {
     #[cfg(test)]
     fn extension_connection_id(&self, name: &str) -> Option<&str> {
         self.extensions
-            .iter()
+            .values()
             .find(|e| e.name == name)
             .map(|e| e.connection_id.as_str())
     }
