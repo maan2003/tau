@@ -31,7 +31,7 @@ impl ConversationId {
         Self(s.into())
     }
 
-    #[allow(dead_code)] // used by the ext-query path wired in a follow-up step
+    #[cfg(test)]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -72,9 +72,13 @@ pub(crate) enum ConversationTurnState {
 /// for the harness's whole lifetime. Side queries from extensions
 /// spawn additional conversations that are removed once their final
 /// response is routed back.
-#[allow(dead_code)] // fields populated by the ext-query path wired in a follow-up step
 #[derive(Debug)]
 pub(crate) struct Conversation {
+    /// Owning conversation id. Duplicates the key in the harness's
+    /// `conversations` map, but pinning it on the conversation itself
+    /// lets future code carry a `&Conversation` without also threading
+    /// the id through every call site.
+    #[allow(dead_code)]
     pub(crate) id: ConversationId,
     pub(crate) session_id: SessionId,
     pub(crate) originator: PromptOriginator,

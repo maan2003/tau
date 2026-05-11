@@ -21,7 +21,10 @@ use crate::harness::{Harness, default_agent_runner};
 use crate::runtime_dir;
 use crate::settings::{Config, resolve_config};
 
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Cap on how long [`send_daemon_message_with_trace`] (a synchronous test
+/// helper) waits for a daemon response. This is not a daemon-wide knob —
+/// the long-running daemon paths block indefinitely on their event loop.
+const SEND_DAEMON_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionLaunchStatus {
@@ -329,10 +332,10 @@ pub fn send_daemon_message_with_trace(
     // higher when tool-result follow-ups bump the counter).
     let mut our_spid_counter: Option<u64> = None;
     loop {
-        if RESPONSE_TIMEOUT <= started_at.elapsed() {
+        if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
             return Err(HarnessError::ResponseTimeout);
         }
-        if let Some(frame) = peer.recv_timeout(RESPONSE_TIMEOUT)? {
+        if let Some(frame) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
             // UI clients don't ack — they just consume the inner event.
             let (_log_id, frame) = frame.peel_log();
             match frame {

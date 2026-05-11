@@ -6,7 +6,7 @@ use std::os::unix::net::UnixStream;
 use std::process::Child;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tau_core::{ConnectionSendError, ConnectionSink};
 use tau_proto::{Disconnect, Frame, FrameReader, FrameWriter, Message};
@@ -105,7 +105,7 @@ pub(crate) fn spawn_writer_thread(
             WriterShutdown::CloseStream => {
                 // Drop the writer → closes the stream.
             }
-            WriterShutdown::KillChild(mut child) => {
+            WriterShutdown::KillChild(child) => {
                 // Best-effort disconnect message.
                 let _ = w.write_frame(&Frame::Message(Message::Disconnect(Disconnect {
                     reason: Some("shutdown".to_owned()),
@@ -114,23 +114,34 @@ pub(crate) fn spawn_writer_thread(
                 // Drop the writer → closes stdin → extension sees EOF.
                 drop(w);
 
-                // Wait for graceful exit, then escalate.
-                let started = Instant::now();
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(_)) => return,
-                        Ok(None) => {}
-                        Err(_) => return,
-                    }
-                    if SHUTDOWN_GRACE <= started.elapsed() {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(50));
-                }
-                let _ = child.kill();
-                let _ = child.wait();
+                wait_with_grace(child, SHUTDOWN_GRACE);
             }
         }
     });
     tx
+}
+
+/// Block until `child` exits, or escalate to `SIGKILL` after `grace`.
+///
+/// The wait happens on a helper thread so the caller can time it out via a
+/// channel rather than polling `try_wait`. On timeout we signal the child
+/// by PID; the helper thread's `wait()` then reaps it.
+fn wait_with_grace(mut child: Child, grace: Duration) {
+    let pid = child.id();
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let waiter = thread::spawn(move || {
+        let _ = child.wait();
+        let _ = done_tx.send(());
+    });
+    if done_rx.recv_timeout(grace).is_err() {
+        // SAFETY: signaling a process by PID. The PID cannot be recycled until
+        // the helper thread's `wait()` reaps the child, which has not happened
+        // yet (we just timed out waiting for it).
+        #[allow(unsafe_code)]
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = done_rx.recv();
+    }
+    let _ = waiter.join();
 }

@@ -121,10 +121,6 @@ pub(crate) struct Harness {
     /// branch on this to special-case agent traffic (e.g. tool-call
     /// emission, session prompt routing).
     pub(crate) agent_connection_id: tau_proto::ConnectionId,
-    /// Monotonic source for `ExtensionInstanceId`s, bumped as
-    /// extensions are constructed. Underscore-prefixed because nothing
-    /// reads it after `new`/`new_supervised` returns.
-    pub(crate) _next_instance_counter: u64,
     /// Monotonic counter used to mint synthetic `sp-N`
     /// `SessionPromptId`s when dispatching prompts to the agent.
     pub(crate) next_session_prompt_id: u64,
@@ -280,13 +276,6 @@ pub(crate) struct DeferredPublish {
 #[derive(Clone)]
 pub(crate) struct ConversationHeadSync {
     pub(crate) cid: ConversationId,
-    /// Retained for back-compatibility with callers building a
-    /// [`ConversationHeadSync`] from a session id; the sync logic in
-    /// `commit_event` now reads the just-folded node id directly from
-    /// [`SessionStore::append_session_event_at`]'s outcome rather than
-    /// looking up the tree by session.
-    #[allow(dead_code)]
-    pub(crate) session_id: SessionId,
 }
 
 /// Event types where a `Drop` reply from an interceptor is
@@ -438,6 +427,19 @@ pub(crate) fn default_agent_runner(r: UnixStream, w: UnixStream) -> Result<(), S
     tau_agent::run(r, w).map_err(|e| e.to_string())
 }
 
+/// Returns a closure that mints monotonic `ExtensionInstanceId`s starting
+/// at zero. Used during harness construction so each extension entry gets
+/// a distinct id without a manually managed counter that's easy to leave
+/// dangling when extensions are added or removed.
+fn instance_id_factory() -> impl FnMut() -> tau_proto::ExtensionInstanceId {
+    let mut counter: u64 = 0;
+    move || {
+        let iid = tau_proto::ExtensionInstanceId::new(counter);
+        counter += 1;
+        iid
+    }
+}
+
 impl Harness {
     /// Creates a harness with in-process extensions (agent, fs, shell).
     ///
@@ -471,18 +473,16 @@ impl Harness {
         let store = SessionStore::open_lazy(&state_dir)?;
 
         let own_pid = std::process::id();
-        let mut _next_instance_counter: u64 = 0;
+        let mut next_iid = instance_id_factory();
 
         let mut extensions = Vec::new();
         // Agent
         let (conn_id, thread) =
             spawn_in_process("agent", ClientKind::Agent, agent_runner, &mut bus, &tx)?;
         let agent_connection_id = conn_id.clone();
-        let iid = tau_proto::ExtensionInstanceId::new(_next_instance_counter);
-        _next_instance_counter += 1;
         extensions.push(ExtensionEntry {
             name: "agent".to_owned(),
-            instance_id: iid,
+            instance_id: next_iid(),
             connection_id: conn_id,
             kind: ClientKind::Agent,
             pid: Some(own_pid),
@@ -501,11 +501,9 @@ impl Harness {
             &mut bus,
             &tx,
         )?;
-        let iid = tau_proto::ExtensionInstanceId::new(_next_instance_counter);
-        _next_instance_counter += 1;
         extensions.push(ExtensionEntry {
             name: "shell".to_owned(),
-            instance_id: iid,
+            instance_id: next_iid(),
             connection_id: conn_id,
             kind: ClientKind::Tool,
             pid: Some(own_pid),
@@ -562,7 +560,6 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
-            _next_instance_counter,
             next_session_prompt_id: 0,
             next_synthetic_call_id: 0,
             prompt_conversations: std::collections::HashMap::new(),
@@ -665,7 +662,7 @@ impl Harness {
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session store opened");
 
         let mut extensions = Vec::new();
-        let mut _next_instance_counter: u64 = 0;
+        let mut next_iid = instance_id_factory();
         let mut agent_connection_id = None;
 
         for ext_config in config.extensions.values() {
@@ -684,11 +681,9 @@ impl Harness {
             if kind == ClientKind::Agent {
                 agent_connection_id = Some(conn_id.clone());
             }
-            let iid = tau_proto::ExtensionInstanceId::new(_next_instance_counter);
-            _next_instance_counter += 1;
             extensions.push(ExtensionEntry {
                 name: ext_config.name.clone(),
-                instance_id: iid,
+                instance_id: next_iid(),
                 connection_id: conn_id,
                 kind: kind.clone(),
                 pid: Some(child_pid),
@@ -750,7 +745,6 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
-            _next_instance_counter,
             next_session_prompt_id: 0,
             next_synthetic_call_id: 0,
             prompt_conversations: std::collections::HashMap::new(),
@@ -832,12 +826,6 @@ impl Harness {
         self.conversations.get(cid).map(|c| c.session_id.clone())
     }
 
-    /// Conversation id that owns a given tool call, if any.
-    #[allow(dead_code)] // used by the ext-query path wired in a follow-up step
-    fn conversation_for_tool_call(&self, call_id: &ToolCallId) -> Option<ConversationId> {
-        self.tool_conversations.get(call_id).cloned()
-    }
-
     /// Conversation id that owns a given in-flight prompt, if any.
     fn conversation_for_prompt(&self, spid: &SessionPromptId) -> Option<ConversationId> {
         self.prompt_conversations.get(spid).cloned()
@@ -901,18 +889,6 @@ impl Harness {
         self.enqueue_publish(source, event, transient, false, None);
     }
 
-    /// Like [`Harness::publish_event`] but the publish is marked
-    /// `must_pass`: an interceptor that returns
-    /// [`InterceptAction::Drop`] for this event is overridden — the
-    /// harness `tracing::warn!`s and continues with the original.
-    /// Reserved for events whose silent disappearance would corrupt
-    /// the harness's own bookkeeping (e.g. session-prompt life-cycle).
-    #[allow(dead_code)] // wired up at must-pass call sites in a later phase
-    fn publish_event_must_pass(&mut self, source: Option<&str>, event: Event) {
-        let transient = event.defaults_to_transient();
-        self.enqueue_publish(source, event, transient, true, None);
-    }
-
     /// Like [`Harness::publish_event`] but tags the publish with the
     /// originating conversation. After the event commits, the
     /// harness syncs that conversation's cached `head` to the
@@ -925,7 +901,7 @@ impl Harness {
         source: Option<&str>,
         event: Event,
     ) {
-        let Some(session_id) = self.conversations.get(cid).map(|c| c.session_id.clone()) else {
+        if !self.conversations.contains_key(cid) {
             // The conversation was torn down between when the
             // caller looked it up and now (e.g. side conv that
             // raced its own teardown with a late tool result).
@@ -941,12 +917,9 @@ impl Harness {
             );
             self.publish_event(source, event);
             return;
-        };
+        }
         let transient = event.defaults_to_transient();
-        let sync = Some(ConversationHeadSync {
-            cid: cid.clone(),
-            session_id,
-        });
+        let sync = Some(ConversationHeadSync { cid: cid.clone() });
         self.enqueue_publish(source, event, transient, false, sync);
     }
 
@@ -4096,7 +4069,15 @@ impl Harness {
                         let body = body.get_or_insert_with(|| {
                             std::fs::read_to_string(&skill.file_path)
                                 .map(|s| s.to_lowercase())
-                                .unwrap_or_default()
+                                .unwrap_or_else(|err| {
+                                    tracing::warn!(
+                                        skill = %name.as_str(),
+                                        path = %skill.file_path.display(),
+                                        error = %err,
+                                        "skill body unreadable; treating as empty for content search",
+                                    );
+                                    String::new()
+                                })
                         });
                         body.contains(needle.as_str())
                     })

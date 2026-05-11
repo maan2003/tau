@@ -319,8 +319,14 @@ pub fn builtin_extensions() -> Vec<BuiltinExtension> {
 
 #[must_use]
 pub fn default_config() -> Config {
-    let extensions = resolve_extensions(&HarnessSettings::default(), builtin_extensions())
-        .expect("built-in extensions resolve cleanly");
+    // `resolve_extensions` is fallible only for user-added entries with an
+    // empty `command`. Here we pass an empty `HarnessSettings` and the
+    // hard-coded `builtin_extensions()` list (all with non-empty `command`),
+    // so the failure path is unreachable.
+    let extensions = match resolve_extensions(&HarnessSettings::default(), builtin_extensions()) {
+        Ok(extensions) => extensions,
+        Err(err) => unreachable!("built-in extensions resolve cleanly: {err}"),
+    };
 
     Config {
         core: CoreConfig {
