@@ -234,18 +234,23 @@ fn prompt_cache_retention(
 }
 
 fn supports_prompt_cache_key(provider: &ProviderConfig, base_url: &str) -> bool {
-    provider.compat.supports_prompt_cache_key || is_builtin_openai_prompt_cache_api(base_url)
+    provider.compat.supports_prompt_cache_key || is_builtin_openai_endpoint(base_url)
 }
 
 fn supports_reasoning_summary(provider: &ProviderConfig, base_url: &str) -> bool {
-    provider.compat.supports_reasoning_summary || is_builtin_openai_prompt_cache_api(base_url)
+    provider.compat.supports_reasoning_summary || is_builtin_openai_endpoint(base_url)
 }
 
 fn supports_prompt_cache_retention(provider: &ProviderConfig, base_url: &str) -> bool {
-    provider.compat.supports_prompt_cache_retention || is_builtin_openai_prompt_cache_api(base_url)
+    provider.compat.supports_prompt_cache_retention || is_builtin_openai_endpoint(base_url)
 }
 
-fn is_builtin_openai_prompt_cache_api(base_url: &str) -> bool {
+/// True for the two OpenAI-operated endpoints that ship with the full set
+/// of OpenAI-side compat features (prompt cache key, prompt cache
+/// retention, reasoning summary). User-configured proxies and re-hosters
+/// in front of these URLs do NOT count — they must opt in explicitly via
+/// `ProviderCompat`.
+fn is_builtin_openai_endpoint(base_url: &str) -> bool {
     matches!(
         base_url.trim_end_matches('/'),
         "https://api.openai.com/v1" | "https://chatgpt.com/backend-api"
