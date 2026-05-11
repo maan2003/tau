@@ -2,11 +2,22 @@
 name = "tau"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
 tau-cli.workspace = true
+tau-ext-core-delegate.workspace = true
+tau-ext-std-notifications.workspace = true
+tau-ext-shell.workspace = true
+tau-ext-test-dummy.workspace = true
+tau-ext-websearch-exa.workspace = true

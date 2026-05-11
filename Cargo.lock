@@ -1458,6 +1458,11 @@ name = "tau"
 version = "0.1.0"
 dependencies = [
  "tau-cli",
+ "tau-ext-core-delegate",
+ "tau-ext-shell",
+ "tau-ext-std-notifications",
+ "tau-ext-test-dummy",
+ "tau-ext-websearch-exa",
 ]
 
 [[package]]
@@ -1495,11 +1500,6 @@ dependencies = [
  "tau-cli-term",
  "tau-cli-term-raw",
  "tau-config",
- "tau-ext-core-delegate",
- "tau-ext-shell",
- "tau-ext-std-notifications",
- "tau-ext-test-dummy",
- "tau-ext-websearch-exa",
  "tau-harness",
  "tau-proto",
  "tau-provider",

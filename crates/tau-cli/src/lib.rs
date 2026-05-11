@@ -3291,14 +3291,28 @@ fn run_init(force: bool) -> Result<(), CliError> {
 // Entrypoint
 // ---------------------------------------------------------------------------
 
+pub type ComponentRunner = fn() -> Result<(), Box<dyn std::error::Error>>;
+
+pub struct Component {
+    pub name: &'static str,
+    pub runner: ComponentRunner,
+}
+
 /// Parses CLI arguments via clap and dispatches to the appropriate
 /// command.
 pub fn main_with_args() -> std::process::ExitCode {
+    main_with_args_and_components(&[])
+}
+
+/// Parses CLI arguments via clap and dispatches to the appropriate
+/// command, using caller-provided component registrations for hidden
+/// `ext`/`component` dispatch.
+pub fn main_with_args_and_components(components: &[Component]) -> std::process::ExitCode {
     use std::process::ExitCode;
 
     use clap::Parser;
 
-    fn run() -> Result<(), CliError> {
+    let run = || -> Result<(), CliError> {
         let cli::Cli {
             version,
             run,
@@ -3382,24 +3396,36 @@ pub fn main_with_args() -> std::process::ExitCode {
 
             cli::Command::Ext { name } => {
                 ui_logging::init_stderr_from_env("tau_harness=info,tau_cli=info");
-                let runner: fn() -> Result<(), Box<dyn std::error::Error>> = match name.as_str() {
-                    "agent" => tau_agent::run_stdio,
-                    "ext-shell" => tau_ext_shell::run_stdio,
-                    "ext-test-dummy" => tau_ext_test_dummy::run_stdio,
-                    "ext-core-delegate" => tau_ext_core_delegate::run_stdio,
-                    "ext-std-notifications" => tau_ext_std_notifications::run_stdio,
-                    "ext-websearch-exa" => tau_ext_websearch_exa::run_stdio,
-                    "harness" => tau_harness::run_component,
-                    _ => {
-                        return Err(CliError::Participant(format!(
-                            "unknown extension: {name}\navailable: agent, ext-shell, ext-test-dummy, ext-core-delegate, ext-std-notifications, ext-websearch-exa, harness"
-                        )));
-                    }
-                };
+                let built_in_components = [
+                    Component {
+                        name: "agent",
+                        runner: tau_agent::run_stdio,
+                    },
+                    Component {
+                        name: "harness",
+                        runner: tau_harness::run_component,
+                    },
+                ];
+                let runner = built_in_components
+                    .iter()
+                    .chain(components)
+                    .find(|component| component.name == name)
+                    .map(|component| component.runner)
+                    .ok_or_else(|| {
+                        let available = built_in_components
+                            .iter()
+                            .chain(components)
+                            .map(|component| component.name)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        CliError::Participant(format!(
+                            "unknown extension: {name}\navailable: {available}"
+                        ))
+                    })?;
                 runner().map_err(|e| CliError::Participant(e.to_string()))
             }
         }
-    }
+    };
 
     match run() {
         Ok(()) => ExitCode::SUCCESS,

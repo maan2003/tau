@@ -30,6 +30,12 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
+description = "A minimal Unix-first coding agent."
+repository = "https://github.com/dpc/tau-agent"
+homepage = "https://github.com/dpc/tau-agent"
+readme = "README.md"
+keywords = ["agent", "cli", "llm", "coding-agent"]
+categories = ["command-line-utilities", "development-tools"]
 license = "MPL-2.0"
 rust-version = "1.86"
 version = "0.1.0"
