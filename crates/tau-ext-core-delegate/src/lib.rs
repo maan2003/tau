@@ -9,15 +9,14 @@ use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 
 use tau_proto::{
-    Ack, CborValue, ClientKind, Event, EventSelector, ExtAgentQuery, Frame, FrameReader,
-    FrameWriter, Hello, LogEventId, Message, PROTOCOL_VERSION, Ready, Subscribe, ToolError,
-    ToolInvoke, ToolRegister, ToolResult, ToolSideEffects, ToolSpec,
+    Ack, CborValue, Event, ExtAgentQuery, Frame, FrameReader, FrameWriter, LogEventId, Message,
+    ToolError, ToolInvoke, ToolResult, ToolSideEffects, ToolSpec,
 };
 
 pub const LOG_TARGET: &str = "core-delegate";
 pub const TOOL_NAME: &str = "delegate";
 
-const DELEGATE_PREFIX: &str = "You are a delegated sub-agent. Your conversation context is fresh — you have only this instruction and your tools, with no visibility into what your parent agent has already done. If you need information about the surrounding task, prior findings, file paths, or code snippets, it is in this instruction below; if it isn't there, it isn't available, and you must complete the task with what's given. Do not ask the parent for clarification — there is no back-channel.\n\nComplete the task below fully using your tools — don't gold-plate, but don't leave it half-done.\n\nReturn only the final information useful to the parent agent: the answer, plus any absolute file paths and short code snippets that are load-bearing. Do not include reasoning, tool history, or status chatter. Do not write report/summary .md files; the parent reads your final message, not files you create.\n\nTask:\n";
+const DELEGATE_PREFIX: &str = include_str!("../prompts/delegate_prefix.md");
 
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_extension::init_logging();
@@ -32,25 +31,23 @@ where
     let mut reader = FrameReader::new(BufReader::new(reader));
     let mut writer = FrameWriter::new(BufWriter::new(writer));
 
-    writer.write_frame(&Frame::Message(Message::Hello(Hello {
-        protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-ext-core-delegate".into(),
-        client_kind: ClientKind::Tool,
-    })))?;
-    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
-        selectors: vec![
-            EventSelector::Exact(tau_proto::EventName::TOOL_INVOKE),
-            EventSelector::Exact(tau_proto::EventName::EXTENSION_AGENT_QUERY_RESULT),
-        ],
-    })))?;
-    writer.write_frame(&Frame::Event(Event::ToolRegister(ToolRegister {
-        tool: tool_spec(),
-    })))?;
-    writer.write_frame(&Frame::Message(Message::Ready(Ready {
-        message: Some("core-delegate ready".to_owned()),
-    })))?;
-    writer.flush()?;
+    tau_extension::Handshake::tool("tau-ext-core-delegate")
+        .subscribe([
+            tau_proto::EventName::TOOL_INVOKE,
+            tau_proto::EventName::EXTENSION_AGENT_QUERY_RESULT,
+        ])
+        .register_tool(tool_spec())
+        .ready_message("core-delegate ready")
+        .run(&mut writer)?;
+    tracing::info!(target: LOG_TARGET, tool = TOOL_NAME, "registered and ready");
 
+    // Outstanding delegations indexed by query id. Cleanup relies on
+    // the harness invariant that every `ExtAgentQuery` is answered by
+    // exactly one terminal `ExtAgentQueryResult` (success or error).
+    // If the harness ever drops that contract (cancellation,
+    // abandoned side conversation, etc.) this map grows unbounded —
+    // at that point a GC keyed off a cancellation event would be
+    // needed.
     let mut pending: HashMap<String, (tau_proto::ToolCallId, tau_proto::ToolName)> = HashMap::new();
     let mut next_query_id: u64 = 0;
 
@@ -66,6 +63,12 @@ where
             Frame::Event(Event::ExtAgentQueryResult(result)) => {
                 if let Some((call_id, tool_name)) = pending.remove(&result.query_id) {
                     if let Some(error) = result.error {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            query_id = %result.query_id,
+                            error = %error,
+                            "delegation failed",
+                        );
                         writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
                             call_id,
                             tool_name,
@@ -74,6 +77,12 @@ where
                             originator: tau_proto::PromptOriginator::User,
                         })))?;
                     } else {
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            query_id = %result.query_id,
+                            text_len = result.text.len(),
+                            "delegation succeeded",
+                        );
                         writer.write_frame(&Frame::Event(Event::ToolResult(ToolResult {
                             call_id,
                             tool_name,
@@ -82,9 +91,23 @@ where
                         })))?;
                     }
                     writer.flush()?;
+                } else {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        query_id = %result.query_id,
+                        "received result for unknown query_id",
+                    );
                 }
             }
-            Frame::Message(Message::Disconnect(_)) => break,
+            Frame::Message(Message::Disconnect(_)) => {
+                tracing::info!(target: LOG_TARGET, "disconnect received, exiting");
+                break;
+            }
+            // No configuration today. `Configure` (and any other
+            // message variants the harness may add) is intentionally
+            // ignored — the harness does not require an
+            // acknowledgement. If that changes (e.g. a mandatory
+            // `Configure` handshake is added) this arm must respond.
             _ => {}
         }
         if let Some(id) = log_id {
@@ -101,6 +124,11 @@ fn handle_tool_invoke<W: Write>(
     writer: &mut FrameWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
     if invoke.tool_name.as_str() != TOOL_NAME {
+        tracing::warn!(
+            target: LOG_TARGET,
+            tool = %invoke.tool_name,
+            "received invoke for unknown tool",
+        );
         writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
@@ -115,6 +143,11 @@ fn handle_tool_invoke<W: Write>(
     let parsed = match parse_args(&invoke.arguments) {
         Ok(parsed) => parsed,
         Err(message) => {
+            tracing::debug!(
+                target: LOG_TARGET,
+                error = %message,
+                "rejecting delegate invocation: bad arguments",
+            );
             writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
@@ -130,6 +163,13 @@ fn handle_tool_invoke<W: Write>(
     let query_id = format!("delegate-{next_query_id}");
     *next_query_id += 1;
     let call_id = invoke.call_id.clone();
+    tracing::info!(
+        target: LOG_TARGET,
+        query_id = %query_id,
+        task_name = %parsed.task_name,
+        prompt_len = parsed.prompt.len(),
+        "dispatching delegation",
+    );
     pending.insert(query_id.clone(), (invoke.call_id, invoke.tool_name));
     writer.write_frame(&Frame::Event(Event::ExtAgentQuery(ExtAgentQuery {
         query_id,
@@ -187,6 +227,7 @@ fn tool_spec() -> ToolSpec {
     }
 }
 
+#[cfg_attr(test, derive(Debug))]
 struct DelegateArgs {
     task_name: String,
     prompt: String,
@@ -221,4 +262,103 @@ fn parse_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
         return Err("`task_name` must not be empty".to_owned());
     }
     Ok(DelegateArgs { task_name, prompt })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(entries: &[(&str, CborValue)]) -> CborValue {
+        CborValue::Map(
+            entries
+                .iter()
+                .map(|(k, v)| (CborValue::Text((*k).to_owned()), v.clone()))
+                .collect(),
+        )
+    }
+
+    fn text(s: &str) -> CborValue {
+        CborValue::Text(s.to_owned())
+    }
+
+    #[test]
+    fn parses_valid_args() {
+        let parsed = parse_args(&args(&[
+            ("task_name", text("audit")),
+            ("prompt", text("do the thing")),
+        ]))
+        .expect("valid args parse");
+        assert_eq!(parsed.task_name, "audit");
+        assert_eq!(parsed.prompt, "do the thing");
+    }
+
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let parsed = parse_args(&args(&[
+            ("task_name", text("audit")),
+            ("prompt", text("do the thing")),
+            ("read_only", CborValue::Bool(true)),
+            ("future_field", CborValue::Integer(7.into())),
+        ]))
+        .expect("unknown keys ignored");
+        assert_eq!(parsed.task_name, "audit");
+    }
+
+    #[test]
+    fn rejects_non_map_arguments() {
+        let err = parse_args(&CborValue::Text("nope".to_owned())).unwrap_err();
+        assert!(err.contains("arguments must be an object"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_missing_prompt() {
+        let err = parse_args(&args(&[("task_name", text("audit"))])).unwrap_err();
+        assert!(err.contains("prompt"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_missing_task_name() {
+        let err = parse_args(&args(&[("prompt", text("do the thing"))])).unwrap_err();
+        assert!(err.contains("task_name"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_empty_prompt() {
+        let err = parse_args(&args(&[
+            ("task_name", text("audit")),
+            ("prompt", text("   \n")),
+        ]))
+        .unwrap_err();
+        assert!(err.contains("`prompt` must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_empty_task_name() {
+        let err = parse_args(&args(&[
+            ("task_name", text("")),
+            ("prompt", text("do the thing")),
+        ]))
+        .unwrap_err();
+        assert!(err.contains("`task_name` must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_wrong_type_for_prompt() {
+        let err = parse_args(&args(&[
+            ("task_name", text("audit")),
+            ("prompt", CborValue::Integer(42.into())),
+        ]))
+        .unwrap_err();
+        assert!(err.contains("`prompt` must be a string"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_wrong_type_for_task_name() {
+        let err = parse_args(&args(&[
+            ("task_name", CborValue::Bool(false)),
+            ("prompt", text("do the thing")),
+        ]))
+        .unwrap_err();
+        assert!(err.contains("`task_name` must be a string"), "got: {err}");
+    }
 }

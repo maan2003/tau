@@ -1609,6 +1609,7 @@ version = "0.1.0"
 dependencies = [
  "rand",
  "serde_json",
+ "tau-extension",
  "tau-proto",
 ]
 

@@ -53,9 +53,8 @@ impl Drop for SemaphoreGuard<'_> {
 }
 
 use tau_proto::{
-    Ack, CborValue, ClientKind, ConfigError, Event, EventSelector, Frame, FrameReader, FrameWriter,
-    Hello, LogEventId, Message, PROTOCOL_VERSION, Ready, SessionStarted, Subscribe, ToolError,
-    ToolProgress, ToolRegister, ToolResult, ToolSideEffects, ToolSpec,
+    Ack, CborValue, ConfigError, Event, Frame, FrameReader, FrameWriter, LogEventId, Message,
+    SessionStarted, ToolError, ToolProgress, ToolResult, ToolSideEffects, ToolSpec,
 };
 
 pub const ECHO_TOOL_NAME: &str = "echo";
@@ -138,29 +137,13 @@ where
     let mut reader = FrameReader::new(BufReader::new(reader));
     let mut writer = FrameWriter::new(BufWriter::new(writer));
 
-    writer.write_frame(&Frame::Message(Message::Hello(Hello {
-        protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-ext-shell".into(),
-        client_kind: ClientKind::Tool,
-    })))?;
-    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
-        selectors: vec![
-            EventSelector::Exact(tau_proto::EventName::TOOL_INVOKE),
-            EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
-            EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND),
-        ],
-    })))?;
-    if include_echo {
-        writer.write_frame(&Frame::Event(Event::ToolRegister(ToolRegister {
-            tool: ToolSpec {
-                name: ECHO_TOOL_NAME.into(),
-                description: Some("Echo the provided payload unchanged".to_owned()),
-                parameters: None,
-                side_effects: ToolSideEffects::Pure,
-            },
-        })))?;
-    }
-    for tool in [
+    let echo_tool = include_echo.then(|| ToolSpec {
+        name: ECHO_TOOL_NAME.into(),
+        description: Some("Echo the provided payload unchanged".to_owned()),
+        parameters: None,
+        side_effects: ToolSideEffects::Pure,
+    });
+    let tools = echo_tool.into_iter().chain([
         ToolSpec {
             name: READ_TOOL_NAME.into(),
             description: Some(
@@ -373,14 +356,17 @@ where
             })),
             side_effects: ToolSideEffects::Mutating,
         },
-    ] {
-        writer.write_frame(&Frame::Event(Event::ToolRegister(ToolRegister { tool })))?;
-    }
+    ]);
 
-    writer.write_frame(&Frame::Message(Message::Ready(Ready {
-        message: Some("filesystem and shell tools ready".to_owned()),
-    })))?;
-    writer.flush()?;
+    tau_extension::Handshake::tool("tau-ext-shell")
+        .subscribe([
+            tau_proto::EventName::TOOL_INVOKE,
+            tau_proto::EventName::SESSION_STARTED,
+            tau_proto::EventName::UI_SHELL_COMMAND,
+        ])
+        .register_tools(tools)
+        .ready_message("filesystem and shell tools ready")
+        .run(&mut writer)?;
 
     // Response channel: worker threads send frames here, writer thread
     // drains them onto the wire.

@@ -31,6 +31,9 @@
 //! deserve their own knob so users can crank one extension to trace
 //! without flooding stderr with everything else.
 
+mod handshake;
+
+pub use handshake::Handshake;
 use tracing_subscriber::EnvFilter;
 
 /// Environment variable controlling extension log filtering. Same

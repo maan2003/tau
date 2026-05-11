@@ -11,4 +11,5 @@ workspace = true
 [dependencies]
 rand.workspace = true
 serde_json.workspace = true
+tau-extension.workspace = true
 tau-proto.workspace = true

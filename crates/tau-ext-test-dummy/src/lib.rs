@@ -5,9 +5,8 @@ use rand::Rng;
 #[cfg(test)]
 use rand::{SeedableRng, rngs::StdRng};
 use tau_proto::{
-    ClientKind, Emit, Event, EventSelector, Frame, FrameReader, FrameWriter, HarnessInfo,
-    HarnessInfoLevel, Hello, Intercept, InterceptAction, InterceptReply, InterceptionPriority,
-    Message, PROTOCOL_VERSION, Ready, Subscribe, ToolError, ToolRegister, ToolResult,
+    Emit, Event, EventSelector, Frame, FrameReader, FrameWriter, HarnessInfo, HarnessInfoLevel,
+    InterceptAction, InterceptReply, InterceptionPriority, Message, ToolError, ToolResult,
     ToolSideEffects, ToolSpec, UiPromptSubmitted,
 };
 
@@ -85,22 +84,13 @@ where
     let mut reader = FrameReader::new(BufReader::new(reader));
     let mut writer = FrameWriter::new(BufWriter::new(writer));
 
-    writer.write_frame(&Frame::Message(Message::Hello(Hello {
-        protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-ext-test-dummy".into(),
-        client_kind: ClientKind::Tool,
-    })))?;
-    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
-        selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_INVOKE)],
-    })))?;
-    writer.write_frame(&Frame::Message(Message::Intercept(Intercept {
-        selectors: vec![EventSelector::Exact(
-            tau_proto::EventName::UI_PROMPT_SUBMITTED,
-        )],
-        priority: InterceptionPriority(0),
-    })))?;
-    writer.write_frame(&Frame::Event(Event::ToolRegister(ToolRegister {
-        tool: ToolSpec {
+    tau_extension::Handshake::tool("tau-ext-test-dummy")
+        .subscribe([tau_proto::EventName::TOOL_INVOKE])
+        .intercept(
+            EventSelector::Exact(tau_proto::EventName::UI_PROMPT_SUBMITTED),
+            InterceptionPriority(0),
+        )
+        .register_tool(ToolSpec {
             name: RESTART_TEST_DUMMY_TOOL_NAME.into(),
             description: Some(
                 "Test-only tool that randomly restarts the dummy extension or returns an error"
@@ -112,12 +102,9 @@ where
                 "additionalProperties": false,
             })),
             side_effects: ToolSideEffects::Mutating,
-        },
-    })))?;
-    writer.write_frame(&Frame::Message(Message::Ready(Ready {
-        message: Some("test dummy tools ready".to_owned()),
-    })))?;
-    writer.flush()?;
+        })
+        .ready_message("test dummy tools ready")
+        .run(&mut writer)?;
 
     loop {
         let Some(frame) = reader.read_frame()? else {

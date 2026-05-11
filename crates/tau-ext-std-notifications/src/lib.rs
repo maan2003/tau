@@ -32,8 +32,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    ClientKind, ConfigError, Event, EventSelector, ExtAgentQuery, Frame, FrameReader, FrameWriter,
-    Hello, Message, Osc1337SetUserVar, PROTOCOL_VERSION, Ready, Subscribe,
+    ConfigError, Event, ExtAgentQuery, Frame, FrameReader, FrameWriter, Message, Osc1337SetUserVar,
 };
 
 /// `tracing` target for events emitted from this extension. Matches
@@ -242,30 +241,22 @@ where
     // from the harness overwrites both on receipt.
     let mut config = ExtConfig::default();
 
-    writer.write_frame(&Frame::Message(Message::Hello(Hello {
-        protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-ext-std-notifications".into(),
-        client_kind: ClientKind::Tool,
-    })))?;
-    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
-        selectors: vec![
-            EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
-            EventSelector::Exact(tau_proto::EventName::AGENT_RESPONSE_FINISHED),
-            EventSelector::Exact(tau_proto::EventName::UI_PROMPT_SUBMITTED),
+    tau_extension::Handshake::tool("tau-ext-std-notifications")
+        .subscribe([
+            tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            tau_proto::EventName::AGENT_RESPONSE_FINISHED,
+            tau_proto::EventName::UI_PROMPT_SUBMITTED,
             // Trailing-edge debounced typing pings from the UI:
             // bumps the idle deadline so the desktop notification
             // doesn't fire while the user is mid-sentence.
-            EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT),
+            tau_proto::EventName::UI_PROMPT_DRAFT,
             // Side-query results come back point-to-point from the
             // harness, but we subscribe defensively so the broadcast
             // form (if it ever appears) also reaches us.
-            EventSelector::Exact(tau_proto::EventName::EXTENSION_AGENT_QUERY_RESULT),
-        ],
-    })))?;
-    writer.write_frame(&Frame::Message(Message::Ready(Ready {
-        message: Some("std-notifications ready".to_owned()),
-    })))?;
-    writer.flush()?;
+            tau_proto::EventName::EXTENSION_AGENT_QUERY_RESULT,
+        ])
+        .ready_message("std-notifications ready")
+        .run(&mut writer)?;
 
     // Spawn a reader thread so the main loop can wait on either an
     // incoming frame or an idle deadline via `recv_timeout`. The

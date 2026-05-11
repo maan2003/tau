@@ -18,9 +18,8 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use tau_proto::{
-    Ack, CborValue, ClientKind, Event, EventSelector, Frame, FrameReader, FrameWriter, Hello,
-    LogEventId, Message, PROTOCOL_VERSION, Ready, Subscribe, ToolError, ToolInvoke, ToolRegister,
-    ToolResult, ToolSideEffects, ToolSpec,
+    Ack, CborValue, Event, Frame, FrameReader, FrameWriter, LogEventId, Message, ToolError,
+    ToolInvoke, ToolResult, ToolSideEffects, ToolSpec,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -90,21 +89,11 @@ where
     let mut reader = FrameReader::new(BufReader::new(reader));
     let mut writer = FrameWriter::new(BufWriter::new(writer));
 
-    writer.write_frame(&Frame::Message(Message::Hello(Hello {
-        protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-ext-websearch-exa".into(),
-        client_kind: ClientKind::Tool,
-    })))?;
-    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
-        selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_INVOKE)],
-    })))?;
-    writer.write_frame(&Frame::Event(Event::ToolRegister(ToolRegister {
-        tool: tool_spec(),
-    })))?;
-    writer.write_frame(&Frame::Message(Message::Ready(Ready {
-        message: Some("websearch-exa ready".to_owned()),
-    })))?;
-    writer.flush()?;
+    tau_extension::Handshake::tool("tau-ext-websearch-exa")
+        .subscribe([tau_proto::EventName::TOOL_INVOKE])
+        .register_tool(tool_spec())
+        .ready_message("websearch-exa ready")
+        .run(&mut writer)?;
 
     let (tx, rx) = mpsc::channel::<Frame>();
 
