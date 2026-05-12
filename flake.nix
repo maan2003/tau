@@ -43,8 +43,18 @@
           paths = buildPaths;
         };
 
-        tauBuildPlaceholder = "01234569abcdef7afa1d2683a099c7af48a523c1";
-        tauBuildDatePlaceholder = "1970-01-01 00:00";
+        # Placeholders are 40 / 16 raw bytes that the binary embeds via
+        # a `static [u8; N]` in `crates/tau-harness/src/version.rs`.
+        # The strings below MUST byte-for-byte match those statics, and
+        # the substituted values MUST be the same length so `bbe` can
+        # patch them in place without shifting any file offsets.
+        #
+        # Why the unique `__TAU_BUILD…` prefix: short, "ASCII-table-ish"
+        # placeholders (e.g. `0123456`) collide with natural byte runs
+        # in the binary (base64 alphabets, hex digit tables) and bbe
+        # would silently corrupt them.
+        tauBuildRevisionPlaceholder = "__TAU_BUILD_GIT_REVISION_PLACEHOLDER____";
+        tauBuildDatePlaceholder = "__TAU_BUILD_DATE";
         tauBuildRevision =
           if (self ? rev) && (builtins.stringLength self.rev == 40) then
             self.rev
@@ -53,8 +63,7 @@
           else if (self ? dirtyRev) && (builtins.stringLength self.dirtyRev == 40) then
             self.dirtyRev
           else
-            tauBuildPlaceholder;
-        tauBuildShortRevision = builtins.substring 0 7 tauBuildRevision;
+            tauBuildRevisionPlaceholder;
         tauBuildDate =
           if self ? lastModifiedDate then
             "${builtins.substring 0 4 self.lastModifiedDate}-${builtins.substring 4 2 self.lastModifiedDate}-${
@@ -79,7 +88,7 @@
               chmod -R u+w $out
               for path in $(${pkgs.findutils}/bin/find $out -type f -executable); do
                 ${pkgs.bbe}/bin/bbe \
-                  -e 's/${builtins.substring 0 7 tauBuildPlaceholder}/${tauBuildShortRevision}/' \
+                  -e 's/${tauBuildRevisionPlaceholder}/${tauBuildRevision}/' \
                   -e 's/${tauBuildDatePlaceholder}/${tauBuildDate}/' \
                   "$path" -o ./tmp
                 cat ./tmp > "$path"
@@ -94,9 +103,6 @@
               pname = projectName;
               src = buildSrc;
               nativeBuildInputs = [ ];
-              BUILT_OVERRIDE_tau-cli_GIT_COMMIT_HASH = tauBuildPlaceholder;
-              BUILT_OVERRIDE_tau-cli_GIT_COMMIT_HASH_SHORT = builtins.substring 0 7 tauBuildPlaceholder;
-              TAU_LAST_MODIFIED = tauBuildDatePlaceholder;
             };
           in
           rec {

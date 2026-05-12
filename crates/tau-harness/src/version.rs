@@ -1,38 +1,83 @@
 //! Build metadata exposed to spawned processes (e.g. the shell
 //! extension's child commands).
 //!
-//! The harness binary is compiled from the same workspace as
-//! `tau-cli`, so it can read its own `built` snapshot rather than
-//! relying on the parent CLI to forward version info via env vars.
-//! [`export_to_env`] populates the `TAU_VERSION` / `TAU_BUILD` /
-//! `TAU_LAST_MODIFIED` variables in the harness process's own
-//! environment so subsequent `Command::new` calls inherit them.
+//! Git revision and build date are stored as fixed-size byte arrays in
+//! a dedicated link section. The Nix packaging step rewrites those
+//! bytes in-place with `bbe` after the binary is built, which lets the
+//! cargo build cache stay reproducible across commits.
+//!
+//! Why a `static [u8; N]` (and not the `built` crate's `&str`
+//! constants): release builds with LTO inline short string literals as
+//! `mov imm32` operands in `.text`, splitting the bytes across two
+//! instructions in reverse order. The placeholder then no longer
+//! exists as a contiguous byte sequence anywhere in the file, and bbe
+//! has nothing to patch. A `#[used]` byte array in a named section is
+//! guaranteed to live in `.rodata` as one contiguous, unmerged blob.
 
 mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
+
+/// Magic prefix used to detect an unpatched binary (i.e. plain
+/// `cargo build` outside of the Nix packaging path).
+const PLACEHOLDER_TAG: &[u8] = b"__TAU_BUILD";
+
+/// 40-byte slot for the git SHA-1 the binary was built from. Patched
+/// in place by the Nix build's `bbe` post-processing.
+#[used]
+#[allow(unsafe_code)]
+#[unsafe(link_section = ".tau_build_info")]
+static GIT_REVISION: [u8; 40] = *b"__TAU_BUILD_GIT_REVISION_PLACEHOLDER____";
+
+/// 16-byte slot for the build date, formatted `YYYY-MM-DD HH:MM`.
+/// Patched in place by the Nix build's `bbe` post-processing.
+#[used]
+#[allow(unsafe_code)]
+#[unsafe(link_section = ".tau_build_info")]
+static LAST_MODIFIED: [u8; 16] = *b"__TAU_BUILD_DATE";
+
+/// Read a `static` byte array via `read_volatile` so the optimizer
+/// can't fold the value back to its initializer (which would defeat
+/// the bbe patch performed by the Nix build).
+fn read_static<const N: usize>(s: &'static [u8; N]) -> [u8; N] {
+    // Safety: `s` points to a static `[u8; N]` with a stable address;
+    // a volatile read is always sound for a valid pointer.
+    #[allow(unsafe_code)]
+    unsafe {
+        core::ptr::read_volatile(s)
+    }
 }
 
 /// Git revision the harness was built from. Suffixed with
 /// `-modified` when the working tree was dirty at build time.
 #[must_use]
 pub fn build_revision() -> String {
-    match (built_info::GIT_COMMIT_HASH_SHORT, built_info::GIT_DIRTY) {
-        (Some(hash), Some(true)) => format!("{hash}-modified"),
-        (Some(hash), _) => hash.to_owned(),
-        _ => "unknown".to_owned(),
+    let bytes = read_static(&GIT_REVISION);
+    if bytes.starts_with(PLACEHOLDER_TAG) {
+        return match (built_info::GIT_COMMIT_HASH_SHORT, built_info::GIT_DIRTY) {
+            (Some(hash), Some(true)) => format!("{hash}-modified"),
+            (Some(hash), _) => hash.to_owned(),
+            _ => "unknown".to_owned(),
+        };
     }
+    let short = bytes.get(..7).unwrap_or(&bytes);
+    std::str::from_utf8(short)
+        .map(str::to_owned)
+        .unwrap_or_else(|_| "unknown".to_owned())
 }
 
-/// `YYYY-MM-DD HH:MM` of the build, with a Nix-packaging override
-/// (`TAU_LAST_MODIFIED` at compile time) taking precedence over the
-/// `built` timestamp. Returns `None` if no usable value is available.
+/// `YYYY-MM-DD HH:MM` of the build, with the Nix-packaging patch
+/// taking precedence over the `built` timestamp. Returns `None` if no
+/// usable value is available.
 #[must_use]
 pub fn build_last_modified() -> Option<String> {
-    option_env!("TAU_LAST_MODIFIED")
-        .filter(|date| !date.is_empty())
-        .map(str::to_owned)
-        .or_else(|| short_built_time(built_info::BUILT_TIME_UTC))
-        .filter(|date| date != "1980-01-01 00:00")
+    let bytes = read_static(&LAST_MODIFIED);
+    if !bytes.starts_with(PLACEHOLDER_TAG)
+        && let Ok(date) = std::str::from_utf8(&bytes)
+    {
+        return Some(date.to_owned());
+    }
+    short_built_time(built_info::BUILT_TIME_UTC).filter(|date| date != "1980-01-01 00:00")
 }
 
 fn short_built_time(_time: &str) -> Option<String> {

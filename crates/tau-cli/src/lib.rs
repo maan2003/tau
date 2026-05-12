@@ -131,17 +131,15 @@ impl From<tau_session_inspect::InspectError> for CliError {
 // ---------------------------------------------------------------------------
 
 fn build_revision() -> String {
-    match (built_info::GIT_COMMIT_HASH_SHORT, built_info::GIT_DIRTY) {
-        (Some(hash), Some(true)) => format!("{hash}-modified"),
-        (Some(hash), _) => hash.to_owned(),
-        _ => "unknown".to_owned(),
-    }
+    tau_harness::version::build_revision()
 }
 
 fn build_last_modified() -> Option<String> {
-    option_env!("TAU_LAST_MODIFIED")
-        .filter(|date| !date.is_empty())
-        .map(str::to_owned)
+    // Fall back to the locally-formatted `built` timestamp when the
+    // harness can't produce a date (e.g. a `cargo build` outside of
+    // Nix where the date placeholder is unpatched and the harness'
+    // `built` snapshot only has the RFC2822 string).
+    tau_harness::version::build_last_modified()
         .or_else(|| short_built_time(built_info::BUILT_TIME_UTC))
         .filter(|date| date != "1980-01-01 00:00")
 }
