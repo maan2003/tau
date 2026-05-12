@@ -92,6 +92,26 @@ pub(crate) struct WsPool {
     /// dropped, so we skip it next time we walk the queue.
     lru: VecDeque<PoolKey>,
     max: usize,
+    stats: WsPoolStats,
+}
+
+/// Lifetime counters for the WS pool. Bumped on each interesting
+/// path so an operator can grep `tau_agent` tracing output and see
+/// how often the silent-reconnect machinery kicked in (or, more
+/// importantly, *kept* kicking in for a session — a runaway count
+/// is the signature of an upstream regression).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WsPoolStats {
+    /// Fresh sockets opened (pool miss, age-out, bearer-rotate, or
+    /// the silent-reconnect path below).
+    pub upgrades: u64,
+    /// Cached sockets that died mid-turn and triggered the silent
+    /// reopen-and-replay-without-chain-id recovery.
+    pub silent_reconnects: u64,
+    /// Times the fresh-socket path stripped a `previous_response_id`
+    /// from the outgoing request because the new socket's chain
+    /// cache was empty by definition.
+    pub chain_strips_on_fresh: u64,
 }
 
 impl WsPool {
@@ -105,7 +125,14 @@ impl WsPool {
             conns: HashMap::new(),
             lru: VecDeque::new(),
             max,
+            stats: WsPoolStats::default(),
         }
+    }
+
+    /// Snapshot the running counters. Cheap (`Copy`); intended for
+    /// tracing emission and tests.
+    pub fn stats(&self) -> WsPoolStats {
+        self.stats
     }
 
     /// Look up an existing connection for `key`, validating its
@@ -194,6 +221,21 @@ impl Default for WsPool {
 /// `release` together with reopen-on-miss semantics. The agent's
 /// `run()` loop calls this; tests can call it directly with a fake
 /// `WsConn::connect` impl by exercising the lower-level methods.
+///
+/// Transparent reconnect: the Codex WS endpoint's
+/// `previous_response_id` cache is **connection-local** (per the
+/// OpenAI deployment-checklist WS guide). Two consequences this
+/// function has to handle:
+///
+/// 1. A fresh socket from `WsConn::connect` has an empty chain cache, so a
+///    `previous_response_id` carried in `request` would 404 on the server. We
+///    strip the field before sending on any just-opened connection.
+/// 2. If a cached socket dies mid-turn (server-side 60-minute reap, keepalive
+///    timeout, transport reset), the in-flight chain id is gone with it. Rather
+///    than surfacing the failure to the outer retry loop — which would just
+///    resend the same dead chain id on the next attempt and 404 again — we
+///    reopen here once and replay the turn with the chain id stripped. Only
+///    persistent failures leak out.
 pub(crate) fn run_turn_through_pool(
     pool: &mut WsPool,
     config: &ResponsesConfig,
@@ -202,21 +244,103 @@ pub(crate) fn run_turn_through_pool(
     on_update: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<crate::common::StreamState, LlmError> {
     let key = PoolKey::for_request(config, session_id);
-    let mut conn = match pool.checkout(&key, &config.api_key) {
-        Some(c) => c,
-        None => WsConn::connect(config)?,
-    };
-    match conn.run_turn(config, request, on_update) {
+
+    // First attempt: prefer a warm cached connection so the
+    // connection-local chain cache stays useful.
+    if let Some(mut conn) = pool.checkout(&key, &config.api_key) {
+        match conn.run_turn(config, request, on_update) {
+            Ok(state) => {
+                pool.release(key, conn);
+                return Ok(state);
+            }
+            Err(err) if is_recoverable_ws_error(&err) => {
+                pool.stats.silent_reconnects += 1;
+                tracing::info!(
+                    target: crate::LOG_TARGET,
+                    session_id,
+                    error = %err,
+                    silent_reconnects = pool.stats.silent_reconnects,
+                    "Codex WS connection lost mid-turn; reopening and replaying without chain id",
+                );
+                drop(conn);
+                // Fall through to the fresh-open path below.
+            }
+            Err(other) => {
+                drop(conn);
+                return Err(other);
+            }
+        }
+    }
+
+    // Fresh socket path. The chain cache here is empty by definition,
+    // so the in-request chain id (if any) is invalid for this
+    // connection — replay the full slice instead.
+    let mut conn = WsConn::connect(config)?;
+    pool.stats.upgrades += 1;
+    let fresh_request = without_previous_response(request);
+    if request.previous_response.is_some() {
+        pool.stats.chain_strips_on_fresh += 1;
+        tracing::debug!(
+            target: crate::LOG_TARGET,
+            session_id,
+            upgrades = pool.stats.upgrades,
+            chain_strips_on_fresh = pool.stats.chain_strips_on_fresh,
+            "fresh Codex WS socket; stripping previous_response_id from outgoing request",
+        );
+    }
+    match conn.run_turn(config, &fresh_request, on_update) {
         Ok(state) => {
             pool.release(key, conn);
             Ok(state)
         }
         Err(err) => {
-            // Connection state may be poisoned. Drop it. The next
-            // turn on this session will reopen.
             drop(conn);
             Err(err)
         }
+    }
+}
+
+/// Errors from `WsConn::run_turn` that mean "this socket is dead,
+/// but the *next* socket can probably serve the turn." Caller's job
+/// is to reopen and retry once silently rather than letting the outer
+/// retry loop burn a backoff on the same broken state.
+///
+/// Two flavors land here:
+/// - Transport-level: tungstenite raised `ConnectionClosed`, `AlreadyClosed`,
+///   or an IO break; or the server sent a close frame mid-stream. All surface
+///   as `HttpStatus(0, "stream error: ws closed..." | "stream error: <io>")`
+///   from [`super::ws::map_ws_runtime_error`].
+/// - Server-level stale-chain: an `error` event whose message says the
+///   `previous_response_id` we just sent doesn't exist on this socket. Same
+///   root cause (the previous socket carrying that chain id is gone), just
+///   surfaced through the JSON event stream instead of a TCP close.
+fn is_recoverable_ws_error(err: &LlmError) -> bool {
+    let LlmError::HttpStatus(0, body) = err else {
+        return false;
+    };
+    if !body.starts_with("stream error:") {
+        return false;
+    }
+    body.contains("ws closed")
+        || body.contains("Previous response")
+        || body.contains("previous_response")
+        || body.contains("response not found")
+}
+
+/// Borrow `request` but blank out its `previous_response`. Used on
+/// the fresh-socket path where the chain id from a prior connection
+/// is guaranteed invalid (connection-local cache).
+fn without_previous_response<'a>(
+    request: &crate::common::PromptPayload<'a>,
+) -> crate::common::PromptPayload<'a> {
+    crate::common::PromptPayload {
+        previous_response: None,
+        system_prompt: request.system_prompt,
+        messages: request.messages,
+        tools: request.tools,
+        params: request.params,
+        originator: request.originator,
+        session_id: request.session_id,
     }
 }
 
@@ -385,6 +509,135 @@ mod tests {
         );
     }
 
+    /// Codex's WS `previous_response_id` cache is connection-local.
+    /// When the pool opens a fresh socket — whether the first turn on
+    /// a session, or a reopen after the previous socket died — the
+    /// new socket has no knowledge of any prior response id. Sending
+    /// one would 404 ("Previous response with id ... not found"),
+    /// which is exactly what the production session-debug log showed
+    /// before this fix. The pool must therefore strip the chain id
+    /// before sending on any just-opened connection.
+    #[test]
+    fn fresh_open_strips_previous_response_id_from_request() {
+        let (addr, server) = spawn_fake_codex_server();
+        let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+        let mut pool = WsPool::new();
+        let mut on_update = |_: &str, _: Option<&str>| {};
+
+        let session_id = tau_proto::SessionId::new("session-fresh");
+        let request = PromptPayload {
+            system_prompt: "sys",
+            messages: &[],
+            tools: &[],
+            params: tau_proto::ModelParams::default(),
+            previous_response: Some(crate::common::PreviousResponse {
+                id: "resp_from_a_dead_socket",
+                message_index: 0,
+            }),
+            originator: &tau_proto::PromptOriginator::User,
+            session_id: &session_id,
+        };
+        run_turn_through_pool(
+            &mut pool,
+            &config,
+            "session-fresh",
+            &request,
+            &mut on_update,
+        )
+        .expect("turn ok");
+
+        let s = server.lock().unwrap();
+        let body = &s.requests[0];
+        assert!(
+            body.get("previous_response_id").is_none(),
+            "fresh-open path must not forward previous_response_id to a brand-new socket; got {body}"
+        );
+        assert_eq!(
+            pool.stats().chain_strips_on_fresh,
+            1,
+            "stat counter should record the strip"
+        );
+    }
+
+    /// A cached connection dies mid-turn (keepalive timeout / TCP
+    /// reset). The pool must reopen and replay once *silently* — no
+    /// error returned to the outer retry loop, no user-visible retry
+    /// banner — and the replay must drop the in-flight chain id
+    /// because the new socket has no record of it.
+    #[test]
+    fn mid_stream_close_triggers_silent_reconnect_without_chain_id() {
+        let (addr, server) = spawn_fake_codex_server();
+        // Make connection #0 die mid-turn-#2 (after_turn=1 -> the
+        // second arriving turn on conn 0 is the one that gets closed).
+        server.lock().unwrap().fault = Some(MidStreamCloseFault {
+            on_conn_index: 0,
+            after_turn: 1,
+        });
+        let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+        let mut pool = WsPool::new();
+        let mut on_update = |_: &str, _: Option<&str>| {};
+
+        // Turn 1: opens conn-0, returns a `response_id` the harness
+        // would chain off for turn 2.
+        let session_id = tau_proto::SessionId::new("session-die");
+        let req1 = PromptPayload {
+            system_prompt: "sys",
+            messages: &[],
+            tools: &[],
+            params: tau_proto::ModelParams::default(),
+            previous_response: None,
+            originator: &tau_proto::PromptOriginator::User,
+            session_id: &session_id,
+        };
+        let state1 =
+            run_turn_through_pool(&mut pool, &config, "session-die", &req1, &mut on_update)
+                .expect("first turn ok");
+        let prev_id = state1.response_id.expect("first turn yielded response_id");
+
+        // Turn 2: harness wants to chain via `prev_id`. The cached
+        // socket dies mid-stream; pool must transparently reopen and
+        // replay without the chain id and return Ok.
+        let req2 = PromptPayload {
+            system_prompt: "sys",
+            messages: &[],
+            tools: &[],
+            params: tau_proto::ModelParams::default(),
+            previous_response: Some(crate::common::PreviousResponse {
+                id: &prev_id,
+                message_index: 0,
+            }),
+            originator: &tau_proto::PromptOriginator::User,
+            session_id: &session_id,
+        };
+        run_turn_through_pool(&mut pool, &config, "session-die", &req2, &mut on_update)
+            .expect("silent reconnect should make this Ok");
+
+        let s = server.lock().unwrap();
+        assert_eq!(
+            s.upgrade_count, 2,
+            "mid-stream close should have forced a reopen"
+        );
+        // Three captured requests in arrival order:
+        //   #0: turn-1 on conn-0 (no chain id, no prior response)
+        //   #1: turn-2 on conn-0 (had chain id; this is the one that died)
+        //   #2: replay on conn-1 (must have chain id stripped)
+        assert_eq!(s.requests.len(), 3, "expected three request envelopes");
+        assert!(
+            s.requests[1].get("previous_response_id").is_some(),
+            "turn-2 on the warm socket should still carry the chain id (warm cache path)"
+        );
+        assert!(
+            s.requests[2].get("previous_response_id").is_none(),
+            "post-reconnect replay must drop chain id; got {req}",
+            req = s.requests[2]
+        );
+        assert_eq!(
+            pool.stats().silent_reconnects,
+            1,
+            "stat counter should record the silent reconnect"
+        );
+    }
+
     // -----------------------------------------------------------------
     // Fake Codex server: minimal blocking tungstenite acceptor.
     // -----------------------------------------------------------------
@@ -404,8 +657,24 @@ mod tests {
         /// Captured request bodies, in arrival order across all
         /// connections. Available for tests that want to inspect
         /// what the client actually sent (chain ids, model knobs).
-        #[allow(dead_code)]
         requests: Vec<serde_json::Value>,
+        /// Fault injection. When `Some`, the worker for a matching
+        /// connection drops the socket with a 1011 close frame
+        /// instead of serving the offending turn — mimicking the
+        /// "keepalive ping timeout" the live Codex server produces
+        /// when its idle reaper fires. Tests use this to exercise
+        /// the silent-reconnect path.
+        fault: Option<MidStreamCloseFault>,
+    }
+
+    /// "After connection index `on_conn_index` has fully served
+    /// `after_turn` turns, drop the next incoming turn mid-stream."
+    /// Indices are zero-based; `after_turn: 1` means the second
+    /// arriving turn on that connection is the one that gets killed.
+    #[derive(Clone, Copy)]
+    struct MidStreamCloseFault {
+        on_conn_index: usize,
+        after_turn: usize,
     }
 
     fn spawn_fake_codex_server() -> (SocketAddr, Arc<Mutex<ServerState>>) {
@@ -446,12 +715,26 @@ mod tests {
                 Message::Text(text) => {
                     let parsed: serde_json::Value =
                         serde_json::from_str(text.as_str()).unwrap_or(serde_json::Value::Null);
-                    {
+                    let fault_now = {
                         let mut s = state.lock().unwrap();
                         s.requests.push(parsed.clone());
                         s.turns_per_connection[conn_idx] += 1;
-                    }
+                        s.fault
+                            .filter(|f| f.on_conn_index == conn_idx && turn_counter >= f.after_turn)
+                    };
                     turn_counter += 1;
+                    if fault_now.is_some() {
+                        // Mimic the live Codex 1011 keepalive-timeout
+                        // drop: send a close frame and bail without
+                        // streaming the response body. Client side
+                        // sees `Message::Close` → `LlmError(0, "stream
+                        // error: ws closed mid-stream ...")`.
+                        let _ = ws.send(Message::Close(Some(tungstenite::protocol::CloseFrame {
+                            code: tungstenite::protocol::frame::coding::CloseCode::Error,
+                            reason: "keepalive ping timeout".into(),
+                        })));
+                        return;
+                    }
                     // Stream a tiny canned event sequence: one
                     // visible-text delta, then completed.
                     let events = [
