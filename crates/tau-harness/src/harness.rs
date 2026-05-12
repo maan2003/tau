@@ -2139,6 +2139,12 @@ impl Harness {
             .selected_model
             .as_ref()
             .and_then(|m| model_context_window(&self.model_registry, m));
+        let display = build_delegate_progress_display(
+            &task_name,
+            conv.context_percent_used,
+            ctx_window,
+            conv.tools_total,
+        );
         let progress = tau_proto::DelegateProgress {
             call_id,
             task_name,
@@ -2147,6 +2153,7 @@ impl Harness {
             ctx_window,
             tools_in_flight: conv.tools_in_flight,
             tools_total: conv.tools_total,
+            display: Some(display),
         };
         self.publish_event(None, Event::ToolDelegateProgress(progress));
     }
@@ -3487,6 +3494,43 @@ impl Harness {
             .values()
             .find(|e| e.name == name)
             .map(|e| e.connection_id.as_str())
+    }
+}
+
+/// Build the [`ToolDisplay`] descriptor the renderer paints for a
+/// running `delegate` tool block. Carries the sub-task name as the
+/// args label and two progress counters (context and tools), with
+/// the trailing chip set to [`ToolDisplayStatus::InProgress`] so the
+/// renderer paints the `…` running indicator.
+fn build_delegate_progress_display(
+    task_name: &str,
+    ctx_percent: Option<u8>,
+    ctx_window: Option<u64>,
+    tools_total: u32,
+) -> tau_proto::ToolDisplay {
+    use tau_proto::{ProgressCounter, ProgressUnit, ToolDisplayStatus};
+
+    let mut counters: Vec<ProgressCounter> = Vec::new();
+    if ctx_percent.is_some() || ctx_window.is_some() {
+        counters.push(ProgressCounter {
+            label: Some("ctx".to_owned()),
+            unit: ProgressUnit::Percent,
+            current: ctx_percent.map(u64::from),
+            total: ctx_window,
+        });
+    }
+    counters.push(ProgressCounter {
+        label: Some("tools".to_owned()),
+        unit: ProgressUnit::Count,
+        current: Some(u64::from(tools_total)),
+        total: None,
+    });
+    tau_proto::ToolDisplay {
+        args: format!("[{task_name}]"),
+        progress_counters: counters,
+        status: ToolDisplayStatus::InProgress,
+        status_text: "…".to_owned(),
+        ..Default::default()
     }
 }
 

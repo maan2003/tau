@@ -245,106 +245,45 @@ pub(crate) fn format_tool_call(tool_name: &str, arguments: &CborValue) -> ToolCa
     }
 }
 
-/// Builds the running display for a `delegate` call once the harness
-/// has reported sub-agent state via `DelegateProgress`. Renders to:
-/// `delegate [task_name] ctx: 38%/200k tools: 2/3 …`.
-pub(crate) fn format_delegate_progress(
-    args: String,
-    progress: &tau_proto::DelegateProgress,
-) -> ToolCallDisplay {
-    let mut suffixes: Vec<ToolSuffixSegment> = Vec::new();
-    if progress.ctx_percent.is_some() || progress.ctx_window.is_some() {
-        suffixes.push(info_suffix(format_ctx_label(
-            progress.ctx_percent,
-            progress.ctx_window,
-        )));
-    }
-    let tools_completed = progress
-        .tools_total
-        .saturating_sub(progress.tools_in_flight);
-    suffixes.push(info_suffix(format!(
-        "tools: {}/{}",
-        tools_completed, progress.tools_total,
-    )));
-    suffixes.push(running_suffix_after("x")); // non-empty so a leading space is preserved
-    ToolCallDisplay {
-        tool_name: "delegate".to_owned(),
-        args,
-        suffixes,
-    }
-}
-
-/// Builds the completion display for a finished `delegate` call.
-/// Renders to:
-/// `delegate [task_name] ctx: 38%/200k tools: 3 (5L, 220B) ok`
-/// (or with `err: …` when `error_message` is set). The chip order
-/// mirrors the in-progress line — `ctx:` then `tools:` — so the
-/// transition from running to done shifts only the trailing segments
-/// (`…` → `(NL, NB) ok`) instead of shuffling existing ones around.
-pub(crate) fn format_delegate_completion(
-    args: String,
-    last_progress: Option<&tau_proto::DelegateProgress>,
+/// Build the completion descriptor for a finished `delegate` call by
+/// carrying the cached progress (args + counters from the latest
+/// [`tau_proto::DelegateProgress`]) and replacing the trailing
+/// in-progress chip with output stats + the final `ok`/`err: …`
+/// status. The chip order matches the running line so the only
+/// visible change at completion is the trailing segments.
+pub(crate) fn build_delegate_completion_display(
+    cached: Option<&ToolDisplay>,
     details: &CborValue,
-    error_message: Option<&str>,
-) -> ToolCallDisplay {
+    error: Option<&str>,
+) -> ToolDisplay {
     let response_text = match details {
         CborValue::Text(text) => text.as_str(),
         _ => "",
     };
-    let mut suffixes: Vec<ToolSuffixSegment> = Vec::new();
-    // Match the in-progress order (`ctx:` → `tools:`) so the line
-    // doesn't visibly reorder when it transitions to done.
-    if let Some(progress) = last_progress {
-        if progress.ctx_percent.is_some() || progress.ctx_window.is_some() {
-            suffixes.push(info_suffix(format_ctx_label(
-                progress.ctx_percent,
-                progress.ctx_window,
-            )));
-        }
-        // Show a single number on completion since "in flight" is
-        // always zero by the time the result lands; total is the
-        // bit the user cares about.
-        suffixes.push(info_suffix(format!("tools: {}", progress.tools_total)));
-    }
-    if !response_text.is_empty() {
-        suffixes.push(output_stats_suffix(response_text));
-    }
-    suffixes.push(match error_message {
-        Some(msg) if !msg.is_empty() => err_suffix(Some(msg)),
-        _ => ok_suffix(),
+    let mut display = cached.cloned().unwrap_or_else(|| ToolDisplay {
+        args: String::new(),
+        ..Default::default()
     });
-    ToolCallDisplay {
-        tool_name: "delegate".to_owned(),
-        args,
-        suffixes,
+    if !response_text.is_empty() {
+        let lines = response_text.lines().count() as u64;
+        let bytes = response_text.len() as u64;
+        display.stats = tau_proto::ToolDisplayStats {
+            matches: None,
+            lines: Some(lines),
+            bytes: Some(bytes),
+        };
     }
-}
-
-/// Renders the `ctx: ` chip for a `DelegateProgress` snapshot. Falls
-/// back to whichever side of (`%`, `window`) is known.
-fn format_ctx_label(percent: Option<u8>, window: Option<u64>) -> String {
-    let percent_part = percent
-        .map(|p| format!("{p}%"))
-        .unwrap_or_else(|| "?".to_owned());
-    let window_part = window.map(format_window).unwrap_or_default();
-    if window_part.is_empty() {
-        format!("ctx: {percent_part}")
-    } else {
-        format!("ctx: {percent_part}/{window_part}")
+    match error {
+        Some(msg) if !msg.is_empty() => {
+            display.status = ToolDisplayStatus::Error;
+            display.status_text = short_error_chip(msg);
+        }
+        _ => {
+            display.status = ToolDisplayStatus::Success;
+            display.status_text = "ok".to_owned();
+        }
     }
-}
-
-/// Compact rendering of a context-window size. `200000` -> `200k`,
-/// `1_048_576` -> `1.0M`. Approximate; for surfacing alongside a `%`.
-fn format_window(window: u64) -> String {
-    if window >= 1_000_000 {
-        let m = window as f64 / 1_000_000.0;
-        format!("{m:.1}M")
-    } else if window >= 1_000 {
-        format!("{}k", window / 1_000)
-    } else {
-        window.to_string()
-    }
+    display
 }
 
 fn tool_suffix(text: String, status: ToolStatus) -> ToolSuffixSegment {
@@ -370,17 +309,6 @@ fn running_suffix_after(args: &str) -> ToolSuffixSegment {
         text: "…".to_owned(),
         status: ToolStatus::Progress,
         no_leading_space,
-    }
-}
-
-fn ok_suffix() -> ToolSuffixSegment {
-    tool_suffix("ok".to_owned(), ToolStatus::Success)
-}
-
-fn err_suffix(message: Option<&str>) -> ToolSuffixSegment {
-    match message {
-        Some(msg) if !msg.is_empty() => tool_suffix(format!("err: {msg}"), ToolStatus::Error),
-        _ => tool_suffix("err".to_owned(), ToolStatus::Error),
     }
 }
 
@@ -476,6 +404,9 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
     if !stats_chip.is_empty() {
         suffixes.push(info_suffix(stats_chip));
     }
+    for counter in &display.progress_counters {
+        suffixes.push(info_suffix(format_progress_counter(counter)));
+    }
     for chip in &display.info_chips {
         suffixes.push(info_suffix(chip.clone()));
     }
@@ -483,12 +414,41 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
         ToolDisplayStatus::Success => ToolStatus::Success,
         ToolDisplayStatus::Warning => ToolStatus::Warning,
         ToolDisplayStatus::Error => ToolStatus::Error,
+        ToolDisplayStatus::InProgress => ToolStatus::Progress,
     };
-    suffixes.push(tool_suffix(display.status_text.clone(), status_kind));
+    let status_text = if display.status_text.is_empty()
+        && matches!(display.status, ToolDisplayStatus::InProgress)
+    {
+        "…".to_owned()
+    } else {
+        display.status_text.clone()
+    };
+    suffixes.push(tool_suffix(status_text, status_kind));
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
         args: display.args.clone(),
         suffixes,
+    }
+}
+
+fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> String {
+    let body = match counter.unit {
+        tau_proto::ProgressUnit::Count => match (counter.current, counter.total) {
+            (Some(c), Some(t)) => format!("{c}/{t}"),
+            (Some(c), None) => c.to_string(),
+            (None, Some(t)) => format!("?/{t}"),
+            (None, None) => "?".to_owned(),
+        },
+        tau_proto::ProgressUnit::Percent => match (counter.current, counter.total) {
+            (Some(p), Some(t)) => format!("{p}%/{}", format_token_count(t)),
+            (Some(p), None) => format!("{p}%"),
+            (None, Some(t)) => format!("?%/{}", format_token_count(t)),
+            (None, None) => "?%".to_owned(),
+        },
+    };
+    match &counter.label {
+        Some(label) => format!("{label}: {body}"),
+        None => body,
     }
 }
 

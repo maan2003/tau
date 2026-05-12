@@ -843,9 +843,15 @@ pub struct ToolDisplay {
     /// so the renderer can omit a slot rather than emit `(0M, 1L)`.
     #[serde(default, skip_serializing_if = "ToolDisplayStats::is_empty")]
     pub stats: ToolDisplayStats,
+    /// Labelled counter chips (current / optional total) rendered
+    /// between stats and `info_chips`. Used for tools that surface
+    /// progress data: `ctx: 6%/200k`, `tools: 3`, `bytes: 12/200`,
+    /// etc. The unit hint picks the rendering shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub progress_counters: Vec<ProgressCounter>,
     /// Free-form info chips beyond the stats slot (e.g. `"(2
-    /// suggestions)"`, `"(3 entries)"`). Rendered between stats and
-    /// status.
+    /// suggestions)"`, `"(3 entries)"`). Rendered between counters
+    /// and status.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub info_chips: Vec<String>,
     /// Severity of the trailing status chip. Picks its themed color.
@@ -856,6 +862,41 @@ pub struct ToolDisplay {
     /// Optional rich content rendered in a block below the chip row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<ToolDisplayPayload>,
+}
+
+/// One labelled counter rendered as an info chip. Shape depends on
+/// `unit` and which of `current` / `total` are populated:
+/// - `Count`: `N` (current only) or `N/M` (both).
+/// - `Percent`: `N%` (current only) or `N%/M` (both — `M` is e.g. a context
+///   window size, formatted by [`format_token_count`]).
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct ProgressCounter {
+    /// Human-readable prefix shown before the value (e.g. `"ctx"`,
+    /// `"tools"`). Renders as `"label: value"`. `None` for an
+    /// unlabelled chip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// What `current` and `total` represent. Picks the rendering.
+    pub unit: ProgressUnit,
+    /// Current value. `None` is rendered as `?`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<u64>,
+    /// Optional denominator. For `Count`, the cumulative total; for
+    /// `Percent`, the underlying span (e.g. context window size).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressUnit {
+    /// Raw integers. Renders as `N` or `N/M`. Default if the sender
+    /// doesn't specify.
+    #[default]
+    Count,
+    /// `current` is a percent 0..=100. Renders as `N%` or
+    /// `N%/format_token_count(total)`.
+    Percent,
 }
 
 /// Volume metrics. Each is optional because a given tool typically
@@ -884,6 +925,9 @@ pub enum ToolDisplayStatus {
     Success,
     Warning,
     Error,
+    /// The tool is still running. Used by progress events. The
+    /// renderer trades the trailing status chip for a `…` indicator.
+    InProgress,
 }
 
 /// Rich content rendered below the chip row. Closed for now — extend
@@ -924,7 +968,7 @@ pub struct ToolProgress {
 /// CLI re-renders the running `delegate` tool block to surface this
 /// to the user without persisting per-update history. Transient — not
 /// folded into the durable session log.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DelegateProgress {
     /// The original parent `delegate` call — the tool block under
     /// which this update should appear.
@@ -946,6 +990,11 @@ pub struct DelegateProgress {
     /// Cumulative number of tool calls the sub-agent has started
     /// during this delegation (including completed and in-flight).
     pub tools_total: u32,
+    /// UI display descriptor for the running delegate block. The
+    /// harness fills this in from the fields above so the renderer
+    /// can paint the progress generically without inspecting them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ToolDisplay>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -1071,10 +1071,9 @@ fn render_tool_display_assembles_chips_in_order() {
             lines: Some(7),
             bytes: Some(120),
         },
-        info_chips: vec![],
         status: ToolDisplayStatus::Success,
         status_text: "ok".into(),
-        payload: None,
+        ..Default::default()
     };
     let rendered = render_tool_display("grep", &display);
     assert_eq!(rendered.tool_name, "grep");

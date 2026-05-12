@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 use tau_proto::{CborValue, Event};
 
 use crate::tool_render::{
-    ToolCallDisplay, build_osc1337_set_user_var, extension_status_block, extract_diff,
-    format_cache_hit_chip, format_context_chip, format_delegate_completion,
-    format_delegate_progress, format_token_stats_line, format_tool_call, format_turn_metrics_chip,
-    render_diff_tool_block, render_harness_info, render_shell_block, render_tool_block,
-    render_tool_display, session_status_block, streaming_block, synthesize_fallback_display,
-    system_loaded_block, system_status_block, ui_dir_block,
+    ToolCallDisplay, build_delegate_completion_display, build_osc1337_set_user_var,
+    extension_status_block, extract_diff, format_cache_hit_chip, format_context_chip,
+    format_token_stats_line, format_tool_call, format_turn_metrics_chip, render_diff_tool_block,
+    render_harness_info, render_shell_block, render_tool_block, render_tool_display,
+    session_status_block, streaming_block, synthesize_fallback_display, system_loaded_block,
+    system_status_block, ui_dir_block,
 };
 use crate::{build_label_parts, random_startup_pun};
 
@@ -177,12 +177,6 @@ struct ToolCallState {
     /// is suppressed (their progress is rolled up into the parent
     /// `delegate` block via `DelegateProgress` instead).
     block_id: Option<tau_cli_term::BlockId>,
-    /// Sticky args (e.g. `[task_name]`) for tool calls whose live
-    /// block needs to be re-rendered on progress events — only
-    /// `delegate` for now. `DelegateProgress` doesn't carry the
-    /// original tool arguments, so we cache the display label when the
-    /// block is first created.
-    delegate_args: Option<String>,
     /// Most recent `DelegateProgress` snapshot. On `ToolResult` we
     /// render the completion line with the final `ctx: …` / `tools: …`
     /// chips so the user sees the delegation cost alongside the
@@ -843,18 +837,10 @@ impl EventRenderer {
                         let block = render_tool_block(&self.theme, &display);
                         let id = self.handle.new_block(block);
                         self.handle.push_above_active(id);
-                        // Cache the rendered args (`[task_name]`) for
-                        // later `DelegateProgress` updates: those
-                        // events don't carry the original tool
-                        // arguments, only task_name + counters.
-                        let delegate_args = (call.name.as_str() == "delegate"
-                            && !display.args.is_empty())
-                        .then(|| display.args.clone());
                         self.tool_calls.insert(
                             call.id.to_string(),
                             ToolCallState {
                                 block_id: Some(id),
-                                delegate_args,
                                 ..ToolCallState::default()
                             },
                         );
@@ -888,14 +874,13 @@ impl EventRenderer {
                     // never rendered) — nothing to update.
                     return;
                 };
-                let args = state.delegate_args.clone().unwrap_or_else(|| {
-                    if progress.task_name.is_empty() {
-                        String::new()
-                    } else {
-                        format!("[{}]", progress.task_name)
-                    }
-                });
-                let display = format_delegate_progress(args, progress);
+                let display = match &progress.display {
+                    Some(descriptor) => render_tool_display("delegate", descriptor),
+                    None => render_tool_display(
+                        "delegate",
+                        &synthesize_fallback_display("delegate", None),
+                    ),
+                };
                 let block = render_tool_block(&self.theme, &display);
                 self.handle.set_block(bid, block);
             }
@@ -911,15 +896,14 @@ impl EventRenderer {
                 if let Some(bid) = prior.block_id {
                     self.handle.remove_block(bid);
                 }
-                let args = prior.delegate_args;
                 let last_progress = prior.delegate_last_progress;
                 let display = if result.tool_name.as_str() == "delegate" {
-                    format_delegate_completion(
-                        args.unwrap_or_default(),
-                        last_progress.as_ref(),
+                    let descriptor = build_delegate_completion_display(
+                        last_progress.as_ref().and_then(|p| p.display.as_ref()),
                         &result.result,
                         None,
-                    )
+                    );
+                    render_tool_display("delegate", &descriptor)
                 } else if let Some(descriptor) = &result.display {
                     render_tool_display(&result.tool_name, descriptor)
                 } else {
@@ -959,16 +943,15 @@ impl EventRenderer {
                 if let Some(bid) = prior.block_id {
                     self.handle.remove_block(bid);
                 }
-                let args = prior.delegate_args;
                 let last_progress = prior.delegate_last_progress;
                 let cbor = error.details.as_ref();
                 let display = if error.tool_name.as_str() == "delegate" {
-                    format_delegate_completion(
-                        args.unwrap_or_default(),
-                        last_progress.as_ref(),
+                    let descriptor = build_delegate_completion_display(
+                        last_progress.as_ref().and_then(|p| p.display.as_ref()),
                         cbor.unwrap_or(&CborValue::Null),
                         Some(&error.message),
-                    )
+                    );
+                    render_tool_display("delegate", &descriptor)
                 } else if let Some(descriptor) = &error.display {
                     render_tool_display(&error.tool_name, descriptor)
                 } else {
