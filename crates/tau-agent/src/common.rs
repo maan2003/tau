@@ -4,7 +4,6 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
 use tau_proto::{
     AgentToolCall, CborValue, ConversationMessage, PromptOriginator, SessionId, ToolDefinition,
 };
@@ -245,11 +244,11 @@ pub fn mix_originator_into_cache_key(
     match originator {
         PromptOriginator::User => Some(base.to_owned()),
         PromptOriginator::Extension { name, .. } => {
-            let mut hasher = Sha256::new();
+            let mut hasher = blake3::Hasher::new();
             hasher.update(base.as_bytes());
             hasher.update(b"\0ext:");
             hasher.update(name.as_str().as_bytes());
-            Some(format!("tau-{:x}", hasher.finalize()))
+            Some(format!("tau-{}", hasher.finalize().to_hex()))
         }
     }
 }

@@ -1,6 +1,5 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
 use tau_config::settings::{
     AuthType, ModelRegistry, PromptCacheRetention, ProviderConfig,
     is_known_24h_prompt_cache_model_id,
@@ -242,13 +241,13 @@ fn prompt_cache_key(provider: &ProviderConfig, base_url: &str, model_id: &str) -
 /// machine) — go any coarser and bursts overflow to multiple
 /// machines, defeating the point.
 fn prompt_cache_key_for(base_url: &str, model_id: &str, cwd: &std::path::Path) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = blake3::Hasher::new();
     hasher.update(base_url.as_bytes());
     hasher.update(b"\0");
     hasher.update(model_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(cwd.to_string_lossy().as_bytes());
-    format!("tau-{:x}", hasher.finalize())
+    format!("tau-{}", hasher.finalize().to_hex())
 }
 
 fn prompt_cache_retention(

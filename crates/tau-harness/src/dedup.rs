@@ -36,7 +36,6 @@
 
 use std::collections::HashMap;
 
-use sha2::{Digest, Sha256};
 use tau_core::{SessionEntry, ToolActivityOutcome};
 use tau_proto::{CborValue, NodeId, ToolCallId};
 
@@ -56,8 +55,10 @@ pub(crate) const DEDUP_MARKER: &str = "[tau-dedup]";
 /// burning cycles hashing them.
 pub(crate) const DEFAULT_THRESHOLD_BYTES: usize = 256;
 
-/// 16-byte truncated SHA-256 digest of the CBOR-serialized result
-/// content. Truncation gives a ~10⁻¹⁹ collision probability per
+/// 16-byte truncated BLAKE3 digest of the CBOR-serialized result
+/// content. BLAKE3 picked over SHA-256 for raw speed — this hash
+/// runs synchronously on the harness's main loop on every tool
+/// result. Truncation gives a ~10⁻¹⁹ collision probability per
 /// pair, which is fine — a collision would only mean two unrelated
 /// outputs get aliased, and the model would see a pointer to the
 /// "wrong" call. In practice the failure mode is so rare that
@@ -111,14 +112,14 @@ impl ResultDedupMap {
                         continue;
                     }
                     let bytes = encode_for_hash(result);
-                    (sha256_truncated(&bytes), bytes.len())
+                    (hash_truncated(&bytes), bytes.len())
                 }
                 ToolActivityOutcome::Error { message, details } => {
                     if message.starts_with(DEDUP_MARKER) {
                         continue;
                     }
                     let bytes = encode_error_for_hash(message, details.as_ref());
-                    (sha256_truncated(&bytes), bytes.len())
+                    (hash_truncated(&bytes), bytes.len())
                 }
                 ToolActivityOutcome::Requested { .. } => continue,
             };
@@ -217,13 +218,11 @@ pub(crate) fn encode_error_for_hash(message: &str, details: Option<&CborValue>) 
     buf
 }
 
-/// SHA-256 of `bytes`, truncated to 16 bytes. See [`ResultHash`].
-pub(crate) fn sha256_truncated(bytes: &[u8]) -> ResultHash {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
+/// BLAKE3 of `bytes`, truncated to 16 bytes. See [`ResultHash`].
+pub(crate) fn hash_truncated(bytes: &[u8]) -> ResultHash {
+    let digest = blake3::hash(bytes);
     let mut out = [0_u8; 16];
-    out.copy_from_slice(&digest[..16]);
+    out.copy_from_slice(&digest.as_bytes()[..16]);
     out
 }
 
@@ -306,7 +305,7 @@ mod tests {
         map.rebuild_from_branch(&entries, Some(NodeId::new(1)), DEFAULT_THRESHOLD_BYTES);
         // Only the big entry was over the threshold.
         assert_eq!(map.len(), 1);
-        let big_hash = sha256_truncated(&encode_for_hash(&cbor_text(&big)));
+        let big_hash = hash_truncated(&encode_for_hash(&cbor_text(&big)));
         assert_eq!(map.lookup(&big_hash).map(|c| c.as_str()), Some("call_big"),);
     }
 
@@ -329,7 +328,7 @@ mod tests {
         map.rebuild_from_branch(&entries, Some(NodeId::new(2)), DEFAULT_THRESHOLD_BYTES);
         // call_a entered, call_b's pointer text did not.
         assert_eq!(map.len(), 1);
-        let big_hash = sha256_truncated(&encode_for_hash(&cbor_text(&big)));
+        let big_hash = hash_truncated(&encode_for_hash(&cbor_text(&big)));
         assert_eq!(map.lookup(&big_hash).map(|c| c.as_str()), Some("call_a"),);
     }
 
@@ -342,7 +341,7 @@ mod tests {
         ];
         let mut map = ResultDedupMap::new();
         map.rebuild_from_branch(&entries, Some(NodeId::new(2)), DEFAULT_THRESHOLD_BYTES);
-        let h = sha256_truncated(&encode_for_hash(&cbor_text(&big)));
+        let h = hash_truncated(&encode_for_hash(&cbor_text(&big)));
         assert_eq!(
             map.lookup(&h).map(|c| c.as_str()),
             Some("call_first"),
@@ -390,17 +389,14 @@ mod tests {
         let s = "abc".repeat(200);
         let result_bytes = encode_for_hash(&cbor_text(&s));
         let error_bytes = encode_error_for_hash(&s, None);
-        assert_ne!(
-            sha256_truncated(&result_bytes),
-            sha256_truncated(&error_bytes),
-        );
+        assert_ne!(hash_truncated(&result_bytes), hash_truncated(&error_bytes),);
     }
 
     #[test]
     fn error_details_distinguish_otherwise_identical_messages() {
         let msg = "compile failed".to_owned();
-        let h1 = sha256_truncated(&encode_error_for_hash(&msg, None));
-        let h2 = sha256_truncated(&encode_error_for_hash(
+        let h1 = hash_truncated(&encode_error_for_hash(&msg, None));
+        let h2 = hash_truncated(&encode_error_for_hash(
             &msg,
             Some(&cbor_text("error: missing semicolon")),
         ));

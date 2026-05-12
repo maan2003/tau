@@ -22,9 +22,9 @@ echo-agent = []
 
 [dependencies]
 backon.workspace = true
+blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 base64.workspace = true
 tau-config.workspace = true
 tau-extension.workspace = true

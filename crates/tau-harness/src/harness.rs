@@ -25,7 +25,7 @@ use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
 use crate::dedup::{
     DEFAULT_THRESHOLD_BYTES, build_pointer_error_message, build_pointer_value,
-    encode_error_for_hash, encode_for_hash, sha256_truncated,
+    encode_error_for_hash, encode_for_hash, hash_truncated,
 };
 use crate::dirs::policy_store_path_from;
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
@@ -748,7 +748,7 @@ impl Harness {
         if bytes.len() < DEFAULT_THRESHOLD_BYTES {
             return;
         }
-        let hash = sha256_truncated(&bytes);
+        let hash = hash_truncated(&bytes);
         let Some(conv) = self.conversations.get_mut(cid) else {
             return;
         };
@@ -789,7 +789,7 @@ impl Harness {
         if bytes.len() < DEFAULT_THRESHOLD_BYTES {
             return;
         }
-        let hash = sha256_truncated(&bytes);
+        let hash = hash_truncated(&bytes);
         let Some(conv) = self.conversations.get_mut(cid) else {
             return;
         };
