@@ -1,44 +1,44 @@
 [workspace]
 default-members = ["crates/tau"]
 members = [
+  "crates/tau",
   "crates/tau-agent",
+  "crates/tau-blocking-notify-channel",
   "crates/tau-cli",
   "crates/tau-cli-picker",
+  "crates/tau-cli-term",
+  "crates/tau-cli-term-raw",
   "crates/tau-config",
   "crates/tau-core",
   "crates/tau-ext-core-delegate",
-  "crates/tau-ext-std-notifications",
   "crates/tau-ext-shell",
-  "crates/tau-ext-websearch-exa",
+  "crates/tau-ext-std-notifications",
   "crates/tau-ext-test-dummy",
+  "crates/tau-ext-websearch-exa",
   "crates/tau-extension",
   "crates/tau-harness",
-  "crates/tau-session-inspect",
-  "crates/tau-skills",
   "crates/tau-proto",
   "crates/tau-provider",
   "crates/tau-provider-cli",
+  "crates/tau-session-inspect",
+  "crates/tau-skills",
   "crates/tau-socket",
   "crates/tau-supervisor",
-  "crates/tau-blocking-notify-channel",
-  "crates/tau-test-support",
   "crates/tau-term-screen",
-  "crates/tau-cli-term-raw",
-  "crates/tau-cli-term",
+  "crates/tau-test-support",
   "crates/tau-themes",
-  "crates/tau",
 ]
 resolver = "2"
 
 [workspace.package]
-edition = "2024"
-description = "A minimal Unix-first coding agent."
-repository = "https://github.com/dpc/tau-agent"
-homepage = "https://github.com/dpc/tau-agent"
-readme = "README.md"
-keywords = ["agent", "cli", "llm", "coding-agent"]
 categories = ["command-line-utilities", "development-tools"]
+description = "A minimal Unix-first coding agent."
+edition = "2024"
+homepage = "https://github.com/dpc/tau-agent"
+keywords = ["agent", "cli", "coding-agent", "llm"]
 license = "MPL-2.0"
+readme = "README.md"
+repository = "https://github.com/dpc/tau-agent"
 rust-version = "1.86"
 version = "0.1.0"
 
@@ -56,23 +56,23 @@ unwrap_used = "deny"
 tau-agent = { path = "crates/tau-agent" }
 tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel" }
 tau-cli = { path = "crates/tau-cli" }
-tau-cli-term = { path = "crates/tau-cli-term" }
 tau-cli-picker = { path = "crates/tau-cli-picker" }
+tau-cli-term = { path = "crates/tau-cli-term" }
 tau-cli-term-raw = { path = "crates/tau-cli-term-raw" }
 tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
 tau-ext-core-delegate = { path = "crates/tau-ext-core-delegate" }
-tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
-tau-ext-websearch-exa = { path = "crates/tau-ext-websearch-exa" }
+tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }
 tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }
+tau-ext-websearch-exa = { path = "crates/tau-ext-websearch-exa" }
 tau-extension = { path = "crates/tau-extension" }
 tau-harness = { path = "crates/tau-harness" }
 tau-proto = { path = "crates/tau-proto" }
-tau-session-inspect = { path = "crates/tau-session-inspect" }
-tau-skills = { path = "crates/tau-skills" }
 tau-provider = { path = "crates/tau-provider" }
 tau-provider-cli = { path = "crates/tau-provider-cli" }
+tau-session-inspect = { path = "crates/tau-session-inspect" }
+tau-skills = { path = "crates/tau-skills" }
 tau-socket = { path = "crates/tau-socket" }
 tau-supervisor = { path = "crates/tau-supervisor" }
 tau-term-screen = { path = "crates/tau-term-screen" }
@@ -85,74 +85,74 @@ backon = { version = "1", default-features = false, features = [
   "std-blocking-sleep",
 ] }
 base64 = { version = "0.22", default-features = false, features = ["std"] }
+blake3 = { version = "1", default-features = false, features = ["std"] }
 bon = { version = "3", default-features = false }
 built = { version = "0.8", default-features = false, features = [
   "chrono",
   "git2",
 ] }
+ciborium = { version = "0.2.2", default-features = false, features = ["std"] }
+clap = { version = "4", default-features = false, features = [
+  "color",
+  "derive",
+  "error-context",
+  "help",
+  "std",
+  "suggestions",
+  "usage",
+] }
+comfy-table = { version = "7", default-features = false }
+config = { version = "0.15", default-features = false, features = ["json5"] }
+crossterm = { version = "0.28", default-features = false, features = [
+  "bracketed-paste",
+  "events",
+] }
+dialoguer = { version = "0.11", default-features = false }
+dirs = { version = "6", default-features = false }
+fs2 = { version = "0.4", default-features = false }
+globset = { version = "0.4", default-features = false }
+ignore = { version = "0.4", default-features = false }
+json5 = { version = "0.4", default-features = false }
+libc = { version = "0.2", default-features = false }
+rand = { version = "0.8", default-features = false, features = [
+  "std",
+  "std_rng",
+] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+  "std",
+] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+serde_yaml_ng = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+similar = { version = "2", default-features = false, features = ["text"] }
+tempfile = { version = "3", default-features = false }
 time = { version = "0.3", default-features = false, features = [
   "formatting",
   "macros",
   "parsing",
 ] }
-comfy-table = { version = "7", default-features = false }
-ciborium = { version = "0.2.2", default-features = false, features = ["std"] }
-config = { version = "0.15", default-features = false, features = ["json5"] }
-dialoguer = { version = "0.11", default-features = false }
-json5 = { version = "0.4", default-features = false }
-rand = { version = "0.8", default-features = false, features = [
-  "std",
-  "std_rng",
-] }
-serde_json = { version = "1", default-features = false, features = ["std"] }
-serde_yaml_ng = { version = "0.10", default-features = false }
-sha2 = { version = "0.10", default-features = false }
-blake3 = { version = "1", default-features = false, features = ["std"] }
-ureq = { version = "2", default-features = false, features = ["tls"] }
-url = { version = "2", default-features = false }
-tungstenite = { version = "0.29", default-features = false, features = [
-  "handshake",
-  "rustls-tls-webpki-roots",
-] }
-clap = { version = "4", default-features = false, features = [
-  "std",
-  "derive",
-  "help",
-  "usage",
-  "error-context",
-  "suggestions",
-  "color",
-] }
-crossterm = { version = "0.28", default-features = false, features = [
-  "bracketed-paste",
-  "events",
-] }
-unicode-width = { version = "0.2", default-features = false }
-dirs = { version = "6", default-features = false }
-fs2 = { version = "0.4", default-features = false }
-globset = { version = "0.4", default-features = false }
-ignore = { version = "0.4", default-features = false }
-libc = { version = "0.2", default-features = false }
-serde = { version = "1", default-features = false, features = [
-  "std",
-  "derive",
-] }
-similar = { version = "2", default-features = false, features = ["text"] }
-tempfile = { version = "3", default-features = false }
 toml = { version = "0.9", default-features = false, features = [
-  "parse",
   "display",
+  "parse",
   "serde",
 ] }
 tracing = { version = "0.1", default-features = false, features = [
-  "std",
   "attributes",
+  "std",
 ] }
 tracing-subscriber = { version = "0.3", default-features = false, features = [
   "env-filter",
   "fmt",
   "std",
 ] }
+tungstenite = { version = "0.29", default-features = false, features = [
+  "handshake",
+  "rustls-tls-webpki-roots",
+] }
+unicode-width = { version = "0.2", default-features = false }
+ureq = { version = "2", default-features = false, features = ["tls"] }
+url = { version = "2", default-features = false }
 vt100 = { version = "0.16", default-features = false }
 which = { version = "8", default-features = false, features = ["real-sys"] }
 

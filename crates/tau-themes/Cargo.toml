@@ -12,8 +12,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-serde = { workspace = true }
 json5 = { workspace = true }
+serde = { workspace = true }
 
 [lints]
 workspace = true

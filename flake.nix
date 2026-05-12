@@ -186,7 +186,7 @@
         legacyPackages = multiBuild;
 
         devShells = flakeboxLib.mkShells {
-          packages = [ ];
+          packages = [ pkgs.taplo ];
         };
       }
     );

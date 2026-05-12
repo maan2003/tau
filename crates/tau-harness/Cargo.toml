@@ -21,18 +21,17 @@ workspace = true
 # Pulls in tau-ext-shell so the `echo` tool is in-process for
 # echo-agent-driven tool calls; without this feature, tau-harness has
 # no dependency on tau-ext-shell at all.
-echo-agent = ["tau-agent/echo-agent", "dep:tau-ext-shell"]
+echo-agent = ["dep:tau-ext-shell", "tau-agent/echo-agent"]
 
 [dependencies]
+blake3.workspace = true
 bon.workspace = true
 ciborium.workspace = true
 dirs.workspace = true
 json5.workspace = true
 libc.workspace = true
-blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 tau-agent.workspace = true
 tau-config.workspace = true
 tau-core.workspace = true
@@ -42,6 +41,7 @@ tau-session-inspect.workspace = true
 tau-skills.workspace = true
 tau-socket.workspace = true
 tau-supervisor.workspace = true
+tempfile.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
