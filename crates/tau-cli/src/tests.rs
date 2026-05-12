@@ -13,7 +13,8 @@ use super::chat::{DraftSlot, should_send_draft_snapshot};
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
     ToolStatus, build_osc1337_set_user_var, cache_hit_percent, format_cache_hit_chip,
-    format_context_chip, format_tool_completion, format_turn_metrics_chip, streaming_block,
+    format_context_chip, format_token_stats_line, format_tool_completion, format_turn_metrics_chip,
+    streaming_block,
 };
 
 /// Writer that feeds bytes into a vt100::Parser. Bytes are
@@ -1163,6 +1164,28 @@ fn format_turn_metrics_chip_includes_latency() {
         " resp:1.2s",
     );
     assert_eq!(format_turn_metrics_chip(None), "");
+}
+
+#[test]
+fn format_token_stats_line_appends_hit_percent_when_cache_hits() {
+    let usage = tau_proto::AgentTokenUsage {
+        prompt_sent_tokens: 17_341,
+        prompt_cached_tokens: 16_896,
+        response_received_tokens: 29,
+        ..Default::default()
+    };
+    let line = format_token_stats_line(&usage);
+
+    assert!(line.contains(" hit:97%"), "{line}");
+    assert!(line.contains("↑Δ445/17.3k"), "{line}");
+}
+
+#[test]
+fn format_token_stats_line_omits_hit_chip_when_no_prompt_sent() {
+    let usage = tau_proto::AgentTokenUsage::default();
+    let line = format_token_stats_line(&usage);
+
+    assert!(!line.contains("hit:"), "{line}");
 }
 
 #[test]

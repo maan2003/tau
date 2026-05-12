@@ -57,7 +57,7 @@ pub(crate) fn format_token_stats_line(usage: &tau_proto::AgentTokenUsage) -> Str
         .total
         .sent_tokens
         .saturating_sub(usage.stats.total.cached_tokens);
-    format!(
+    let mut line = format!(
         "↑Δ{}/{} ↑Σ{}/{} ↓Δ{} ↓Σ{}",
         format_token_count(prompt_uncached_tokens),
         format_token_count(usage.prompt_sent_tokens),
@@ -65,7 +65,19 @@ pub(crate) fn format_token_stats_line(usage: &tau_proto::AgentTokenUsage) -> Str
         format_token_count(usage.stats.total.sent_tokens),
         format_token_count(usage.response_received_tokens),
         format_token_count(usage.stats.total.received_tokens),
-    )
+    );
+    // Per-turn cache-hit %, only meaningful when this turn actually sent
+    // a prompt. Lets the user spot a regression (e.g. tool reordering
+    // breaking the prefix) directly on the offending turn instead of
+    // inferring it from the cumulative status-bar chip.
+    if let Some(percent) = cache_hit_percent(
+        Some(usage.prompt_sent_tokens),
+        Some(usage.prompt_cached_tokens),
+    ) && usage.prompt_sent_tokens > 0
+    {
+        line.push_str(&format!(" hit:{percent}%"));
+    }
+    line
 }
 
 fn format_latency(latency: Duration) -> String {
