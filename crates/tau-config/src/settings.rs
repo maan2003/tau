@@ -546,6 +546,18 @@ impl ModelConfig {
 }
 
 /// Returns `true` for OpenAI model IDs known to accept
+/// `prompt_cache_retention="24h"` on the public API. Per OpenAI's
+/// prompt-caching guide, extended retention is offered only on
+/// gpt-5.5 and forward; sending the param to older models is
+/// rejected as an unknown argument, so we whitelist conservatively
+/// and let unknown models fall back to the default in-memory cache.
+#[must_use]
+pub fn is_known_24h_prompt_cache_model_id(id: &str) -> bool {
+    const PREFIXES: &[&str] = &["gpt-5.5"];
+    PREFIXES.iter().any(|p| id.starts_with(p))
+}
+
+/// Returns `true` for OpenAI model IDs known to accept
 /// `reasoning_effort=xhigh` on the public API as of 2026-05.
 ///
 /// Curated from OpenAI's model documentation:

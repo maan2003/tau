@@ -1,7 +1,10 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use tau_config::settings::{AuthType, ModelRegistry, PromptCacheRetention, ProviderConfig};
+use tau_config::settings::{
+    AuthType, ModelRegistry, PromptCacheRetention, ProviderConfig,
+    is_known_24h_prompt_cache_model_id,
+};
 use tau_proto::{ModelId, ModelName, ProviderName};
 
 use crate::storage::{self, Credentials, ProviderKind};
@@ -122,7 +125,7 @@ fn responses_backend(
         supports_reasoning_effort: provider.compat.supports_reasoning_effort,
         supports_reasoning_summary: supports_reasoning_summary(provider, base_url),
         prompt_cache_key: prompt_cache_key(provider, base_url, model_id),
-        prompt_cache_retention: prompt_cache_retention(provider, base_url),
+        prompt_cache_retention: prompt_cache_retention(provider, base_url, model_id),
     }))
 }
 
@@ -140,7 +143,7 @@ fn copilot_backend(
         .unwrap_or_else(|| "https://api.individual.githubcopilot.com".to_owned());
     Some(ResolvedBackend::ChatCompletions(ResolvedChatCompletions {
         prompt_cache_key: prompt_cache_key(provider, &base_url, model_id),
-        prompt_cache_retention: prompt_cache_retention(provider, &base_url),
+        prompt_cache_retention: prompt_cache_retention(provider, &base_url, model_id),
         base_url,
         api_key: access_token,
         model_id: model_id.clone(),
@@ -165,7 +168,7 @@ fn chat_completions_backend(
             })?;
     Some(ResolvedBackend::ChatCompletions(ResolvedChatCompletions {
         prompt_cache_key: prompt_cache_key(provider, &base_url, model_id),
-        prompt_cache_retention: prompt_cache_retention(provider, &base_url),
+        prompt_cache_retention: prompt_cache_retention(provider, &base_url, model_id),
         base_url,
         api_key: provider.api_key.clone().unwrap_or_default(),
         model_id: model_id.clone(),
@@ -214,6 +217,17 @@ fn prompt_cache_key(provider: &ProviderConfig, base_url: &str, model_id: &str) -
     Some(prompt_cache_key_for(base_url, model_id, &cwd))
 }
 
+/// Derive the per-(provider, model, workspace) cache key the OpenAI
+/// guide expects. The key is hashed with the prompt prefix on the
+/// server side and used to bias routing so semantically-related
+/// requests land on the same machine and reuse its cached KV state.
+///
+/// Granularity rationale: `(base_url, model_id, cwd)` is the
+/// coarsest grouping that still pins a session to one cache. A
+/// single workspace usually has one active conversation at a time,
+/// well under OpenAI's documented ~15 RPM ceiling per (prefix,
+/// machine) — go any coarser and bursts overflow to multiple
+/// machines, defeating the point.
 fn prompt_cache_key_for(base_url: &str, model_id: &str, cwd: &std::path::Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(base_url.as_bytes());
@@ -227,12 +241,22 @@ fn prompt_cache_key_for(base_url: &str, model_id: &str, cwd: &std::path::Path) -
 fn prompt_cache_retention(
     provider: &ProviderConfig,
     base_url: &str,
+    model_id: &str,
 ) -> Option<PromptCacheRetention> {
-    if supports_prompt_cache_retention(provider, base_url) {
-        provider.prompt_cache_retention
-    } else {
-        None
+    if !supports_prompt_cache_retention(provider, base_url) {
+        return None;
     }
+    if let Some(explicit) = provider.prompt_cache_retention {
+        return Some(explicit);
+    }
+    // Default to 24 h retention on built-in OpenAI endpoints when the
+    // model is known to support the param. Same-price extension of
+    // the in-memory TTL (5–10 min idle, max 1 h) to 24 h, so coffee
+    // breaks don't evict the working prefix.
+    if is_builtin_openai_endpoint(base_url) && is_known_24h_prompt_cache_model_id(model_id) {
+        return Some(PromptCacheRetention::Extended24h);
+    }
+    None
 }
 
 fn supports_prompt_cache_key(provider: &ProviderConfig, base_url: &str) -> bool {
