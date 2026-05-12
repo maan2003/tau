@@ -468,8 +468,8 @@ fn build_provider_entry(kind: &ProviderKind, ollama_model: Option<&str>) -> Prov
             config.api = Some("openai-chat".to_owned());
             config.models = vec![
                 model("gpt-5.5", 200_000),
-                model("gpt-5.5-mini", 200_000),
-                model("o3-mini", 200_000),
+                model("gpt-5.4", 200_000),
+                model("gpt-5.4-mini", 200_000),
             ];
         }
         ProviderKind::Anthropic => {
