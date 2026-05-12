@@ -238,6 +238,7 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
             tool_name: invoke.tool_name,
             message: "unknown tool".to_owned(),
             details: None,
+            display: None,
             originator: tau_proto::PromptOriginator::User,
         })));
         return;
@@ -256,6 +257,7 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
                     result: CborValue::Text(text),
+                    display: None,
                     originator: tau_proto::PromptOriginator::User,
                 })
             }
@@ -271,6 +273,7 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
                     tool_name: invoke.tool_name,
                     message,
                     details: Some(invoke.arguments),
+                    display: None,
                     originator: tau_proto::PromptOriginator::User,
                 })
             }
@@ -280,6 +283,7 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
             tool_name: invoke.tool_name,
             message,
             details: Some(invoke.arguments),
+            display: None,
             originator: tau_proto::PromptOriginator::User,
         }),
     };

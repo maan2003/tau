@@ -336,6 +336,7 @@ mod tests {
             tool_name: tau_proto::ToolName::new("shell"),
             message: "command exited with status 1".to_owned(),
             details: Some(details),
+            display: None,
             originator: tau_proto::PromptOriginator::User,
         }));
 

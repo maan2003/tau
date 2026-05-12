@@ -11,8 +11,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentTokenUsage, CborValue, ExtensionName, ModelId, SessionId, SessionPromptId, SkillName,
-    ToolCallId, ToolName, ToolNameMaybe,
+    AgentTokenUsage, CborValue, DiffSummary, ExtensionName, ModelId, SessionId, SessionPromptId,
+    SkillName, ToolCallId, ToolName, ToolNameMaybe,
 };
 
 // ---------------------------------------------------------------------------
@@ -790,6 +790,13 @@ pub struct ToolResult {
     pub call_id: ToolCallId,
     pub tool_name: ToolName,
     pub result: CborValue,
+    /// Optional UI display descriptor populated by the tool. When
+    /// present, lets the renderer paint a uniform tool block without
+    /// inspecting `result`'s tool-specific shape. `None` for older
+    /// logs and tools that haven't migrated yet — the renderer falls
+    /// back to a minimal generic block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ToolDisplay>,
     /// Echo of the originating [`ToolRequest::originator`]. Tool
     /// extensions usually pass [`PromptOriginator::User`] (the
     /// default); the harness re-stamps this with the call's owning
@@ -807,10 +814,88 @@ pub struct ToolError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<CborValue>,
+    /// See [`ToolResult::display`]. On error, the descriptor's
+    /// `status` is typically [`ToolDisplayStatus::Error`] and
+    /// `status_text` carries a short error label for the chip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ToolDisplay>,
     /// Echo of the originating [`ToolRequest::originator`]; see
     /// [`ToolResult::originator`].
     #[serde(default)]
     pub originator: PromptOriginator,
+}
+
+/// UI display descriptor for one finished tool call.
+///
+/// Populated by the tool side (in-tree dispatchers or out-of-tree
+/// extensions) and rendered uniformly by the CLI without inspecting
+/// the tool's specific result shape. Carries everything the chip line
+/// needs (args label, info chips, stats, status word) plus an
+/// optional rich payload to render in a block below.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolDisplay {
+    /// Short label rendered alongside the tool name (e.g.
+    /// `"src/main.rs"`, `"\"foo\" in src"`, `"git status"`). Empty
+    /// when the tool has nothing useful to surface beyond its name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub args: String,
+    /// Compact `(NM, NL, NkB)`-style stats. Each field is optional
+    /// so the renderer can omit a slot rather than emit `(0M, 1L)`.
+    #[serde(default, skip_serializing_if = "ToolDisplayStats::is_empty")]
+    pub stats: ToolDisplayStats,
+    /// Free-form info chips beyond the stats slot (e.g. `"(2
+    /// suggestions)"`, `"(3 entries)"`). Rendered between stats and
+    /// status.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub info_chips: Vec<String>,
+    /// Severity of the trailing status chip. Picks its themed color.
+    pub status: ToolDisplayStatus,
+    /// Short status word/message rendered as the last chip (e.g.
+    /// `"ok"`, `"ok: no matches"`, `"err: regex parse error: …"`).
+    pub status_text: String,
+    /// Optional rich content rendered in a block below the chip row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<ToolDisplayPayload>,
+}
+
+/// Volume metrics. Each is optional because a given tool typically
+/// reports only some of them — `read` has lines/bytes but no matches;
+/// `grep` has all three; `ls` has none (uses [`ToolDisplay::info_chips`]).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct ToolDisplayStats {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matches: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+}
+
+impl ToolDisplayStats {
+    pub fn is_empty(&self) -> bool {
+        self.matches.is_none() && self.lines.is_none() && self.bytes.is_none()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDisplayStatus {
+    #[default]
+    Success,
+    Warning,
+    Error,
+}
+
+/// Rich content rendered below the chip row. Closed for now — extend
+/// as new tool kinds need it. Tools that don't produce a rich payload
+/// (most of them) leave [`ToolDisplay::payload`] as `None`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolDisplayPayload {
+    /// Structured file diff. The renderer derives the `+N -M` chip
+    /// from the summary's `added`/`removed` and renders the hunks
+    /// below the chip row.
+    Diff(DiffSummary),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

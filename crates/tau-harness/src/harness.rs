@@ -1266,6 +1266,7 @@ impl Harness {
                             tool_name,
                             message: "no live provider available".to_owned(),
                             details: None,
+                            display: None,
                             originator: tau_proto::PromptOriginator::User,
                         };
                         match owning_cid {
@@ -1702,6 +1703,7 @@ impl Harness {
                 tool_name,
                 message: "tool provider disconnected".to_owned(),
                 details: None,
+                display: None,
                 originator: tau_proto::PromptOriginator::User,
             };
             // Publish on the owning conversation's branch so the
@@ -3213,6 +3215,7 @@ impl Harness {
                     tool_name,
                     message: "no live provider available".to_owned(),
                     details: None,
+                    display: None,
                     originator: tau_proto::PromptOriginator::User,
                 };
                 self.publish_for_conversation(cid, Event::ToolError(error));
@@ -3278,6 +3281,7 @@ impl Harness {
                 tool_name: placeholder,
                 message,
                 details: None,
+                display: None,
                 originator: tau_proto::PromptOriginator::User,
             }),
         );

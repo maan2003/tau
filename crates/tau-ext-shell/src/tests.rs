@@ -1181,7 +1181,7 @@ fn run_grep_counts_matches_across_directory() {
     fs::write(tempdir.path().join("b.txt"), "alpha\n").expect("write b");
 
     let args = grep_args("alpha", &tempdir.path().display().to_string(), vec![]);
-    let result = run_grep(&args).expect("grep");
+    let result = run_grep(&args).expect("grep").result;
 
     assert_eq!(cbor_int_field(&result, "matches"), Some(3));
 }
@@ -1197,7 +1197,7 @@ fn run_grep_counts_matches_in_single_file() {
     fs::write(&file, "alpha\nbeta\nalpha\ngamma\nalpha\n").expect("write");
 
     let args = grep_args("alpha", &file.display().to_string(), vec![]);
-    let result = run_grep(&args).expect("grep");
+    let result = run_grep(&args).expect("grep").result;
 
     assert_eq!(cbor_int_field(&result, "matches"), Some(3));
     let output = cbor_map_text(&result, "output").expect("output");
@@ -1228,7 +1228,7 @@ fn run_grep_with_context_counts_only_match_lines() {
             CborValue::Integer(1.into()),
         )],
     );
-    let result = run_grep(&args).expect("grep");
+    let result = run_grep(&args).expect("grep").result;
 
     // Two matches; surrounding context lines are present in output
     // but must not inflate the count.
@@ -1317,7 +1317,7 @@ fn read_file_honors_start_line_and_line_count() {
             CborValue::Integer(3.into()),
         ),
     ]);
-    let result = read_file(&args).expect("read");
+    let result = read_file(&args).expect("read").result;
     assert_eq!(
         cbor_map_text(&result, "content"),
         Some("line 2\nline 3\nline 4")
@@ -1340,7 +1340,9 @@ fn read_file_rejects_invalid_line_arguments() {
         ),
     ]);
     assert_eq!(
-        read_file(&args).expect_err("start_line=0 should fail"),
+        read_file(&args)
+            .expect_err("start_line=0 should fail")
+            .message,
         "start_line must be >= 1"
     );
 
@@ -1355,7 +1357,9 @@ fn read_file_rejects_invalid_line_arguments() {
         ),
     ]);
     assert_eq!(
-        read_file(&args).expect_err("line_count=0 should fail"),
+        read_file(&args)
+            .expect_err("line_count=0 should fail")
+            .message,
         "line_count must be >= 1"
     );
 }
@@ -1371,7 +1375,7 @@ fn read_file_truncates_large_output() {
         CborValue::Text("path".to_owned()),
         CborValue::Text(path.display().to_string()),
     )]);
-    let result = read_file(&args).expect("read");
+    let result = read_file(&args).expect("read").result;
     let content = cbor_map_text(&result, "content").expect("content field");
     assert!(content.contains("line 1\n"));
     assert!(content.contains("[Showing lines 1-"));
@@ -1402,7 +1406,7 @@ fn run_find_double_star_matches_top_level_files() {
             CborValue::Text(tempdir.path().display().to_string()),
         ),
     ]);
-    let result = run_find(&args).expect("find");
+    let result = run_find(&args).expect("find").result;
 
     assert_eq!(cbor_int_field(&result, "matches"), Some(2));
     let output = cbor_map_text(&result, "output").expect("output");
@@ -1439,7 +1443,7 @@ fn run_find_returns_matching_files() {
             CborValue::Text(tempdir.path().display().to_string()),
         ),
     ]);
-    let result = run_find(&args).expect("find");
+    let result = run_find(&args).expect("find").result;
 
     assert_eq!(cbor_int_field(&result, "matches"), Some(2));
     let output = cbor_map_text(&result, "output").expect("output");
@@ -1459,7 +1463,7 @@ fn run_ls_lists_directory_contents() {
         CborValue::Text("path".to_owned()),
         CborValue::Text(tempdir.path().display().to_string()),
     )]);
-    let result = run_ls(&args).expect("ls");
+    let result = run_ls(&args).expect("ls").result;
 
     assert_eq!(cbor_int_field(&result, "entries"), Some(3));
     let output = cbor_map_text(&result, "output").expect("output");

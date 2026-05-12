@@ -7,16 +7,18 @@ use std::path::{Path, PathBuf};
 use tau_proto::CborValue;
 
 use crate::argument::{argument_text, optional_argument_int};
+use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
 use crate::truncate::truncate_head_with_notice;
 
-pub(crate) fn read_file(arguments: &CborValue) -> Result<CborValue, String> {
-    let path = argument_text(arguments, "path")?;
+pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
+    let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
     let start_line = parse_read_start_line(arguments)?;
     let line_count = parse_read_line_count(arguments)?;
     let path_buf = PathBuf::from(&path);
+    let display_args = path_buf.display().to_string();
 
-    let sliced =
-        stream_slice_lines(&path_buf, start_line, line_count).map_err(|error| error.to_string())?;
+    let sliced = stream_slice_lines(&path_buf, start_line, line_count)
+        .map_err(|error| ToolFailure::from(error.to_string()).with_args(display_args.clone()))?;
     let total_lines = sliced.total_lines;
     let truncated = truncate_head_with_notice(
         &sliced.content,
@@ -25,11 +27,11 @@ pub(crate) fn read_file(arguments: &CborValue) -> Result<CborValue, String> {
     let mut entries = vec![
         (
             CborValue::Text("path".to_owned()),
-            CborValue::Text(path_buf.display().to_string()),
+            CborValue::Text(display_args.clone()),
         ),
         (
             CborValue::Text("content".to_owned()),
-            CborValue::Text(truncated.content),
+            CborValue::Text(truncated.content.clone()),
         ),
         (
             CborValue::Text("start_line".to_owned()),
@@ -54,7 +56,12 @@ pub(crate) fn read_file(arguments: &CborValue) -> Result<CborValue, String> {
             CborValue::Integer((truncated.total_bytes as i64).into()),
         ));
     }
-    Ok(CborValue::Map(entries))
+    let mut display = ok_display(display_args);
+    display.stats = text_stats(&truncated.content);
+    Ok(ToolOutput {
+        result: CborValue::Map(entries),
+        display,
+    })
 }
 
 pub(crate) struct ReadSlice {
@@ -115,18 +122,18 @@ fn stream_slice_lines(
     })
 }
 
-fn parse_read_start_line(arguments: &CborValue) -> Result<usize, String> {
+fn parse_read_start_line(arguments: &CborValue) -> Result<usize, ToolFailure> {
     match optional_argument_int(arguments, "start_line") {
         None => Ok(1),
-        Some(value) if value < 1 => Err("start_line must be >= 1".to_owned()),
+        Some(value) if value < 1 => Err(ToolFailure::new("start_line must be >= 1")),
         Some(value) => Ok(value as usize),
     }
 }
 
-fn parse_read_line_count(arguments: &CborValue) -> Result<Option<usize>, String> {
+fn parse_read_line_count(arguments: &CborValue) -> Result<Option<usize>, ToolFailure> {
     match optional_argument_int(arguments, "line_count") {
         None => Ok(None),
-        Some(value) if value < 1 => Err("line_count must be >= 1".to_owned()),
+        Some(value) if value < 1 => Err(ToolFailure::new("line_count must be >= 1")),
         Some(value) => Ok(Some(value as usize)),
     }
 }

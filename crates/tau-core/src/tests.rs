@@ -169,6 +169,7 @@ fn connection_abstraction_is_transport_independent_for_in_memory_clients() {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("echo"),
         result: CborValue::Text("done".to_owned()),
+        display: None,
         originator: tau_proto::PromptOriginator::User,
     })));
     assert_eq!(first_report.delivered_to, vec![tool_id.clone()]);
@@ -603,6 +604,7 @@ fn session_tree_associates_tool_activity() {
                 call_id: "call-1".into(),
                 tool_name: tau_proto::ToolName::new("read"),
                 result: CborValue::Text("README".to_owned()),
+                display: None,
                 originator: tau_proto::PromptOriginator::User,
             }),
         )

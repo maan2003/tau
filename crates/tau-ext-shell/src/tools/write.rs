@@ -3,19 +3,23 @@
 use std::fs;
 use std::path::PathBuf;
 
-use tau_proto::CborValue;
+use tau_proto::{CborValue, ToolDisplayPayload, ToolDisplayStatus};
 
 use crate::argument::argument_text;
 use crate::diff::{compute_diff, encode_diff};
+use crate::display::{ToolFailure, ToolOutput};
 
-pub(crate) fn write_file(arguments: &CborValue) -> Result<CborValue, String> {
-    let path = argument_text(arguments, "path")?;
-    let content = argument_text(arguments, "content")?;
+pub(crate) fn write_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
+    let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
+    let content = argument_text(arguments, "content").map_err(ToolFailure::from)?;
     let path_buf = PathBuf::from(&path);
+    let display_args = path_buf.display().to_string();
 
     if let Some(parent) = path_buf.parent() {
         if !parent.exists() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            fs::create_dir_all(parent).map_err(|error| {
+                ToolFailure::from(error.to_string()).with_args(display_args.clone())
+            })?;
         }
     }
 
@@ -25,19 +29,30 @@ pub(crate) fn write_file(arguments: &CborValue) -> Result<CborValue, String> {
     let original = fs::read_to_string(&path_buf).unwrap_or_default();
 
     let bytes_written = content.len();
-    fs::write(&path_buf, &content).map_err(|error| error.to_string())?;
+    fs::write(&path_buf, &content)
+        .map_err(|error| ToolFailure::from(error.to_string()).with_args(display_args.clone()))?;
 
     let diff = compute_diff(&original, &content);
 
-    Ok(CborValue::Map(vec![
-        (
-            CborValue::Text("path".to_owned()),
-            CborValue::Text(path_buf.display().to_string()),
-        ),
-        (
-            CborValue::Text("bytes_written".to_owned()),
-            CborValue::Integer((bytes_written as i64).into()),
-        ),
-        (CborValue::Text("diff".to_owned()), encode_diff(&diff)),
-    ]))
+    let display = tau_proto::ToolDisplay {
+        args: display_args.clone(),
+        status: ToolDisplayStatus::Success,
+        status_text: "ok".to_owned(),
+        payload: Some(ToolDisplayPayload::Diff(diff.clone())),
+        ..Default::default()
+    };
+    Ok(ToolOutput {
+        result: CborValue::Map(vec![
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(display_args),
+            ),
+            (
+                CborValue::Text("bytes_written".to_owned()),
+                CborValue::Integer((bytes_written as i64).into()),
+            ),
+            (CborValue::Text("diff".to_owned()), encode_diff(&diff)),
+        ]),
+        display,
+    })
 }

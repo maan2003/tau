@@ -9,13 +9,14 @@ use tau_proto::CborValue;
 use crate::argument::{
     argument_text, optional_argument_bool, optional_argument_int, optional_argument_text,
 };
+use crate::display::{ToolFailure, ToolOutput, text_stats};
 use crate::isolation::apply_command_isolation;
 use crate::truncate::{truncate_head, truncate_line};
 
 pub(crate) const DEFAULT_GREP_LIMIT: usize = 100;
 pub(crate) const GREP_MAX_LINE_LENGTH: usize = 500;
 
-pub(crate) fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
+pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
     let pattern = argument_text(arguments, "pattern")?;
     let path = optional_argument_text(arguments, "path");
     let glob = optional_argument_text(arguments, "glob");
@@ -64,6 +65,12 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
     args.push(pattern.clone());
     args.push(search_path.to_owned());
 
+    let display_args = match glob.as_deref() {
+        Some(g) => format!("{pattern:?} in {search_path} [{g}]"),
+        None => format!("{pattern:?} in {search_path}"),
+    };
+    let with_args = |f: ToolFailure| f.with_args(display_args.clone());
+
     let mut cmd = Command::new("rg");
     cmd.args(&args)
         .stdout(std::process::Stdio::piped())
@@ -71,12 +78,12 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
     apply_command_isolation(&mut cmd);
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("failed to start ripgrep: {e}"))?;
+        .map_err(|e| with_args(ToolFailure::from(format!("failed to start ripgrep: {e}"))))?;
 
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "ripgrep stdout pipe missing".to_owned())?;
+        .ok_or_else(|| with_args(ToolFailure::from("ripgrep stdout pipe missing".to_owned())))?;
     let GrepStreamResult {
         result_lines,
         match_count,
@@ -90,9 +97,11 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
         let _ = child.kill();
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("failed to wait for ripgrep: {e}"))?;
+    let output = child.wait_with_output().map_err(|e| {
+        with_args(ToolFailure::from(format!(
+            "failed to wait for ripgrep: {e}"
+        )))
+    })?;
 
     // rg exit codes: 0=matches found, 1=no matches, 2=error.
     // Exit-2 is overloaded — ripgrep emits regex parse errors, IO
@@ -102,18 +111,26 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
     let status = output.status.code();
     if status == Some(2) {
         let stderr_raw = String::from_utf8_lossy(&output.stderr);
-        return Err(classify_ripgrep_stderr(stderr_raw.trim()).to_string());
+        return Err(with_args(ToolFailure::from(
+            classify_ripgrep_stderr(stderr_raw.trim()).to_string(),
+        )));
     }
 
     if result_lines.is_empty() {
-        return Ok(grep_result_map(
-            &pattern,
-            search_path,
-            glob.as_deref(),
-            status,
-            0,
-            "no matches found".to_owned(),
-        ));
+        let mut display = crate::display::ok_display(display_args.clone());
+        display.status_text = "ok: no matches".to_owned();
+        display.stats.matches = Some(0);
+        return Ok(ToolOutput {
+            result: grep_result_map(
+                &pattern,
+                search_path,
+                glob.as_deref(),
+                status,
+                0,
+                "no matches found".to_owned(),
+            ),
+            display,
+        });
     }
 
     let mut output_text = result_lines.join("\n");
@@ -147,14 +164,20 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
         output_text.push(']');
     }
 
-    Ok(grep_result_map(
-        &pattern,
-        search_path,
-        glob.as_deref(),
-        status,
-        match_count,
-        output_text,
-    ))
+    let mut display = crate::display::ok_display(display_args);
+    display.stats = text_stats(&output_text);
+    display.stats.matches = Some(match_count as u64);
+    Ok(ToolOutput {
+        result: grep_result_map(
+            &pattern,
+            search_path,
+            glob.as_deref(),
+            status,
+            match_count,
+            output_text,
+        ),
+        display,
+    })
 }
 
 /// Categorized ripgrep failure (exit code 2). The variants encode the

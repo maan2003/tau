@@ -152,6 +152,7 @@ where
                     tool_name: invoke.tool_name,
                     message: "restarting failed".to_owned(),
                     details: None,
+                    display: None,
                     originator: tau_proto::PromptOriginator::User,
                 })))?;
                 writer.flush()?;

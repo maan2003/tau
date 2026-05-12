@@ -12,8 +12,8 @@ use crate::tool_render::{
     format_cache_hit_chip, format_context_chip, format_delegate_completion,
     format_delegate_progress, format_token_stats_line, format_tool_call, format_tool_completion,
     format_turn_metrics_chip, render_diff_tool_block, render_harness_info, render_shell_block,
-    render_tool_block, session_status_block, streaming_block, system_loaded_block,
-    system_status_block, ui_dir_block,
+    render_tool_block, render_tool_display, session_status_block, streaming_block,
+    system_loaded_block, system_status_block, ui_dir_block,
 };
 use crate::{build_label_parts, random_startup_pun};
 
@@ -920,6 +920,8 @@ impl EventRenderer {
                         &result.result,
                         None,
                     )
+                } else if let Some(descriptor) = &result.display {
+                    render_tool_display(&result.tool_name, descriptor)
                 } else {
                     format_tool_completion(&result.tool_name, &result.result, None)
                 };
@@ -956,6 +958,8 @@ impl EventRenderer {
                         cbor.unwrap_or(&CborValue::Null),
                         Some(&error.message),
                     )
+                } else if let Some(descriptor) = &error.display {
+                    render_tool_display(&error.tool_name, descriptor)
                 } else {
                     format_tool_completion(
                         &error.tool_name,

@@ -3,6 +3,7 @@
 use tau_proto::{CborValue, Event, ToolError, ToolProgress, ToolResult};
 
 use crate::config::ShellConfig;
+use crate::display::{ToolFailure, ToolOutput};
 
 pub(crate) mod edit;
 pub(crate) mod find;
@@ -35,6 +36,7 @@ pub(crate) fn execute_tool(
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             result: invoke.arguments,
+            display: None,
             originator: tau_proto::PromptOriginator::User,
         })];
     }
@@ -66,17 +68,23 @@ pub(crate) fn execute_tool(
             progress: None,
         })];
         match shell::run_command(&invoke.arguments, shell_config) {
-            Ok(result) => events.push(Event::ToolResult(ToolResult {
+            Ok(ToolOutput { result, display }) => events.push(Event::ToolResult(ToolResult {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 result,
+                display: Some(display),
                 originator: tau_proto::PromptOriginator::User,
             })),
-            Err((message, details)) => events.push(Event::ToolError(ToolError {
+            Err(ToolFailure {
+                message,
+                details,
+                display,
+            }) => events.push(Event::ToolError(ToolError {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 message,
                 details,
+                display: Some(display),
                 originator: tau_proto::PromptOriginator::User,
             })),
         }
@@ -88,29 +96,39 @@ pub(crate) fn execute_tool(
         tool_name: invoke.tool_name,
         message: "unknown tool".to_owned(),
         details: None,
+        display: None,
         originator: tau_proto::PromptOriginator::User,
     })]
 }
 
 /// Common Ok/Err → Result/Error wrapping for tools whose handler is a
-/// pure `(arguments) -> Result<CborValue, String>`.
+/// pure `(arguments) -> Result<ToolOutput, ToolFailure>`. The
+/// handler's display descriptor is forwarded to the event; the
+/// failure's own details take precedence, with `fallback_details` used
+/// only when the handler didn't attach any.
 fn wrap_pure(
     invoke: tau_proto::ToolInvoke,
-    error_details: Option<CborValue>,
-    handler: fn(&CborValue) -> Result<CborValue, String>,
+    fallback_details: Option<CborValue>,
+    handler: fn(&CborValue) -> Result<ToolOutput, ToolFailure>,
 ) -> Vec<Event> {
     match handler(&invoke.arguments) {
-        Ok(result) => vec![Event::ToolResult(ToolResult {
+        Ok(ToolOutput { result, display }) => vec![Event::ToolResult(ToolResult {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             result,
+            display: Some(display),
             originator: tau_proto::PromptOriginator::User,
         })],
-        Err(error) => vec![Event::ToolError(ToolError {
+        Err(ToolFailure {
+            message,
+            details,
+            display,
+        }) => vec![Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
-            message: error,
-            details: error_details,
+            message,
+            details: details.or(fallback_details),
+            display: Some(display),
             originator: tau_proto::PromptOriginator::User,
         })],
     }

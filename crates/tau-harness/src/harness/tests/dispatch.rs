@@ -1213,6 +1213,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
             call_id: "websearch-call".into(),
             tool_name: tau_proto::ToolName::new("websearch"),
             result: CborValue::Text("fake result".to_owned()),
+            display: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -1378,6 +1379,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             call_id: "nested-call".into(),
             tool_name: tau_proto::ToolName::new("delegate"),
             result: CborValue::Text("nested answer".to_owned()),
+            display: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -1651,6 +1653,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
             call_id: "outer-call".into(),
             tool_name: tau_proto::ToolName::new("delegate"),
             result: CborValue::Text("outer answer".to_owned()),
+            display: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )

@@ -482,6 +482,7 @@ fn duplicate_tool_result_is_discarded() {
             call_id: "orphan-call".into(),
             tool_name: ToolName::new("read"),
             result: tau_proto::CborValue::Text("stale data".to_owned()),
+            display: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     );

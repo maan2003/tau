@@ -109,6 +109,7 @@ impl Harness {
                     "unknown skill action: {other:?} (expected \"load\" or \"search\")"
                 ),
                 details: None,
+                display: None,
                 originator: tau_proto::PromptOriginator::User,
             }),
             None => Event::ToolError(tau_proto::ToolError {
@@ -116,6 +117,7 @@ impl Harness {
                 tool_name: tool_name.clone(),
                 message: "missing required argument: action (\"load\" or \"search\")".to_owned(),
                 details: None,
+                display: None,
                 originator: tau_proto::PromptOriginator::User,
             }),
         };
@@ -142,6 +144,7 @@ impl Harness {
                 tool_name: tool_name.clone(),
                 message: "missing required argument: name (action=load)".to_owned(),
                 details: None,
+                display: None,
                 originator: tau_proto::PromptOriginator::User,
             });
         };
@@ -165,6 +168,7 @@ impl Harness {
                 tool_name: tool_name.clone(),
                 message: format!("unknown skill: {name}"),
                 details: Some(skill_load_not_found_details(name, &needles, &matches)),
+                display: None,
                 originator: tau_proto::PromptOriginator::User,
             });
         };
@@ -184,6 +188,7 @@ impl Harness {
                             CborValue::Text(body.to_owned()),
                         ),
                     ]),
+                    display: None,
                     originator: tau_proto::PromptOriginator::User,
                 })
             }
@@ -192,6 +197,7 @@ impl Harness {
                 tool_name: tool_name.clone(),
                 message: format!("failed to read skill file: {e}"),
                 details: None,
+                display: None,
                 originator: tau_proto::PromptOriginator::User,
             }),
         }
@@ -211,6 +217,7 @@ impl Harness {
                     tool_name: tool_name.clone(),
                     message,
                     details: None,
+                    display: None,
                     originator: tau_proto::PromptOriginator::User,
                 });
             }
@@ -248,6 +255,7 @@ impl Harness {
                 ),
                 (CborValue::Text("matches".to_owned()), matches),
             ]),
+            display: None,
             originator: tau_proto::PromptOriginator::User,
         })
     }

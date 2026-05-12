@@ -14,7 +14,7 @@ use super::event_renderer::EventRenderer;
 use super::tool_render::{
     ToolStatus, build_osc1337_set_user_var, cache_hit_percent, format_cache_hit_chip,
     format_context_chip, format_token_stats_line, format_tool_completion, format_turn_metrics_chip,
-    streaming_block,
+    render_tool_display, streaming_block,
 };
 
 /// Writer that feeds bytes into a vt100::Parser. Bytes are
@@ -180,6 +180,7 @@ fn new_session_clears_session_ui_state() {
                 CborValue::Text("fn main() {}\n".into()),
             ),
         ]),
+        display: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -923,6 +924,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
                 CborValue::Text("fn main() {}\n".into()),
             ),
         ]),
+        display: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -945,6 +947,7 @@ fn websearch_tool_result_shows_result_count_and_size() {
         result: CborValue::Text(
             "Title: One\nURL: https://one.example\n\nTitle: Two\nURL: https://two.example\n".into(),
         ),
+        display: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -1140,6 +1143,75 @@ fn edit_completion_uses_path_on_error() {
     assert_eq!(edit_error.suffixes.len(), 1);
     assert_eq!(edit_error.suffixes[0].text, "err: no match");
     assert!(matches!(edit_error.suffixes[0].status, ToolStatus::Error));
+}
+
+#[test]
+fn render_tool_display_assembles_chips_in_order() {
+    use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
+
+    // grep-style: matches + stats + status.
+    let display = ToolDisplay {
+        args: "\"foo\" in src".into(),
+        stats: ToolDisplayStats {
+            matches: Some(3),
+            lines: Some(7),
+            bytes: Some(120),
+        },
+        info_chips: vec![],
+        status: ToolDisplayStatus::Success,
+        status_text: "ok".into(),
+        payload: None,
+    };
+    let rendered = render_tool_display("grep", &display);
+    assert_eq!(rendered.tool_name, "grep");
+    assert_eq!(rendered.args, "\"foo\" in src");
+    let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(texts, vec!["(3M, 7L, 120B)", "ok"]);
+    assert!(matches!(
+        rendered.suffixes.last().unwrap().status,
+        ToolStatus::Success
+    ));
+}
+
+#[test]
+fn render_tool_display_diff_payload_adds_plus_minus_chips() {
+    use tau_proto::{DiffSummary, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
+
+    let display = ToolDisplay {
+        args: "src/main.rs".into(),
+        status: ToolDisplayStatus::Success,
+        status_text: "ok".into(),
+        payload: Some(ToolDisplayPayload::Diff(DiffSummary {
+            added: 12,
+            removed: 3,
+            hunks: vec![],
+        })),
+        ..Default::default()
+    };
+    let rendered = render_tool_display("edit", &display);
+    let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(texts, vec!["+12", "-3", "ok"]);
+    assert!(matches!(rendered.suffixes[0].status, ToolStatus::DiffAdded));
+    assert!(matches!(
+        rendered.suffixes[1].status,
+        ToolStatus::DiffRemoved
+    ));
+}
+
+#[test]
+fn render_tool_display_error_status_picks_error_severity() {
+    use tau_proto::{ToolDisplay, ToolDisplayStatus};
+
+    let display = ToolDisplay {
+        args: "/etc".into(),
+        status: ToolDisplayStatus::Error,
+        status_text: "err: permission denied".into(),
+        ..Default::default()
+    };
+    let rendered = render_tool_display("ls", &display);
+    assert_eq!(rendered.suffixes.len(), 1);
+    assert_eq!(rendered.suffixes[0].text, "err: permission denied");
+    assert!(matches!(rendered.suffixes[0].status, ToolStatus::Error));
 }
 
 #[test]

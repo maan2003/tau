@@ -26,6 +26,7 @@ fn representative_events() -> Vec<Event> {
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
             result: CborValue::Text("hello".to_owned()),
+            display: None,
             originator: PromptOriginator::User,
         }),
         Event::ToolError(ToolError {
@@ -33,6 +34,7 @@ fn representative_events() -> Vec<Event> {
             tool_name: ToolName::new("missing_tool"),
             message: "no live provider".to_owned(),
             details: None,
+            display: None,
             originator: PromptOriginator::User,
         }),
         Event::ToolProgress(ToolProgress {

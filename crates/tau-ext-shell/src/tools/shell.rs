@@ -2,10 +2,11 @@
 
 use std::sync::mpsc;
 
-use tau_proto::{CborValue, Event, Frame};
+use tau_proto::{CborValue, Event, Frame, ToolDisplay, ToolDisplayStatus};
 
 use crate::argument::{argument_text, optional_argument_int, optional_argument_text};
 use crate::config::ShellConfig;
+use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
 use crate::truncate::truncate_tail;
 
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -24,27 +25,27 @@ pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
 pub(crate) fn run_command(
     arguments: &CborValue,
     shell_config: &ShellConfig,
-) -> Result<CborValue, (String, Option<CborValue>)> {
-    let command = argument_text(arguments, "command").map_err(|message| (message, None))?;
+) -> Result<ToolOutput, ToolFailure> {
+    let command = argument_text(arguments, "command").map_err(ToolFailure::from)?;
     let cwd = optional_argument_text(arguments, "cwd");
     let timeout_secs = optional_argument_int(arguments, "timeout")
         .map(|v| v.max(1) as u64)
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
     let timeout = std::time::Duration::from_secs(timeout_secs);
+    let display_args = command.clone();
 
     let mut child = shell_config
         .spawn_isolated(&command, cwd.as_deref())
         .map_err(|error| {
-            (
-                format!("failed to start shell command: {error}"),
-                Some(command_details_value(
+            ToolFailure::from(format!("failed to start shell command: {error}"))
+                .with_args(display_args.clone())
+                .with_details(command_details_value(
                     command.clone(),
                     cwd.clone(),
                     None,
                     String::new(),
                     String::new(),
-                )),
-            )
+                ))
         })?;
 
     let wait = match wait_with_timeout(&mut child, timeout) {
@@ -52,16 +53,17 @@ pub(crate) fn run_command(
         None => {
             let _ = child.kill();
             let _ = child.wait();
-            return Err((
-                format!("command timed out after {timeout_secs}s"),
-                Some(command_details_value(
-                    command.clone(),
-                    cwd.clone(),
-                    None,
-                    String::new(),
-                    String::new(),
-                )),
-            ));
+            return Err(
+                ToolFailure::from(format!("command timed out after {timeout_secs}s"))
+                    .with_args(display_args)
+                    .with_details(command_details_value(
+                        command.clone(),
+                        cwd.clone(),
+                        None,
+                        String::new(),
+                        String::new(),
+                    )),
+            );
         }
     };
 
@@ -73,6 +75,14 @@ pub(crate) fn run_command(
     let stdout_trunc = truncate_tail(&wait.stdout);
     let stderr_trunc = truncate_tail(&wait.stderr);
 
+    let combined = if stdout_trunc.content.is_empty() {
+        stderr_trunc.content.clone()
+    } else if stderr_trunc.content.is_empty() {
+        stdout_trunc.content.clone()
+    } else {
+        format!("{}\n{}", stdout_trunc.content, stderr_trunc.content)
+    };
+
     let result = command_details_value(
         command.clone(),
         cwd.clone(),
@@ -82,17 +92,25 @@ pub(crate) fn run_command(
     );
 
     if success {
-        Ok(result)
+        let mut display = ok_display(display_args);
+        display.stats = text_stats(&combined);
+        Ok(ToolOutput { result, display })
     } else {
-        Err((
-            format!(
-                "command exited with status {}",
-                status_code
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned())
-            ),
-            Some(result),
-        ))
+        let exit_label = status_code
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+        let mut display = ToolDisplay {
+            args: display_args,
+            status: ToolDisplayStatus::Error,
+            status_text: format!("err: {exit_label}"),
+            ..Default::default()
+        };
+        display.stats = text_stats(&combined);
+        Err(ToolFailure {
+            message: format!("command exited with status {exit_label}"),
+            details: Some(result),
+            display,
+        })
     }
 }
 

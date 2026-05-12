@@ -6,7 +6,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use tau_proto::{
-    CborValue, cbor_array_field, cbor_bool_field, cbor_field, cbor_int_field, cbor_text_field,
+    CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus, cbor_array_field,
+    cbor_bool_field, cbor_field, cbor_int_field, cbor_text_field,
 };
 
 /// Format the context-usage chip for the status bar. Three cases:
@@ -201,6 +202,7 @@ pub(crate) fn extract_diff(details: &CborValue) -> Option<tau_proto::DiffSummary
 #[derive(Clone, Copy)]
 pub(crate) enum ToolStatus {
     Success,
+    Warning,
     Error,
     Info,
     Progress,
@@ -521,6 +523,84 @@ fn format_tool_error(tool_name: &str, args: String, error_message: &str) -> Tool
     }
 }
 
+/// Render a [`ToolDisplay`] descriptor directly to a
+/// [`ToolCallDisplay`]. The generic path the renderer takes when the
+/// tool side attached a display descriptor to its result/error event —
+/// no `match tool_name` arms needed. Falls back to
+/// [`format_tool_completion`] for older events that didn't carry a
+/// descriptor.
+pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> ToolCallDisplay {
+    let mut suffixes: Vec<ToolSuffixSegment> = Vec::new();
+    // Diff `+N -M` chips (themed green/red) are derived from the
+    // payload so write/edit don't have to push them as info chips.
+    if let Some(ToolDisplayPayload::Diff(summary)) = &display.payload
+        && (summary.added > 0 || summary.removed > 0)
+    {
+        if summary.added > 0 {
+            suffixes.push(tool_suffix(
+                format!("+{}", summary.added),
+                ToolStatus::DiffAdded,
+            ));
+        }
+        if summary.removed > 0 {
+            suffixes.push(ToolSuffixSegment {
+                text: format!("-{}", summary.removed),
+                status: ToolStatus::DiffRemoved,
+                no_leading_space: summary.added > 0,
+            });
+        }
+    }
+    let stats_chip = format_tool_display_stats(&display.stats);
+    if !stats_chip.is_empty() {
+        suffixes.push(info_suffix(stats_chip));
+    }
+    for chip in &display.info_chips {
+        suffixes.push(info_suffix(chip.clone()));
+    }
+    let status_kind = match display.status {
+        ToolDisplayStatus::Success => ToolStatus::Success,
+        ToolDisplayStatus::Warning => ToolStatus::Warning,
+        ToolDisplayStatus::Error => ToolStatus::Error,
+    };
+    suffixes.push(tool_suffix(display.status_text.clone(), status_kind));
+    ToolCallDisplay {
+        tool_name: tool_name.to_owned(),
+        args: display.args.clone(),
+        suffixes,
+    }
+}
+
+fn format_tool_display_stats(stats: &tau_proto::ToolDisplayStats) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(m) = stats.matches {
+        parts.push(format!("{m}M"));
+    }
+    if let Some(l) = stats.lines {
+        parts.push(format!("{l}L"));
+    }
+    if let Some(b) = stats.bytes {
+        parts.push(format_tool_display_bytes(b));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("({})", parts.join(", "))
+    }
+}
+
+fn format_tool_display_bytes(bytes: u64) -> String {
+    if bytes >= 1024 {
+        let k = bytes as f64 / 1024.0;
+        if k >= 100.0 {
+            format!("{k:.0}kB")
+        } else {
+            format!("{k:.1}kB")
+        }
+    } else {
+        format!("{bytes}B")
+    }
+}
+
 /// Formats a completed tool call for display.
 pub(crate) fn format_tool_completion(
     tool_name: &str,
@@ -787,8 +867,11 @@ pub(crate) fn render_tool_block(
     for suffix in &display.suffixes {
         let status_name = match suffix.status {
             ToolStatus::Success => names::TOOL_STATUS_SUCCESS,
+            // Warning has no dedicated token yet — share the info
+            // colour so the chip still reads as "non-error" without a
+            // theme migration.
+            ToolStatus::Warning | ToolStatus::Info => names::TOOL_STATUS_INFO,
             ToolStatus::Error => names::TOOL_STATUS_ERROR,
-            ToolStatus::Info => names::TOOL_STATUS_INFO,
             ToolStatus::Progress => names::PROGRESS_INDICATOR,
             ToolStatus::DiffAdded => names::DIFF_ADDED,
             ToolStatus::DiffRemoved => names::DIFF_REMOVED,

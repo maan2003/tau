@@ -46,6 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         CborValue::Null => CborValue::Text("null".to_owned()),
                         value => value,
                     },
+                    display: None,
                     originator: tau_proto::PromptOriginator::User,
                 })))?;
                 writer.flush()?;

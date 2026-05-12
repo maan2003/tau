@@ -19,6 +19,7 @@ mod agents;
 mod argument;
 mod config;
 mod diff;
+mod display;
 mod isolation;
 mod semaphore;
 mod tools;
