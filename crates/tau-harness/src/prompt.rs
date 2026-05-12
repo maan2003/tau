@@ -25,7 +25,15 @@ pub(crate) fn build_system_prompt(
     let mut prompt = String::from(
         "You are an expert coding assistant operating inside Tau, \
          a coding agent harness. You help users by reading files, executing commands, \
-         editing code, and writing new files.\n\n",
+         editing code, and writing new files.\n\n\
+         You can call multiple tools in a single response. \
+         If you intend to call multiple tools and there are no dependencies between the calls, \
+         make all independent tool calls in parallel in the same response. \
+         Maximize use of parallel tool calls where possible to increase efficiency. \
+         However, if some tool calls depend on previous calls to inform dependent values, \
+         do NOT call these tools in parallel and instead call them sequentially. \
+         For instance, if one operation must complete before another starts, \
+         run these operations sequentially instead.\n\n",
     );
 
     // Available skills section.
@@ -278,6 +286,14 @@ mod tests {
         let prompt = build_system_prompt(&skills, "/tmp/work");
         assert!(prompt.contains("expert coding assistant"));
         assert!(prompt.contains("Current working directory: /tmp/work"));
+    }
+
+    #[test]
+    fn build_system_prompt_encourages_parallel_tool_calls() {
+        let skills = std::collections::HashMap::new();
+        let prompt = build_system_prompt(&skills, "/tmp/work");
+        assert!(prompt.contains("parallel"));
+        assert!(prompt.contains("sequentially"));
     }
 
     /// Tool errors must surface their `details` payload to the LLM,
