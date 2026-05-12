@@ -2275,14 +2275,24 @@ impl Harness {
     /// `SessionPromptCreated` immediately, and the agent extension
     /// serializes consumption from the event log.
     ///
-    /// Every sub-agent starts with a *fresh* context: only its
-    /// delegated instruction, no inherited messages from the parent
-    /// (no user framing, no completed prior turns, no in-flight tool
-    /// blocks). The parent agent is responsible for putting everything
-    /// the sub-agent needs into the `prompt`. This applies uniformly
-    /// at any nesting depth — a top-level delegate and a recursive
-    /// delegate get the same isolation, so deeper sub-agents can't
-    /// see (and restage) ancestor task framing.
+    /// Two forking modes depending on whether the query is tool-backed:
+    ///
+    /// - **Tool-backed (`tool_call_id: Some(...)`, e.g. `delegate`)**: the
+    ///   sub-agent starts with a *fresh* context — only the delegated
+    ///   instruction, no inherited messages from the parent (no user framing,
+    ///   no completed prior turns, no in-flight tool blocks). The parent agent
+    ///   is responsible for putting everything the sub-agent needs into the
+    ///   `prompt`. This applies uniformly at any nesting depth so deeper
+    ///   sub-agents can't see (and restage) ancestor task framing.
+    ///
+    /// - **Non-tool (`tool_call_id: None`, e.g. notifications' idle summary)**:
+    ///   the side conv inherits the parent conversation's current head (and
+    ///   `chain_anchor`, if any) so the assembled prompt actually contains the
+    ///   user's recent history. The whole point of this flow is to summarize
+    ///   what the user/agent were doing — that needs the conversation it is
+    ///   summarizing. Sharing the prefix also lets prompt caching reuse the
+    ///   parent's cached transcript verbatim, since the only delta is the
+    ///   appended instruction.
     fn handle_ext_agent_query(
         &mut self,
         source_id: &str,
@@ -2308,24 +2318,28 @@ impl Harness {
             return Ok(());
         }
 
-        // Resolve the session id from the conversation that issued
-        // the tool call, so the side branch lands in the right
-        // session. We deliberately do NOT inherit the parent's
-        // tree head: `branch_root = None` means the side conversation
-        // starts at the tree root and `send_prompt_to_agent_for`
-        // assembles a message list containing only the new
-        // `UiPromptSubmitted` we publish below.
+        // Resolve the parent conversation: for tool-backed queries it's
+        // the conv that owns the tool_call_id; for non-tool queries it's
+        // the default (user) conv. Both modes share the parent's
+        // session id so the side branch lands in the same session.
         let parent_cid = query
             .tool_call_id
             .as_ref()
             .and_then(|call_id| self.tool_conversations.get(call_id))
             .cloned()
             .unwrap_or_else(|| self.default_conversation_id.clone());
-        let session_id = self
+        let parent_conv = self
             .conversations
             .get(&parent_cid)
-            .map(|c| c.session_id.clone())
             .expect("parent conversation always present");
+        let session_id = parent_conv.session_id.clone();
+        // Tool-backed: fresh fork (head=None). Non-tool: inherit the
+        // parent's branch + stateful-chain anchor.
+        let (initial_head, initial_chain_anchor) = if query.tool_call_id.is_some() {
+            (None, None)
+        } else {
+            (parent_conv.head, parent_conv.chain_anchor.clone())
+        };
 
         let originator = tau_proto::PromptOriginator::Extension {
             name: extension_name.clone().into(),
@@ -2335,7 +2349,7 @@ impl Harness {
             cid.clone(),
             session_id.clone(),
             originator,
-            None,
+            initial_head,
             Some(source_id.into()),
         );
         // For tool-backed extensions (currently just `delegate`)
@@ -2344,6 +2358,7 @@ impl Harness {
         // that tool block via `DelegateProgress`.
         conv.parent_tool_call_id = parent_call_id;
         conv.task_name = task_name;
+        conv.chain_anchor = initial_chain_anchor;
         self.conversations.insert(cid.clone(), conv);
 
         // Emit the initial progress snapshot (`tools: 0/0`, no ctx
@@ -2353,11 +2368,14 @@ impl Harness {
         self.emit_delegate_progress(&cid);
 
         // Publish the UiPromptSubmitted on the side conversation's
-        // branch (head=None → folds at root) and dispatch the agent.
-        // `send_prompt_to_agent_for` reads `conv.head`, which after
-        // the commit points at the just-folded UserMessage, so the
-        // assembled message list is exactly the one user turn
-        // carrying `query.instruction`.
+        // branch and dispatch the agent. The fold parents the new
+        // UserMessage at `conv.head` — root for the fresh tool-backed
+        // mode, or the parent conv's tip for the inherited non-tool
+        // mode. `send_prompt_to_agent_for` then reads `conv.head`
+        // (which the post-commit hook just snapped to the new
+        // UserMessage) and `assemble_conversation_from` walks back to
+        // root, yielding either `[instruction]` alone or the full
+        // inherited transcript + `instruction`.
         //
         // If an interceptor is registered on `ui.prompt_submitted`
         // (e.g. `tau-ext-test-dummy`'s tao→tau corrector) the publish

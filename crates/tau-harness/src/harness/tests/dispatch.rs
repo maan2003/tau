@@ -734,6 +734,15 @@ fn switch_session_rebinds_default_conversation() {
     h.shutdown().expect("shutdown");
 }
 
+/// While a parent's `delegate` tool call is in flight, the harness
+/// must still dispatch the spawned side conversation's prompt
+/// immediately — the parent's `ToolsRunning` turn state is logically
+/// independent from the side conv's own turn. The two failure modes
+/// this test pins down: (1) the side prompt gets queued behind the
+/// parent's pending tool result and never goes out (deadlock), and
+/// (2) the parent's `ToolsRunning` state gets clobbered when the
+/// side conv finishes, leaving the parent unable to receive its
+/// `ToolResult`. Uses the real delegate shape (`tool_call_id: Some`).
 #[test]
 fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
     let td = TempDir::new().expect("tempdir");
@@ -801,7 +810,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
         ExtAgentQuery {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
-            tool_call_id: None,
+            tool_call_id: Some("delegate-call".into()),
             task_name: None,
         },
     )
@@ -864,6 +873,17 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
     h.shutdown().expect("shutdown");
 }
 
+/// A tool-backed `ExtAgentQuery` (`tool_call_id: Some(...)`) is the
+/// `delegate` path: it dispatches *while the parent's tool call is
+/// still in flight*, so the parent conv's tip is a `ToolUse` block
+/// with no matching `ToolResult` yet. The side conv must therefore
+/// fork off the tree root with `head: None`, NOT inherit the
+/// parent's branch — otherwise (a) the assembled prompt would carry
+/// an orphan `ToolUse` block (provider 400s on unmatched tool_use),
+/// and (b) the sub-agent would see the user's framing and might
+/// recursively re-delegate the same task. (Contrast with the
+/// non-tool path, where `tool_call_id: None` deliberately inherits
+/// the parent — see `non_tool_ext_agent_query_inherits_parent_branch`.)
 #[test]
 fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
     let td = TempDir::new().expect("tempdir");
@@ -922,7 +942,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
         ExtAgentQuery {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
-            tool_call_id: None,
+            tool_call_id: Some("delegate-call".into()),
             task_name: None,
         },
     )
@@ -935,11 +955,12 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
         .expect("side prompt id");
     let prompt = read_prompt_created(&h, &side_spid);
 
-    // The sub-agent gets a fresh context regardless of whether its
-    // parent is mid-tool-call: it sees only its own `query.instruction`,
-    // never the parent's unresolved `delegate` tool_use (which would
-    // be an orphan ToolUse the provider rejects), and never the
-    // user's task framing (which would invite recursive re-delegation).
+    // Tool-backed sub-agents (`tool_call_id: Some(...)`) get a fresh
+    // context regardless of whether the parent is mid-tool-call: they
+    // see only their own `query.instruction`, never the parent's
+    // unresolved `delegate` tool_use (which would be an orphan ToolUse
+    // the provider rejects), and never the user's task framing (which
+    // would invite recursive re-delegation).
     let saw_orphan_tool_use = prompt.messages.iter().any(|message| {
         message.content.iter().any(|block| {
             matches!(
@@ -974,6 +995,145 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
     assert!(
         saw_own_instruction,
         "side prompt should contain the delegated instruction"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A non-tool `ExtAgentQuery` (`tool_call_id: None`, e.g.
+/// `std-notifications`' idle summary) is **not** a delegate. Its
+/// purpose is to summarize what the user just did, so the side conv
+/// must inherit the parent conversation's branch — assembling the
+/// user's recent UserMessage / AgentMessage history *plus* the new
+/// instruction. The whole feature falls back to a useless generic
+/// greeting if the model is asked to summarize an empty transcript.
+///
+/// This is also why we don't strip tools / system prompt for these
+/// queries: the side conv's request reuses the parent's cached prefix
+/// (system_prompt + tools + full transcript) and adds only the
+/// instruction as a delta. Verified here by comparing the assembled
+/// prompt to what the parent conv sees.
+#[test]
+fn non_tool_ext_agent_query_inherits_parent_branch() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = Some("test/model".into());
+
+    // Drive the user's main conversation through one full
+    // user-message → agent-final-response turn so the parent conv has
+    // a non-empty history when the idle summary fires.
+    let cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "find the bug in foo.rs".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: main_spid,
+        text: Some("I fixed the off-by-one in foo.rs".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: None,
+        cached_tokens: None,
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+
+        backend: None,
+        response_id: None,
+        phase: None,
+    })
+    .expect("main response");
+    let parent_head_before = h.conversations.get(&cid).expect("default conv").head;
+    assert!(
+        parent_head_before.is_some(),
+        "parent conv should have advanced its head after the agent's reply",
+    );
+
+    // std-notifications-shaped query: no tool_call_id, just an
+    // instruction asking the model to summarize.
+    h.handle_ext_agent_query(
+        "conn-notifications",
+        ExtAgentQuery {
+            query_id: "idle-0".to_owned(),
+            instruction: "Summarize in one sentence.".to_owned(),
+            tool_call_id: None,
+            task_name: None,
+        },
+    )
+    .expect("ext query");
+
+    let side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("side prompt id");
+    let side_prompt = read_prompt_created(&h, &side_spid);
+
+    // The assembled side prompt must contain the user's original
+    // task, the agent's final answer, AND the new instruction — in
+    // that order. Without inheritance the side prompt would only
+    // hold the instruction and the model would default to a generic
+    // "I'm ready for your next task" reply.
+    let user_task_present = side_prompt.messages.iter().any(|m| {
+        matches!(m.role, tau_proto::ConversationRole::User) && m.content.iter().any(|b| {
+            matches!(
+                b,
+                tau_proto::ContentBlock::Text { text } if text.contains("find the bug in foo.rs")
+            )
+        })
+    });
+    let agent_answer_present = side_prompt.messages.iter().any(|m| {
+        matches!(m.role, tau_proto::ConversationRole::Assistant) && m.content.iter().any(|b| {
+            matches!(
+                b,
+                tau_proto::ContentBlock::Text { text } if text.contains("I fixed the off-by-one")
+            )
+        })
+    });
+    let instruction_present = side_prompt.messages.iter().any(|m| {
+        matches!(m.role, tau_proto::ConversationRole::User)
+            && m.content.iter().any(|b| {
+                matches!(
+                    b,
+                    tau_proto::ContentBlock::Text { text } if text == "Summarize in one sentence."
+                )
+            })
+    });
+    assert!(
+        user_task_present,
+        "side prompt must inherit the user's original task message: {:?}",
+        side_prompt.messages,
+    );
+    assert!(
+        agent_answer_present,
+        "side prompt must inherit the agent's final reply: {:?}",
+        side_prompt.messages,
+    );
+    assert!(
+        instruction_present,
+        "side prompt must contain the summarize-instruction itself: {:?}",
+        side_prompt.messages,
+    );
+
+    // The parent conv's head must not have moved sideways because of
+    // the side conv's publish — both convs are now downstream of the
+    // parent's previous tip, but the side conv folded onto its own
+    // child node.
+    let parent_head_after = h.conversations.get(&cid).expect("default conv").head;
+    assert_eq!(
+        parent_head_before, parent_head_after,
+        "side conv's UserMessage must not advance the parent conv's head",
     );
 
     h.shutdown().expect("shutdown");
@@ -1057,7 +1217,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
         ExtAgentQuery {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
-            tool_call_id: None,
+            tool_call_id: Some("delegate-call".into()),
             task_name: None,
         },
     )
