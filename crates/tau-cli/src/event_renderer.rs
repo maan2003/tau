@@ -10,9 +10,9 @@ use tau_proto::{CborValue, Event};
 use crate::tool_render::{
     ToolCallDisplay, build_osc1337_set_user_var, extension_status_block, extract_diff,
     format_cache_hit_chip, format_context_chip, format_delegate_completion,
-    format_delegate_progress, format_token_stats_line, format_tool_call, format_tool_completion,
-    format_turn_metrics_chip, render_diff_tool_block, render_harness_info, render_shell_block,
-    render_tool_block, render_tool_display, session_status_block, streaming_block,
+    format_delegate_progress, format_token_stats_line, format_tool_call, format_turn_metrics_chip,
+    render_diff_tool_block, render_harness_info, render_shell_block, render_tool_block,
+    render_tool_display, session_status_block, streaming_block, synthesize_fallback_display,
     system_loaded_block, system_status_block, ui_dir_block,
 };
 use crate::{build_label_parts, random_startup_pun};
@@ -923,9 +923,20 @@ impl EventRenderer {
                 } else if let Some(descriptor) = &result.display {
                     render_tool_display(&result.tool_name, descriptor)
                 } else {
-                    format_tool_completion(&result.tool_name, &result.result, None)
+                    render_tool_display(
+                        &result.tool_name,
+                        &synthesize_fallback_display(&result.tool_name, None),
+                    )
                 };
-                if let Some(diff) = extract_diff(&result.result) {
+                let diff = result
+                    .display
+                    .as_ref()
+                    .and_then(|d| match &d.payload {
+                        Some(tau_proto::ToolDisplayPayload::Diff(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .or_else(|| extract_diff(&result.result));
+                if let Some(diff) = diff {
                     let block =
                         render_diff_tool_block(&self.theme, &display, &diff, self.diffs_expanded);
                     let bid = self.handle.print_output(block);
@@ -961,10 +972,9 @@ impl EventRenderer {
                 } else if let Some(descriptor) = &error.display {
                     render_tool_display(&error.tool_name, descriptor)
                 } else {
-                    format_tool_completion(
+                    render_tool_display(
                         &error.tool_name,
-                        cbor.unwrap_or(&CborValue::Null),
-                        Some(&error.message),
+                        &synthesize_fallback_display(&error.tool_name, Some(&error.message)),
                     )
                 };
                 self.handle

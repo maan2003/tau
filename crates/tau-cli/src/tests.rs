@@ -13,8 +13,8 @@ use super::chat::{DraftSlot, should_send_draft_snapshot};
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
     ToolStatus, build_osc1337_set_user_var, cache_hit_percent, format_cache_hit_chip,
-    format_context_chip, format_token_stats_line, format_tool_completion, format_turn_metrics_chip,
-    render_tool_display, streaming_block,
+    format_context_chip, format_token_stats_line, format_turn_metrics_chip, render_tool_display,
+    streaming_block, synthesize_fallback_display,
 };
 
 /// Writer that feeds bytes into a vt100::Parser. Bytes are
@@ -180,7 +180,12 @@ fn new_session_clears_session_ui_state() {
                 CborValue::Text("fn main() {}\n".into()),
             ),
         ]),
-        display: None,
+        display: Some(tau_proto::ToolDisplay {
+            args: "src/lib.rs".into(),
+            status: tau_proto::ToolDisplayStatus::Success,
+            status_text: "ok".into(),
+            ..Default::default()
+        }),
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -924,7 +929,17 @@ fn running_tool_call_shows_ellipsis_until_result() {
                 CborValue::Text("fn main() {}\n".into()),
             ),
         ]),
-        display: None,
+        display: Some(tau_proto::ToolDisplay {
+            args: "src/main.rs".into(),
+            stats: tau_proto::ToolDisplayStats {
+                matches: None,
+                lines: Some(1),
+                bytes: Some(13),
+            },
+            status: tau_proto::ToolDisplayStatus::Success,
+            status_text: "ok".into(),
+            ..Default::default()
+        }),
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -947,7 +962,13 @@ fn websearch_tool_result_shows_result_count_and_size() {
         result: CborValue::Text(
             "Title: One\nURL: https://one.example\n\nTitle: Two\nURL: https://two.example\n".into(),
         ),
-        display: None,
+        display: Some(tau_proto::ToolDisplay {
+            args: String::new(),
+            info_chips: vec!["(2 results, 5L, 73B)".into()],
+            status: tau_proto::ToolDisplayStatus::Success,
+            status_text: "ok".into(),
+            ..Default::default()
+        }),
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -1039,113 +1060,6 @@ fn agents_md_loaded_event_shows_output_stats() {
 }
 
 #[test]
-fn grep_completion_uses_output_stats_and_status_chip() {
-    let grep_details = CborValue::Map(vec![
-        (
-            CborValue::Text("pattern".into()),
-            CborValue::Text("foo".into()),
-        ),
-        (CborValue::Text("path".into()), CborValue::Text(".".into())),
-        (
-            CborValue::Text("status".into()),
-            CborValue::Integer(1.into()),
-        ),
-        (
-            CborValue::Text("matches".into()),
-            CborValue::Integer(0.into()),
-        ),
-        (
-            CborValue::Text("output".into()),
-            CborValue::Text("a\nb\n".into()),
-        ),
-    ]);
-    let grep = format_tool_completion("grep", &grep_details, None);
-    assert_eq!(grep.suffixes.len(), 2);
-    assert_eq!(grep.suffixes[0].text, "(0M, 2L, 4B)");
-    assert!(matches!(grep.suffixes[0].status, ToolStatus::Info));
-    assert_eq!(grep.suffixes[1].text, "ok: no matches");
-    assert!(matches!(grep.suffixes[1].status, ToolStatus::Success));
-
-    let grep_ok_details = CborValue::Map(vec![
-        (
-            CborValue::Text("pattern".into()),
-            CborValue::Text("foo".into()),
-        ),
-        (CborValue::Text("path".into()), CborValue::Text(".".into())),
-        (
-            CborValue::Text("status".into()),
-            CborValue::Integer(0.into()),
-        ),
-        (
-            CborValue::Text("matches".into()),
-            CborValue::Integer(1.into()),
-        ),
-        (
-            CborValue::Text("output".into()),
-            CborValue::Text("a\n".into()),
-        ),
-    ]);
-    let grep_ok = format_tool_completion("grep", &grep_ok_details, None);
-    assert_eq!(grep_ok.suffixes[1].text, "ok");
-    assert!(matches!(grep_ok.suffixes[1].status, ToolStatus::Success));
-}
-
-#[test]
-fn shell_completion_uses_output_stats_and_exit_color() {
-    let shell_details = CborValue::Map(vec![
-        (
-            CborValue::Text("command".into()),
-            CborValue::Text("echo hi".into()),
-        ),
-        (
-            CborValue::Text("stdout".into()),
-            CborValue::Text("hi\n".into()),
-        ),
-        (
-            CborValue::Text("stderr".into()),
-            CborValue::Text(String::new()),
-        ),
-        (
-            CborValue::Text("status".into()),
-            CborValue::Integer(7.into()),
-        ),
-    ]);
-    let shell = format_tool_completion("shell", &shell_details, None);
-    assert_eq!(shell.suffixes.len(), 2);
-    assert_eq!(shell.suffixes[0].text, "(1L, 3B)");
-    assert!(matches!(shell.suffixes[0].status, ToolStatus::Info));
-    assert_eq!(shell.suffixes[1].text, "err: 7");
-    assert!(matches!(shell.suffixes[1].status, ToolStatus::Error));
-
-    let shell_error = format_tool_completion(
-        "shell",
-        &shell_details,
-        Some("command exited with status 7"),
-    );
-    assert_eq!(shell_error.suffixes.len(), 2);
-    assert_eq!(shell_error.suffixes[0].text, "(1L, 3B)");
-    assert!(matches!(shell_error.suffixes[0].status, ToolStatus::Info));
-    assert_eq!(shell_error.suffixes[1].text, "err: 7");
-    assert!(matches!(shell_error.suffixes[1].status, ToolStatus::Error));
-}
-
-#[test]
-fn edit_completion_uses_path_on_error() {
-    let edit_error = format_tool_completion(
-        "edit",
-        &CborValue::Map(vec![(
-            CborValue::Text("path".into()),
-            CborValue::Text("tmp/test-files/test1.txt".into()),
-        )]),
-        Some("no match"),
-    );
-    assert_eq!(edit_error.args, "tmp/test-files/test1.txt");
-    assert_eq!(edit_error.suffixes.len(), 1);
-    assert_eq!(edit_error.suffixes[0].text, "err: no match");
-    assert!(matches!(edit_error.suffixes[0].status, ToolStatus::Error));
-}
-
-#[test]
 fn render_tool_display_assembles_chips_in_order() {
     use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
 
@@ -1196,6 +1110,19 @@ fn render_tool_display_diff_payload_adds_plus_minus_chips() {
         rendered.suffixes[1].status,
         ToolStatus::DiffRemoved
     ));
+}
+
+#[test]
+fn synthesize_fallback_display_is_minimal() {
+    let ok = synthesize_fallback_display("my_tool", None);
+    assert_eq!(ok.args, "");
+    assert_eq!(ok.status_text, "ok");
+    assert!(matches!(ok.status, tau_proto::ToolDisplayStatus::Success));
+
+    let err =
+        synthesize_fallback_display("my_tool", Some("failure description\nwith trailing line"));
+    assert_eq!(err.status_text, "err: failure description");
+    assert!(matches!(err.status, tau_proto::ToolDisplayStatus::Error));
 }
 
 #[test]
@@ -1313,120 +1240,6 @@ fn streaming_block_handles_each_trailing_case() {
             .collect();
         assert_eq!(actual, expected, "input was {input:?}");
     }
-}
-
-#[test]
-fn edit_completion_uses_diff_chip() {
-    let edit_details = CborValue::Map(vec![
-        (
-            CborValue::Text("path".into()),
-            CborValue::Text("tmp/test-files/test1.txt".into()),
-        ),
-        (
-            CborValue::Text("diff".into()),
-            CborValue::Map(vec![
-                (
-                    CborValue::Text("added".into()),
-                    CborValue::Integer(2.into()),
-                ),
-                (
-                    CborValue::Text("removed".into()),
-                    CborValue::Integer(1.into()),
-                ),
-            ]),
-        ),
-    ]);
-    let edit = format_tool_completion("edit", &edit_details, None);
-    assert_eq!(edit.suffixes.len(), 6);
-    assert_eq!(edit.suffixes[0].text, "(");
-    assert!(matches!(edit.suffixes[0].status, ToolStatus::Info));
-    assert_eq!(edit.suffixes[1].text, "+2");
-    assert!(matches!(edit.suffixes[1].status, ToolStatus::DiffAdded));
-    assert!(edit.suffixes[1].no_leading_space);
-    assert_eq!(edit.suffixes[2].text, "/");
-    assert!(matches!(edit.suffixes[2].status, ToolStatus::Info));
-    assert!(edit.suffixes[2].no_leading_space);
-    assert_eq!(edit.suffixes[3].text, "-1");
-    assert!(matches!(edit.suffixes[3].status, ToolStatus::DiffRemoved));
-    assert!(edit.suffixes[3].no_leading_space);
-    assert_eq!(edit.suffixes[4].text, ")");
-    assert!(matches!(edit.suffixes[4].status, ToolStatus::Info));
-    assert!(edit.suffixes[4].no_leading_space);
-    assert_eq!(edit.suffixes[5].text, "ok");
-    assert!(matches!(edit.suffixes[5].status, ToolStatus::Success));
-}
-
-/// A successful skill load shows the skill name and output stats;
-/// a missed load shows the requested name, the count of split-name
-/// suggestions returned in `details`, and the error message — so the
-/// user can see at a glance whether the agent has useful follow-ups
-/// available.
-#[test]
-fn skill_completion_renders_load_paths() {
-    // Successful load.
-    let load_ok = CborValue::Map(vec![
-        (
-            CborValue::Text("name".into()),
-            CborValue::Text("my-skill".into()),
-        ),
-        (
-            CborValue::Text("content".into()),
-            CborValue::Text("body".into()),
-        ),
-    ]);
-    let ok = format_tool_completion("skill", &load_ok, None);
-    assert_eq!(ok.args, "my-skill");
-    assert_eq!(ok.suffixes.len(), 2);
-    assert_eq!(ok.suffixes[0].text, "(1L, 4B)");
-    assert!(matches!(ok.suffixes[0].status, ToolStatus::Info));
-    assert_eq!(ok.suffixes[1].text, "ok");
-
-    // Failed load with split-name search suggestions.
-    let load_miss = CborValue::Map(vec![
-        (
-            CborValue::Text("name".into()),
-            CborValue::Text("foo-bar-baz".into()),
-        ),
-        (
-            CborValue::Text("queries".into()),
-            CborValue::Array(vec![
-                CborValue::Text("foo".into()),
-                CborValue::Text("bar".into()),
-                CborValue::Text("baz".into()),
-            ]),
-        ),
-        (
-            CborValue::Text("search_content".into()),
-            CborValue::Bool(false),
-        ),
-        (
-            CborValue::Text("matches".into()),
-            CborValue::Array(vec![
-                CborValue::Map(vec![(
-                    CborValue::Text("name".into()),
-                    CborValue::Text("foo-bar".into()),
-                )]),
-                CborValue::Map(vec![(
-                    CborValue::Text("name".into()),
-                    CborValue::Text("baz-helper".into()),
-                )]),
-            ]),
-        ),
-    ]);
-    let miss = format_tool_completion("skill", &load_miss, Some("unknown skill: foo-bar-baz"));
-    assert_eq!(miss.args, "foo-bar-baz");
-    assert_eq!(miss.suffixes.len(), 2);
-    assert_eq!(miss.suffixes[0].text, "(2 suggestions)");
-    assert!(matches!(miss.suffixes[0].status, ToolStatus::Info));
-    assert!(miss.suffixes[1].text.contains("unknown skill"));
-    assert!(matches!(miss.suffixes[1].status, ToolStatus::Error));
-
-    // Plain load error without suggestions (e.g. missing argument)
-    // still renders as a plain error.
-    let plain_err = CborValue::Null;
-    let plain = format_tool_completion("skill", &plain_err, Some("missing argument"));
-    assert_eq!(plain.suffixes.len(), 1);
-    assert!(matches!(plain.suffixes[0].status, ToolStatus::Error));
 }
 
 /// Reproduces the user-reported bug: send 3 prompts during the

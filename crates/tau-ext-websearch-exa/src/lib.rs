@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use tau_proto::{
     Ack, CborValue, ConfigError, Event, Frame, FrameReader, FrameWriter, LogEventId, Message,
-    ToolError, ToolInvoke, ToolResult, ToolSideEffects, ToolSpec,
+    ToolDisplay, ToolDisplayStatus, ToolError, ToolInvoke, ToolResult, ToolSideEffects, ToolSpec,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -236,9 +236,9 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
         let _ = tx.send(Frame::Event(Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
+            display: Some(exa_error_display("unknown tool")),
             message: "unknown tool".to_owned(),
             details: None,
-            display: None,
             originator: tau_proto::PromptOriginator::User,
         })));
         return;
@@ -253,11 +253,12 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
                     response_len = text.len(),
                     "exa search returned",
                 );
+                let display = exa_ok_display(&text);
                 Event::ToolResult(ToolResult {
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
                     result: CborValue::Text(text),
-                    display: None,
+                    display: Some(display),
                     originator: tau_proto::PromptOriginator::User,
                 })
             }
@@ -271,9 +272,9 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
                 Event::ToolError(ToolError {
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
+                    display: Some(exa_error_display(&message)),
                     message,
                     details: Some(invoke.arguments),
-                    display: None,
                     originator: tau_proto::PromptOriginator::User,
                 })
             }
@@ -281,13 +282,71 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
         Err(message) => Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
+            display: Some(exa_error_display(&message)),
             message,
             details: Some(invoke.arguments),
-            display: None,
             originator: tau_proto::PromptOriginator::User,
         }),
     };
     let _ = tx.send(Frame::Event(event));
+}
+
+fn exa_ok_display(response: &str) -> ToolDisplay {
+    // Count Title:/URL: lines for a `(N results, NL, NB)` chip. Either
+    // half may be missing (formatter quirks), so use the higher count
+    // as the result tally — matches the previous CLI behaviour.
+    let titles = response
+        .lines()
+        .filter(|line| line.starts_with("Title:"))
+        .count();
+    let urls = response
+        .lines()
+        .filter(|line| line.starts_with("URL:"))
+        .count();
+    let results = titles.max(urls);
+    let chip = if results > 0 {
+        format!(
+            "({results} results, {}L, {}B)",
+            response.lines().count(),
+            response.len()
+        )
+    } else if response.is_empty() {
+        String::new()
+    } else {
+        format!("({}L, {}B)", response.lines().count(), response.len())
+    };
+    let mut display = ToolDisplay {
+        args: String::new(),
+        status: ToolDisplayStatus::Success,
+        status_text: "ok".to_owned(),
+        ..Default::default()
+    };
+    if !chip.is_empty() {
+        display.info_chips.push(chip);
+    }
+    display
+}
+
+fn exa_error_display(message: &str) -> ToolDisplay {
+    let first = message
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let label = if first.is_empty() {
+        "err".to_owned()
+    } else if first.chars().count() <= 64 {
+        format!("err: {first}")
+    } else {
+        let truncated: String = first.chars().take(63).collect();
+        format!("err: {truncated}…")
+    };
+    ToolDisplay {
+        args: String::new(),
+        status: ToolDisplayStatus::Error,
+        status_text: label,
+        ..Default::default()
+    }
 }
 
 fn parse_args(arguments: &CborValue) -> Result<(String, u32), String> {

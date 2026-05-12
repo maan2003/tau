@@ -6,8 +6,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use tau_proto::{
-    CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus, cbor_array_field,
-    cbor_bool_field, cbor_field, cbor_int_field, cbor_text_field,
+    CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus, cbor_bool_field, cbor_field,
+    cbor_text_field,
 };
 
 /// Format the context-usage chip for the status bar. Three cases:
@@ -152,39 +152,6 @@ fn format_token_count(tokens: u64) -> String {
 /// result as themed suffix segments. `+N` is painted with the
 /// diff-added style and `-M` with the diff-removed style, matching
 /// `git diff --shortstat`. The parens and slash stay in the muted info
-/// style. Returns `None` if the diff is missing or empty.
-fn format_diff_chip_segments(details: &CborValue) -> Option<Vec<ToolSuffixSegment>> {
-    let diff = cbor_field(details, "diff")?;
-    let added = cbor_int_field(diff, "added").unwrap_or(0);
-    let removed = cbor_int_field(diff, "removed").unwrap_or(0);
-    if added == 0 && removed == 0 {
-        return None;
-    }
-    Some(vec![
-        info_suffix("(".to_owned()),
-        ToolSuffixSegment {
-            text: format!("+{added}"),
-            status: ToolStatus::DiffAdded,
-            no_leading_space: true,
-        },
-        ToolSuffixSegment {
-            text: "/".to_owned(),
-            status: ToolStatus::Info,
-            no_leading_space: true,
-        },
-        ToolSuffixSegment {
-            text: format!("-{removed}"),
-            status: ToolStatus::DiffRemoved,
-            no_leading_space: true,
-        },
-        ToolSuffixSegment {
-            text: ")".to_owned(),
-            status: ToolStatus::Info,
-            no_leading_space: true,
-        },
-    ])
-}
-
 /// Decode a `DiffSummary` sub-tree from a tool result, if present and
 /// non-empty. Round-trips the CBOR sub-value through ciborium.
 pub(crate) fn extract_diff(details: &CborValue) -> Option<tau_proto::DiffSummary> {
@@ -478,51 +445,6 @@ fn stats_suffix(prefix: Option<String>, text: &str) -> ToolSuffixSegment {
     info_suffix(format!("({})", parts.join(", ")))
 }
 
-fn websearch_stats_suffix(text: &str) -> ToolSuffixSegment {
-    let titles = text
-        .lines()
-        .filter(|line| line.starts_with("Title:"))
-        .count();
-    let urls = text.lines().filter(|line| line.starts_with("URL:")).count();
-    let results = if titles < urls { urls } else { titles };
-    if 0 < results {
-        info_suffix(format!(
-            "({results} results, {}L, {}B)",
-            text.lines().count(),
-            text.len()
-        ))
-    } else {
-        output_stats_suffix(text)
-    }
-}
-
-/// Render the `queries` array from a skill search/load-error result
-/// as a single space-separated string. Non-text entries are skipped
-/// rather than failing the render.
-fn format_skill_query_list(queries: &[CborValue]) -> String {
-    let mut out = String::new();
-    for q in queries {
-        if let CborValue::Text(s) = q
-            && !s.is_empty()
-        {
-            if !out.is_empty() {
-                out.push(' ');
-            }
-            out.push_str(s);
-        }
-    }
-    out
-}
-
-/// Error-path display: `<tool_name> <args> <err>`.
-fn format_tool_error(tool_name: &str, args: String, error_message: &str) -> ToolCallDisplay {
-    ToolCallDisplay {
-        tool_name: tool_name.to_owned(),
-        args,
-        suffixes: vec![err_suffix(Some(error_message))],
-    }
-}
-
 /// Render a [`ToolDisplay`] descriptor directly to a
 /// [`ToolCallDisplay`]. The generic path the renderer takes when the
 /// tool side attached a display descriptor to its result/error event —
@@ -601,243 +523,43 @@ fn format_tool_display_bytes(bytes: u64) -> String {
     }
 }
 
-/// Formats a completed tool call for display.
-pub(crate) fn format_tool_completion(
-    tool_name: &str,
-    details: &CborValue,
-    error_message: Option<&str>,
-) -> ToolCallDisplay {
-    match tool_name {
-        "shell" => format_shell_completion(details, error_message),
-        "read" => {
-            let path = cbor_text_field(details, "path").unwrap_or_default();
-            if let Some(msg) = error_message {
-                format_tool_error("read", path, msg)
-            } else {
-                let content = cbor_text_field(details, "content").unwrap_or_default();
-                ToolCallDisplay {
-                    tool_name: "read".into(),
-                    args: path,
-                    suffixes: vec![output_stats_suffix(&content), ok_suffix()],
-                }
-            }
-        }
-        "write" => {
-            let path = cbor_text_field(details, "path").unwrap_or_default();
-            if let Some(msg) = error_message {
-                format_tool_error("write", path, msg)
-            } else {
-                // Prefer the colored +N/-M diff chip; fall back to byte
-                // count for tools that don't ship a diff (or no-op
-                // writes).
-                let mut suffixes = format_diff_chip_segments(details).unwrap_or_else(|| {
-                    let bytes = cbor_int_field(details, "bytes_written").unwrap_or(0);
-                    vec![info_suffix(format!("({bytes}B)"))]
-                });
-                suffixes.push(ok_suffix());
-                ToolCallDisplay {
-                    tool_name: "write".into(),
-                    args: path,
-                    suffixes,
-                }
-            }
-        }
-        "edit" => {
-            let path = cbor_text_field(details, "path").unwrap_or_default();
-            if let Some(msg) = error_message {
-                format_tool_error("edit", path, msg)
-            } else {
-                let mut suffixes = format_diff_chip_segments(details).unwrap_or_else(|| {
-                    let count = cbor_int_field(details, "edits_applied").unwrap_or(0);
-                    vec![info_suffix(format!("({count} edits applied)"))]
-                });
-                suffixes.push(ok_suffix());
-                ToolCallDisplay {
-                    tool_name: "edit".into(),
-                    args: path,
-                    suffixes,
-                }
-            }
-        }
-        "find" => {
-            let path = cbor_text_field(details, "path").unwrap_or_else(|| ".".to_owned());
-            let pattern = cbor_text_field(details, "pattern").unwrap_or_default();
-            let args = format!("{pattern} in {path}");
-            if let Some(msg) = error_message {
-                format_tool_error("find", args, msg)
-            } else {
-                let output = cbor_text_field(details, "output").unwrap_or_default();
-                ToolCallDisplay {
-                    tool_name: "find".into(),
-                    args,
-                    suffixes: vec![stats_suffix(None, &output), ok_suffix()],
-                }
-            }
-        }
-        "grep" => {
-            let path = cbor_text_field(details, "path").unwrap_or_else(|| ".".to_owned());
-            let pattern = cbor_text_field(details, "pattern").unwrap_or_default();
-            let glob = cbor_text_field(details, "glob");
-            let args = match glob {
-                Some(g) => format!("{pattern:?} in {path} [{g}]"),
-                None => format!("{pattern:?} in {path}"),
-            };
-            if let Some(msg) = error_message {
-                format_tool_error("grep", args, msg)
-            } else {
-                let output = cbor_text_field(details, "output").unwrap_or_default();
-                let status = cbor_int_field(details, "status");
-                let match_count = cbor_int_field(details, "matches").unwrap_or(0);
-                let mut suffixes = vec![stats_suffix(Some(format!("{match_count}M")), &output)];
-                suffixes.push(match status {
-                    Some(0) => ok_suffix(),
-                    Some(1) => tool_suffix("ok: no matches".to_owned(), ToolStatus::Success),
-                    Some(code) => err_suffix(Some(&code.to_string())),
-                    None => info_suffix("ok?".to_owned()),
-                });
-                ToolCallDisplay {
-                    tool_name: "grep".into(),
-                    args,
-                    suffixes,
-                }
-            }
-        }
-        "ls" => {
-            let path = cbor_text_field(details, "path").unwrap_or_else(|| ".".to_owned());
-            if let Some(msg) = error_message {
-                format_tool_error("ls", path, msg)
-            } else {
-                let count = cbor_int_field(details, "entries").unwrap_or(0);
-                ToolCallDisplay {
-                    tool_name: "ls".into(),
-                    args: path,
-                    suffixes: vec![info_suffix(format!("({count} entries)")), ok_suffix()],
-                }
-            }
-        }
-        "websearch_exa" => {
-            if let Some(msg) = error_message {
-                format_tool_error("websearch_exa", String::new(), msg)
-            } else {
-                let text = match details {
-                    CborValue::Text(text) => text.as_str(),
-                    _ => "",
-                };
-                ToolCallDisplay {
-                    tool_name: "websearch_exa".into(),
-                    args: String::new(),
-                    suffixes: vec![websearch_stats_suffix(text), ok_suffix()],
-                }
-            }
-        }
-        // `delegate` is rendered by `format_delegate_completion`,
-        // which has access to the cached task name + last progress
-        // snapshot. This match arm is unreachable for the running
-        // delegate path; if a synthetic result somehow flows through
-        // the generic fallback it will land in the catch-all below.
-        "skill" => {
-            // Distinguish search vs load by the result shape: search
-            // results carry `queries` + `matches`; load successes
-            // carry `name` + `content`; load failures carry `name`
-            // plus a search-shaped `queries` + `matches` echo built
-            // from the requested name's word-like tokens.
-            let queries = cbor_array_field(details, "queries")
-                .map(format_skill_query_list)
-                .filter(|s| !s.is_empty());
-            let load_name = cbor_text_field(details, "name");
-            let match_count = cbor_array_field(details, "matches")
-                .map(<[CborValue]>::len)
-                .unwrap_or(0);
-            let scope = if cbor_bool_field(details, "search_content").unwrap_or(false) {
-                " [content]"
-            } else {
-                ""
-            };
-            match (queries, load_name.clone(), error_message) {
-                // Failed load with auto-search hint. Show the
-                // requested name as args and surface the suggestion
-                // count next to the error so the user can tell at a
-                // glance whether to expect useful follow-ups.
-                (Some(_), Some(name), Some(msg)) => ToolCallDisplay {
-                    tool_name: "skill".into(),
-                    args: name,
-                    suffixes: vec![
-                        info_suffix(format!("({match_count} suggestions)")),
-                        err_suffix(Some(msg)),
-                    ],
-                },
-                // Plain skill search (success or error).
-                (Some(query_str), _, error_message) => {
-                    let args = format!("search: {query_str}{scope}");
-                    if let Some(msg) = error_message {
-                        format_tool_error("skill", args, msg)
-                    } else {
-                        ToolCallDisplay {
-                            tool_name: "skill".into(),
-                            args,
-                            suffixes: vec![info_suffix(format!("({match_count}L)")), ok_suffix()],
-                        }
-                    }
-                }
-                // Plain skill load (success or non-suggestion error).
-                (None, _, error_message) => {
-                    let name = load_name.unwrap_or_default();
-                    if let Some(msg) = error_message {
-                        format_tool_error("skill", name, msg)
-                    } else {
-                        let content = cbor_text_field(details, "content").unwrap_or_default();
-                        ToolCallDisplay {
-                            tool_name: "skill".into(),
-                            args: name,
-                            suffixes: vec![output_stats_suffix(&content), ok_suffix()],
-                        }
-                    }
-                }
-            }
-        }
-        _ => ToolCallDisplay {
-            tool_name: tool_name.to_owned(),
-            args: String::new(),
-            suffixes: vec![match error_message {
-                Some(msg) => err_suffix(Some(msg)),
-                None => ok_suffix(),
-            }],
-        },
+/// Minimal display for events that didn't ship a [`ToolDisplay`]
+/// (old logs and any extension that hasn't migrated). Renders just
+/// `<tool_name> ok` or `<tool_name> err: <short message>` — the chip
+/// shape is intentionally generic so future tool names render without
+/// touching this code.
+pub(crate) fn synthesize_fallback_display(tool_name: &str, error: Option<&str>) -> ToolDisplay {
+    let (status, status_text) = match error {
+        Some(msg) if !msg.is_empty() => (ToolDisplayStatus::Error, short_error_chip(msg)),
+        _ => (ToolDisplayStatus::Success, "ok".to_owned()),
+    };
+    let _ = tool_name;
+    ToolDisplay {
+        args: String::new(),
+        status,
+        status_text,
+        ..Default::default()
     }
 }
 
-fn format_shell_completion(details: &CborValue, error_message: Option<&str>) -> ToolCallDisplay {
-    let cmd = cbor_text_field(details, "command").unwrap_or_default();
-    if !matches!(details, CborValue::Map(_))
-        && let Some(msg) = error_message
-    {
-        return format_tool_error("shell", cmd, msg);
+fn short_error_chip(message: &str) -> String {
+    let first = message
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        return "err".to_owned();
     }
-
-    let stdout = cbor_text_field(details, "stdout").unwrap_or_default();
-    let stderr = cbor_text_field(details, "stderr").unwrap_or_default();
-    let combined = if stdout.is_empty() {
-        stderr.clone()
-    } else if stderr.is_empty() {
-        stdout.clone()
+    const MAX: usize = 64;
+    let label = if first.chars().count() <= MAX {
+        first.to_owned()
     } else {
-        format!("{stdout}\n{stderr}")
+        let mut s: String = first.chars().take(MAX.saturating_sub(1)).collect();
+        s.push('…');
+        s
     };
-
-    let status = cbor_int_field(details, "status");
-    let suffixes = vec![
-        output_stats_suffix(&combined),
-        match status {
-            Some(0) => ok_suffix(),
-            Some(code) => err_suffix(Some(&code.to_string())),
-            None => info_suffix("ok?".to_owned()),
-        },
-    ];
-    ToolCallDisplay {
-        tool_name: "shell".into(),
-        args: cmd,
-        suffixes,
-    }
+    format!("err: {label}")
 }
 
 /// Paints a [`ToolCallDisplay`] onto a themed block.

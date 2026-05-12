@@ -6,7 +6,10 @@
 //! harness already discovered at startup (`Harness::discovered_skills`),
 //! so search and load don't touch the filesystem walker again.
 
-use tau_proto::{AgentToolCall, CborValue, Event, ToolCallId, ToolName, ToolRequest};
+use tau_proto::{
+    AgentToolCall, CborValue, Event, ToolCallId, ToolDisplay, ToolDisplayStats, ToolDisplayStatus,
+    ToolName, ToolRequest,
+};
 
 use crate::conversation::ConversationId;
 use crate::discovery::DiscoveredSkill;
@@ -102,24 +105,30 @@ impl Harness {
         let result_event = match action {
             Some("load") => self.handle_skill_load(&call_id, &tool_name, &call.arguments),
             Some("search") => self.handle_skill_search(&call_id, &tool_name, &call.arguments),
-            Some(other) => Event::ToolError(tau_proto::ToolError {
-                call_id: call_id.clone(),
-                tool_name: tool_name.clone(),
-                message: format!(
-                    "unknown skill action: {other:?} (expected \"load\" or \"search\")"
-                ),
-                details: None,
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            }),
-            None => Event::ToolError(tau_proto::ToolError {
-                call_id: call_id.clone(),
-                tool_name: tool_name.clone(),
-                message: "missing required argument: action (\"load\" or \"search\")".to_owned(),
-                details: None,
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            }),
+            Some(other) => {
+                let message =
+                    format!("unknown skill action: {other:?} (expected \"load\" or \"search\")");
+                Event::ToolError(tau_proto::ToolError {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    display: Some(skill_error_display("", &message)),
+                    message,
+                    details: None,
+                    originator: tau_proto::PromptOriginator::User,
+                })
+            }
+            None => {
+                let message =
+                    "missing required argument: action (\"load\" or \"search\")".to_owned();
+                Event::ToolError(tau_proto::ToolError {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    display: Some(skill_error_display("", &message)),
+                    message,
+                    details: None,
+                    originator: tau_proto::PromptOriginator::User,
+                })
+            }
         };
 
         // Publish, then drop the in-flight tracking — order matters:
@@ -139,12 +148,13 @@ impl Harness {
         arguments: &CborValue,
     ) -> Event {
         let Some(name) = cbor_map_text(arguments, "name") else {
+            let message = "missing required argument: name (action=load)".to_owned();
             return Event::ToolError(tau_proto::ToolError {
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
-                message: "missing required argument: name (action=load)".to_owned(),
+                display: Some(skill_error_display("", &message)),
+                message,
                 details: None,
-                display: None,
                 originator: tau_proto::PromptOriginator::User,
             });
         };
@@ -163,18 +173,25 @@ impl Harness {
             } else {
                 self.search_discovered_skills(&needles, false)
             };
+            let message = format!("unknown skill: {name}");
+            let mut display = skill_error_display(name, &message);
+            display
+                .info_chips
+                .insert(0, format!("({} suggestions)", matches.len()));
             return Event::ToolError(tau_proto::ToolError {
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
-                message: format!("unknown skill: {name}"),
+                message,
                 details: Some(skill_load_not_found_details(name, &needles, &matches)),
-                display: None,
+                display: Some(display),
                 originator: tau_proto::PromptOriginator::User,
             });
         };
         match std::fs::read_to_string(&skill.file_path) {
             Ok(content) => {
                 let body = tau_skills::strip_frontmatter(&content);
+                let mut display = skill_ok_display(name);
+                display.stats = text_stats_for_skill(&body);
                 Event::ToolResult(tau_proto::ToolResult {
                     call_id: call_id.clone(),
                     tool_name: tool_name.clone(),
@@ -188,18 +205,21 @@ impl Harness {
                             CborValue::Text(body.to_owned()),
                         ),
                     ]),
-                    display: None,
+                    display: Some(display),
                     originator: tau_proto::PromptOriginator::User,
                 })
             }
-            Err(e) => Event::ToolError(tau_proto::ToolError {
-                call_id: call_id.clone(),
-                tool_name: tool_name.clone(),
-                message: format!("failed to read skill file: {e}"),
-                details: None,
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            }),
+            Err(e) => {
+                let message = format!("failed to read skill file: {e}");
+                Event::ToolError(tau_proto::ToolError {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    display: Some(skill_error_display(name, &message)),
+                    message,
+                    details: None,
+                    originator: tau_proto::PromptOriginator::User,
+                })
+            }
         }
     }
 
@@ -215,15 +235,21 @@ impl Harness {
                 return Event::ToolError(tau_proto::ToolError {
                     call_id: call_id.clone(),
                     tool_name: tool_name.clone(),
+                    display: Some(skill_error_display("search:", &message)),
                     message,
                     details: None,
-                    display: None,
                     originator: tau_proto::PromptOriginator::User,
                 });
             }
         };
         let search_content = cbor_map_bool(arguments, "search_content").unwrap_or(false);
         let hits = self.search_discovered_skills(&needles, search_content);
+        let scope_label = if search_content { " [content]" } else { "" };
+        let queries_label = needles.join(" ");
+        let display_args = format!("search: {queries_label}{scope_label}");
+
+        let mut display = skill_ok_display(&display_args);
+        display.info_chips.push(format!("({}L)", hits.len()));
 
         let matches = CborValue::Array(
             hits.into_iter()
@@ -255,7 +281,7 @@ impl Harness {
                 ),
                 (CborValue::Text("matches".to_owned()), matches),
             ]),
-            display: None,
+            display: Some(display),
             originator: tau_proto::PromptOriginator::User,
         })
     }
@@ -336,6 +362,56 @@ impl Harness {
 /// wanted (e.g. `dpc-rust-code-style` → `[dpc, rust, code, style]`).
 /// Empty parts are dropped; duplicates are removed in first-seen
 /// order so a name like `foo-foo` doesn't double-count itself.
+fn skill_ok_display(args: &str) -> ToolDisplay {
+    ToolDisplay {
+        args: args.to_owned(),
+        status: ToolDisplayStatus::Success,
+        status_text: "ok".to_owned(),
+        ..Default::default()
+    }
+}
+
+fn skill_error_display(args: &str, message: &str) -> ToolDisplay {
+    let chip = error_chip_text(message);
+    ToolDisplay {
+        args: args.to_owned(),
+        status: ToolDisplayStatus::Error,
+        status_text: chip,
+        ..Default::default()
+    }
+}
+
+fn text_stats_for_skill(text: &str) -> ToolDisplayStats {
+    if text.is_empty() {
+        return ToolDisplayStats::default();
+    }
+    ToolDisplayStats {
+        matches: None,
+        lines: Some(text.lines().count() as u64),
+        bytes: Some(text.len() as u64),
+    }
+}
+
+fn error_chip_text(message: &str) -> String {
+    let first = message
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        return "err".to_owned();
+    }
+    const MAX: usize = 64;
+    let label = if first.chars().count() <= MAX {
+        first.to_owned()
+    } else {
+        let mut s: String = first.chars().take(MAX.saturating_sub(1)).collect();
+        s.push('…');
+        s
+    };
+    format!("err: {label}")
+}
+
 fn split_skill_name_into_needles(name: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for part in name.split(['-', '_']) {
