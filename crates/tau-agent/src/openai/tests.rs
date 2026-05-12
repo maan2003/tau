@@ -21,6 +21,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         tools: &[],
         params: tau_proto::ModelParams::default(),
         previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
@@ -49,6 +50,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         tools: &[],
         params: tau_proto::ModelParams::default(),
         previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
@@ -78,6 +80,7 @@ fn build_request_includes_llama_cpp_cache_prompt_when_configured() {
         tools: &[],
         params: tau_proto::ModelParams::default(),
         previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
@@ -108,6 +111,7 @@ fn build_request_sets_parallel_tool_calls_when_tools_offered() {
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
@@ -134,12 +138,62 @@ fn build_request_omits_parallel_tool_calls_without_tools() {
         tools: &[],
         params: tau_proto::ModelParams::default(),
         previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
     let object = body.as_object().expect("request object");
 
     assert!(!object.contains_key("parallel_tool_calls"));
+}
+
+/// Extension-originated turns must NOT share the wire
+/// `prompt_cache_key` with the user's interactive turns — the OpenAI
+/// deployment checklist warns that >15 RPM per
+/// `(prefix, prompt_cache_key)` overflows to additional machines and
+/// degrades cache hit rate, and parallel delegations easily push a
+/// shared key past that threshold.
+#[test]
+fn build_request_prompt_cache_key_differs_for_extension_originator() {
+    let config = OpenAiConfig {
+        base_url: "https://api.openai.com/v1".into(),
+        api_key: "test".into(),
+        model_id: "gpt-5".into(),
+        supports_reasoning_effort: false,
+        supports_verbosity: false,
+        prompt_cache_key: Some("tau-base".into()),
+        prompt_cache_retention: None,
+        supports_llama_cpp_cache: false,
+    };
+    let ext = tau_proto::PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("core-delegate"),
+        query_id: "delegate-1".into(),
+    };
+    let user_request = PromptPayload {
+        system_prompt: "system",
+        messages: &[],
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+    };
+    let ext_request = PromptPayload {
+        system_prompt: "system",
+        messages: &[],
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        previous_response: None,
+        originator: &ext,
+    };
+
+    let user_body =
+        serde_json::to_value(build_request(&config, &user_request, true)).expect("serialize");
+    let ext_body =
+        serde_json::to_value(build_request(&config, &ext_request, true)).expect("serialize");
+
+    assert_eq!(user_body["prompt_cache_key"], "tau-base");
+    assert!(ext_body["prompt_cache_key"].is_string());
+    assert_ne!(ext_body["prompt_cache_key"], user_body["prompt_cache_key"]);
 }
 
 #[test]

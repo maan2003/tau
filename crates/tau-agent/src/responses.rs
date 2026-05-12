@@ -10,6 +10,7 @@ use tau_proto::{ContentBlock, ConversationMessage, ConversationRole};
 
 use crate::common::{
     LlmError, PromptPayload, StreamState, ToolCallAccumulator, cbor_to_json, effort_wire,
+    mix_originator_into_cache_key,
 };
 
 /// Config for the Codex Responses API.
@@ -86,6 +87,7 @@ pub fn responses_stream(
         messages: request.messages,
         tools: request.tools,
         params: request.params,
+        originator: request.originator,
     };
     responses_stream_once(config, &fallback, &mut on_update)
 }
@@ -437,7 +439,8 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
     } else {
         None
     };
-    let prompt_cache_key = config.prompt_cache_key.clone();
+    let prompt_cache_key =
+        mix_originator_into_cache_key(config.prompt_cache_key.as_deref(), request.originator);
     let prompt_cache_retention = config
         .prompt_cache_retention
         .map(tau_config::settings::PromptCacheRetention::as_wire);

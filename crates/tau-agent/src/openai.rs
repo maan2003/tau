@@ -10,7 +10,7 @@ use tau_proto::{ContentBlock, ConversationMessage, ConversationRole, ToolDefinit
 
 use crate::common::{
     LlmError, PromptPayload, StreamState, ToolCallAccumulator, cbor_to_json, effort_wire,
-    verbosity_wire,
+    mix_originator_into_cache_key, verbosity_wire,
 };
 
 /// Configuration for the OpenAI-compatible backend.
@@ -312,7 +312,8 @@ fn build_request(
     } else {
         None
     };
-    let prompt_cache_key = config.prompt_cache_key.clone();
+    let prompt_cache_key =
+        mix_originator_into_cache_key(config.prompt_cache_key.as_deref(), request.originator);
     let prompt_cache_retention = config
         .prompt_cache_retention
         .map(tau_config::settings::PromptCacheRetention::as_wire);

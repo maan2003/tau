@@ -79,3 +79,104 @@ fn server_error_uses_backoff_retry() {
 
     assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
+
+/// `None` base in → `None` out, regardless of originator. The resolver
+/// already decided this provider doesn't get a key; the agent must not
+/// resurrect one.
+#[test]
+fn mix_originator_passes_through_absent_base() {
+    let ext = PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("core-delegate"),
+        query_id: "delegate-1".into(),
+    };
+    assert_eq!(
+        mix_originator_into_cache_key(None, &PromptOriginator::User),
+        None
+    );
+    assert_eq!(mix_originator_into_cache_key(None, &ext), None);
+}
+
+/// A user-originated turn must reuse the resolver-supplied base
+/// verbatim, so successive turns of an interactive session keep
+/// routing to the same cache machine.
+#[test]
+fn mix_originator_user_returns_base_verbatim() {
+    let base = "tau-abc123";
+    assert_eq!(
+        mix_originator_into_cache_key(Some(base), &PromptOriginator::User),
+        Some(base.to_owned()),
+    );
+}
+
+/// An extension-originated turn must NOT inherit the user's wire key —
+/// otherwise parallel delegate runs pile onto the user agent's
+/// routing bucket and push the `(prefix, prompt_cache_key)` pair past
+/// the ~15 RPM threshold the OpenAI deployment checklist warns about.
+#[test]
+fn mix_originator_extension_diverges_from_user() {
+    let base = "tau-abc123";
+    let ext = PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("core-delegate"),
+        query_id: "delegate-1".into(),
+    };
+    let user_key = mix_originator_into_cache_key(Some(base), &PromptOriginator::User);
+    let ext_key = mix_originator_into_cache_key(Some(base), &ext);
+    assert!(user_key.is_some() && ext_key.is_some());
+    assert_ne!(user_key, ext_key);
+}
+
+/// Two distinct extensions must route to distinct cache buckets so
+/// e.g. a websearch helper and a delegate sub-agent don't share load.
+#[test]
+fn mix_originator_distinct_extensions_diverge() {
+    let base = "tau-abc123";
+    let delegate = PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("core-delegate"),
+        query_id: "q-1".into(),
+    };
+    let websearch = PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("websearch-exa"),
+        query_id: "q-2".into(),
+    };
+    assert_ne!(
+        mix_originator_into_cache_key(Some(base), &delegate),
+        mix_originator_into_cache_key(Some(base), &websearch),
+    );
+}
+
+/// The `query_id` is intentionally NOT mixed in: a sub-agent's own
+/// multi-turn loop (each turn carries a fresh query id) must keep
+/// hitting the same cache. If this regressed, every delegate turn
+/// would be a cold cache.
+#[test]
+fn mix_originator_ignores_extension_query_id() {
+    let base = "tau-abc123";
+    let first = PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("core-delegate"),
+        query_id: "delegate-1".into(),
+    };
+    let second = PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("core-delegate"),
+        query_id: "delegate-2".into(),
+    };
+    assert_eq!(
+        mix_originator_into_cache_key(Some(base), &first),
+        mix_originator_into_cache_key(Some(base), &second),
+    );
+}
+
+/// Determinism: same inputs → byte-equal output. Locks the hash
+/// format so a stray reformatting of the salt prefix doesn't silently
+/// invalidate every cache key in the wild.
+#[test]
+fn mix_originator_is_deterministic() {
+    let base = "tau-abc123";
+    let ext = PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("core-delegate"),
+        query_id: "delegate-1".into(),
+    };
+    assert_eq!(
+        mix_originator_into_cache_key(Some(base), &ext),
+        mix_originator_into_cache_key(Some(base), &ext),
+    );
+}

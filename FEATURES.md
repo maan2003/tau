@@ -135,9 +135,12 @@ changes a knob.
 For providers that support it, Tau emits stable `prompt_cache_key` routing
 keys (derived from base URL, model id, and session cwd) so cache hits survive
 restarts and parallel sessions, and sets `prompt_cache_retention` where
-available. Provider compatibility flags live next to the model entry
-(`supports_prompt_cache_key`, `supports_prompt_cache_retention`). Toggle the
-status-bar hit-rate readout with `/set show-cache-stats <true|false>`.
+available. Extension-originated turns (e.g. `core-delegate` sub-agents) get a
+distinct key so parallel delegations don't pile onto the user agent's routing
+bucket and trip OpenAI's `>15 RPM`-per-key overflow heuristic. Provider
+compatibility flags live next to the model entry (`supports_prompt_cache_key`,
+`supports_prompt_cache_retention`). Toggle the status-bar hit-rate readout with
+`/set show-cache-stats <true|false>`.
 
 ### Policy / approvals
 

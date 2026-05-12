@@ -4,7 +4,8 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tau_proto::{AgentToolCall, CborValue, ConversationMessage, ToolDefinition};
+use sha2::{Digest, Sha256};
+use tau_proto::{AgentToolCall, CborValue, ConversationMessage, PromptOriginator, ToolDefinition};
 
 /// The parts of a prompt needed by an LLM backend client.
 pub struct PromptPayload<'a> {
@@ -23,6 +24,14 @@ pub struct PromptPayload<'a> {
     /// `messages[index..]` and sets `previous_response_id` +
     /// `store: true` on the upstream call.
     pub previous_response: Option<PreviousResponse<'a>>,
+    /// Who originated this prompt — the interactive user, or an
+    /// extension-side sub-agent query (most notably `core-delegate`).
+    /// Folded into the wire `prompt_cache_key` so concurrent
+    /// delegated turns don't share a routing bucket with the user's
+    /// own turns (OpenAI's deployment checklist warns that >15 RPM
+    /// per `(prefix, prompt_cache_key)` overflows to additional
+    /// machines and degrades hit rate).
+    pub originator: &'a PromptOriginator,
 }
 
 /// See [`PromptPayload::previous_response`].
@@ -198,6 +207,43 @@ pub fn effort_wire(level: tau_proto::Effort) -> Option<&'static str> {
 /// flag instead.
 pub fn verbosity_wire(level: tau_proto::Verbosity) -> &'static str {
     level.as_openai_wire()
+}
+
+/// Produce the wire `prompt_cache_key` for an outgoing request from a
+/// per-`(base_url, model_id, cwd)` base key resolved upstream and the
+/// originator of the current prompt.
+///
+/// User turns pass `base` through unchanged so a single interactive
+/// session's successive turns keep landing on the same cache machine.
+/// Extension-originated turns (e.g. `core-delegate` sub-agents) get a
+/// distinct key derived from the extension's *name* so:
+///   - sub-agent traffic doesn't pile onto the user agent's routing bucket —
+///     OpenAI's deployment checklist warns that >15 RPM per `(prefix,
+///     prompt_cache_key)` overflows to additional machines and degrades cache
+///     effectiveness, and a parallel-delegate turn easily blows past that on a
+///     shared key;
+///   - the sub-agent's own multi-turn loop still reuses *its* cache because the
+///     query id is intentionally NOT mixed in.
+///
+/// `None` in / `None` out: when the resolver chose not to send a
+/// prompt cache key (provider doesn't support it, cwd unreadable),
+/// no key is sent regardless of originator.
+#[must_use]
+pub fn mix_originator_into_cache_key(
+    base: Option<&str>,
+    originator: &PromptOriginator,
+) -> Option<String> {
+    let base = base?;
+    match originator {
+        PromptOriginator::User => Some(base.to_owned()),
+        PromptOriginator::Extension { name, .. } => {
+            let mut hasher = Sha256::new();
+            hasher.update(base.as_bytes());
+            hasher.update(b"\0ext:");
+            hasher.update(name.as_str().as_bytes());
+            Some(format!("tau-{:x}", hasher.finalize()))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

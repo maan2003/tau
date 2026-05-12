@@ -24,6 +24,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         tools: &[],
         params: tau_proto::ModelParams::default(),
         previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
     };
 
     let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
@@ -53,6 +54,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         tools: &[],
         params: tau_proto::ModelParams::default(),
         previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
     };
 
     let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
@@ -77,6 +79,7 @@ fn build_request_first_turn_replays_full_history_without_chain() {
         tools: &[],
         params: tau_proto::ModelParams::default(),
         previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
     };
 
     let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
@@ -126,6 +129,7 @@ fn build_request_chain_turn_sends_delta_and_previous_response_id() {
             id: "resp_abc",
             message_index: 2,
         }),
+        originator: &tau_proto::PromptOriginator::User,
     };
 
     let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
@@ -161,6 +165,7 @@ fn build_request_chain_with_oob_index_falls_back_to_full_replay() {
             id: "resp_abc",
             message_index: 99,
         }),
+        originator: &tau_proto::PromptOriginator::User,
     };
 
     let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
@@ -196,6 +201,78 @@ fn stale_chain_error_detection() {
     // chain.
     let server = LlmError::HttpStatus(503, "previous_response upstream blip".into());
     assert!(!is_stale_chain_error(&server));
+}
+
+/// Regression: `prompt_cache_key` must still ride along on chained
+/// (`previous_response_id`) turns. Without it the Codex backend would
+/// route the chain continuation to a different machine on each turn
+/// and squander the warm cache the chain is supposed to preserve.
+#[test]
+fn build_request_chain_turn_still_emits_prompt_cache_key() {
+    let config = ResponsesConfig {
+        prompt_cache_key: Some("tau-base".into()),
+        ..chain_test_config()
+    };
+    let messages = vec![
+        user_text("first turn"),
+        assistant_text("first response"),
+        user_text("second turn"),
+    ];
+    let request = PromptPayload {
+        system_prompt: "sys",
+        messages: &messages,
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        previous_response: Some(PreviousResponse {
+            id: "resp_abc",
+            message_index: 2,
+        }),
+        originator: &tau_proto::PromptOriginator::User,
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+    assert_eq!(body["previous_response_id"], "resp_abc");
+    assert_eq!(body["prompt_cache_key"], "tau-base");
+}
+
+/// The Responses backend must split the wire `prompt_cache_key` for
+/// extension-originated turns just like the Chat Completions backend
+/// does. Both paths share the same `mix_originator_into_cache_key`
+/// helper, but this test pins the wiring at the request-build layer
+/// so a future refactor can't silently regress it on one path.
+#[test]
+fn build_request_prompt_cache_key_differs_for_extension_originator() {
+    let config = ResponsesConfig {
+        prompt_cache_key: Some("tau-base".into()),
+        ..chain_test_config()
+    };
+    let ext = tau_proto::PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("core-delegate"),
+        query_id: "delegate-1".into(),
+    };
+    let user_request = PromptPayload {
+        system_prompt: "sys",
+        messages: &[],
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+    };
+    let ext_request = PromptPayload {
+        system_prompt: "sys",
+        messages: &[],
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        previous_response: None,
+        originator: &ext,
+    };
+
+    let user_body = serde_json::to_value(build_request(&config, &user_request)).expect("serialize");
+    let ext_body = serde_json::to_value(build_request(&config, &ext_request)).expect("serialize");
+
+    assert_eq!(user_body["prompt_cache_key"], "tau-base");
+    assert!(ext_body["prompt_cache_key"].is_string());
+    assert_ne!(ext_body["prompt_cache_key"], user_body["prompt_cache_key"]);
 }
 
 fn chain_test_config() -> ResponsesConfig {
@@ -263,6 +340,7 @@ fn build_request_stamps_phase_on_assistant_messages_when_supported() {
         tools: &[],
         params: tau_proto::ModelParams::default(),
         previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
     };
     let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
     let input = body["input"].as_array().expect("input");
@@ -297,6 +375,7 @@ fn build_request_omits_phase_when_unsupported() {
         tools: &[],
         params: tau_proto::ModelParams::default(),
         previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
     };
     let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
     let input = body["input"].as_array().expect("input");
@@ -340,6 +419,7 @@ fn build_request_stamps_phase_on_pre_tool_call_text_flush() {
         tools: &[],
         params: tau_proto::ModelParams::default(),
         previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
     };
     let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
     let input = body["input"].as_array().expect("input");

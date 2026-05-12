@@ -456,6 +456,7 @@ fn handle_prompt<W: Write>(
                 id: p.id.as_str(),
                 message_index: p.message_index,
             }),
+        originator: &prompt.originator,
     };
 
     let originator = prompt.originator.clone();
