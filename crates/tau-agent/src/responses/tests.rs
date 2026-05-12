@@ -1,5 +1,5 @@
 use tau_config::settings::PromptCacheRetention;
-use tau_proto::{ContentBlock, ConversationMessage, ConversationRole, Effort};
+use tau_proto::{ContentBlock, ConversationMessage, ConversationRole};
 
 use super::*;
 use crate::common::{LlmError, PreviousResponse};
@@ -12,6 +12,8 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         model_id: "gpt-5-codex".into(),
         account_id: None,
         supports_reasoning_effort: false,
+        supports_verbosity: false,
+        supports_phase: false,
         supports_reasoning_summary: false,
         prompt_cache_key: Some("tau:seed".into()),
         prompt_cache_retention: Some(PromptCacheRetention::InMemory),
@@ -20,8 +22,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         system_prompt: "system",
         messages: &[],
         tools: &[],
-        effort: Effort::Off,
-        thinking_summary: tau_proto::ThinkingSummary::Off,
+        params: tau_proto::ModelParams::default(),
         previous_response: None,
     };
 
@@ -40,6 +41,8 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         model_id: "gpt-5-codex".into(),
         account_id: None,
         supports_reasoning_effort: false,
+        supports_verbosity: false,
+        supports_phase: false,
         supports_reasoning_summary: false,
         prompt_cache_key: None,
         prompt_cache_retention: None,
@@ -48,8 +51,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         system_prompt: "system",
         messages: &[],
         tools: &[],
-        effort: Effort::Off,
-        thinking_summary: tau_proto::ThinkingSummary::Off,
+        params: tau_proto::ModelParams::default(),
         previous_response: None,
     };
 
@@ -73,8 +75,7 @@ fn build_request_first_turn_replays_full_history_without_chain() {
         system_prompt: "sys",
         messages: &messages,
         tools: &[],
-        effort: Effort::Off,
-        thinking_summary: tau_proto::ThinkingSummary::Off,
+        params: tau_proto::ModelParams::default(),
         previous_response: None,
     };
 
@@ -120,8 +121,7 @@ fn build_request_chain_turn_sends_delta_and_previous_response_id() {
         system_prompt: "sys",
         messages: &messages,
         tools: &[],
-        effort: Effort::Off,
-        thinking_summary: tau_proto::ThinkingSummary::Off,
+        params: tau_proto::ModelParams::default(),
         previous_response: Some(PreviousResponse {
             id: "resp_abc",
             message_index: 2,
@@ -156,8 +156,7 @@ fn build_request_chain_with_oob_index_falls_back_to_full_replay() {
         system_prompt: "sys",
         messages: &messages,
         tools: &[],
-        effort: Effort::Off,
-        thinking_summary: tau_proto::ThinkingSummary::Off,
+        params: tau_proto::ModelParams::default(),
         previous_response: Some(PreviousResponse {
             id: "resp_abc",
             message_index: 99,
@@ -206,9 +205,18 @@ fn chain_test_config() -> ResponsesConfig {
         model_id: "gpt-5-codex".into(),
         account_id: None,
         supports_reasoning_effort: false,
+        supports_verbosity: false,
+        supports_phase: false,
         supports_reasoning_summary: false,
         prompt_cache_key: None,
         prompt_cache_retention: None,
+    }
+}
+
+fn phase_test_config() -> ResponsesConfig {
+    ResponsesConfig {
+        supports_phase: true,
+        ..chain_test_config()
     }
 }
 
@@ -216,6 +224,7 @@ fn user_text(text: &str) -> ConversationMessage {
     ConversationMessage {
         role: ConversationRole::User,
         content: vec![ContentBlock::Text { text: text.into() }],
+        phase: None,
     }
 }
 
@@ -223,5 +232,180 @@ fn assistant_text(text: &str) -> ConversationMessage {
     ConversationMessage {
         role: ConversationRole::Assistant,
         content: vec![ContentBlock::Text { text: text.into() }],
+        phase: None,
     }
+}
+
+fn assistant_text_with_phase(text: &str, phase: tau_proto::MessagePhase) -> ConversationMessage {
+    ConversationMessage {
+        role: ConversationRole::Assistant,
+        content: vec![ContentBlock::Text { text: text.into() }],
+        phase: Some(phase),
+    }
+}
+
+/// When `supports_phase` is on, every assistant `message` item must
+/// carry a `phase` field. A stored `Commentary` value rides straight
+/// through; absence of a stored value falls back to `final_answer`
+/// per the OpenAI deployment-checklist guidance for legacy history.
+#[test]
+fn build_request_stamps_phase_on_assistant_messages_when_supported() {
+    let config = phase_test_config();
+    let messages = vec![
+        user_text("hello"),
+        assistant_text_with_phase("draft", tau_proto::MessagePhase::Commentary),
+        user_text("more"),
+        assistant_text("legacy turn without phase"),
+    ];
+    let request = PromptPayload {
+        system_prompt: "sys",
+        messages: &messages,
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        previous_response: None,
+    };
+    let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+    let input = body["input"].as_array().expect("input");
+
+    let assistant_items: Vec<&serde_json::Value> = input
+        .iter()
+        .filter(|item| item["role"].as_str() == Some("assistant"))
+        .collect();
+    assert_eq!(assistant_items.len(), 2, "two assistant messages expected");
+    assert_eq!(assistant_items[0]["phase"], "commentary");
+    assert_eq!(
+        assistant_items[1]["phase"], "final_answer",
+        "legacy assistant message must default to final_answer per OpenAI guidance"
+    );
+}
+
+/// `supports_phase: false` keeps the field off the wire entirely,
+/// even when the stored message carries one. This is the safety
+/// gate that lets older Codex models (which would reject unknown
+/// fields) keep working as the harness sends them history that may
+/// have been captured against a newer model.
+#[test]
+fn build_request_omits_phase_when_unsupported() {
+    let config = chain_test_config(); // supports_phase: false
+    let messages = vec![assistant_text_with_phase(
+        "draft",
+        tau_proto::MessagePhase::Commentary,
+    )];
+    let request = PromptPayload {
+        system_prompt: "sys",
+        messages: &messages,
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        previous_response: None,
+    };
+    let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+    let input = body["input"].as_array().expect("input");
+    let assistant_item = input
+        .iter()
+        .find(|i| i["role"].as_str() == Some("assistant"))
+        .expect("assistant message");
+    assert!(
+        assistant_item.as_object().unwrap().get("phase").is_none(),
+        "phase must not be sent when the backend doesn't advertise support"
+    );
+}
+
+/// Tool-call boundaries flush a pending text block into its own
+/// assistant `message` item. That intermediate flush must carry
+/// `phase` too — otherwise a mixed text+tool_use turn would
+/// half-pass-through with a phase on the trailing flush only.
+#[test]
+fn build_request_stamps_phase_on_pre_tool_call_text_flush() {
+    let config = phase_test_config();
+    let messages = vec![ConversationMessage {
+        role: ConversationRole::Assistant,
+        content: vec![
+            ContentBlock::Text {
+                text: "thinking out loud".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "shell".into(),
+                input: tau_proto::CborValue::Null,
+            },
+            ContentBlock::Text {
+                text: "trailing".into(),
+            },
+        ],
+        phase: Some(tau_proto::MessagePhase::Commentary),
+    }];
+    let request = PromptPayload {
+        system_prompt: "sys",
+        messages: &messages,
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        previous_response: None,
+    };
+    let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+    let input = body["input"].as_array().expect("input");
+    let assistant_items: Vec<&serde_json::Value> = input
+        .iter()
+        .filter(|item| item["role"].as_str() == Some("assistant"))
+        .collect();
+    assert_eq!(
+        assistant_items.len(),
+        2,
+        "pre-tool-call text and trailing text each become their own assistant message"
+    );
+    for (i, item) in assistant_items.iter().enumerate() {
+        assert_eq!(
+            item["phase"], "commentary",
+            "assistant message #{i} must carry the captured phase"
+        );
+    }
+}
+
+/// `parse_phase_from_item` is the bridge from the Responses-API
+/// `output_item.*` shape into our typed `MessagePhase`. The two
+/// known wire strings round-trip; unknown values (forward
+/// compatibility) come back as `None` rather than panicking.
+#[test]
+fn parse_phase_from_item_recognizes_wire_strings() {
+    let commentary = serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "phase": "commentary",
+    });
+    assert_eq!(
+        parse_phase_from_item(&commentary),
+        Some(tau_proto::MessagePhase::Commentary)
+    );
+
+    let final_ans = serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "phase": "final_answer",
+    });
+    assert_eq!(
+        parse_phase_from_item(&final_ans),
+        Some(tau_proto::MessagePhase::FinalAnswer)
+    );
+
+    let unknown_future = serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "phase": "rumination",
+    });
+    assert_eq!(parse_phase_from_item(&unknown_future), None);
+
+    let no_phase = serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+    });
+    assert_eq!(parse_phase_from_item(&no_phase), None);
+
+    let function_call = serde_json::json!({
+        "type": "function_call",
+        "phase": "commentary",
+    });
+    assert_eq!(
+        parse_phase_from_item(&function_call),
+        None,
+        "non-message items must not have their `phase` field harvested"
+    );
 }

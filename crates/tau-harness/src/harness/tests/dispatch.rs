@@ -100,6 +100,7 @@ fn pure_mutating_pure_serializes_through_dispatch_state_machine() {
 
         backend: None,
         response_id: None,
+        phase: None,
     };
 
     h.handle_agent_response_finished(response)
@@ -202,6 +203,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
 
         backend: None,
         response_id: None,
+        phase: None,
     };
     h.handle_agent_response_finished(response)
         .expect("finished");
@@ -290,6 +292,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("agent response with tool call");
 
@@ -435,6 +438,7 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("persist first agent response");
 
@@ -446,7 +450,7 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
     assert_eq!(prompt2.system_prompt, prompt1.system_prompt);
     assert_eq!(prompt2.tools, prompt1.tools);
     assert_eq!(prompt2.model, prompt1.model);
-    assert_eq!(prompt2.effort, prompt1.effort);
+    assert_eq!(prompt2.model_params, prompt1.model_params);
     assert!(
         prompt1.messages.len() < prompt2.messages.len(),
         "second prompt should strictly extend first: {} !< {}",
@@ -492,6 +496,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
         originator: tau_proto::PromptOriginator::User,
         backend: None,
         response_id: Some("resp_abc".to_owned()),
+        phase: None,
     })
     .expect("finish first");
 
@@ -538,6 +543,7 @@ fn model_switch_invalidates_chain_anchor() {
         originator: tau_proto::PromptOriginator::User,
         backend: None,
         response_id: Some("resp_abc".to_owned()),
+        phase: None,
     })
     .expect("finish first");
 
@@ -583,6 +589,7 @@ fn missing_response_id_leaves_chain_unset() {
         originator: tau_proto::PromptOriginator::User,
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("finish first");
 
@@ -630,6 +637,7 @@ fn queued_prompt_extends_completed_first_prompt() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("finish first");
 
@@ -765,6 +773,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("tool response");
 
@@ -817,6 +826,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("side finished");
 
@@ -892,6 +902,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("tool response");
 
@@ -1023,6 +1034,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("main response");
 
@@ -1067,6 +1079,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("side response");
 
@@ -1160,6 +1173,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("main response");
 
@@ -1232,6 +1246,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("main response");
     assert_eq!(
@@ -1309,6 +1324,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("main response");
 
@@ -1357,6 +1373,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("side response");
 
@@ -1454,6 +1471,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("main response");
 
@@ -1499,6 +1517,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("outer response");
     h.handle_ext_agent_query(
@@ -1541,6 +1560,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("nested final");
 
@@ -1658,6 +1678,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("main response");
 
@@ -1697,6 +1718,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("outer response");
 
@@ -1790,6 +1812,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("main response");
 
@@ -1824,6 +1847,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("side final");
 
@@ -1911,6 +1935,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("main response");
 
@@ -1950,6 +1975,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("top response");
 
@@ -2087,6 +2113,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("main response");
 
@@ -2174,6 +2201,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("A response");
 
@@ -2266,6 +2294,7 @@ fn tool_events_carry_owning_conversation_originator() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("main response");
 
@@ -2305,6 +2334,7 @@ fn tool_events_carry_owning_conversation_originator() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("sub response");
 

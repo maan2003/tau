@@ -177,6 +177,7 @@ where
                                 // No backend ran: model failed to resolve.
                                 backend: None,
                                 response_id: None,
+                                phase: None,
                             },
                         )))?;
                         writer.flush()?;
@@ -294,6 +295,7 @@ impl From<tau_provider::resolver::ResolvedBackend> for BackendConfig {
                     api_key: cfg.api_key,
                     model_id: cfg.model_id.into_string(),
                     supports_reasoning_effort: cfg.supports_reasoning_effort,
+                    supports_verbosity: cfg.supports_verbosity,
                     prompt_cache_key: cfg.prompt_cache_key,
                     prompt_cache_retention: cfg.prompt_cache_retention,
                     supports_llama_cpp_cache: cfg.supports_llama_cpp_cache,
@@ -307,6 +309,8 @@ impl From<tau_provider::resolver::ResolvedBackend> for BackendConfig {
                     account_id: cfg.account_id,
                     supports_reasoning_effort: cfg.supports_reasoning_effort,
                     supports_reasoning_summary: cfg.supports_reasoning_summary,
+                    supports_verbosity: cfg.supports_verbosity,
+                    supports_phase: cfg.supports_phase,
                     prompt_cache_key: cfg.prompt_cache_key,
                     prompt_cache_retention: cfg.prompt_cache_retention,
                 })
@@ -444,8 +448,7 @@ fn handle_prompt<W: Write>(
         system_prompt: &prompt.system_prompt,
         messages: &prompt.messages,
         tools: &prompt.tools,
-        effort: prompt.effort,
-        thinking_summary: prompt.thinking_summary,
+        params: prompt.model_params,
         previous_response: prompt
             .previous_response
             .as_ref()
@@ -517,6 +520,7 @@ fn finish_stream<W: Write>(
     );
     let thinking = state.thinking.clone();
     let response_id = state.response_id.clone();
+    let phase = state.phase;
     let tool_calls = state.into_tool_calls();
     let text = if text_empty {
         if tool_calls.is_empty() {
@@ -542,6 +546,7 @@ fn finish_stream<W: Write>(
             originator: originator.clone(),
             backend: Some(backend.clone()),
             response_id,
+            phase,
         },
     )))?;
     writer.flush()?;
@@ -567,6 +572,7 @@ fn finish_error<W: Write>(
             originator: originator.clone(),
             backend: Some(backend.clone()),
             response_id: None,
+            phase: None,
         },
     )))?;
     writer.flush()?;
@@ -654,6 +660,7 @@ where
                             // Echo agent never calls a real LLM backend.
                             backend: None,
                             response_id: None,
+                            phase: None,
                         },
                     )))?;
                 } else {
@@ -716,6 +723,7 @@ where
                             // Echo agent never calls a real LLM backend.
                             backend: None,
                             response_id: None,
+                            phase: None,
                         },
                     )))?;
                 }

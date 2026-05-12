@@ -30,6 +30,16 @@ pub enum SessionEntry {
         /// replay (see harness `assemble_conversation`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thinking: Option<String>,
+        /// Provider-supplied `phase` label captured for this turn
+        /// (`commentary` vs. `final_answer`). Persisted so it can be
+        /// echoed back on later turns — the OpenAI Codex deployment
+        /// checklist explicitly calls out missing phase on history
+        /// as a cause of early stopping on `gpt-5.3-codex+`. Older
+        /// sessions without this field deserialize as `None` and
+        /// fall back to the default-`final_answer` behavior in the
+        /// Responses backend.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<tau_proto::MessagePhase>,
     },
     ToolActivity(ToolActivityRecord),
 }
@@ -300,6 +310,7 @@ impl SessionTree {
                     SessionEntry::AgentMessage {
                         text: text.clone(),
                         thinking: response.thinking.clone(),
+                        phase: response.phase,
                     },
                 )
             }),

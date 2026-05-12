@@ -77,9 +77,10 @@ pub(crate) struct EventRenderer {
     /// when the effort changes, and vice versa). `None` until the
     /// first `HarnessModelSelected`, or when no model is selected.
     current_model: Option<tau_proto::ModelId>,
-    /// Current effort. Mirrored into `effort_state` so the
-    /// input thread can read it for Shift+Tab cycling.
-    current_effort: tau_proto::Effort,
+    /// Current per-prompt model knobs. Mirrored into `effort_state` /
+    /// `verbosity_state` / `thinking_summary_state` so the input
+    /// thread can read individual fields for cycling helpers.
+    current_params: tau_proto::ModelParams,
     /// Current model context usage percent. `None` when the context
     /// window is unknown for the selected model.
     current_context_percent: Option<u8>,
@@ -113,6 +114,22 @@ pub(crate) struct EventRenderer {
     /// support (e.g. `xhigh` on `gpt-5.4-mini`).
     efforts_available:
         std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<tau_proto::Effort>>>,
+    /// Shared verbosity mirror. No cycle key today; kept symmetric
+    /// with `effort_state` so a future Shift+Tab variant can read it.
+    verbosity_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    /// Allowed verbosity set, mirrored from
+    /// `HarnessVerbositiesAvailable`. Also drives `/verbosity` arg
+    /// completions.
+    verbosities_available:
+        std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<tau_proto::Verbosity>>>,
+    /// Shared thinking-summary mirror. Kept symmetric with the
+    /// other knobs for future cycle helpers.
+    thinking_summary_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    /// Allowed thinking-summary set, mirrored from
+    /// `HarnessThinkingSummariesAvailable`. Drives the
+    /// `/thinking-summary` arg completions.
+    thinking_summaries_available:
+        std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<tau_proto::ThinkingSummary>>>,
     /// Context appended to files opened by the external prompt editor.
     /// Locked with `if let Ok(...)` rather than [`crate::locked`] because
     /// this is best-effort UI metadata: if another holder panicked we'd
@@ -265,7 +282,7 @@ impl EventRenderer {
             token_stats_history: Vec::new(),
             state_dirs,
             current_model: None,
-            current_effort: tau_proto::Effort::Off,
+            current_params: tau_proto::ModelParams::default(),
             current_context_percent: None,
             current_context_input_tokens: None,
             current_context_cached_tokens: None,
@@ -279,6 +296,18 @@ impl EventRenderer {
             // empty set as "no allowed levels known yet" and
             // skips sending a request the harness would just clamp.
             efforts_available: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeSet::new(),
+            )),
+            verbosity_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+                tau_proto::Verbosity::default().as_u8(),
+            )),
+            verbosities_available: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeSet::new(),
+            )),
+            thinking_summary_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+                tau_proto::ThinkingSummary::default().as_u8(),
+            )),
+            thinking_summaries_available: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::BTreeSet::new(),
             )),
             editor_context: std::sync::Arc::new(std::sync::Mutex::new(
@@ -519,11 +548,19 @@ impl EventRenderer {
         let label = match self.current_model.as_ref() {
             None => "no model selected".to_string(),
             Some(model) => {
-                let level = if matches!(self.current_effort, tau_proto::Effort::Off) {
+                let mut params = if matches!(self.current_params.effort, tau_proto::Effort::Off) {
                     "none".to_owned()
                 } else {
-                    self.current_effort.to_string()
+                    self.current_params.effort.to_string()
                 };
+                if self.current_params.verbosity != tau_proto::Verbosity::Medium {
+                    params.push_str(&format!(", v={}", self.current_params.verbosity));
+                }
+                if self.current_params.thinking_summary != tau_proto::ThinkingSummary::Auto
+                    && self.current_params.thinking_summary != tau_proto::ThinkingSummary::Off
+                {
+                    params.push_str(&format!(", ts={}", self.current_params.thinking_summary));
+                }
                 let context = format_context_chip(
                     self.current_context_input_tokens,
                     self.current_context_percent,
@@ -538,7 +575,7 @@ impl EventRenderer {
                     String::new()
                 };
                 let turn_metrics = format_turn_metrics_chip(self.last_turn_latency);
-                format!("{model} ({level}){context}{cache}{turn_metrics}")
+                format!("{model} ({params}){context}{cache}{turn_metrics}")
             }
         };
         let block = themed_block(&self.theme, names::MODEL_STATUS, label);
@@ -1118,8 +1155,20 @@ impl EventRenderer {
                 self.render_model_status();
             }
             Event::HarnessEffortChanged(changed) => {
-                self.current_effort = changed.level;
+                self.current_params.effort = changed.level;
                 self.effort_state
+                    .store(changed.level.as_u8(), std::sync::atomic::Ordering::Relaxed);
+                self.render_model_status();
+            }
+            Event::HarnessVerbosityChanged(changed) => {
+                self.current_params.verbosity = changed.level;
+                self.verbosity_state
+                    .store(changed.level.as_u8(), std::sync::atomic::Ordering::Relaxed);
+                self.render_model_status();
+            }
+            Event::HarnessThinkingSummaryChanged(changed) => {
+                self.current_params.thinking_summary = changed.level;
+                self.thinking_summary_state
                     .store(changed.level.as_u8(), std::sync::atomic::Ordering::Relaxed);
                 self.render_model_status();
             }
@@ -1137,6 +1186,34 @@ impl EventRenderer {
                 self.completion_data
                     .set_arg_completions(tau_cli_term::CommandName::new("/effort"), items);
                 if let Ok(mut set) = self.efforts_available.lock() {
+                    set.clear();
+                    set.extend(avail.levels.iter().copied());
+                }
+            }
+            Event::HarnessVerbositiesAvailable(avail) => {
+                let items: Vec<tau_cli_term::CompletionItem> = avail
+                    .levels
+                    .iter()
+                    .map(|l| tau_cli_term::CompletionItem::plain(l.as_str()))
+                    .collect();
+                self.completion_data
+                    .set_arg_completions(tau_cli_term::CommandName::new("/verbosity"), items);
+                if let Ok(mut set) = self.verbosities_available.lock() {
+                    set.clear();
+                    set.extend(avail.levels.iter().copied());
+                }
+            }
+            Event::HarnessThinkingSummariesAvailable(avail) => {
+                let items: Vec<tau_cli_term::CompletionItem> = avail
+                    .levels
+                    .iter()
+                    .map(|l| tau_cli_term::CompletionItem::plain(l.as_str()))
+                    .collect();
+                self.completion_data.set_arg_completions(
+                    tau_cli_term::CommandName::new("/thinking-summary"),
+                    items,
+                );
+                if let Ok(mut set) = self.thinking_summaries_available.lock() {
                     set.clear();
                     set.extend(avail.levels.iter().copied());
                 }

@@ -110,8 +110,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            effort: Default::default(),
-            thinking_summary: Default::default(),
+            model_params: Default::default(),
             originator: Default::default(),
             ctx_id: None,
             previous_response: None,
@@ -140,6 +139,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
 
             backend: None,
             response_id: None,
+            phase: None,
         }),
     );
 
@@ -352,6 +352,7 @@ fn resumed_harness_replays_persisted_session_history() {
 
             backend: None,
             response_id: None,
+            phase: None,
         })
         .expect("persist agent response");
 
@@ -415,6 +416,7 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("persist agent response");
 

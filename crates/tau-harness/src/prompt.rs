@@ -152,16 +152,29 @@ pub(crate) fn assemble_conversation_from(
                 messages.push(ConversationMessage {
                     role: ConversationRole::User,
                     content: vec![ContentBlock::Text { text: text.clone() }],
+                    phase: None,
                 });
             }
-            SessionEntry::AgentMessage { text, thinking: _ } => {
+            SessionEntry::AgentMessage {
+                text,
+                thinking: _,
+                phase,
+            } => {
                 // `thinking` is intentionally NOT replayed: provider
                 // reasoning summaries are for human inspection only,
                 // never fed back into later turns as plain assistant
                 // text. See `TAU_VISIBLE_THINKING_IMPLEMENTATION_PLAN.md`.
+                //
+                // `phase` *is* replayed — the Codex deployment
+                // checklist warns that omitting it on history causes
+                // early stopping on `gpt-5.3-codex` and later. The
+                // Responses backend echoes it (or defaults to
+                // `final_answer`) when its `supports_phase` flag is
+                // on.
                 messages.push(ConversationMessage {
                     role: ConversationRole::Assistant,
                     content: vec![ContentBlock::Text { text: text.clone() }],
+                    phase: *phase,
                 });
             }
             SessionEntry::ToolActivity(activity) => match &activity.outcome {
@@ -175,6 +188,7 @@ pub(crate) fn assemble_conversation_from(
                         messages.push(ConversationMessage {
                             role: ConversationRole::Assistant,
                             content: Vec::new(),
+                            phase: None,
                         });
                     }
                     if let Some(last) = messages.last_mut() {
@@ -193,6 +207,7 @@ pub(crate) fn assemble_conversation_from(
                             content: cbor_to_text(result),
                             is_error: false,
                         }],
+                        phase: None,
                     });
                 }
                 ToolActivityOutcome::Error { message, details } => {
@@ -207,6 +222,7 @@ pub(crate) fn assemble_conversation_from(
                             content,
                             is_error: true,
                         }],
+                        phase: None,
                     });
                 }
             },
@@ -364,5 +380,43 @@ mod tests {
             tool_result.contains("compiling"),
             "missing stdout: {tool_result}"
         );
+    }
+
+    /// `phase` captured on a prior assistant turn must show up on
+    /// the `ConversationMessage` we hand to the backend on the next
+    /// prompt. This is the link in the chain that lets the
+    /// Responses backend stamp the wire field without round-tripping
+    /// through a separate side channel.
+    #[test]
+    fn assemble_conversation_preserves_agent_phase() {
+        let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
+        tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+            text: "hi".to_owned(),
+            session_id: "session-1".into(),
+            originator: tau_proto::PromptOriginator::default(),
+            ctx_id: None,
+        }));
+        tree.apply_event(&Event::AgentResponseFinished(
+            tau_proto::AgentResponseFinished {
+                session_prompt_id: "sp-1".into(),
+                text: Some("draft answer".to_owned()),
+                tool_calls: Vec::new(),
+                input_tokens: None,
+                cached_tokens: None,
+                thinking: None,
+                token_usage: None,
+                originator: tau_proto::PromptOriginator::User,
+                backend: None,
+                response_id: None,
+                phase: Some(tau_proto::MessagePhase::Commentary),
+            },
+        ));
+
+        let messages = assemble_conversation_from(&tree, tree.head());
+        let assistant = messages
+            .iter()
+            .find(|m| matches!(m.role, tau_proto::ConversationRole::Assistant))
+            .expect("assistant message");
+        assert_eq!(assistant.phase, Some(tau_proto::MessagePhase::Commentary));
     }
 }

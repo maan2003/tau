@@ -243,8 +243,11 @@ pub struct HarnessSettings {
     /// `"anthropic/claude-sonnet-4-20250514"`).
     pub default_model: Option<ModelId>,
 
-    /// Default effort per model.
-    pub default_efforts: HashMap<ModelId, tau_proto::Effort>,
+    /// Default per-prompt model parameters (effort, verbosity,
+    /// thinking-summary), keyed by model id. Each entry's fields are
+    /// independently optional — fields omitted from a per-model entry
+    /// fall back to the harness's per-param middle/auto default.
+    pub default_params: HashMap<ModelId, tau_proto::ModelParams>,
 
     /// Number of days to keep inactive session state directories.
     /// Set to `0` to disable session cleanup.
@@ -458,6 +461,19 @@ pub struct ProviderCompat {
     /// `response.reasoning_summary_text.*` events. Currently only
     /// the OpenAI Responses API surface.
     pub supports_reasoning_summary: bool,
+    /// Provider's API accepts an output-verbosity hint (`verbosity`
+    /// on Chat Completions, `text.verbosity` on the Responses API).
+    /// Currently OpenAI's GPT-5 family. Off by default so we don't
+    /// emit the field to providers that reject unknown arguments.
+    pub supports_verbosity: bool,
+    /// Provider's API accepts the `phase` field on assistant
+    /// `message` items in the Responses API input (`commentary` /
+    /// `final_answer`). Currently OpenAI Codex on `gpt-5.3-codex`
+    /// and later. Off by default — emitting the field to a provider
+    /// that rejects unknown arguments breaks the call. The Codex
+    /// Responses endpoint auto-enables this at resolver time, so
+    /// users don't need to flip it on for the built-in OAuth flow.
+    pub supports_phase: bool,
 }
 
 impl Default for ProviderCompat {
@@ -470,6 +486,8 @@ impl Default for ProviderCompat {
             supports_prompt_cache_retention: false,
             supports_llama_cpp_cache: false,
             supports_reasoning_summary: false,
+            supports_verbosity: false,
+            supports_phase: false,
         }
     }
 }
@@ -532,6 +550,17 @@ pub struct ModelConfig {
     /// `None` keeps the default behaviour.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_efforts: Option<Vec<tau_proto::Effort>>,
+    /// Per-model override of the provider-level `supportsVerbosity`
+    /// flag. `None` (the default) defers to the provider flag.
+    /// Ignored when `verbosities` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_verbosity: Option<bool>,
+    /// Full per-model override of the verbosity levels this model
+    /// accepts. When set, this list replaces both the canonical
+    /// `[low, medium, high]` set and the `supports_verbosity` /
+    /// `supportsVerbosity` flags. `None` keeps the default behaviour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verbosities: Option<Vec<tau_proto::Verbosity>>,
 }
 
 impl ModelConfig {

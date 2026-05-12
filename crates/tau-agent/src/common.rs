@@ -11,14 +11,10 @@ pub struct PromptPayload<'a> {
     pub system_prompt: &'a str,
     pub messages: &'a [ConversationMessage],
     pub tools: &'a [ToolDefinition],
-    /// Reasoning effort. `Off` disables; otherwise rendered into
-    /// `reasoning_effort` (Chat Completions) or `reasoning.effort`
-    /// (Responses), iff the provider supports it.
-    pub effort: tau_proto::Effort,
-    /// Whether to ask the provider for a visible reasoning summary,
-    /// and at what verbosity. Only honored on backends whose config
-    /// reports `supports_reasoning_summary`.
-    pub thinking_summary: tau_proto::ThinkingSummary,
+    /// Per-prompt model knobs (effort / verbosity / thinking-summary).
+    /// Each field is honored only when the backend's config reports
+    /// support for the corresponding provider feature.
+    pub params: tau_proto::ModelParams,
     /// Hint from the harness for stateful chaining: the previous
     /// turn's `response_id` and the index in `messages` where new
     /// content for this turn begins. Backends that don't support
@@ -123,6 +119,13 @@ pub struct StreamState {
     /// populated by the Responses backend; the Chat Completions
     /// backend leaves this `None`.
     pub response_id: Option<String>,
+    /// Provider-supplied `phase` label on the assistant `message`
+    /// output item (`commentary` vs. `final_answer`). Only populated
+    /// by the Responses backend when its `supports_phase` flag is on
+    /// and the model emitted one. Surfaced on
+    /// [`tau_proto::AgentResponseFinished`] so the harness persists
+    /// it for later replay.
+    pub phase: Option<tau_proto::MessagePhase>,
 }
 
 /// Accumulates one tool call across streaming chunks.
@@ -142,6 +145,7 @@ impl StreamState {
             output_tokens: None,
             thinking: None,
             response_id: None,
+            phase: None,
         }
     }
 
@@ -186,6 +190,14 @@ pub fn effort_wire(level: tau_proto::Effort) -> Option<&'static str> {
         High => Some("high"),
         XHigh => Some("xhigh"),
     }
+}
+
+/// Maps `Verbosity` to the wire string OpenAI's `verbosity` /
+/// `text.verbosity` field accepts. There is no "off" sentinel — the
+/// caller gates the field on a provider-level `supports_verbosity`
+/// flag instead.
+pub fn verbosity_wire(level: tau_proto::Verbosity) -> &'static str {
+    level.as_openai_wire()
 }
 
 // ---------------------------------------------------------------------------

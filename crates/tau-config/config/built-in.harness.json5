@@ -3,7 +3,7 @@
 // recursion on the public type.
 {
     default_model: null,
-    default_efforts: {},
+    default_params: {},
     session_retention_days: 60,
     extensions: {},
 }

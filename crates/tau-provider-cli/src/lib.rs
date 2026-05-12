@@ -441,6 +441,10 @@ fn build_provider_entry(kind: &ProviderKind, ollama_model: Option<&str>) -> Prov
             supports_xhigh: None,
             // `None` keeps the canonical default level set.
             reasoning_efforts: None,
+            // `None` defers to the provider-level `supportsVerbosity`.
+            supports_verbosity: None,
+            // `None` keeps the canonical `[low, medium, high]` set.
+            verbosities: None,
         }
     }
 

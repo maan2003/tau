@@ -80,6 +80,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
 
         backend: None,
         response_id: None,
+        phase: None,
     })
     .expect("main response");
 

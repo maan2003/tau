@@ -18,7 +18,9 @@ use tau_proto::{
 };
 
 use crate::harness::{Harness, selector_matches_event};
-use crate::model::{efforts_for_model, model_context_window};
+use crate::model::{
+    efforts_for_model, model_context_window, thinking_summaries_for_model, verbosities_for_model,
+};
 
 impl Harness {
     pub(crate) fn replay_session_events(&mut self, client_id: &str, selectors: &[EventSelector]) {
@@ -102,24 +104,72 @@ impl Harness {
                 .send_to(client_id, None, Frame::Event(context_event));
         }
         let effort_event = Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
-            level: self.selected_effort,
+            level: self.selected_params.effort,
         });
         if selector_matches_event(selectors, &effort_event) {
             let _ = self
                 .bus
                 .send_to(client_id, None, Frame::Event(effort_event));
         }
-        let levels = self
+        let effort_levels = self
             .selected_model
             .as_ref()
             .map(|m| efforts_for_model(&self.model_registry, m))
             .unwrap_or_default();
-        let levels_event =
-            Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable { levels });
-        if selector_matches_event(selectors, &levels_event) {
+        let effort_levels_event =
+            Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
+                levels: effort_levels,
+            });
+        if selector_matches_event(selectors, &effort_levels_event) {
             let _ = self
                 .bus
-                .send_to(client_id, None, Frame::Event(levels_event));
+                .send_to(client_id, None, Frame::Event(effort_levels_event));
+        }
+        let verbosity_event = Event::HarnessVerbosityChanged(tau_proto::HarnessVerbosityChanged {
+            level: self.selected_params.verbosity,
+        });
+        if selector_matches_event(selectors, &verbosity_event) {
+            let _ = self
+                .bus
+                .send_to(client_id, None, Frame::Event(verbosity_event));
+        }
+        let verbosity_levels = self
+            .selected_model
+            .as_ref()
+            .map(|m| verbosities_for_model(&self.model_registry, m))
+            .unwrap_or_default();
+        let verbosity_levels_event =
+            Event::HarnessVerbositiesAvailable(tau_proto::HarnessVerbositiesAvailable {
+                levels: verbosity_levels,
+            });
+        if selector_matches_event(selectors, &verbosity_levels_event) {
+            let _ = self
+                .bus
+                .send_to(client_id, None, Frame::Event(verbosity_levels_event));
+        }
+        let thinking_event =
+            Event::HarnessThinkingSummaryChanged(tau_proto::HarnessThinkingSummaryChanged {
+                level: self.selected_params.thinking_summary,
+            });
+        if selector_matches_event(selectors, &thinking_event) {
+            let _ = self
+                .bus
+                .send_to(client_id, None, Frame::Event(thinking_event));
+        }
+        let thinking_levels = self
+            .selected_model
+            .as_ref()
+            .map(|m| thinking_summaries_for_model(&self.model_registry, m))
+            .unwrap_or_default();
+        let thinking_levels_event = Event::HarnessThinkingSummariesAvailable(
+            tau_proto::HarnessThinkingSummariesAvailable {
+                levels: thinking_levels,
+            },
+        );
+        if selector_matches_event(selectors, &thinking_levels_event) {
+            let _ = self
+                .bus
+                .send_to(client_id, None, Frame::Event(thinking_levels_event));
         }
     }
 }

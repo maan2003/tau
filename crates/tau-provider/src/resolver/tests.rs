@@ -126,3 +126,82 @@ fn non_builtin_backend_skips_retention_default() {
         None
     );
 }
+
+/// The ChatGPT Codex Responses endpoint auto-enables `supports_phase`
+/// for models known to emit the field (`gpt-5.3-codex` and later) so
+/// users on the built-in OAuth flow get the field plumbed through
+/// without having to touch their settings. Older Codex models stay
+/// off the feature — older variants reject unknown fields, and the
+/// docs only call out 5.3+.
+#[test]
+fn codex_backend_auto_enables_phase_for_supported_models() {
+    let provider = ProviderConfig::default();
+
+    assert!(supports_phase(
+        &provider,
+        "https://chatgpt.com/backend-api",
+        "gpt-5.3-codex"
+    ));
+    assert!(supports_phase(
+        &provider,
+        "https://chatgpt.com/backend-api/",
+        "gpt-5.3-codex-2026-01-15"
+    ));
+    assert!(supports_phase(
+        &provider,
+        "https://chatgpt.com/backend-api",
+        "gpt-5.4-codex"
+    ));
+    assert!(
+        !supports_phase(&provider, "https://chatgpt.com/backend-api", "gpt-5-codex"),
+        "the pre-5.3 codex line predates the field"
+    );
+    assert!(
+        !supports_phase(
+            &provider,
+            "https://chatgpt.com/backend-api",
+            "gpt-5.2-codex"
+        ),
+        "5.2-codex is below the doc-cited 5.3 floor"
+    );
+    assert!(
+        !supports_phase(&provider, "https://chatgpt.com/backend-api", "gpt-5.5"),
+        "non-codex models don't get the auto-enable"
+    );
+}
+
+/// Explicit `supports_phase` on a provider's compat block overrides
+/// the model-id heuristic. This is the escape hatch for self-hosted
+/// or proxy backends that mimic the Codex shape but don't appear in
+/// our built-in whitelist.
+#[test]
+fn explicit_provider_phase_flag_wins() {
+    let provider = ProviderConfig {
+        compat: settings::ProviderCompat {
+            supports_phase: true,
+            ..settings::ProviderCompat::default()
+        },
+        ..ProviderConfig::default()
+    };
+
+    assert!(supports_phase(
+        &provider,
+        "https://example.com/v1",
+        "some-custom-model"
+    ));
+}
+
+/// The public OpenAI REST API (`api.openai.com/v1`) is NOT in the
+/// auto-enable list: Tau doesn't route Responses through it today,
+/// and `phase` is a Codex-surface concept per the deployment
+/// checklist. The flag must stay off there absent an explicit
+/// opt-in, just like `prompt_cache_retention` is gated separately.
+#[test]
+fn public_openai_api_does_not_auto_enable_phase() {
+    let provider = ProviderConfig::default();
+    assert!(!supports_phase(
+        &provider,
+        "https://api.openai.com/v1",
+        "gpt-5.3-codex"
+    ));
+}

@@ -10,6 +10,7 @@ use tau_proto::{ContentBlock, ConversationMessage, ConversationRole, ToolDefinit
 
 use crate::common::{
     LlmError, PromptPayload, StreamState, ToolCallAccumulator, cbor_to_json, effort_wire,
+    verbosity_wire,
 };
 
 /// Configuration for the OpenAI-compatible backend.
@@ -21,6 +22,9 @@ pub struct OpenAiConfig {
     /// Whether the provider's API accepts a `reasoning_effort` field.
     /// Read from `models.json5` provider compat flags.
     pub supports_reasoning_effort: bool,
+    /// Whether the provider's API accepts a top-level `verbosity`
+    /// field (OpenAI Chat Completions on GPT-5+).
+    pub supports_verbosity: bool,
     /// Routing key sent as `prompt_cache_key`. Stable per
     /// `(base_url, model_id, cwd)` so OpenAI routes same-prefix
     /// requests to the same machine.
@@ -204,6 +208,12 @@ struct CompletionRequest {
     /// effort.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
+    /// Top-level GPT-5 output-verbosity hint (`low`/`medium`/`high`).
+    /// Sent only when the provider's `supports_verbosity` flag is on;
+    /// otherwise omitted so non-GPT-5 endpoints don't reject the
+    /// request with an unknown-argument error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verbosity: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -293,7 +303,12 @@ fn build_request(
     let parallel_tool_calls = (!tools.is_empty()).then_some(true);
 
     let reasoning_effort = if config.supports_reasoning_effort {
-        effort_wire(request.effort)
+        effort_wire(request.params.effort)
+    } else {
+        None
+    };
+    let verbosity = if config.supports_verbosity {
+        Some(verbosity_wire(request.params.verbosity))
     } else {
         None
     };
@@ -313,6 +328,7 @@ fn build_request(
             include_usage: true,
         }),
         reasoning_effort,
+        verbosity,
         prompt_cache_key,
         prompt_cache_retention,
         cache_prompt: config.supports_llama_cpp_cache.then_some(true),

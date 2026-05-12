@@ -22,7 +22,7 @@ fn find_important_info(h: &Harness, needle: &str) -> Option<String> {
 }
 
 #[test]
-fn selected_effort_is_model_specific_and_clamped() {
+fn selected_params_effort_is_model_specific_and_clamped() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -36,9 +36,9 @@ fn selected_effort_is_model_specific_and_clamped() {
     std::fs::write(
         config_dir.join("harness.json5"),
         r#"{
-            default_efforts: {
-                "openai/gpt-4.1": "high",
-                "local/llama": "high",
+            default_params: {
+                "openai/gpt-4.1": { effort: "high" },
+                "local/llama": { effort: "high" },
             },
         }"#,
     )
@@ -63,9 +63,9 @@ fn selected_effort_is_model_specific_and_clamped() {
         state_dir.join("harness.json5"),
         r#"{
             "last_selected_model": "openai/gpt-4.1",
-            "last_efforts": {
-                "openai/gpt-4.1": "minimal",
-                "local/llama": "high"
+            "last_params": {
+                "openai/gpt-4.1": { "effort": "minimal" },
+                "local/llama": { "effort": "high" }
             }
         }"#,
     )
@@ -76,27 +76,29 @@ fn selected_effort_is_model_specific_and_clamped() {
     let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
 
     assert_eq!(
-        selected_effort_for_model(
+        selected_params_for_model(
             &dirs,
             &harness_settings,
             &model_registry,
             &"openai/gpt-4.1".into()
-        ),
+        )
+        .effort,
         tau_proto::Effort::High
     );
     assert_eq!(
-        selected_effort_for_model(
+        selected_params_for_model(
             &dirs,
             &harness_settings,
             &model_registry,
             &"local/llama".into()
-        ),
+        )
+        .effort,
         tau_proto::Effort::Off
     );
 }
 
-/// First-time users (no per-model entry in `default_efforts`, no
-/// persisted `last_efforts`) get the middle of the available
+/// First-time users (no per-model entry in `default_params`, no
+/// persisted `last_params`) get the middle of the available
 /// reasoning levels, not the lowest. For the standard
 /// reasoning-supporting list (`[Off, Minimal, Low, Medium, High]`)
 /// that's `Low`. Non-reasoning providers stay at `Off`.
@@ -112,7 +114,7 @@ fn fresh_install_picks_middle_effort_when_no_history() {
         state_dir: Some(state_dir.clone()),
     };
 
-    // No harness.json5: default settings, empty default_efforts.
+    // No harness.json5: default settings, empty default_params.
     std::fs::write(
         config_dir.join("models.json5"),
         r#"{
@@ -136,21 +138,23 @@ fn fresh_install_picks_middle_effort_when_no_history() {
     let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
 
     assert_eq!(
-        selected_effort_for_model(
+        selected_params_for_model(
             &dirs,
             &harness_settings,
             &model_registry,
             &"openai/gpt-4.1".into()
-        ),
+        )
+        .effort,
         tau_proto::Effort::Low,
     );
     assert_eq!(
-        selected_effort_for_model(
+        selected_params_for_model(
             &dirs,
             &harness_settings,
             &model_registry,
             &"local/llama".into()
-        ),
+        )
+        .effort,
         tau_proto::Effort::Off,
     );
 }
@@ -398,4 +402,170 @@ fn clamp_effort_degrades_xhigh_to_high_when_unsupported() {
     assert_eq!(clamp_effort(L::Minimal, &[L::Off]), L::Off);
     // No Off in the allowed set: degrade to the first entry.
     assert_eq!(clamp_effort(L::High, &[L::Medium, L::Low]), L::Medium);
+}
+
+/// `verbosities_for_model` returns the full `[Low, Medium, High]` set
+/// only when the provider (or per-model override) opts in. Providers
+/// that don't advertise verbosity pin to `[Medium]` so the status bar
+/// has a single uniform choice to render and the harness clamping
+/// keeps an unsupported user request out of the wire payload.
+#[test]
+fn verbosities_for_model_respects_provider_and_per_model_flags() {
+    use tau_proto::Verbosity as V;
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("models.json5"),
+        r#"{
+            providers: {
+                openai: {
+                    compat: { supportsVerbosity: true },
+                    models: [
+                        { id: "gpt-5" },
+                        { id: "gpt-5-locked", supportsVerbosity: false },
+                        { id: "gpt-5-pinned", verbosities: ["medium", "high"] },
+                    ],
+                },
+                local: {
+                    compat: { supportsVerbosity: false },
+                    models: [
+                        { id: "llama" },
+                        { id: "llama-opt-in", supportsVerbosity: true },
+                    ],
+                },
+            },
+        }"#,
+    )
+    .expect("write models");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(dir.to_path_buf()),
+        state_dir: None,
+    };
+    let registry = tau_config::settings::load_models_in(&dirs).expect("load");
+
+    assert_eq!(
+        verbosities_for_model(&registry, &"openai/gpt-5".into()),
+        vec![V::Low, V::Medium, V::High],
+    );
+    assert_eq!(
+        verbosities_for_model(&registry, &"openai/gpt-5-locked".into()),
+        vec![V::Medium],
+        "per-model override beats provider-level supportsVerbosity",
+    );
+    assert_eq!(
+        verbosities_for_model(&registry, &"openai/gpt-5-pinned".into()),
+        vec![V::Medium, V::High],
+        "explicit verbosities list replaces the canonical set",
+    );
+    assert_eq!(
+        verbosities_for_model(&registry, &"local/llama".into()),
+        vec![V::Medium],
+    );
+    assert_eq!(
+        verbosities_for_model(&registry, &"local/llama-opt-in".into()),
+        vec![V::Low, V::Medium, V::High],
+        "per-model override flips an off-by-default provider on",
+    );
+}
+
+/// `thinking_summaries_for_model` gates on the provider-level
+/// `supportsReasoningSummary` flag. Off providers report only `[Off]`
+/// so the harness never asks the model to emit a summary it can't.
+#[test]
+fn thinking_summaries_for_model_gates_on_provider_flag() {
+    use tau_proto::ThinkingSummary as T;
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("models.json5"),
+        r#"{
+            providers: {
+                openai: {
+                    compat: { supportsReasoningSummary: true },
+                    models: [{ id: "gpt-5" }],
+                },
+                local: {
+                    compat: { supportsReasoningSummary: false },
+                    models: [{ id: "llama" }],
+                },
+            },
+        }"#,
+    )
+    .expect("write models");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(dir.to_path_buf()),
+        state_dir: None,
+    };
+    let registry = tau_config::settings::load_models_in(&dirs).expect("load");
+
+    assert_eq!(
+        thinking_summaries_for_model(&registry, &"openai/gpt-5".into()),
+        vec![T::Off, T::Auto, T::Concise, T::Detailed],
+    );
+    assert_eq!(
+        thinking_summaries_for_model(&registry, &"local/llama".into()),
+        vec![T::Off],
+    );
+}
+
+/// `selected_params_for_model` falls back to `last_params` for models
+/// with no entry in `default_params`. Each field is restored from the
+/// persisted JSON, so a `/verbosity high` followed by a restart finds
+/// the same level.
+#[test]
+fn selected_params_restores_each_field_from_last_params() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    std::fs::write(
+        config_dir.join("models.json5"),
+        r#"{
+            providers: {
+                openai: {
+                    compat: {
+                        supportsReasoningEffort: true,
+                        supportsReasoningSummary: true,
+                        supportsVerbosity: true,
+                    },
+                    models: [{ id: "gpt-5" }],
+                },
+            },
+        }"#,
+    )
+    .expect("write models");
+    std::fs::write(
+        state_dir.join("harness.json5"),
+        r#"{
+            "last_selected_model": "openai/gpt-5",
+            "last_params": {
+                "openai/gpt-5": {
+                    "effort": "high",
+                    "verbosity": "low",
+                    "thinking_summary": "concise"
+                }
+            }
+        }"#,
+    )
+    .expect("write state");
+
+    let harness_settings =
+        tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
+    let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
+
+    let params = selected_params_for_model(
+        &dirs,
+        &harness_settings,
+        &model_registry,
+        &"openai/gpt-5".into(),
+    );
+    assert_eq!(params.effort, tau_proto::Effort::High);
+    assert_eq!(params.verbosity, tau_proto::Verbosity::Low);
+    assert_eq!(params.thinking_summary, tau_proto::ThinkingSummary::Concise);
 }

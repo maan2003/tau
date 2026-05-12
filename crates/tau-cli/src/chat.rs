@@ -271,6 +271,14 @@ pub(crate) fn run_chat(
             "Set reasoning effort: off, minimal, low, medium, high, xhigh (Shift+Tab to cycle)",
         ),
         SlashCommand::new(
+            "/verbosity",
+            "Set output verbosity: low, medium, high (provider-dependent)",
+        ),
+        SlashCommand::new(
+            "/thinking-summary",
+            "Set reasoning summary mode: off, auto, concise, detailed",
+        ),
+        SlashCommand::new(
             "/set",
             "Set a UI setting (e.g. /set show-diff true); Tab cycles names + values",
         ),
@@ -592,6 +600,40 @@ fn terminal_input_loop(
                 }
                 if text == "/effort" {
                     print_local("/effort <level> — one of: off, minimal, low, medium, high, xhigh");
+                    continue;
+                }
+                if let Some(arg) = text.strip_prefix("/verbosity ") {
+                    match arg.trim().parse::<tau_proto::Verbosity>() {
+                        Ok(level) => {
+                            let _ = send_event(
+                                writer,
+                                &Event::UiSetVerbosity(tau_proto::UiSetVerbosity { level }),
+                            );
+                        }
+                        Err(error) => print_local(&format!("/verbosity: {error}")),
+                    }
+                    continue;
+                }
+                if text == "/verbosity" {
+                    print_local("/verbosity <level> — one of: low, medium, high");
+                    continue;
+                }
+                if let Some(arg) = text.strip_prefix("/thinking-summary ") {
+                    match arg.trim().parse::<tau_proto::ThinkingSummary>() {
+                        Ok(level) => {
+                            let _ = send_event(
+                                writer,
+                                &Event::UiSetThinkingSummary(tau_proto::UiSetThinkingSummary {
+                                    level,
+                                }),
+                            );
+                        }
+                        Err(error) => print_local(&format!("/thinking-summary: {error}")),
+                    }
+                    continue;
+                }
+                if text == "/thinking-summary" {
+                    print_local("/thinking-summary <mode> — one of: off, auto, concise, detailed");
                     continue;
                 }
                 if let Some(provider) = text.strip_prefix("/provider-auth ") {

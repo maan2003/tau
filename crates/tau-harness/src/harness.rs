@@ -38,8 +38,9 @@ use crate::harness::interception::{
     ConversationHeadSync, DeferredPublish, InterceptorRegistry, PendingIntercept,
 };
 use crate::model::{
-    clamp_effort, context_percent_used, efforts_for_model, load_model_list, model_context_window,
-    save_harness_state, selected_effort_for_model,
+    clamp_effort, clamp_thinking_summary, clamp_verbosity, context_percent_used, efforts_for_model,
+    load_model_list, model_context_window, save_harness_state, selected_params_for_model,
+    thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::prompt::{
     assemble_conversation_from, build_system_prompt, cbor_map_bool, render_agents_context_message,
@@ -181,11 +182,12 @@ pub(crate) struct Harness {
     /// Currently selected model. `None` means no model is selected
     /// yet (no providers configured, or the user hasn't picked one).
     pub(crate) selected_model: Option<ModelId>,
-    /// Currently selected reasoning effort level.
-    pub(crate) selected_effort: tau_proto::Effort,
-    /// Currently selected reasoning summary mode. Sent to providers
-    /// that advertise `supportsReasoningSummary`; ignored elsewhere.
-    pub(crate) selected_thinking_summary: tau_proto::ThinkingSummary,
+    /// Currently selected per-prompt model knobs. Stamped onto every
+    /// outgoing [`tau_proto::SessionPromptCreated`]; mutated by
+    /// `UiSetEffort` / `UiSetVerbosity` / `UiSetThinkingSummary` and
+    /// reseeded on every `UiModelSelect` from
+    /// [`selected_params_for_model`].
+    pub(crate) selected_params: tau_proto::ModelParams,
     /// Input tokens consumed by the most recent agent response, if
     /// the provider reported it. `None` until the first usage report
     /// for the current model.
@@ -357,9 +359,9 @@ impl Harness {
             state_dir.clone(),
             harness_settings.session_retention(),
         );
-        let selected_effort = selected_model
+        let selected_params = selected_model
             .as_ref()
-            .map(|m| selected_effort_for_model(&dirs, &harness_settings, &model_registry, m))
+            .map(|m| selected_params_for_model(&dirs, &harness_settings, &model_registry, m))
             .unwrap_or_default();
 
         let default_conversation_id = ConversationId::new("default");
@@ -415,8 +417,7 @@ impl Harness {
             pending_user_prompt_dispatches: VecDeque::new(),
             available_models,
             selected_model,
-            selected_effort,
-            selected_thinking_summary: tau_proto::ThinkingSummary::Auto,
+            selected_params,
             context_input_tokens: None,
             context_cached_tokens: None,
             context_percent_used: None,
@@ -559,9 +560,9 @@ impl Harness {
             state_dir.clone(),
             harness_settings.session_retention(),
         );
-        let selected_effort = selected_model
+        let selected_params = selected_model
             .as_ref()
-            .map(|m| selected_effort_for_model(&dirs, &harness_settings, &model_registry, m))
+            .map(|m| selected_params_for_model(&dirs, &harness_settings, &model_registry, m))
             .unwrap_or_default();
 
         let default_conversation_id = ConversationId::new("default");
@@ -617,8 +618,7 @@ impl Harness {
             pending_user_prompt_dispatches: VecDeque::new(),
             available_models,
             selected_model,
-            selected_effort,
-            selected_thinking_summary: tau_proto::ThinkingSummary::Auto,
+            selected_params,
             context_input_tokens: None,
             context_cached_tokens: None,
             context_percent_used: None,
@@ -1455,18 +1455,21 @@ impl Harness {
                     let model = select.model.clone();
                     self.selected_model = Some(model.clone());
                     let (live_settings, _) = load_harness_settings_or_warn(&self.dirs);
-                    self.selected_effort = selected_effort_for_model(
+                    self.selected_params = selected_params_for_model(
                         &self.dirs,
                         &live_settings,
                         &self.model_registry,
                         &model,
                     );
-                    save_harness_state(&self.dirs, Some(&model), self.selected_effort);
+                    save_harness_state(&self.dirs, Some(&model), self.selected_params);
                     self.context_input_tokens = None;
                     self.context_cached_tokens = None;
                     self.context_percent_used = None;
                     let context_window = model_context_window(&self.model_registry, &model);
-                    let levels = efforts_for_model(&self.model_registry, &model);
+                    let effort_levels = efforts_for_model(&self.model_registry, &model);
+                    let verbosity_levels = verbosities_for_model(&self.model_registry, &model);
+                    let thinking_levels =
+                        thinking_summaries_for_model(&self.model_registry, &model);
                     self.publish_event(
                         None,
                         Event::HarnessModelSelected(HarnessModelSelected {
@@ -1485,14 +1488,44 @@ impl Harness {
                     self.publish_event(
                         None,
                         Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
-                            level: self.selected_effort,
+                            level: self.selected_params.effort,
                         }),
                     );
                     self.publish_event(
                         None,
                         Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
-                            levels,
+                            levels: effort_levels,
                         }),
+                    );
+                    self.publish_event(
+                        None,
+                        Event::HarnessVerbosityChanged(tau_proto::HarnessVerbosityChanged {
+                            level: self.selected_params.verbosity,
+                        }),
+                    );
+                    self.publish_event(
+                        None,
+                        Event::HarnessVerbositiesAvailable(
+                            tau_proto::HarnessVerbositiesAvailable {
+                                levels: verbosity_levels,
+                            },
+                        ),
+                    );
+                    self.publish_event(
+                        None,
+                        Event::HarnessThinkingSummaryChanged(
+                            tau_proto::HarnessThinkingSummaryChanged {
+                                level: self.selected_params.thinking_summary,
+                            },
+                        ),
+                    );
+                    self.publish_event(
+                        None,
+                        Event::HarnessThinkingSummariesAvailable(
+                            tau_proto::HarnessThinkingSummariesAvailable {
+                                levels: thinking_levels,
+                            },
+                        ),
                     );
                     // If we just went from no-model to having one,
                     // drain queued prompts.
@@ -1536,17 +1569,97 @@ impl Harness {
                         }),
                     );
                 }
-                self.selected_effort = clamped;
+                self.selected_params.effort = clamped;
                 save_harness_state(
                     &self.dirs,
                     self.selected_model.as_ref(),
-                    self.selected_effort,
+                    self.selected_params,
                 );
                 self.publish_event(
                     None,
                     Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
-                        level: self.selected_effort,
+                        level: self.selected_params.effort,
                     }),
+                );
+                Ok(true)
+            }
+            Event::UiSetVerbosity(req) => {
+                let levels = self
+                    .selected_model
+                    .as_ref()
+                    .map(|m| verbosities_for_model(&self.model_registry, m))
+                    .unwrap_or_default();
+                let clamped = clamp_verbosity(req.level, &levels);
+                if clamped != req.level {
+                    let model_label = self
+                        .selected_model
+                        .as_ref()
+                        .map(ModelId::to_string)
+                        .unwrap_or_else(|| "(no model)".to_owned());
+                    self.publish_event(
+                        None,
+                        Event::HarnessInfo(tau_proto::HarnessInfo {
+                            message: format!(
+                                "verbosity `{}` not supported by `{model_label}`; using `{}` instead",
+                                req.level.as_str(),
+                                clamped.as_str(),
+                            ),
+                            level: tau_proto::HarnessInfoLevel::Normal,
+                        }),
+                    );
+                }
+                self.selected_params.verbosity = clamped;
+                save_harness_state(
+                    &self.dirs,
+                    self.selected_model.as_ref(),
+                    self.selected_params,
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessVerbosityChanged(tau_proto::HarnessVerbosityChanged {
+                        level: self.selected_params.verbosity,
+                    }),
+                );
+                Ok(true)
+            }
+            Event::UiSetThinkingSummary(req) => {
+                let levels = self
+                    .selected_model
+                    .as_ref()
+                    .map(|m| thinking_summaries_for_model(&self.model_registry, m))
+                    .unwrap_or_default();
+                let clamped = clamp_thinking_summary(req.level, &levels);
+                if clamped != req.level {
+                    let model_label = self
+                        .selected_model
+                        .as_ref()
+                        .map(ModelId::to_string)
+                        .unwrap_or_else(|| "(no model)".to_owned());
+                    self.publish_event(
+                        None,
+                        Event::HarnessInfo(tau_proto::HarnessInfo {
+                            message: format!(
+                                "thinking summary `{}` not supported by `{model_label}`; using `{}` instead",
+                                req.level.as_str(),
+                                clamped.as_str(),
+                            ),
+                            level: tau_proto::HarnessInfoLevel::Normal,
+                        }),
+                    );
+                }
+                self.selected_params.thinking_summary = clamped;
+                save_harness_state(
+                    &self.dirs,
+                    self.selected_model.as_ref(),
+                    self.selected_params,
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessThinkingSummaryChanged(
+                        tau_proto::HarnessThinkingSummaryChanged {
+                            level: self.selected_params.thinking_summary,
+                        },
+                    ),
                 );
                 Ok(true)
             }
@@ -2677,8 +2790,7 @@ impl Harness {
             messages,
             tools,
             model,
-            effort: self.selected_effort,
-            thinking_summary: self.selected_thinking_summary,
+            model_params: self.selected_params,
             originator,
             ctx_id,
             previous_response,
@@ -3487,7 +3599,7 @@ impl Harness {
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "(none)".to_owned())
         ));
-        out.push_str(&format!("effort: {:?}\n\n", prompt.effort));
+        out.push_str(&format!("params: {:?}\n\n", prompt.model_params));
 
         out.push_str("================ SYSTEM PROMPT ================\n");
         out.push_str(&prompt.system_prompt);

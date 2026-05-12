@@ -25,6 +25,20 @@ pub struct ResponsesConfig {
     /// Whether the provider's API accepts `reasoning.summary` and
     /// streams `response.reasoning_summary_text.*` events.
     pub supports_reasoning_summary: bool,
+    /// Whether the provider's API accepts a `text.verbosity` field
+    /// (OpenAI Responses on GPT-5+).
+    pub supports_verbosity: bool,
+    /// Whether the provider's API accepts (and the model emits) the
+    /// `phase` field on assistant `message` items
+    /// (`commentary` / `final_answer`). When on:
+    /// 1. The Responses backend stamps `phase` on every outgoing assistant
+    ///    message, defaulting to `final_answer` when the stored history doesn't
+    ///    carry one (matches OpenAI's deployment-checklist guidance for
+    ///    backwards compatibility).
+    /// 2. The SSE parser captures `phase` off the assistant `message` item so
+    ///    the harness can persist it.
+    /// When off, no `phase` field is sent or parsed.
+    pub supports_phase: bool,
     /// Routing key sent as `prompt_cache_key`. See
     /// `openai::prompt_cache_key` for the derivation rationale.
     pub prompt_cache_key: Option<String>,
@@ -71,8 +85,7 @@ pub fn responses_stream(
         system_prompt: request.system_prompt,
         messages: request.messages,
         tools: request.tools,
-        effort: request.effort,
-        thinking_summary: request.thinking_summary,
+        params: request.params,
     };
     responses_stream_once(config, &fallback, &mut on_update)
 }
@@ -184,7 +197,7 @@ fn responses_stream_once(
                         .push_str(delta);
                 }
             }
-            "response.output_item.added" => {
+            "response.output_item.added" | "response.output_item.done" => {
                 if let Some(item) = event.get("item") {
                     if item["type"].as_str() == Some("function_call") {
                         let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
@@ -201,6 +214,9 @@ fn responses_stream_once(
                         if let Some(name) = item["name"].as_str() {
                             state.tool_calls[output_index].name = name.to_owned();
                         }
+                    }
+                    if state.phase.is_none() {
+                        state.phase = parse_phase_from_item(item);
                     }
                 }
             }
@@ -233,6 +249,20 @@ fn responses_stream_once(
                         .and_then(|response| response["id"].as_str())
                         .or_else(|| event["id"].as_str())
                         .map(str::to_owned);
+                }
+                if state.phase.is_none() {
+                    // Some providers only surface `phase` on the
+                    // terminal `response.completed` envelope, not on
+                    // per-item events. Scan `response.output[]` as a
+                    // fallback so we capture whatever the model
+                    // committed to before the stream ended.
+                    state.phase = event
+                        .get("response")
+                        .and_then(|response| response.get("output"))
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .find_map(parse_phase_from_item);
                 }
                 break;
             }
@@ -297,6 +327,11 @@ struct ResponsesRequest {
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningRequest>,
+    /// GPT-5 `text.verbosity` knob. Only set when the provider
+    /// advertises `supports_verbosity`; otherwise omitted so older
+    /// endpoints don't trip on an unknown field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<TextRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -319,6 +354,13 @@ struct ReasoningRequest {
     effort: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct TextRequest {
+    /// `low`/`medium`/`high` — see
+    /// <https://developers.openai.com/api/docs/guides/deployment-checklist#set-up-textverbosity>.
+    verbosity: &'static str,
 }
 
 fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> ResponsesRequest {
@@ -345,7 +387,7 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
 
     let mut input = Vec::new();
     for msg in input_messages {
-        convert_message(msg, &mut input);
+        convert_message(msg, config.supports_phase, &mut input);
     }
 
     let tools: Vec<serde_json::Value> = request
@@ -374,17 +416,24 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
     };
 
     let effort = if config.supports_reasoning_effort {
-        effort_wire(request.effort)
+        effort_wire(request.params.effort)
     } else {
         None
     };
     let summary = if config.supports_reasoning_summary {
-        request.thinking_summary.as_openai_wire()
+        request.params.thinking_summary.as_openai_wire()
     } else {
         None
     };
     let reasoning = if effort.is_some() || summary.is_some() {
         Some(ReasoningRequest { effort, summary })
+    } else {
+        None
+    };
+    let text = if config.supports_verbosity {
+        Some(TextRequest {
+            verbosity: crate::common::verbosity_wire(request.params.verbosity),
+        })
     } else {
         None
     };
@@ -412,9 +461,31 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         tools,
         tool_choice,
         reasoning,
+        text,
         prompt_cache_key,
         prompt_cache_retention,
         previous_response_id,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase capture
+// ---------------------------------------------------------------------------
+
+/// Extracts the assistant-phase label off a Responses-API `output[]`
+/// or `output_item.*` item, when the item is an assistant `message`
+/// carrying a known `phase` wire string. Returns `None` for items
+/// that aren't messages, messages without a `phase` field, or wire
+/// strings we don't recognize (forward-compatible: an unknown future
+/// value just won't be persisted, rather than panicking).
+fn parse_phase_from_item(item: &serde_json::Value) -> Option<tau_proto::MessagePhase> {
+    if item.get("type").and_then(serde_json::Value::as_str)? != "message" {
+        return None;
+    }
+    match item.get("phase")?.as_str()? {
+        "commentary" => Some(tau_proto::MessagePhase::Commentary),
+        "final_answer" => Some(tau_proto::MessagePhase::FinalAnswer),
+        _ => None,
     }
 }
 
@@ -439,7 +510,11 @@ fn encode_tool_name(name: &str) -> String {
 // Conversation conversion
 // ---------------------------------------------------------------------------
 
-fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) {
+fn convert_message(
+    msg: &ConversationMessage,
+    supports_phase: bool,
+    out: &mut Vec<serde_json::Value>,
+) {
     match msg.role {
         ConversationRole::User => {
             // Collect text blocks into one user message, emit tool results separately.
@@ -490,6 +565,23 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) 
         ConversationRole::Assistant => {
             // Emit tool calls as individual function_call items,
             // text as a message item.
+            //
+            // `phase` (when the backend supports it): stamp every
+            // assistant `message` item we replay. The stored
+            // `msg.phase` is preferred; turns from before this
+            // field existed (or from non-Codex paths) get the
+            // doc-recommended `final_answer` default — the OpenAI
+            // deployment checklist explicitly calls this out as the
+            // fallback for missing phase on history.
+            let phase_wire: Option<&'static str> = if supports_phase {
+                Some(
+                    msg.phase
+                        .unwrap_or(tau_proto::MessagePhase::FinalAnswer)
+                        .as_openai_wire(),
+                )
+            } else {
+                None
+            };
             let mut text_parts = Vec::new();
             for block in &msg.content {
                 match block {
@@ -501,7 +593,7 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) 
                     } => {
                         // Emit any pending text first.
                         if !text_parts.is_empty() {
-                            out.push(serde_json::json!({
+                            let mut item = serde_json::json!({
                                 "type": "message",
                                 "role": "assistant",
                                 "content": [{
@@ -509,7 +601,11 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) 
                                     "text": text_parts.join("\n"),
                                     "annotations": [],
                                 }],
-                            }));
+                            });
+                            if let Some(phase) = phase_wire {
+                                item["phase"] = serde_json::Value::String(phase.to_owned());
+                            }
+                            out.push(item);
                             text_parts.clear();
                         }
                         let args_json = cbor_to_json(input);
@@ -531,7 +627,7 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) 
                 }
             }
             if !text_parts.is_empty() {
-                out.push(serde_json::json!({
+                let mut item = serde_json::json!({
                     "type": "message",
                     "role": "assistant",
                     "content": [{
@@ -539,7 +635,11 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) 
                         "text": text_parts.join("\n"),
                         "annotations": [],
                     }],
-                }));
+                });
+                if let Some(phase) = phase_wire {
+                    item["phase"] = serde_json::Value::String(phase.to_owned());
+                }
+                out.push(item);
             }
         }
     }

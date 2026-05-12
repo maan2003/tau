@@ -65,6 +65,7 @@ fn representative_events() -> Vec<Event> {
                 content: vec![ContentBlock::Text {
                     text: "hello".to_owned(),
                 }],
+                phase: None,
             }],
             tools: vec![ToolDefinition {
                 name: ToolName::new("read"),
@@ -72,8 +73,7 @@ fn representative_events() -> Vec<Event> {
                 parameters: None,
             }],
             model: None,
-            effort: Effort::Off,
-            thinking_summary: ThinkingSummary::Off,
+            model_params: ModelParams::default(),
             originator: PromptOriginator::User,
             ctx_id: None,
             previous_response: None,
@@ -90,6 +90,7 @@ fn representative_events() -> Vec<Event> {
 
             backend: None,
             response_id: None,
+            phase: None,
         }),
         Event::ExtensionStarting(ExtensionStarting {
             instance_id: 1.into(),
@@ -132,6 +133,29 @@ fn representative_events() -> Vec<Event> {
             name: "demo.progress".parse().expect("event name"),
             session_id: Some("s1".into()),
             payload: CborValue::Text("working".to_owned()),
+        }),
+        Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
+            level: Verbosity::Low,
+        }),
+        Event::HarnessVerbositiesAvailable(HarnessVerbositiesAvailable {
+            levels: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
+        }),
+        Event::HarnessThinkingSummaryChanged(HarnessThinkingSummaryChanged {
+            level: ThinkingSummary::Concise,
+        }),
+        Event::HarnessThinkingSummariesAvailable(HarnessThinkingSummariesAvailable {
+            levels: vec![
+                ThinkingSummary::Off,
+                ThinkingSummary::Auto,
+                ThinkingSummary::Concise,
+                ThinkingSummary::Detailed,
+            ],
+        }),
+        Event::UiSetVerbosity(UiSetVerbosity {
+            level: Verbosity::High,
+        }),
+        Event::UiSetThinkingSummary(UiSetThinkingSummary {
+            level: ThinkingSummary::Auto,
         }),
     ]
 }
@@ -438,6 +462,66 @@ fn tool_name_maybe_serializes_as_transparent_string() {
     let reparsed: ToolNameMaybe =
         serde_json::from_str("\"bad.name\"").expect("deserialize invalid");
     assert!(matches!(reparsed, ToolNameMaybe::Invalid(_)));
+}
+
+/// `Verbosity::next_in` mirrors `Effort::next_in`. Even though the CLI
+/// doesn't bind a cycle key for verbosity today, the helper is part of
+/// the public API and the protocol tests should pin the same wrap /
+/// skip / empty-allowed-set behaviour effort relies on.
+#[test]
+fn verbosity_next_in_skips_disallowed_levels_and_wraps() {
+    use Verbosity::*;
+    let canonical = [Low, Medium, High];
+
+    assert_eq!(Low.next_in(&canonical), Medium);
+    assert_eq!(High.next_in(&canonical), Low);
+
+    let only_low_high = [Low, High];
+    assert_eq!(Low.next_in(&only_low_high), High);
+    assert_eq!(High.next_in(&only_low_high), Low);
+
+    let pinned = [Medium];
+    assert_eq!(Low.next_in(&pinned), Medium);
+    assert_eq!(Medium.next_in(&pinned), Medium);
+
+    assert_eq!(Medium.next_in(&[]), Medium.next());
+}
+
+/// `ThinkingSummary` parses from / displays through the canonical
+/// wire forms the slash command and `models.json5` rely on.
+#[test]
+fn thinking_summary_round_trips_through_display_and_from_str() {
+    use ThinkingSummary::*;
+    for level in [Off, Auto, Concise, Detailed] {
+        let s = level.to_string();
+        assert_eq!(s.parse::<ThinkingSummary>().ok(), Some(level));
+    }
+    assert!("bogus".parse::<ThinkingSummary>().is_err());
+}
+
+/// `ModelParams` serializes its bundled knobs as a flat object that
+/// drops fields at their default value. Lets `harness.json5`
+/// snapshots stay tiny and avoids surprising callers that introspect
+/// the wire shape.
+#[test]
+fn model_params_serializes_skipping_defaults() {
+    let json = serde_json::to_value(ModelParams::default()).expect("serialize");
+    assert_eq!(json, serde_json::json!({}));
+
+    let json = serde_json::to_value(ModelParams {
+        effort: Effort::High,
+        verbosity: Verbosity::Low,
+        thinking_summary: ThinkingSummary::Concise,
+    })
+    .expect("serialize");
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "effort": "high",
+            "verbosity": "low",
+            "thinking_summary": "concise",
+        })
+    );
 }
 
 /// `Effort::next_in` powers the Shift+Tab cycle on the CLI side: it

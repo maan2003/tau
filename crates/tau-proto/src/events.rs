@@ -218,10 +218,21 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "effort_changed");
     pub const HARNESS_EFFORTS_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "efforts_available");
+    pub const HARNESS_VERBOSITY_CHANGED: Self =
+        Self::from_static(EventCategory::Harness, "verbosity_changed");
+    pub const HARNESS_VERBOSITIES_AVAILABLE: Self =
+        Self::from_static(EventCategory::Harness, "verbosities_available");
+    pub const HARNESS_THINKING_SUMMARY_CHANGED: Self =
+        Self::from_static(EventCategory::Harness, "thinking_summary_changed");
+    pub const HARNESS_THINKING_SUMMARIES_AVAILABLE: Self =
+        Self::from_static(EventCategory::Harness, "thinking_summaries_available");
 
     pub const UI_PROMPT_SUBMITTED: Self = Self::from_static(EventCategory::Ui, "prompt_submitted");
     pub const UI_MODEL_SELECT: Self = Self::from_static(EventCategory::Ui, "model_select");
     pub const UI_SET_EFFORT: Self = Self::from_static(EventCategory::Ui, "set_effort");
+    pub const UI_SET_VERBOSITY: Self = Self::from_static(EventCategory::Ui, "set_verbosity");
+    pub const UI_SET_THINKING_SUMMARY: Self =
+        Self::from_static(EventCategory::Ui, "set_thinking_summary");
     pub const UI_DETACH_REQUEST: Self = Self::from_static(EventCategory::Ui, "detach_request");
     pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
     pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
@@ -583,6 +594,14 @@ impl Effort {
             _ => None,
         }
     }
+
+    /// True for the default level (`Off`). Used by `ModelParams`'
+    /// `#[serde(skip_serializing_if)]` so untouched values stay out
+    /// of the wire form.
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Off)
+    }
 }
 
 impl std::str::FromStr for Effort {
@@ -640,21 +659,197 @@ pub struct HarnessEffortChanged {
     pub level: Effort,
 }
 
+/// Output verbosity hint sent to providers that support it (OpenAI
+/// GPT-5 family: `verbosity` on Chat Completions, `text.verbosity` on
+/// Responses). Providers that don't advertise `supportsVerbosity`
+/// silently ignore the field.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum Verbosity {
+    Low = 0,
+    #[default]
+    Medium = 1,
+    High = 2,
+}
+
+impl Verbosity {
+    /// Cycles to the next level (wraps `High → Low`).
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Low,
+        }
+    }
+
+    /// Cycle in canonical order through levels that are in `allowed`.
+    /// Falls back to plain [`Verbosity::next`] when `allowed` is empty.
+    #[must_use]
+    pub fn next_in(self, allowed: &[Self]) -> Self {
+        if allowed.is_empty() {
+            return self.next();
+        }
+        let mut candidate = self.next();
+        for _ in 0..3 {
+            if allowed.contains(&candidate) {
+                return candidate;
+            }
+            candidate = candidate.next();
+        }
+        self
+    }
+
+    /// Short label for status display (`low` / `medium` / `high`).
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Low),
+            1 => Some(Self::Medium),
+            2 => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    /// Wire string for OpenAI's `verbosity` / `text.verbosity` field.
+    /// All variants map to a non-empty string — there is no "off"
+    /// sentinel — so callers gate the field on a provider-level
+    /// `supports_verbosity` flag, not on the value itself.
+    #[must_use]
+    pub const fn as_openai_wire(self) -> &'static str {
+        self.as_str()
+    }
+
+    /// True for the default level. Used by `#[serde(skip_serializing_if)]`
+    /// on `ModelParams` so untouched values stay out of the wire form.
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Medium)
+    }
+}
+
+impl std::str::FromStr for Verbosity {
+    type Err = ParseVerbosityError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            other => Err(ParseVerbosityError {
+                input: other.to_owned(),
+            }),
+        }
+    }
+}
+
+/// Error returned when a verbosity string is not one of the well-known
+/// levels (`low`, `medium`, `high`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseVerbosityError {
+    input: String,
+}
+
+impl ParseVerbosityError {
+    #[must_use]
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl fmt::Display for ParseVerbosityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown verbosity level `{}`; expected low/medium/high",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for ParseVerbosityError {}
+
+impl fmt::Display for Verbosity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The harness announces the current verbosity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessVerbosityChanged {
+    pub level: Verbosity,
+}
+
+/// The harness announces which verbosity levels are valid for the
+/// currently-selected model. Updated on startup and on every model
+/// switch. Empty list means no model is selected; a single-element
+/// `[Medium]` list means the provider doesn't support the knob.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessVerbositiesAvailable {
+    pub levels: Vec<Verbosity>,
+}
+
 /// Whether to ask the provider for a human-readable summary of its
 /// reasoning, and at what verbosity. Currently only the OpenAI
-/// Responses API exposes this surface (`reasoning.summary`). Off by
-/// default — summaries cost extra latency and tokens.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+/// Responses API exposes this surface (`reasoning.summary`). Auto by
+/// default for providers that advertise `supportsReasoningSummary`;
+/// `Off` everywhere else.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum ThinkingSummary {
     #[default]
-    Off,
-    Auto,
-    Concise,
-    Detailed,
+    Off = 0,
+    Auto = 1,
+    Concise = 2,
+    Detailed = 3,
 }
 
 impl ThinkingSummary {
+    /// Cycles to the next level (wraps `Detailed → Off`).
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Auto,
+            Self::Auto => Self::Concise,
+            Self::Concise => Self::Detailed,
+            Self::Detailed => Self::Off,
+        }
+    }
+
+    /// Cycle in canonical order through levels that are in `allowed`.
+    /// Falls back to plain [`ThinkingSummary::next`] when `allowed` is
+    /// empty.
+    #[must_use]
+    pub fn next_in(self, allowed: &[Self]) -> Self {
+        if allowed.is_empty() {
+            return self.next();
+        }
+        let mut candidate = self.next();
+        for _ in 0..4 {
+            if allowed.contains(&candidate) {
+                return candidate;
+            }
+            candidate = candidate.next();
+        }
+        self
+    }
+
     /// Short label for status display.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
@@ -663,6 +858,22 @@ impl ThinkingSummary {
             Self::Auto => "auto",
             Self::Concise => "concise",
             Self::Detailed => "detailed",
+        }
+    }
+
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Off),
+            1 => Some(Self::Auto),
+            2 => Some(Self::Concise),
+            3 => Some(Self::Detailed),
+            _ => None,
         }
     }
 
@@ -677,27 +888,89 @@ impl ThinkingSummary {
             Self::Detailed => Some("detailed"),
         }
     }
+
+    /// True for the default level.
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Off)
+    }
 }
 
 impl std::str::FromStr for ThinkingSummary {
-    type Err = String;
+    type Err = ParseThinkingSummaryError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "off" => Ok(Self::Off),
             "auto" => Ok(Self::Auto),
             "concise" => Ok(Self::Concise),
             "detailed" => Ok(Self::Detailed),
-            other => Err(format!(
-                "unknown thinking summary `{other}`; expected off/auto/concise/detailed"
-            )),
+            other => Err(ParseThinkingSummaryError {
+                input: other.to_owned(),
+            }),
         }
     }
 }
+
+/// Error returned when a thinking-summary string is not one of the
+/// well-known modes (`off`, `auto`, `concise`, `detailed`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseThinkingSummaryError {
+    input: String,
+}
+
+impl ParseThinkingSummaryError {
+    #[must_use]
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl fmt::Display for ParseThinkingSummaryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown thinking summary `{}`; expected off/auto/concise/detailed",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for ParseThinkingSummaryError {}
 
 impl std::fmt::Display for ThinkingSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// The harness announces the current thinking-summary mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessThinkingSummaryChanged {
+    pub level: ThinkingSummary,
+}
+
+/// The harness announces which thinking-summary modes are valid for
+/// the currently-selected model. Empty list means no model is
+/// selected; `[Off]` means the provider doesn't expose summaries.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessThinkingSummariesAvailable {
+    pub levels: Vec<ThinkingSummary>,
+}
+
+/// Per-prompt model knobs the harness selects, persists, and stamps
+/// onto every [`SessionPromptCreated`]. Bundling these together lets
+/// providers and backends thread one struct through instead of a
+/// growing list of fields. Each component independently falls back to
+/// "omit the field" when its [`Verbosity::is_default`] / `is_default`
+/// helper says it's still at the default.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ModelParams {
+    #[serde(default, skip_serializing_if = "Effort::is_default")]
+    pub effort: Effort,
+    #[serde(default, skip_serializing_if = "Verbosity::is_default")]
+    pub verbosity: Verbosity,
+    #[serde(default, skip_serializing_if = "ThinkingSummary::is_default")]
+    pub thinking_summary: ThinkingSummary,
 }
 
 /// The harness announces which efforts are valid for the
@@ -1209,6 +1482,18 @@ pub struct UiSetEffort {
     pub level: Effort,
 }
 
+/// The user requests a verbosity change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiSetVerbosity {
+    pub level: Verbosity,
+}
+
+/// The user requests a thinking-summary mode change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiSetThinkingSummary {
+    pub level: ThinkingSummary,
+}
+
 /// The user requests switching to a different session within the same
 /// daemon. Harness emits `SessionShutdown` for the current session,
 /// then `SessionStarted { reason: New | Resume }` for the new one,
@@ -1443,14 +1728,12 @@ pub struct SessionPromptCreated {
     /// Currently selected model as `"provider/model_id"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
-    /// Reasoning effort to request from the provider (if supported).
+    /// Per-prompt model knobs (reasoning effort, output verbosity,
+    /// thinking-summary mode). The harness stamps in its current
+    /// selection on every prompt; backends pass each field through
+    /// only when the provider advertises support for it.
     #[serde(default)]
-    pub effort: Effort,
-    /// Whether to ask the provider for a visible reasoning summary,
-    /// and at what verbosity. Sent to providers that advertise
-    /// `supportsReasoningSummary`; ignored by everyone else.
-    #[serde(default)]
-    pub thinking_summary: ThinkingSummary,
+    pub model_params: ModelParams,
     /// Who asked for this prompt. Defaults to [`PromptOriginator::User`]
     /// for backward compatibility with old persisted events.
     #[serde(default)]
@@ -1596,6 +1879,15 @@ pub struct AgentResponseFinished {
     /// unfit for chaining — e.g. after a fallback retry).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
+    /// Provider-supplied assistant-phase label captured for this
+    /// turn. `Some(_)` only when the backend supports the Codex
+    /// `phase` field on assistant `message` items (see
+    /// [`MessagePhase`]) and the model emitted one. Persisted with
+    /// the turn so later prompts can echo it back, preventing the
+    /// "early stopping" behavior the OpenAI deployment checklist
+    /// warns about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<MessagePhase>,
 }
 
 /// Identifies the LLM backend that handled an
@@ -1655,11 +1947,60 @@ pub enum ContentBlock {
     },
 }
 
+/// Assistant-message phase label, mirroring the OpenAI Codex
+/// `phase` field on assistant `message` items.
+///
+/// The Codex Responses API attaches one of these to each assistant
+/// turn it produces (on models that support it, currently
+/// `gpt-5.3-codex` and later). Resending the same value on later
+/// turns lets the model distinguish intermediate progress from
+/// completed work — the doc-recommended remedy for "early stopping"
+/// in long, tool-heavy runs.
+///
+/// We capture the value off the SSE stream, persist it alongside the
+/// assistant turn, and echo it back on every re-serialized history
+/// replay. Older models that do not emit this field still receive
+/// the `final_answer` default on assistant message items the harness
+/// re-serializes, which is the explicit guidance in the deployment
+/// checklist.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagePhase {
+    /// Intermediate progress / preliminary notes.
+    Commentary,
+    /// Final completed response.
+    FinalAnswer,
+}
+
+impl MessagePhase {
+    /// Wire string accepted by the OpenAI Codex Responses API on
+    /// assistant `message` items.
+    #[must_use]
+    pub const fn as_openai_wire(self) -> &'static str {
+        match self {
+            Self::Commentary => "commentary",
+            Self::FinalAnswer => "final_answer",
+        }
+    }
+}
+
 /// One message in the conversation history.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConversationMessage {
     pub role: ConversationRole,
     pub content: Vec<ContentBlock>,
+    /// Assistant-only: the `phase` label the provider attached to
+    /// this turn, when one was captured. Echoed back on outgoing
+    /// requests so the model retains its read of "this prior turn
+    /// was commentary vs. final" — the OpenAI deployment checklist
+    /// flags missing phase on history as a cause of early stopping
+    /// on `gpt-5.3-codex` and later.
+    ///
+    /// `None` for user messages and for assistant turns produced by
+    /// providers that do not emit phase; the Responses backend
+    /// substitutes `final_answer` on the wire in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<MessagePhase>,
 }
 
 /// A tool definition available for the agent to use.
@@ -1745,6 +2086,14 @@ pub enum Event {
     HarnessEffortChanged(HarnessEffortChanged),
     #[serde(rename = "harness.efforts_available")]
     HarnessEffortsAvailable(HarnessEffortsAvailable),
+    #[serde(rename = "harness.verbosity_changed")]
+    HarnessVerbosityChanged(HarnessVerbosityChanged),
+    #[serde(rename = "harness.verbosities_available")]
+    HarnessVerbositiesAvailable(HarnessVerbositiesAvailable),
+    #[serde(rename = "harness.thinking_summary_changed")]
+    HarnessThinkingSummaryChanged(HarnessThinkingSummaryChanged),
+    #[serde(rename = "harness.thinking_summaries_available")]
+    HarnessThinkingSummariesAvailable(HarnessThinkingSummariesAvailable),
 
     // UI
     #[serde(rename = "ui.prompt_submitted")]
@@ -1755,6 +2104,10 @@ pub enum Event {
     UiModelSelect(UiModelSelect),
     #[serde(rename = "ui.set_effort")]
     UiSetEffort(UiSetEffort),
+    #[serde(rename = "ui.set_verbosity")]
+    UiSetVerbosity(UiSetVerbosity),
+    #[serde(rename = "ui.set_thinking_summary")]
+    UiSetThinkingSummary(UiSetThinkingSummary),
     #[serde(rename = "ui.detach_request")]
     UiDetachRequest(UiDetachRequest),
     #[serde(rename = "ui.shell_command")]
@@ -1834,10 +2187,18 @@ impl Event {
             Self::HarnessContextUsageChanged(_) => EventName::HARNESS_CONTEXT_USAGE_CHANGED,
             Self::HarnessEffortChanged(_) => EventName::HARNESS_EFFORT_CHANGED,
             Self::HarnessEffortsAvailable(_) => EventName::HARNESS_EFFORTS_AVAILABLE,
+            Self::HarnessVerbosityChanged(_) => EventName::HARNESS_VERBOSITY_CHANGED,
+            Self::HarnessVerbositiesAvailable(_) => EventName::HARNESS_VERBOSITIES_AVAILABLE,
+            Self::HarnessThinkingSummaryChanged(_) => EventName::HARNESS_THINKING_SUMMARY_CHANGED,
+            Self::HarnessThinkingSummariesAvailable(_) => {
+                EventName::HARNESS_THINKING_SUMMARIES_AVAILABLE
+            }
             Self::UiPromptSubmitted(_) => EventName::UI_PROMPT_SUBMITTED,
             Self::UiPromptDraft(_) => EventName::UI_PROMPT_DRAFT,
             Self::UiModelSelect(_) => EventName::UI_MODEL_SELECT,
             Self::UiSetEffort(_) => EventName::UI_SET_EFFORT,
+            Self::UiSetVerbosity(_) => EventName::UI_SET_VERBOSITY,
+            Self::UiSetThinkingSummary(_) => EventName::UI_SET_THINKING_SUMMARY,
             Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,

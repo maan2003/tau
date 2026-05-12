@@ -67,27 +67,40 @@ The harness prepends `prefix` to the resolved command. Anything that gives you
 a stdio pipe to a remote process works the same way (`docker exec`, `nsenter`,
 `bwrap`, …).
 
-### Reasoning effort
+### Model parameters: effort, verbosity, thinking summary
 
-Tau exposes a uniform six-level effort knob — `off`, `minimal`, `low`,
-`medium`, `high`, `xhigh` — that maps onto provider-specific reasoning
-controls. The `xhigh` rung is gated per model: a curated whitelist
-covers known OpenAI models (`gpt-5.5`, `gpt-5.4`/`gpt-5.4-pro`,
-`gpt-5.3-codex`, `gpt-5.2`, `gpt-5.1-codex-max`, excluding `mini`/`nano`
-variants) and individual model entries can opt in or out explicitly
-with `supportsXhigh: true|false` in `models.json5`. For asymmetric
-models like `gpt-5.4-pro` (medium/high/xhigh only — no `off`/`low`)
-or when Tau's detection is wrong/out of date, a `reasoningEfforts`
-list on the model entry pins the exact accepted levels and overrides
-both the whitelist and the provider-level `supportsReasoningEffort`
-flag:
+Three per-prompt knobs are bundled into a single `ModelParams` struct
+that the harness stamps onto every `SessionPromptCreated` and that
+backends thread through to the provider request:
+
+- **`effort`** — reasoning effort. Six levels (`off`, `minimal`, `low`,
+  `medium`, `high`, `xhigh`); maps to OpenAI `reasoning.effort` /
+  `reasoning_effort`. The `xhigh` rung is gated per model: a curated
+  whitelist covers known OpenAI models (`gpt-5.5`, `gpt-5.4`/
+  `gpt-5.4-pro`, `gpt-5.3-codex`, `gpt-5.2`, `gpt-5.1-codex-max`,
+  excluding `mini`/`nano` variants), and individual model entries can
+  opt in or out explicitly with `supportsXhigh: true|false`. For
+  asymmetric models like `gpt-5.4-pro` (medium/high/xhigh only — no
+  `off`/`low`) a `reasoningEfforts` list on the model entry pins the
+  exact accepted levels.
+- **`verbosity`** — output verbosity (`low`, `medium`, `high`).
+  Sent to providers that advertise `supportsVerbosity` as
+  top-level `verbosity` (Chat Completions) or `text.verbosity`
+  (Responses). Default `medium`. Per-model `supportsVerbosity` and
+  `verbosities` overrides mirror the effort escape hatches.
+- **`thinking_summary`** — reasoning-summary mode (`off`, `auto`,
+  `concise`, `detailed`). Sent as `reasoning.summary` on providers
+  that set `supportsReasoningSummary`; ignored otherwise.
+
+Per-model escape hatches in `models.json5`:
 
 ```json5
-// models.json5
 providers: {
   openai: {
+    compat: { supportsVerbosity: true },
     models: [
       { id: "gpt-5.4-pro", reasoningEfforts: ["medium", "high", "xhigh"] },
+      { id: "gpt-5-locked", supportsVerbosity: false },
     ],
   },
 },
@@ -97,18 +110,25 @@ Defaults can be set per-model:
 
 ```json5
 // harness.json5
-default_efforts: {
-  "anthropic/claude-opus-4-7": "high",
-  "openai/gpt-5.5": "xhigh",
+default_params: {
+  "anthropic/claude-opus-4-7": { effort: "high" },
+  "openai/gpt-5.5": { effort: "xhigh", verbosity: "low" },
 },
 ```
 
-In the UI: `/effort medium`, or hit `Shift+Tab` to cycle. The cycle
-walks the levels the harness reports as available for the current
-model, so `xhigh` is reachable on `gpt-5.5` and skipped on
-`gpt-5.4-mini`. Asking for an unsupported level (e.g. `/effort xhigh`
-on a mini model) degrades to `high` and surfaces a `HarnessInfo`
-notice rather than silently disabling reasoning.
+In the UI: `/effort medium`, `/verbosity low`, `/thinking-summary
+concise`. Shift+Tab cycles **effort** specifically; the other knobs
+are slash-command-only today. The cycle walks levels the harness
+reports as available for the current model, so `xhigh` is reachable
+on `gpt-5.5` and skipped on `gpt-5.4-mini`. Asking for an unsupported
+level (e.g. `/effort xhigh` on a mini model, `/verbosity high` on a
+provider that doesn't support it) degrades and surfaces a
+`HarnessInfo` notice rather than silently dropping the field.
+
+The status bar renders effort always; non-default verbosity and
+thinking-summary are appended as `, v=<level>` / `, ts=<level>` so a
+fresh session reads `gpt-5 (medium)` and only grows when the user
+changes a knob.
 
 ### Prompt input caching
 
@@ -230,6 +250,8 @@ Type `/` for menu autocompletion. The built-in set:
 | `/new`              | Start a fresh session in this harness                |
 | `/model <id>`       | Switch model (Tab completes from provider list)      |
 | `/effort <level>`   | Set reasoning effort (`Shift+Tab` cycles)            |
+| `/verbosity <level>`| Set output verbosity (`low`/`medium`/`high`)         |
+| `/thinking-summary <mode>` | Set reasoning-summary mode (`off`/`auto`/`concise`/`detailed`) |
 | `/tree [id]`        | Print session tree; with `id`, rewind head           |
 | `/set <name> <val>` | Set a UI setting (Tab cycles names + values)         |
 

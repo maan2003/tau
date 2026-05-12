@@ -21,6 +21,7 @@ pub struct ResolvedChatCompletions {
     pub api_key: String,
     pub model_id: ModelName,
     pub supports_reasoning_effort: bool,
+    pub supports_verbosity: bool,
     pub prompt_cache_key: Option<String>,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     pub supports_llama_cpp_cache: bool,
@@ -34,6 +35,10 @@ pub struct ResolvedResponses {
     pub account_id: Option<String>,
     pub supports_reasoning_effort: bool,
     pub supports_reasoning_summary: bool,
+    pub supports_verbosity: bool,
+    /// Provider accepts (and the model emits) the Codex assistant
+    /// `phase` field. See [`ProviderCompat::supports_phase`].
+    pub supports_phase: bool,
     pub prompt_cache_key: Option<String>,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
 }
@@ -124,6 +129,8 @@ fn responses_backend(
         account_id,
         supports_reasoning_effort: provider.compat.supports_reasoning_effort,
         supports_reasoning_summary: supports_reasoning_summary(provider, base_url),
+        supports_verbosity: provider.compat.supports_verbosity,
+        supports_phase: supports_phase(provider, base_url, model_id),
         prompt_cache_key: prompt_cache_key(provider, base_url, model_id),
         prompt_cache_retention: prompt_cache_retention(provider, base_url, model_id),
     }))
@@ -148,6 +155,7 @@ fn copilot_backend(
         api_key: access_token,
         model_id: model_id.clone(),
         supports_reasoning_effort: provider.compat.supports_reasoning_effort,
+        supports_verbosity: provider.compat.supports_verbosity,
         supports_llama_cpp_cache: provider.compat.supports_llama_cpp_cache,
     }))
 }
@@ -173,6 +181,7 @@ fn chat_completions_backend(
         api_key: provider.api_key.clone().unwrap_or_default(),
         model_id: model_id.clone(),
         supports_reasoning_effort: provider.compat.supports_reasoning_effort,
+        supports_verbosity: provider.compat.supports_verbosity,
         supports_llama_cpp_cache: provider.compat.supports_llama_cpp_cache,
     }))
 }
@@ -267,6 +276,52 @@ fn supports_prompt_cache_key(provider: &ProviderConfig, base_url: &str) -> bool 
 
 fn supports_reasoning_summary(provider: &ProviderConfig, base_url: &str) -> bool {
     provider.compat.supports_reasoning_summary || is_builtin_openai_endpoint(base_url)
+}
+
+/// Effective `phase`-on-assistant-message support for a resolved
+/// Responses backend.
+///
+/// Explicit provider opt-in always wins. As a convenience for the
+/// shipped OpenAI Codex backend (`chatgpt.com/backend-api`), the flag
+/// auto-enables for models whose id is known to emit the field —
+/// `gpt-5.3-codex` and later. Older Codex models still resolve with
+/// `supports_phase: false`, so the request body shape stays unchanged
+/// for them and they cannot be tripped up by a field they don't
+/// recognize.
+fn supports_phase(provider: &ProviderConfig, base_url: &str, model_id: &str) -> bool {
+    if provider.compat.supports_phase {
+        return true;
+    }
+    is_builtin_openai_codex_endpoint(base_url) && is_known_phase_capable_model_id(model_id)
+}
+
+/// True for the ChatGPT Codex Responses backend specifically — the
+/// only built-in endpoint where the assistant `phase` field is
+/// expected. The public OpenAI `api.openai.com/v1` Responses endpoint
+/// is not on this list: Tau does not route through it today, and the
+/// doc-recommended phase behavior was scoped to the Codex surface.
+fn is_builtin_openai_codex_endpoint(base_url: &str) -> bool {
+    base_url.trim_end_matches('/') == "https://chatgpt.com/backend-api"
+}
+
+/// Model-id whitelist for assistant-phase emission. Matches the
+/// deployment-checklist guidance: `gpt-5.3-codex` and later. We
+/// match by prefix rather than enumerating every snapshot so that
+/// `gpt-5.3-codex-2026-01-15`-style date suffixes are handled
+/// without a settings update.
+fn is_known_phase_capable_model_id(model_id: &str) -> bool {
+    let trimmed = model_id.trim();
+    // `gpt-5.3-codex` and its dated snapshots, plus any future minor
+    // bumps in the same major. `gpt-5-codex` and `gpt-5.2-codex` do
+    // NOT match — those predate the field.
+    if let Some(rest) = trimmed.strip_prefix("gpt-5.") {
+        if let Some((minor, _)) = rest.split_once("-codex").or_else(|| rest.split_once('-')) {
+            if let Ok(n) = minor.parse::<u32>() {
+                return n >= 3 && rest.starts_with(&format!("{minor}-codex"));
+            }
+        }
+    }
+    false
 }
 
 fn supports_prompt_cache_retention(provider: &ProviderConfig, base_url: &str) -> bool {

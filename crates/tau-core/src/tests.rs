@@ -56,6 +56,7 @@ fn store_agent_message(store: &mut SessionStore, session_id: &str, text: &str) -
 
                 backend: None,
                 response_id: None,
+                phase: None,
             }),
         )
         .expect("append session event");
@@ -130,6 +131,7 @@ fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
 
                 backend: None,
                 response_id: None,
+                phase: None,
             })),
         )
         .expect("directed route should succeed");
@@ -189,6 +191,7 @@ fn connection_abstraction_is_transport_independent_for_in_memory_clients() {
 
             backend: None,
             response_id: None,
+            phase: None,
         },
     )));
     assert_eq!(second_report.delivered_to, vec![agent_id.clone()]);
@@ -501,6 +504,51 @@ fn next_event_id_is_cached_across_appends_and_reopen() {
     assert_eq!(outcome.id.get(), 16);
 }
 
+/// `AgentResponseFinished.phase` must survive the session-event
+/// fold into `SessionEntry::AgentMessage`. The next prompt-assembly
+/// pass needs the value to echo it back on the wire — without this,
+/// every turn after a compaction (or a stale-chain fallback) would
+/// drop the label and re-trigger the early-stopping bug the OpenAI
+/// deployment checklist warns about.
+#[test]
+fn session_tree_captures_phase_from_agent_response_finished() {
+    use tau_proto::MessagePhase;
+
+    let mut tree = crate::session::SessionTree::from_events("session-1".into(), &[]);
+    tree.apply_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "session-1".into(),
+        text: "hello".to_owned(),
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    tree.apply_event(&Event::AgentResponseFinished(AgentResponseFinished {
+        session_prompt_id: "sp-1".into(),
+        text: Some("draft response".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        response_id: None,
+        phase: Some(MessagePhase::Commentary),
+    }));
+
+    let last = tree
+        .current_branch()
+        .into_iter()
+        .last()
+        .expect("at least one entry");
+    match last {
+        SessionEntry::AgentMessage { phase, text, .. } => {
+            assert_eq!(text, "draft response");
+            assert_eq!(*phase, Some(MessagePhase::Commentary));
+        }
+        other => panic!("expected AgentMessage, got {other:?}"),
+    }
+}
+
 #[test]
 fn session_tree_persists_across_reopen() {
     let tempdir = TempDir::new().expect("tempdir should exist");
@@ -527,6 +575,7 @@ fn session_tree_persists_across_reopen() {
             &SessionEntry::AgentMessage {
                 text: "hi there".to_owned(),
                 thinking: None,
+                phase: None,
             },
         ]
     );

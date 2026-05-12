@@ -1,5 +1,4 @@
 use tau_config::settings::PromptCacheRetention;
-use tau_proto::Effort;
 
 use super::*;
 use crate::common::PromptPayload;
@@ -11,6 +10,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         api_key: "test".into(),
         model_id: "gpt-5".into(),
         supports_reasoning_effort: false,
+        supports_verbosity: false,
         prompt_cache_key: Some("tau:seed".into()),
         prompt_cache_retention: Some(PromptCacheRetention::Extended24h),
         supports_llama_cpp_cache: false,
@@ -19,8 +19,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         system_prompt: "system",
         messages: &[],
         tools: &[],
-        effort: Effort::Off,
-        thinking_summary: tau_proto::ThinkingSummary::Off,
+        params: tau_proto::ModelParams::default(),
         previous_response: None,
     };
 
@@ -39,6 +38,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         api_key: "test".into(),
         model_id: "local".into(),
         supports_reasoning_effort: false,
+        supports_verbosity: false,
         prompt_cache_key: None,
         prompt_cache_retention: None,
         supports_llama_cpp_cache: false,
@@ -47,8 +47,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         system_prompt: "system",
         messages: &[],
         tools: &[],
-        effort: Effort::Off,
-        thinking_summary: tau_proto::ThinkingSummary::Off,
+        params: tau_proto::ModelParams::default(),
         previous_response: None,
     };
 
@@ -68,6 +67,7 @@ fn build_request_includes_llama_cpp_cache_prompt_when_configured() {
         api_key: "none".into(),
         model_id: "llama-3".into(),
         supports_reasoning_effort: false,
+        supports_verbosity: false,
         prompt_cache_key: None,
         prompt_cache_retention: None,
         supports_llama_cpp_cache: true,
@@ -76,8 +76,7 @@ fn build_request_includes_llama_cpp_cache_prompt_when_configured() {
         system_prompt: "system",
         messages: &[],
         tools: &[],
-        effort: Effort::Off,
-        thinking_summary: tau_proto::ThinkingSummary::Off,
+        params: tau_proto::ModelParams::default(),
         previous_response: None,
     };
 
@@ -93,6 +92,7 @@ fn build_request_sets_parallel_tool_calls_when_tools_offered() {
         api_key: "test".into(),
         model_id: "gpt-5".into(),
         supports_reasoning_effort: false,
+        supports_verbosity: false,
         prompt_cache_key: None,
         prompt_cache_retention: None,
         supports_llama_cpp_cache: false,
@@ -106,8 +106,7 @@ fn build_request_sets_parallel_tool_calls_when_tools_offered() {
         system_prompt: "system",
         messages: &[],
         tools: std::slice::from_ref(&tool),
-        effort: Effort::Off,
-        thinking_summary: tau_proto::ThinkingSummary::Off,
+        params: tau_proto::ModelParams::default(),
         previous_response: None,
     };
 
@@ -124,6 +123,7 @@ fn build_request_omits_parallel_tool_calls_without_tools() {
         api_key: "test".into(),
         model_id: "gpt-5".into(),
         supports_reasoning_effort: false,
+        supports_verbosity: false,
         prompt_cache_key: None,
         prompt_cache_retention: None,
         supports_llama_cpp_cache: false,
@@ -132,8 +132,7 @@ fn build_request_omits_parallel_tool_calls_without_tools() {
         system_prompt: "system",
         messages: &[],
         tools: &[],
-        effort: Effort::Off,
-        thinking_summary: tau_proto::ThinkingSummary::Off,
+        params: tau_proto::ModelParams::default(),
         previous_response: None,
     };
 

@@ -86,8 +86,12 @@ fn harness_settings_user_override_wins_over_built_in() {
         dir.join("harness.json5"),
         r#"{
                 default_model: "anthropic/claude-sonnet-4-20250514",
-                default_efforts: {
-                    "anthropic/claude-sonnet-4-20250514": "high",
+                default_params: {
+                    "anthropic/claude-sonnet-4-20250514": {
+                        effort: "high",
+                        verbosity: "low",
+                        thinking_summary: "concise",
+                    },
                 },
             }"#,
     )
@@ -96,10 +100,14 @@ fn harness_settings_user_override_wins_over_built_in() {
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     let expected: tau_proto::ModelId = "anthropic/claude-sonnet-4-20250514".parse().expect("id");
     assert_eq!(s.default_model.as_ref(), Some(&expected));
-    assert_eq!(
-        s.default_efforts.get(&expected).copied(),
-        Some(tau_proto::Effort::High)
-    );
+    let entry = s
+        .default_params
+        .get(&expected)
+        .copied()
+        .expect("entry should be present");
+    assert_eq!(entry.effort, tau_proto::Effort::High);
+    assert_eq!(entry.verbosity, tau_proto::Verbosity::Low);
+    assert_eq!(entry.thinking_summary, tau_proto::ThinkingSummary::Concise);
 }
 
 #[test]
@@ -221,6 +229,8 @@ fn add_provider_in_writes_typed_entry() {
         context_window: Some(123_456),
         supports_xhigh: None,
         reasoning_efforts: None,
+        supports_verbosity: None,
+        verbosities: None,
     });
 
     let openai = tau_proto::ProviderName::new("openai");
@@ -319,6 +329,8 @@ fn model_supports_xhigh_explicit_override_wins() {
         context_window: None,
         supports_xhigh: None,
         reasoning_efforts: None,
+        supports_verbosity: None,
+        verbosities: None,
     };
     assert!(base.supports_xhigh(), "whitelist default for gpt-5.5");
 

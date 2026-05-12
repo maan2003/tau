@@ -1,8 +1,8 @@
 //! Model-registry helpers: loading the available model list, computing
-//! valid effort levels per model, persisting the user's selection, and
-//! gauging context-window usage.
+//! valid effort/verbosity/thinking-summary levels per model, persisting
+//! the user's selection, and gauging context-window usage.
 
-use tau_proto::ModelId;
+use tau_proto::{ModelId, ModelParams};
 
 use crate::settings::{load_harness_settings_or_warn, load_models_or_warn};
 
@@ -94,6 +94,59 @@ pub(crate) fn efforts_for_model(
     levels
 }
 
+/// Returns the verbosity levels valid for `model`.
+///
+/// Resolution order:
+/// 1. Empty list when the model's provider isn't in the registry.
+/// 2. Per-model `verbosities` (escape hatch).
+/// 3. `[Medium]` when neither the per-model `supportsVerbosity` nor the
+///    provider-level `supportsVerbosity` flag is true — the medium-only
+///    "pinned" set is harmless to send and keeps the status bar rendering
+///    uniform.
+/// 4. Otherwise the canonical `[Low, Medium, High]` set.
+pub(crate) fn verbosities_for_model(
+    registry: &tau_config::settings::ModelRegistry,
+    model: &ModelId,
+) -> Vec<tau_proto::Verbosity> {
+    use tau_proto::Verbosity as V;
+    let Some(provider) = registry.providers.get(&model.provider) else {
+        return Vec::new();
+    };
+    let model_cfg = provider.models.iter().find(|m| m.id == model.model);
+    if let Some(custom) = model_cfg.and_then(|m| m.verbosities.as_ref()) {
+        let mut seen = std::collections::BTreeSet::new();
+        return custom
+            .iter()
+            .copied()
+            .filter(|level| seen.insert(*level))
+            .collect();
+    }
+    let supports = model_cfg
+        .and_then(|m| m.supports_verbosity)
+        .unwrap_or(provider.compat.supports_verbosity);
+    if !supports {
+        return vec![V::Medium];
+    }
+    vec![V::Low, V::Medium, V::High]
+}
+
+/// Returns the thinking-summary modes valid for `model`. `[Off]` when
+/// the provider doesn't expose `reasoning.summary`; otherwise the full
+/// `[Off, Auto, Concise, Detailed]` set.
+pub(crate) fn thinking_summaries_for_model(
+    registry: &tau_config::settings::ModelRegistry,
+    model: &ModelId,
+) -> Vec<tau_proto::ThinkingSummary> {
+    use tau_proto::ThinkingSummary as T;
+    let Some(provider) = registry.providers.get(&model.provider) else {
+        return Vec::new();
+    };
+    if !provider.compat.supports_reasoning_summary {
+        return vec![T::Off];
+    }
+    vec![T::Off, T::Auto, T::Concise, T::Detailed]
+}
+
 pub(crate) fn model_context_window(
     registry: &tau_config::settings::ModelRegistry,
     model: &ModelId,
@@ -136,13 +189,37 @@ pub(crate) fn clamp_effort(
     allowed.first().copied().unwrap_or(L::Off)
 }
 
-fn parse_effort(value: &str) -> Option<tau_proto::Effort> {
-    value.parse().ok()
+pub(crate) fn clamp_verbosity(
+    requested: tau_proto::Verbosity,
+    allowed: &[tau_proto::Verbosity],
+) -> tau_proto::Verbosity {
+    use tau_proto::Verbosity as V;
+    if allowed.contains(&requested) {
+        return requested;
+    }
+    if allowed.contains(&V::Medium) {
+        return V::Medium;
+    }
+    allowed.first().copied().unwrap_or(V::Medium)
 }
 
-fn load_last_efforts(
+pub(crate) fn clamp_thinking_summary(
+    requested: tau_proto::ThinkingSummary,
+    allowed: &[tau_proto::ThinkingSummary],
+) -> tau_proto::ThinkingSummary {
+    use tau_proto::ThinkingSummary as T;
+    if allowed.contains(&requested) {
+        return requested;
+    }
+    if allowed.contains(&T::Off) {
+        return T::Off;
+    }
+    allowed.first().copied().unwrap_or(T::Off)
+}
+
+fn load_last_params(
     dirs: &tau_config::settings::TauDirs,
-) -> std::collections::HashMap<ModelId, tau_proto::Effort> {
+) -> std::collections::HashMap<ModelId, ModelParams> {
     let Some(path) = dirs.state_dir.as_ref().map(|d| d.join("harness.json5")) else {
         return std::collections::HashMap::new();
     };
@@ -153,44 +230,71 @@ fn load_last_efforts(
         return std::collections::HashMap::new();
     };
 
-    let mut levels = std::collections::HashMap::new();
-    if let Some(map) = json["last_efforts"].as_object() {
-        for (model, level) in map {
+    let mut out = std::collections::HashMap::new();
+    if let Some(map) = json["last_params"].as_object() {
+        for (model, entry) in map {
             let Ok(model) = model.parse::<ModelId>() else {
                 // Skip entries persisted with a malformed id rather
                 // than failing the whole load — the on-disk state file
                 // is best-effort UX, not a contract.
                 continue;
             };
-            let Some(level) = level.as_str().and_then(parse_effort) else {
+            let Ok(params) = serde_json::from_value::<ModelParams>(entry.clone()) else {
                 continue;
             };
-            levels.insert(model, level);
+            out.insert(model, params);
         }
     }
 
-    levels
+    out
 }
 
-pub(crate) fn selected_effort_for_model(
+/// Resolve the [`ModelParams`] to use for `model` on startup or after
+/// a model switch.
+///
+/// Each field is selected independently:
+/// 1. `default_params[model]` entry in `harness.json5`, if any;
+/// 2. otherwise the persisted `last_params[model]` from state;
+/// 3. otherwise the per-field middle / Auto fallback.
+///
+/// Each field is then clamped against the allowed set for `model`, so
+/// stale persistence after a model switch can't ship a value the new
+/// model doesn't accept.
+pub(crate) fn selected_params_for_model(
     dirs: &tau_config::settings::TauDirs,
     harness_settings: &tau_config::settings::HarnessSettings,
     registry: &tau_config::settings::ModelRegistry,
     model: &ModelId,
-) -> tau_proto::Effort {
-    let allowed = efforts_for_model(registry, model);
-    let requested = harness_settings
-        .default_efforts
-        .get(model)
-        .copied()
-        .or_else(|| load_last_efforts(dirs).remove(model))
-        .unwrap_or_else(|| middle_effort(&allowed));
-    clamp_effort(requested, &allowed)
+) -> ModelParams {
+    let allowed_effort = efforts_for_model(registry, model);
+    let allowed_verbosity = verbosities_for_model(registry, model);
+    let allowed_thinking = thinking_summaries_for_model(registry, model);
+    let default_entry = harness_settings.default_params.get(model).copied();
+    let last = load_last_params(dirs).remove(model);
+
+    let effort = default_entry
+        .map(|p| p.effort)
+        .or(last.map(|p| p.effort))
+        .unwrap_or_else(|| middle_effort(&allowed_effort));
+    let verbosity = default_entry
+        .map(|p| p.verbosity)
+        .or(last.map(|p| p.verbosity))
+        .unwrap_or_else(|| middle_verbosity(&allowed_verbosity));
+    let thinking_summary = default_entry
+        .map(|p| p.thinking_summary)
+        .or(last.map(|p| p.thinking_summary))
+        .unwrap_or_else(|| default_thinking_summary(&allowed_thinking));
+
+    ModelParams {
+        effort: clamp_effort(effort, &allowed_effort),
+        verbosity: clamp_verbosity(verbosity, &allowed_verbosity),
+        thinking_summary: clamp_thinking_summary(thinking_summary, &allowed_thinking),
+    }
 }
 
 /// Pick the middle element of `allowed`, or `Off` for an empty list.
-/// First-time users (no `default_efforts` entry, no persisted last
-/// effort) get a sensible reasoning level instead of always landing on
+/// First-time users (no `default_params` entry, no persisted last
+/// params) get a sensible reasoning level instead of always landing on
 /// `Off` — for the standard `[Off, Minimal, Low, Medium, High]` list
 /// that's `Low`. Returns `Off` for `[Off]`-only providers and the
 /// empty case.
@@ -199,6 +303,33 @@ pub(crate) fn middle_effort(allowed: &[tau_proto::Effort]) -> tau_proto::Effort 
         return tau_proto::Effort::Off;
     }
     allowed[allowed.len() / 2]
+}
+
+/// Default verbosity when no persisted preference exists. Picks
+/// `Medium` whenever it's allowed (the OpenAI default and the only
+/// member of pinned single-level lists), otherwise falls back to the
+/// first allowed entry.
+pub(crate) fn middle_verbosity(allowed: &[tau_proto::Verbosity]) -> tau_proto::Verbosity {
+    use tau_proto::Verbosity as V;
+    if allowed.contains(&V::Medium) {
+        return V::Medium;
+    }
+    allowed.first().copied().unwrap_or(V::Medium)
+}
+
+/// Default thinking-summary mode when no persisted preference exists.
+/// `Auto` for providers that support summaries; `Off` everywhere else.
+pub(crate) fn default_thinking_summary(
+    allowed: &[tau_proto::ThinkingSummary],
+) -> tau_proto::ThinkingSummary {
+    use tau_proto::ThinkingSummary as T;
+    if allowed.contains(&T::Auto) {
+        return T::Auto;
+    }
+    if allowed.contains(&T::Off) {
+        return T::Off;
+    }
+    allowed.first().copied().unwrap_or(T::Off)
 }
 
 /// Load the last-selected model from `<state_dir>/harness.json5`.
@@ -211,34 +342,34 @@ fn load_last_selected_model(dirs: &tau_config::settings::TauDirs) -> Option<Mode
     json["last_selected_model"].as_str()?.parse().ok()
 }
 
-/// Persist model + effort to `<state_dir>/harness.json5`. `model: None`
+/// Persist model + params to `<state_dir>/harness.json5`. `model: None`
 /// records that no model is currently selected.
 pub(crate) fn save_harness_state(
     dirs: &tau_config::settings::TauDirs,
     model: Option<&ModelId>,
-    effort: tau_proto::Effort,
+    params: ModelParams,
 ) {
     let Some(dir) = dirs.state_dir.as_ref() else {
         return;
     };
     let path = dir.join("harness.json5");
     let _ = std::fs::create_dir_all(dir);
-    let mut last_efforts = load_last_efforts(dirs);
+    let mut last_params = load_last_params(dirs);
     if let Some(model) = model {
-        last_efforts.insert(model.clone(), effort);
+        last_params.insert(model.clone(), params);
     }
-    let effort_json = last_efforts
+    let params_json = last_params
         .into_iter()
-        .map(|(model, level)| {
+        .map(|(model, params)| {
             (
                 model.to_string(),
-                serde_json::Value::String(level.as_str().to_owned()),
+                serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
             )
         })
         .collect::<serde_json::Map<String, serde_json::Value>>();
     let json = serde_json::json!({
         "last_selected_model": model.map(ModelId::to_string).unwrap_or_default(),
-        "last_efforts": effort_json,
+        "last_params": params_json,
     });
     let _ = serde_json::to_string_pretty(&json)
         .ok()
