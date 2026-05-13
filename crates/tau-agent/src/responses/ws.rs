@@ -42,8 +42,11 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
 
-use super::{ResponsesConfig, apply_event, build_ws_envelope, build_ws_prewarm_envelope};
-use crate::common::{LlmError, PromptPayload, StreamState};
+use super::{
+    ResponsesConfig, apply_event, build_ws_envelope, build_ws_prewarm_envelope,
+    ws_chain_fingerprint,
+};
+use crate::common::{LlmError, PreviousResponse, PromptPayload, StreamState};
 use crate::responses::ws_runtime;
 
 /// Beta-feature header value the OpenAI WebSocket endpoint expects.
@@ -126,6 +129,34 @@ pub(crate) struct WsConn {
     /// mismatch means OAuth refreshed and this socket's auth is
     /// stale, so it gets dropped and reopened.
     pub bearer: String,
+    /// Response id returned by a non-generating prewarm on this
+    /// socket. The next matching real turn can send only the input
+    /// delta with `previous_response_id` pointing here, which is how
+    /// Codex's own client makes request prewarm useful.
+    prewarm_anchor: Option<PrewarmAnchor>,
+}
+
+struct PrewarmAnchor {
+    response_id: String,
+    message_count: usize,
+    messages: Vec<tau_proto::ConversationMessage>,
+    fingerprint: String,
+}
+
+impl PrewarmAnchor {
+    fn matches(
+        &self,
+        config: &ResponsesConfig,
+        request: &PromptPayload<'_>,
+    ) -> Result<bool, LlmError> {
+        if request.messages.len() < self.messages.len() {
+            return Ok(false);
+        }
+        if request.messages[..self.messages.len()] != self.messages {
+            return Ok(false);
+        }
+        Ok(self.fingerprint == ws_chain_fingerprint(config, request)?)
+    }
 }
 
 impl WsConn {
@@ -178,6 +209,7 @@ impl WsConn {
             writer_abort,
             opened_at: Instant::now(),
             bearer,
+            prewarm_anchor: None,
         })
     }
 
@@ -195,8 +227,39 @@ impl WsConn {
         request: &PromptPayload<'_>,
         on_update: &mut impl FnMut(&str, Option<&str>),
     ) -> Result<StreamState, LlmError> {
-        let envelope = build_ws_envelope(config, request);
-        self.run_envelope(envelope, on_update)
+        let envelope = {
+            let owned_previous;
+            let chained_request;
+            let request = if request.previous_response.is_none() {
+                match self.prewarm_anchor.as_ref() {
+                    Some(anchor) if anchor.matches(config, request)? => {
+                        owned_previous = PreviousResponse {
+                            id: &anchor.response_id,
+                            message_index: anchor.message_count,
+                        };
+                        chained_request = PromptPayload {
+                            previous_response: Some(owned_previous),
+                            system_prompt: request.system_prompt,
+                            messages: request.messages,
+                            tools: request.tools,
+                            params: request.params,
+                            tool_choice: request.tool_choice,
+                            originator: request.originator,
+                            session_id: request.session_id,
+                            share_user_cache_key: request.share_user_cache_key,
+                        };
+                        &chained_request
+                    }
+                    _ => request,
+                }
+            } else {
+                request
+            };
+            build_ws_envelope(config, request)
+        };
+        let state = self.run_envelope(envelope, on_update)?;
+        self.prewarm_anchor = None;
+        Ok(state)
     }
 
     /// Send one non-generating prewarm envelope and wait for the
@@ -208,7 +271,15 @@ impl WsConn {
         request: &PromptPayload<'_>,
     ) -> Result<StreamState, LlmError> {
         let envelope = build_ws_prewarm_envelope(config, request);
-        self.run_envelope(envelope, &mut |_, _| {})
+        let fingerprint = ws_chain_fingerprint(config, request)?;
+        let state = self.run_envelope(envelope, &mut |_, _| {})?;
+        self.prewarm_anchor = state.response_id.as_ref().map(|response_id| PrewarmAnchor {
+            response_id: response_id.clone(),
+            message_count: request.messages.len(),
+            messages: request.messages.to_vec(),
+            fingerprint,
+        });
+        Ok(state)
     }
 
     fn run_envelope(

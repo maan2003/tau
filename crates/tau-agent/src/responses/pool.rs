@@ -156,7 +156,7 @@ impl WsPool {
         }
         // Age-out: a 59-minute-old socket would die mid-stream.
         // Reopen here instead, before sending anything.
-        if conn.opened_at.elapsed() >= MAX_CONNECTION_AGE {
+        if MAX_CONNECTION_AGE <= conn.opened_at.elapsed() {
             self.purge_key(key);
             return None;
         }
@@ -409,7 +409,7 @@ fn without_previous_response<'a>(
         tool_choice: request.tool_choice,
         originator: request.originator,
         session_id: request.session_id,
-        share_user_cache_key: false,
+        share_user_cache_key: request.share_user_cache_key,
     }
 }
 
@@ -579,6 +579,65 @@ mod tests {
         assert!(
             state.response_id.is_some(),
             "response_id must be captured so the next turn can chain via previous_response_id"
+        );
+    }
+
+    /// A `generate:false` prewarm is only useful if the next matching
+    /// real turn chains off the prewarm's `response.id` and sends just
+    /// the new input delta. Sending the full prompt again on the same
+    /// socket leaves the prewarm as dead weight and misses the Codex
+    /// stateful-cache fast path.
+    #[test]
+    fn prewarm_anchor_chains_next_matching_turn_as_delta() {
+        let (addr, server) = spawn_fake_codex_server();
+        let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+        let mut pool = WsPool::new();
+        let mut on_update = |_: &str, _: Option<&str>| {};
+        let session_id = tau_proto::SessionId::new("session-prewarm");
+        let prewarmed_messages = vec![user_msg("AGENTS.md context")];
+        let real_messages = vec![user_msg("AGENTS.md context"), user_msg("actual request")];
+
+        let prewarm = PromptPayload {
+            system_prompt: "sys",
+            messages: &prewarmed_messages,
+            tools: &[],
+            params: tau_proto::ModelParams::default(),
+            tool_choice: tau_proto::ToolChoice::default(),
+            previous_response: None,
+            originator: &tau_proto::PromptOriginator::User,
+            session_id: &session_id,
+            share_user_cache_key: false,
+        };
+        run_prewarm_through_pool(&mut pool, &config, "session-prewarm", &prewarm)
+            .expect("prewarm ok");
+
+        let real = PromptPayload {
+            messages: &real_messages,
+            ..prewarm
+        };
+        run_turn_through_pool(&mut pool, &config, "session-prewarm", &real, &mut on_update)
+            .expect("turn ok");
+
+        let s = server.lock().expect("server lock");
+        assert_eq!(s.upgrade_count, 1, "prewarm and turn must share one socket");
+        assert_eq!(s.requests.len(), 2, "expected prewarm plus real turn");
+        let warm = &s.requests[0];
+        let turn = &s.requests[1];
+        assert_eq!(
+            warm.get("generate").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            turn.get("previous_response_id")
+                .and_then(serde_json::Value::as_str),
+            Some("resp_0_1")
+        );
+        assert_eq!(
+            turn.get("input")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1),
+            "real turn should send only messages added after the prewarmed prefix",
         );
     }
 
@@ -917,6 +976,16 @@ mod tests {
                 Message::Close(_) => return,
                 _ => continue,
             }
+        }
+    }
+
+    fn user_msg(text: &str) -> tau_proto::ConversationMessage {
+        tau_proto::ConversationMessage {
+            role: tau_proto::ConversationRole::User,
+            content: vec![tau_proto::ContentBlock::Text {
+                text: text.to_owned(),
+            }],
+            phase: None,
         }
     }
 

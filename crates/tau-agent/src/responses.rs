@@ -637,6 +637,22 @@ pub(crate) fn build_ws_envelope(
     }
 }
 
+/// Stable fingerprint of the request fields that must match for a
+/// `generate:false` prewarm response to be usable as a
+/// `previous_response_id` anchor. The prompt `input` and chain id are
+/// intentionally blanked: the next real turn is allowed to extend the
+/// prewarmed input prefix, and the prewarm itself never has a prior
+/// chain id.
+pub(crate) fn ws_chain_fingerprint(
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+) -> Result<String, LlmError> {
+    let mut body = build_request(config, request);
+    body.input.clear();
+    body.previous_response_id = None;
+    serde_json::to_string(&body).map_err(LlmError::Json)
+}
+
 /// Build a non-generating WebSocket envelope for provider-side
 /// prompt-cache prewarm. Normal turns must keep `generate` omitted;
 /// only this path serializes `generate: false`.
