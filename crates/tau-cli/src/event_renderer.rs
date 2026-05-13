@@ -524,13 +524,13 @@ impl EventRenderer {
         let pun = random_startup_pun();
         let (version, build) = build_label_parts();
         let banner = StyledText::from(vec![
-            tau_cli_term::Span::new("▀█▀▀ ", logo),
+            tau_cli_term::Span::new("▀█▀▘ ", logo),
             tau_cli_term::Span::new("tau", name),
             tau_cli_term::Span::new(version.trim_start_matches("tau"), version_style),
             tau_cli_term::Span::new(" ", Default::default()),
             tau_cli_term::Span::new(build, build_style),
             tau_cli_term::Span::new("\n", Default::default()),
-            tau_cli_term::Span::new(" █▄▖ ", logo),
+            tau_cli_term::Span::new(" █▄  ", logo),
             tau_cli_term::Span::new(pun, pun_style),
         ]);
         self.handle.print_output(StyledBlock::new(banner));
