@@ -474,18 +474,24 @@ pub struct ProviderCompat {
     /// Responses endpoint auto-enables this at resolver time, so
     /// users don't need to flip it on for the built-in OAuth flow.
     pub supports_phase: bool,
-    /// Provider returns `reasoning` output items with a replayable
-    /// `encrypted_content` field when the request body asks for
-    /// `include: ["reasoning.encrypted_content"]`. Currently OpenAI
-    /// Codex on `gpt-5.3-codex` and later. Off by default — emitting
-    /// the `include` opt-in to a provider that rejects unknown
-    /// arguments breaks the call. The Codex Responses endpoint
-    /// auto-enables this at resolver time so users don't need to
-    /// flip it on for the built-in OAuth flow. Companion to
-    /// [`Self::supports_phase`]: both gate on the same model
-    /// generation, but they're tracked separately because users may
-    /// run private deployments where one is plumbed and the other
-    /// isn't.
+    /// Provider's endpoint accepts `include:
+    /// ["reasoning.encrypted_content"]` on the request and fills in
+    /// the `encrypted_content` blob on each `reasoning` output item
+    /// the model emits. Off by default — emitting the opt-in to a
+    /// provider that rejects unknown arguments breaks the call. The
+    /// built-in Codex Responses endpoint auto-enables this for every
+    /// model at resolver time, so OAuth users never need to flip it
+    /// on; flip it on here for self-hosted or proxy backends that
+    /// expose the same surface.
+    ///
+    /// No per-model gate: this is a server capability, not a model
+    /// capability — models that don't emit reasoning simply omit
+    /// `encrypted_content`, and the agent skips capturing items
+    /// without the blob (so a non-reasoning model on a Codex-shaped
+    /// endpoint costs nothing). Companion to
+    /// [`Self::supports_phase`], but resolved independently because
+    /// `phase` *is* model-gated (older Codex generations reject the
+    /// field).
     pub supports_encrypted_reasoning: bool,
     /// Provider exposes the Responses API over a persistent
     /// WebSocket transport instead of (or in addition to) HTTP+SSE.

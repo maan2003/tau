@@ -210,62 +210,46 @@ fn public_openai_api_does_not_auto_enable_phase() {
 // supports_encrypted_reasoning
 // -----------------------------------------------------------------------
 //
-// Mirrors the supports_phase tests above. The two features share a
-// model-id whitelist by construction (introduced in the same Codex
-// generation), but they're resolved by independent functions — these
-// tests pin that both functions stay aligned, so a future refactor of
-// one can't silently drift away from the other and leave built-in
-// Codex users with phase plumbed but reasoning continuity dropped on
-// the floor.
+// Unlike `supports_phase`, there's no model-id gate here. `include:
+// ["reasoning.encrypted_content"]` is a request-side opt-in: the
+// server either fills in `encrypted_content` on each reasoning output
+// item or it doesn't, and the agent only captures items that actually
+// carry the blob. So enabling it broadly costs nothing for models
+// that don't emit reasoning and rescues every reasoning model
+// (including new snapshots not yet listed anywhere) from the silent
+// "rs_… not found" retry loop that a stale whitelist used to cause.
 
 /// The ChatGPT Codex Responses endpoint auto-enables
-/// `supports_encrypted_reasoning` on the same model-id whitelist as
-/// `supports_phase` (`gpt-5.3-codex` and later). Without this
-/// auto-enable, the feature would silently stay off for the
-/// out-of-the-box OAuth flow — `include: ["reasoning.encrypted_content"]`
-/// wouldn't go on the wire and reasoning replay would degrade to
-/// empty husks.
+/// `supports_encrypted_reasoning` for every model. The per-item
+/// `encrypted_content` check on the agent side handles the
+/// "this model doesn't actually emit reasoning" case for us.
 #[test]
-fn codex_backend_auto_enables_encrypted_reasoning_for_supported_models() {
+fn codex_backend_auto_enables_encrypted_reasoning() {
     let provider = ProviderConfig::default();
 
+    for model_id in [
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-2026-01-15",
+        "gpt-5.4-codex",
+        "gpt-5.5",
+        "gpt-5-codex",
+        "gpt-5.2-codex",
+    ] {
+        assert!(
+            supports_encrypted_reasoning(&provider, "https://chatgpt.com/backend-api"),
+            "expected auto-enable on Codex endpoint for {model_id}",
+        );
+    }
     assert!(supports_encrypted_reasoning(
         &provider,
-        "https://chatgpt.com/backend-api",
-        "gpt-5.3-codex"
+        "https://chatgpt.com/backend-api/"
     ));
-    assert!(supports_encrypted_reasoning(
-        &provider,
-        "https://chatgpt.com/backend-api/",
-        "gpt-5.3-codex-2026-01-15"
-    ));
-    assert!(supports_encrypted_reasoning(
-        &provider,
-        "https://chatgpt.com/backend-api",
-        "gpt-5.4-codex"
-    ));
-    assert!(
-        !supports_encrypted_reasoning(&provider, "https://chatgpt.com/backend-api", "gpt-5-codex"),
-        "the pre-5.3 codex line predates the field"
-    );
-    assert!(
-        !supports_encrypted_reasoning(
-            &provider,
-            "https://chatgpt.com/backend-api",
-            "gpt-5.2-codex"
-        ),
-        "5.2-codex is below the doc-cited 5.3 floor"
-    );
-    assert!(
-        !supports_encrypted_reasoning(&provider, "https://chatgpt.com/backend-api", "gpt-5.5"),
-        "non-codex models don't get the auto-enable"
-    );
 }
 
 /// Explicit `supports_encrypted_reasoning` on a provider's compat
-/// block overrides the model-id heuristic. Escape hatch for
-/// self-hosted or proxy backends that mimic the Codex shape but
-/// aren't in our built-in whitelist.
+/// block forces the flag on for non-Codex endpoints too. Escape
+/// hatch for self-hosted or proxy backends that mimic the Codex
+/// shape.
 #[test]
 fn explicit_provider_encrypted_reasoning_flag_wins() {
     let provider = ProviderConfig {
@@ -278,21 +262,18 @@ fn explicit_provider_encrypted_reasoning_flag_wins() {
 
     assert!(supports_encrypted_reasoning(
         &provider,
-        "https://example.com/v1",
-        "some-custom-model"
+        "https://example.com/v1"
     ));
 }
 
-/// The public OpenAI REST API is NOT in the auto-enable list for
-/// the same reasons as `supports_phase`: Tau doesn't route through
-/// it today, and the encrypted-reasoning surface was scoped to the
-/// Codex endpoint.
+/// The public OpenAI REST API is NOT in the auto-enable list:
+/// Tau doesn't route through it today, and the encrypted-reasoning
+/// surface was scoped to the Codex endpoint.
 #[test]
 fn public_openai_api_does_not_auto_enable_encrypted_reasoning() {
     let provider = ProviderConfig::default();
     assert!(!supports_encrypted_reasoning(
         &provider,
-        "https://api.openai.com/v1",
-        "gpt-5.3-codex"
+        "https://api.openai.com/v1"
     ));
 }

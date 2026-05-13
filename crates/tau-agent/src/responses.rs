@@ -284,8 +284,17 @@ pub(crate) fn apply_event(
                 // wire-format change (extra fields, schema rev) round-
                 // trips without code changes — same Pi-style blob the
                 // harness re-emits on full-transcript replay.
+                //
+                // An item without `encrypted_content` is unreplayable:
+                // the server stores reasoning only for `store: true`
+                // requests, and Codex forces `store: false`, so a bare
+                // `rs_…` id in a later turn's `input[]` triggers
+                // `Item with id 'rs_…' not found` and an 8-attempt
+                // retry loop. Skip those — losing reasoning continuity
+                // on this turn is better than poisoning the chain.
                 if event_type == "response.output_item.done"
                     && item["type"].as_str() == Some("reasoning")
+                    && item["encrypted_content"].is_string()
                 {
                     state.reasoning_items.push(item.to_string());
                 }
