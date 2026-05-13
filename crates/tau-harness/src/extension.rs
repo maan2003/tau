@@ -91,19 +91,31 @@ where
     Ok((conn_id, thread))
 }
 
+/// Per-session log directory: `<sessions_dir>/<session_id>/logs/`.
+/// Holds the harness daemon's own tracing output (`tau-harness.log`)
+/// plus one file per spawned extension. Lives next to `events.jsonl`
+/// so a session dir is self-contained for post-mortems.
+pub fn session_logs_dir(sessions_dir: &Path, session_id: &str) -> PathBuf {
+    sessions_dir.join(session_id).join("logs")
+}
+
 /// Path of the per-session, per-extension stderr log:
-/// `<sessions_dir>/<session_id>/extensions/<name>.log`. Stays inside
-/// the session dir so a session is self-contained (logs sit next to
-/// `events.jsonl` and the session's `events.cbor`).
+/// `<sessions_dir>/<session_id>/logs/<name>.log`.
 pub(crate) fn extension_stderr_log_path(
     sessions_dir: &Path,
     session_id: &str,
     name: &str,
 ) -> PathBuf {
-    sessions_dir
-        .join(session_id)
-        .join("extensions")
-        .join(format!("{name}.log"))
+    session_logs_dir(sessions_dir, session_id).join(format!("{name}.log"))
+}
+
+/// Path of the per-session harness daemon log:
+/// `<sessions_dir>/<session_id>/logs/tau-harness.log`. The CLI points
+/// the daemon's stderr at this file when spawning it, so the daemon's
+/// tracing output (which writes to stderr via `init_stderr_from_env`)
+/// lands alongside the per-extension logs.
+pub fn harness_log_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
+    session_logs_dir(sessions_dir, session_id).join("tau-harness.log")
 }
 
 pub(crate) fn spawn_supervised(

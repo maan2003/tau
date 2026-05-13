@@ -15,6 +15,11 @@ use crate::{
     SkillName, ToolCallId, ToolName, ToolNameMaybe,
 };
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 // ---------------------------------------------------------------------------
 // Event names
 // ---------------------------------------------------------------------------
@@ -1774,6 +1779,16 @@ pub struct SessionPromptCreated {
     /// for backward compatibility with old persisted events.
     #[serde(default)]
     pub originator: PromptOriginator,
+    /// When `true`, the backend uses the **user's** `prompt_cache_key`
+    /// bucket for this turn even though [`Self::originator`] is an
+    /// extension. The harness sets this for non-fan-out side queries
+    /// (notably `std-notifications`' idle-summary) so a single side
+    /// turn can hit the user's already-warm prefix cache. Delegate
+    /// sub-agents leave it `false` because parallel fan-out on a
+    /// shared key would exceed OpenAI's 15 RPM-per-bucket guideline
+    /// and degrade routing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub share_user_cache_key: bool,
     /// Echo of [`UiPromptSubmitted::ctx_id`] when this prompt was
     /// initiated by a UI submission. Tool-result follow-up
     /// `SessionPromptCreated` events for the same chain do not

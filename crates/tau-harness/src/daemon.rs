@@ -495,7 +495,17 @@ pub fn run_harness_daemon(
 /// Entrypoint for `tau ext harness`.
 pub fn run_component() -> Result<(), Box<dyn std::error::Error>> {
     let startup_started_at = Instant::now();
-    tracing::debug!(target: "tau_harness::startup", "harness component starting");
+    let current_exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_owned());
+    tracing::info!(
+        target: "tau_harness::startup",
+        pid = std::process::id(),
+        current_exe = %current_exe,
+        version = env!("CARGO_PKG_VERSION"),
+        build = %crate::version::build_revision(),
+        "harness component starting",
+    );
     // Make TAU_VERSION/TAU_BUILD/TAU_LAST_MODIFIED visible to anything
     // we spawn (shell extension, sub-agents) by reading our own
     // `built` snapshot — saves the parent CLI from having to forward

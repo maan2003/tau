@@ -529,7 +529,14 @@ impl Harness {
         let mut agent_connection_id = None;
 
         for ext_config in config.extensions.values() {
-            tracing::debug!(target: "tau_harness::startup", extension = %ext_config.name, elapsed_ms = startup_started_at.elapsed().as_millis(), "spawning extension");
+            tracing::info!(
+                target: "tau_harness::startup",
+                extension = %ext_config.name,
+                command = %ext_config.command,
+                args = ?ext_config.args,
+                elapsed_ms = startup_started_at.elapsed().as_millis(),
+                "spawning extension",
+            );
             let kind = match ext_config.role.as_deref() {
                 Some("agent") => ClientKind::Agent,
                 _ => ClientKind::Tool,
@@ -539,7 +546,13 @@ impl Harness {
                 extension_stderr_log_path(&sessions_dir, eager_session_id, &ext_config.name);
             let (conn_id, child_pid) =
                 spawn_supervised(ext_config, kind.clone(), Some(log_path), &mut bus, &tx)?;
-            tracing::debug!(target: "tau_harness::startup", extension = %ext_config.name, pid = child_pid, elapsed_ms = startup_started_at.elapsed().as_millis(), "extension spawned");
+            tracing::info!(
+                target: "tau_harness::startup",
+                extension = %ext_config.name,
+                pid = child_pid,
+                elapsed_ms = startup_started_at.elapsed().as_millis(),
+                "extension spawned",
+            );
 
             if kind == ClientKind::Agent {
                 agent_connection_id = Some(conn_id.clone());
@@ -2039,8 +2052,23 @@ impl Harness {
             self.current_session_id.as_str(),
             &config.name,
         );
+        tracing::info!(
+            target: "tau_harness::startup",
+            extension = %config.name,
+            command = %config.command,
+            args = ?config.args,
+            attempt,
+            "respawning extension",
+        );
         let (new_connection_id, child_pid) =
             spawn_supervised(&config, kind, Some(log_path), &mut self.bus, &self.tx)?;
+        tracing::info!(
+            target: "tau_harness::startup",
+            extension = %config.name,
+            pid = child_pid,
+            attempt,
+            "extension respawned",
+        );
 
         // Re-key the entry under the freshly-minted connection id and
         // patch its in-place state. The `extension_order` slot stays in
@@ -2897,15 +2925,22 @@ impl Harness {
         // calls. We keep the tools list and system prompt unchanged
         // so the prompt-cache prefix continues to match the parent
         // conv; only the per-turn `tool_choice` flips to `None`.
-        let tool_choice = if matches!(
+        let is_non_tool_ext_query = matches!(
             conv.originator,
             tau_proto::PromptOriginator::Extension { .. }
-        ) && conv.parent_tool_call_id.is_none()
-        {
+        ) && conv.parent_tool_call_id.is_none();
+        let tool_choice = if is_non_tool_ext_query {
             tau_proto::ToolChoice::None
         } else {
             tau_proto::ToolChoice::Auto
         };
+        // Single-shot side queries (idle-summary) reuse the user's
+        // `prompt_cache_key` bucket so they hit the user's warm
+        // prefix cache instead of cold-starting their own. Delegate
+        // sub-agents keep the per-extension split — they fan out and
+        // could overflow the user's bucket past OpenAI's 15 RPM
+        // routing guideline.
+        let share_user_cache_key = is_non_tool_ext_query;
         // Walk the conversation's *own* branch, not whatever tree.head
         // currently points at. With multiple side conversations
         // running concurrently their tree mutations interleave, so
@@ -3011,6 +3046,7 @@ impl Harness {
             model_params: self.selected_params,
             tool_choice,
             originator,
+            share_user_cache_key,
             ctx_id,
             previous_response,
         });

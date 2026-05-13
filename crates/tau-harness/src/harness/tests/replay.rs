@@ -115,6 +115,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
             originator: Default::default(),
             ctx_id: None,
             previous_response: None,
+            share_user_cache_key: false,
         }),
     );
     h.publish_event(

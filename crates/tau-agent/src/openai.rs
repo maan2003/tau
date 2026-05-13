@@ -315,8 +315,11 @@ fn build_request(
     } else {
         None
     };
-    let prompt_cache_key =
-        mix_originator_into_cache_key(config.prompt_cache_key.as_deref(), request.originator);
+    let prompt_cache_key = mix_originator_into_cache_key(
+        config.prompt_cache_key.as_deref(),
+        request.originator,
+        request.share_user_cache_key,
+    );
     let prompt_cache_retention = config
         .prompt_cache_retention
         .map(tau_config::settings::PromptCacheRetention::as_wire);

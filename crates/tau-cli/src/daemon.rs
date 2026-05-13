@@ -322,7 +322,9 @@ fn build_daemon_command(
         // can still override/filter with `TAU_LOG`.
         .env(
             "TAU_LOG",
-            std::env::var("TAU_LOG").unwrap_or_else(|_| "tau_harness=info,tau_cli=info".to_owned()),
+            std::env::var("TAU_LOG").unwrap_or_else(|_| {
+                "tau_harness=info,tau_agent=info,tau_cli=info,agent=info".to_owned()
+            }),
         )
         .stdin(Stdio::null())
         .stdout(stdout)

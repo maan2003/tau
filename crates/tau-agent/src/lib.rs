@@ -551,6 +551,7 @@ fn handle_prompt<W: Write>(
                 message_index: p.message_index,
             }),
         originator: &prompt.originator,
+        share_user_cache_key: prompt.share_user_cache_key,
         session_id: &prompt.session_id,
     };
 

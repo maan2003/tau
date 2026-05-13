@@ -24,6 +24,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
@@ -55,6 +56,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
@@ -87,6 +89,7 @@ fn build_request_includes_llama_cpp_cache_prompt_when_configured() {
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
@@ -120,6 +123,7 @@ fn build_request_sets_parallel_tool_calls_when_tools_offered() {
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
@@ -149,6 +153,7 @@ fn build_request_omits_parallel_tool_calls_without_tools() {
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
@@ -189,6 +194,7 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
@@ -233,6 +239,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
     };
     let ext_request = PromptPayload {
         system_prompt: "system",
@@ -243,6 +250,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
         previous_response: None,
         originator: &ext,
         session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
     };
 
     let user_body =

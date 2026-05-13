@@ -148,6 +148,7 @@ fn new_session_clears_session_ui_state() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
     renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
         session_prompt_id: "sp-0".into(),
@@ -299,6 +300,7 @@ fn single_prompt_response_cycle() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "…"));
@@ -369,6 +371,7 @@ fn thinking_renders_as_separate_block_above_response() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
     sync(&handle);
 
@@ -478,6 +481,7 @@ fn set_show_thinking_round_trip_restores_history() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
     renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
         session_prompt_id: "sp-0".into(),
@@ -574,6 +578,7 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
     renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
         session_prompt_id: "sp-0".into(),
@@ -631,6 +636,7 @@ fn no_thinking_block_when_summary_absent() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
     renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
         session_prompt_id: "sp-0".into(),
@@ -688,6 +694,7 @@ fn queued_prompt_renders_after_first_completes() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
 
     // Second prompt queued.
@@ -742,6 +749,7 @@ fn queued_prompt_renders_after_first_completes() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
     sync(&handle);
     assert!(
@@ -830,6 +838,7 @@ fn three_queued_prompts_render_sequentially() {
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
                 previous_response: None,
+                share_user_cache_key: false,
             }));
         } else {
             renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
@@ -855,6 +864,7 @@ fn three_queued_prompts_render_sequentially() {
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
                 previous_response: None,
+                share_user_cache_key: false,
             }));
         }
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
@@ -922,6 +932,7 @@ fn streaming_indicator_appends_during_updates() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "…"));
@@ -1217,6 +1228,7 @@ fn streaming_block_does_not_duplicate_on_finish() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
     renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
         session_prompt_id: "sp-0".into(),
@@ -1521,6 +1533,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
 
     // Agent starts streaming response 1.
@@ -1606,6 +1619,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
     renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
         session_prompt_id: "sp-1".into(),
@@ -1650,6 +1664,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
     renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
         session_prompt_id: "sp-2".into(),
@@ -1739,6 +1754,7 @@ fn emoji_in_response_renders_correctly() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
 
     // Response with emoji followed by text on next line.
@@ -1819,6 +1835,7 @@ fn multiple_emoji_no_column_drift() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
 
     // 3 emoji = 6 columns + "end" = 9 columns total.
@@ -1881,6 +1898,7 @@ fn overflowing_stream_replaced_cleanly_on_finish() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     }));
 
     let partial = "stream 0\nstream 1\nstream 2\nstream 3\nPARTIAL ONLY";

@@ -149,26 +149,37 @@ pub(crate) fn run_chat(
     let daemon_output = if attach {
         None
     } else {
+        // Route the daemon's stdout+stderr (where its tracing
+        // subscriber writes) into the per-session harness log so it
+        // sits next to per-extension logs under
+        // `<session>/logs/`. The CLI's own tracing still goes to
+        // `ui.log`; the two streams are intentionally separated so a
+        // session post-mortem doesn't need to pull from two places.
+        let sessions_dir = tau_session_inspect::default_sessions_dir();
+        let harness_log = tau_harness::harness_log_path(&sessions_dir, session_id);
+        if let Some(parent) = harness_log.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let start_offset = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(ui_logging.log_path())?
+            .open(&harness_log)?
             .metadata()?
             .len();
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(ui_logging.log_path())
+            .open(&harness_log)
             .map(Stdio::from)?;
         let stderr = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(ui_logging.log_path())
+            .open(&harness_log)
             .map(Stdio::from)?;
         Some(DaemonOutput {
             stdout,
             stderr,
-            log_path: ui_logging.log_path().to_owned(),
+            log_path: harness_log,
             start_offset,
         })
     };

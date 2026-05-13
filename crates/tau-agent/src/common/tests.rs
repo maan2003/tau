@@ -91,10 +91,10 @@ fn mix_originator_passes_through_absent_base() {
         query_id: "delegate-1".into(),
     };
     assert_eq!(
-        mix_originator_into_cache_key(None, &PromptOriginator::User),
+        mix_originator_into_cache_key(None, &PromptOriginator::User, false),
         None
     );
-    assert_eq!(mix_originator_into_cache_key(None, &ext), None);
+    assert_eq!(mix_originator_into_cache_key(None, &ext, false), None);
 }
 
 /// A user-originated turn must reuse the resolver-supplied base
@@ -104,7 +104,7 @@ fn mix_originator_passes_through_absent_base() {
 fn mix_originator_user_returns_base_verbatim() {
     let base = "tau-abc123";
     assert_eq!(
-        mix_originator_into_cache_key(Some(base), &PromptOriginator::User),
+        mix_originator_into_cache_key(Some(base), &PromptOriginator::User, false),
         Some(base.to_owned()),
     );
 }
@@ -120,8 +120,8 @@ fn mix_originator_extension_diverges_from_user() {
         name: tau_proto::ExtensionName::new("core-delegate"),
         query_id: "delegate-1".into(),
     };
-    let user_key = mix_originator_into_cache_key(Some(base), &PromptOriginator::User);
-    let ext_key = mix_originator_into_cache_key(Some(base), &ext);
+    let user_key = mix_originator_into_cache_key(Some(base), &PromptOriginator::User, false);
+    let ext_key = mix_originator_into_cache_key(Some(base), &ext, false);
     assert!(user_key.is_some() && ext_key.is_some());
     assert_ne!(user_key, ext_key);
 }
@@ -140,8 +140,8 @@ fn mix_originator_distinct_extensions_diverge() {
         query_id: "q-2".into(),
     };
     assert_ne!(
-        mix_originator_into_cache_key(Some(base), &delegate),
-        mix_originator_into_cache_key(Some(base), &websearch),
+        mix_originator_into_cache_key(Some(base), &delegate, false),
+        mix_originator_into_cache_key(Some(base), &websearch, false),
     );
 }
 
@@ -161,9 +161,28 @@ fn mix_originator_ignores_extension_query_id() {
         query_id: "delegate-2".into(),
     };
     assert_eq!(
-        mix_originator_into_cache_key(Some(base), &first),
-        mix_originator_into_cache_key(Some(base), &second),
+        mix_originator_into_cache_key(Some(base), &first, false),
+        mix_originator_into_cache_key(Some(base), &second, false),
     );
+}
+
+/// When the harness flags a side query as "share the user's bucket"
+/// (`share_user_bucket=true`), an extension-originated turn must
+/// produce the user's base key — not the per-extension hash — so the
+/// single-shot probe (idle-summary) hits the user's already-warm
+/// prefix cache instead of cold-starting its own.
+#[test]
+fn mix_originator_share_user_bucket_overrides_extension_split() {
+    let base = "tau-abc123";
+    let ext = PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("std-notifications"),
+        query_id: "idle-0".into(),
+    };
+    let user_key = mix_originator_into_cache_key(Some(base), &PromptOriginator::User, false);
+    let ext_shared_key = mix_originator_into_cache_key(Some(base), &ext, true);
+    let ext_split_key = mix_originator_into_cache_key(Some(base), &ext, false);
+    assert_eq!(ext_shared_key, user_key);
+    assert_ne!(ext_split_key, user_key);
 }
 
 /// Determinism: same inputs → byte-equal output. Locks the hash
@@ -177,7 +196,7 @@ fn mix_originator_is_deterministic() {
         query_id: "delegate-1".into(),
     };
     assert_eq!(
-        mix_originator_into_cache_key(Some(base), &ext),
-        mix_originator_into_cache_key(Some(base), &ext),
+        mix_originator_into_cache_key(Some(base), &ext, false),
+        mix_originator_into_cache_key(Some(base), &ext, false),
     );
 }

@@ -220,6 +220,7 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
+        share_user_cache_key: false,
     };
     let _ = bus.send_to(
         &agent_id,

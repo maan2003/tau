@@ -280,6 +280,11 @@ async fn read_loop(mut stream: Stream, tx: UnboundedSender<InboundEvent>) {
                     .as_ref()
                     .map(|f| format!("code={} reason={}", f.code, f.reason))
                     .unwrap_or_else(|| "no close frame".to_owned());
+                tracing::info!(
+                    target: crate::LOG_TARGET,
+                    %reason,
+                    "ws server sent close frame — connection will be reopened on next turn",
+                );
                 (InboundEvent::Closed(reason), true)
             }
             Ok(Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {
@@ -288,7 +293,14 @@ async fn read_loop(mut stream: Stream, tx: UnboundedSender<InboundEvent>) {
                 // auto-handling, no caller action needed.
                 continue;
             }
-            Err(e) => (InboundEvent::Error(format!("{e}")), true),
+            Err(e) => {
+                tracing::warn!(
+                    target: crate::LOG_TARGET,
+                    error = %e,
+                    "ws read failed — connection will be reopened on next turn",
+                );
+                (InboundEvent::Error(format!("{e}")), true)
+            }
         };
         if tx.send(event).is_err() {
             // Receiver dropped — WsConn went away mid-stream. We're
@@ -345,9 +357,29 @@ async fn write_loop(
                 }
             },
             _ = ticker.tick() => {
-                if let Err(e) = sink.send(Message::Ping(Vec::new().into())).await {
-                    let _ = inbound_tx.send(InboundEvent::Error(format!("ws keepalive failed: {e}")));
-                    return;
+                match sink.send(Message::Ping(Vec::new().into())).await {
+                    Ok(()) => {
+                        // Pings are 25 s apart — info isn't spammy at
+                        // that cadence, and a session log that suddenly
+                        // *stops* showing them is the clearest signal
+                        // that the writer task is stuck (and that the
+                        // upstream's reap timer is therefore counting
+                        // down toward a 1011 close). When we're confident
+                        // the keepalive path is solid, demote to debug.
+                        tracing::info!(
+                            target: crate::LOG_TARGET,
+                            "ws keepalive ping sent",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: crate::LOG_TARGET,
+                            error = %e,
+                            "ws keepalive ping failed — writer task exiting, next turn will reopen",
+                        );
+                        let _ = inbound_tx.send(InboundEvent::Error(format!("ws keepalive failed: {e}")));
+                        return;
+                    }
                 }
             }
         }

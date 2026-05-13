@@ -38,6 +38,12 @@ pub struct PromptPayload<'a> {
     /// per `(prefix, prompt_cache_key)` overflows to additional
     /// machines and degrades hit rate).
     pub originator: &'a PromptOriginator,
+    /// When `true`, force the wire `prompt_cache_key` to the user's
+    /// base key for this turn even though [`Self::originator`] is an
+    /// extension. Lets a single-shot side query (idle-summary) reuse
+    /// the user's already-warm prefix cache. See
+    /// [`mix_originator_into_cache_key`].
+    pub share_user_cache_key: bool,
     /// Harness session this prompt belongs to. Used by the Responses
     /// WebSocket pool to key per-conversation connections — same
     /// session stays on the same socket across turns, so the
@@ -238,8 +244,9 @@ pub fn verbosity_wire(level: tau_proto::Verbosity) -> &'static str {
 }
 
 /// Produce the wire `prompt_cache_key` for an outgoing request from a
-/// per-`(base_url, model_id, cwd)` base key resolved upstream and the
-/// originator of the current prompt.
+/// per-`(base_url, model_id, cwd)` base key resolved upstream, the
+/// originator of the current prompt, and a `share_user_bucket`
+/// override.
 ///
 /// User turns pass `base` through unchanged so a single interactive
 /// session's successive turns keep landing on the same cache machine.
@@ -253,6 +260,12 @@ pub fn verbosity_wire(level: tau_proto::Verbosity) -> &'static str {
 ///   - the sub-agent's own multi-turn loop still reuses *its* cache because the
 ///     query id is intentionally NOT mixed in.
 ///
+/// When `share_user_bucket` is `true`, the extension branch is skipped
+/// and the base key is returned verbatim. Used by the harness for
+/// non-fan-out side queries (idle-summary) so a single side turn can
+/// hit the user's already-warm prefix cache. Delegate sub-agents leave
+/// it `false` to preserve the fan-out isolation above.
+///
 /// `None` in / `None` out: when the resolver chose not to send a
 /// prompt cache key (provider doesn't support it, cwd unreadable),
 /// no key is sent regardless of originator.
@@ -260,8 +273,12 @@ pub fn verbosity_wire(level: tau_proto::Verbosity) -> &'static str {
 pub fn mix_originator_into_cache_key(
     base: Option<&str>,
     originator: &PromptOriginator,
+    share_user_bucket: bool,
 ) -> Option<String> {
     let base = base?;
+    if share_user_bucket {
+        return Some(base.to_owned());
+    }
     match originator {
         PromptOriginator::User => Some(base.to_owned()),
         PromptOriginator::Extension { name, .. } => {

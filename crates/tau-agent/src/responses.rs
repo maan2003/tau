@@ -123,6 +123,7 @@ pub fn responses_stream(
         tool_choice: request.tool_choice,
         originator: request.originator,
         session_id: request.session_id,
+        share_user_cache_key: false,
     };
     responses_stream_once(config, &fallback, on_update)
 }
@@ -538,8 +539,11 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
     } else {
         None
     };
-    let prompt_cache_key =
-        mix_originator_into_cache_key(config.prompt_cache_key.as_deref(), request.originator);
+    let prompt_cache_key = mix_originator_into_cache_key(
+        config.prompt_cache_key.as_deref(),
+        request.originator,
+        request.share_user_cache_key,
+    );
     let prompt_cache_retention = config
         .prompt_cache_retention
         .map(tau_config::settings::PromptCacheRetention::as_wire);

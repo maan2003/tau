@@ -349,6 +349,7 @@ fn without_previous_response<'a>(
         tool_choice: request.tool_choice,
         originator: request.originator,
         session_id: request.session_id,
+        share_user_cache_key: false,
     }
 }
 
@@ -410,6 +411,7 @@ mod tests {
                 previous_response: None,
                 originator: &tau_proto::PromptOriginator::User,
                 session_id: &session_id,
+                share_user_cache_key: false,
             };
             run_turn_through_pool(&mut pool, &config, session, &request, &mut on_update)
                 .expect("turn ok");
@@ -507,6 +509,7 @@ mod tests {
             previous_response: None,
             originator: &tau_proto::PromptOriginator::User,
             session_id: &session_id,
+            share_user_cache_key: false,
         };
 
         let state =
@@ -547,6 +550,7 @@ mod tests {
             }),
             originator: &tau_proto::PromptOriginator::User,
             session_id: &session_id,
+            share_user_cache_key: false,
         };
         run_turn_through_pool(
             &mut pool,
@@ -600,6 +604,7 @@ mod tests {
             previous_response: None,
             originator: &tau_proto::PromptOriginator::User,
             session_id: &session_id,
+            share_user_cache_key: false,
         };
         let state1 =
             run_turn_through_pool(&mut pool, &config, "session-die", &req1, &mut on_update)
@@ -621,6 +626,7 @@ mod tests {
             }),
             originator: &tau_proto::PromptOriginator::User,
             session_id: &session_id,
+            share_user_cache_key: false,
         };
         run_turn_through_pool(&mut pool, &config, "session-die", &req2, &mut on_update)
             .expect("silent reconnect should make this Ok");
@@ -849,6 +855,7 @@ mod tests {
             previous_response: None,
             originator: &tau_proto::PromptOriginator::User,
             session_id: &session_id,
+            share_user_cache_key: false,
         };
         run_turn_through_pool(pool, config, session, &request, on_update).expect("turn ok");
     }

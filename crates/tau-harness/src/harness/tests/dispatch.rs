@@ -1458,6 +1458,12 @@ fn non_tool_ext_agent_query_preserves_chain_anchor() {
         tau_proto::ToolChoice::None,
         "sanity: idle-summary query still flips tool_choice to None",
     );
+    assert!(
+        side_prompt.share_user_cache_key,
+        "idle-summary side conv must opt out of the extension cache-key split — \
+         otherwise it cold-starts a separate cache bucket from the user's prefix \
+         and the whole point of sharing the warm prefix is lost",
+    );
     let prev = side_prompt.previous_response.as_ref().expect(
         "idle-summary side conv must inherit parent's chain anchor — \
          tool_choice flipping is intentional and must not bust the cache",
@@ -1550,6 +1556,12 @@ fn delegate_ext_agent_query_keeps_tool_choice_auto() {
         prompt.tool_choice,
         tau_proto::ToolChoice::Auto,
         "delegated sub-agent must keep tool access (ToolChoice::Auto)",
+    );
+    assert!(
+        !prompt.share_user_cache_key,
+        "delegate sub-agents must keep the per-extension cache-key split — \
+         parallel fan-out would otherwise push the user's bucket past \
+         OpenAI's 15-RPM-per-(prefix, key) routing guideline",
     );
 
     h.shutdown().expect("shutdown");

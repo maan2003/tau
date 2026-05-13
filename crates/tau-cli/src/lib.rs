@@ -366,7 +366,9 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             },
 
             cli::Command::Ext { name } => {
-                ui_logging::init_stderr_from_env("tau_harness=info,tau_cli=info");
+                ui_logging::init_stderr_from_env(
+                    "tau_harness=info,tau_agent=info,tau_cli=info,agent=info",
+                );
                 let built_in_components = [
                     Component {
                         name: "agent",
