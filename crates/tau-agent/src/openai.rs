@@ -218,6 +218,10 @@ struct CompletionRequest {
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_retention: Option<&'static str>,
+    /// Optional upstream service tier (`fast` for Fast mode, `flex` for
+    /// lower-priority service).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_prompt: Option<bool>,
 }
@@ -338,6 +342,10 @@ fn build_request(
         verbosity,
         prompt_cache_key,
         prompt_cache_retention,
+        service_tier: request
+            .params
+            .service_tier
+            .map(tau_proto::ServiceTier::as_wire),
         cache_prompt: config.supports_llama_cpp_cache.then_some(true),
     }
 }

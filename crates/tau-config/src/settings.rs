@@ -123,10 +123,11 @@ impl CliShellCommand {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CliBindingAction {
-    /// Action name, e.g. `shell-prompt-insert` or `shell-prompt-edit`.
+    /// Action name, e.g. `shell-prompt-insert`, `shell-prompt-edit`,
+    /// or `fast-toggle`.
     pub action: String,
     /// Shell command to execute. `None` for actions that don't shell
-    /// out (e.g. `prompt-previous`, `prompt-next`).
+    /// out (e.g. `prompt-previous`, `prompt-next`, `fast-toggle`).
     pub command: Option<String>,
     /// Whether to trim command stdout before insertion.
     pub trim: bool,

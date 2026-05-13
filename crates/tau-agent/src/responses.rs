@@ -453,6 +453,10 @@ struct ResponsesRequest {
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_retention: Option<&'static str>,
+    /// Optional upstream service tier (`fast` for Fast mode, `flex` for
+    /// lower-priority service).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<&'static str>,
     /// Stateful-chain mode: points to the prior turn's `response.id`.
     /// When set, the upstream API carries reasoning context across
     /// turns and the request body only needs the *new* input
@@ -600,6 +604,10 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         include,
         prompt_cache_key,
         prompt_cache_retention,
+        service_tier: request
+            .params
+            .service_tier
+            .map(tau_proto::ServiceTier::as_wire),
         previous_response_id,
     }
 }

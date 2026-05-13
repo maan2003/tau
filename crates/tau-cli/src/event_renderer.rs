@@ -114,6 +114,8 @@ pub(crate) struct EventRenderer {
     cumulative_agent_latency: Duration,
     /// Shared effort mirror for the input thread.
     effort_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    /// Shared Fast-mode mirror for the input thread's `fast-toggle` binding.
+    fast_mode_state: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Shared set of currently-available effort levels, mirrored
     /// from `HarnessEffortsAvailable`. The input thread's Shift+Tab
     /// cycle reads it to skip levels the current model doesn't
@@ -314,6 +316,7 @@ impl EventRenderer {
             effort_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
                 tau_proto::Effort::Off.as_u8(),
             )),
+            fast_mode_state: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // Empty until the first `HarnessEffortsAvailable`
             // arrives. The input loop's BackTab handler treats an
             // empty set as "no allowed levels known yet" and
@@ -374,6 +377,12 @@ impl EventRenderer {
     /// input thread to read the current level for Shift+Tab cycling.
     pub(crate) fn effort_state(&self) -> std::sync::Arc<std::sync::atomic::AtomicU8> {
         self.effort_state.clone()
+    }
+
+    /// Returns a clone of the shared Fast-mode mirror, used by configurable
+    /// bindings.
+    pub(crate) fn fast_mode_state(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.fast_mode_state.clone()
     }
 
     /// Returns a clone of the shared available-efforts set. The
@@ -690,6 +699,12 @@ impl EventRenderer {
                 } else {
                     self.current_params.effort.to_string()
                 };
+                if matches!(
+                    self.current_params.service_tier,
+                    Some(tau_proto::ServiceTier::Fast)
+                ) {
+                    params.push_str(", fast");
+                }
                 if self.current_params.verbosity != tau_proto::Verbosity::Medium {
                     params.push_str(&format!(", v={}", self.current_params.verbosity));
                 }
@@ -1362,6 +1377,14 @@ impl EventRenderer {
                 self.current_params.effort = changed.level;
                 self.effort_state
                     .store(changed.level.as_u8(), std::sync::atomic::Ordering::Relaxed);
+                self.render_model_status();
+            }
+            Event::HarnessServiceTierChanged(changed) => {
+                self.current_params.service_tier = changed.service_tier;
+                self.fast_mode_state.store(
+                    matches!(changed.service_tier, Some(tau_proto::ServiceTier::Fast)),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 self.render_model_status();
             }
             Event::HarnessVerbosityChanged(changed) => {

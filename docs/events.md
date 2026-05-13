@@ -30,6 +30,8 @@ for control of the emit/intercept pipeline.
   response that reports usage.
 - **`harness.effort_changed`** — The current reasoning-effort level
   (`off` / `minimal` / `low` / `medium` / `high` / `xhigh`).
+- **`harness.service_tier_changed`** — The current service tier (`fast`,
+  `flex`, or absent to use provider default).
 - **`harness.efforts_available`** — Which effort levels are valid for the
   currently selected model. Empty when no model is selected or the
   provider doesn't support reasoning.
@@ -157,6 +159,7 @@ intent.
   (e.g. notification idle reset), not persisted.
 - **`ui.model_select`** — User requests a model switch.
 - **`ui.set_effort`** — User requests a reasoning-effort change.
+- **`ui.set_service_tier`** — User requests a service-tier change (`fast` for Fast mode, or `null` to clear it).
 - **`ui.detach_request`** — UI is detaching but wants the daemon to keep
   running so a later `tau --attach` can reconnect.
 - **`ui.shell_command`** — User submitted a `!` (in-context) or `!!`

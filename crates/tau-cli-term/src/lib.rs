@@ -43,6 +43,8 @@ pub enum Event {
     /// Shift+Tab pressed outside an open completion menu — caller
     /// decides what to do with it (Pi-style: cycle effort).
     BackTab,
+    /// A binding requested Fast mode toggle without touching the prompt draft.
+    FastToggle,
 }
 
 /// Higher-level terminal prompt with completion support.
@@ -199,7 +201,10 @@ impl HighTerm {
 
                 RawEvent::Binding(action) => {
                     self.sync_menu_block();
-                    self.run_binding(&action);
+                    if let Some(event) = self.run_binding(&action) {
+                        self.handle.redraw_sync();
+                        return Ok(event);
+                    }
                     self.handle.redraw_sync();
                     return Ok(Event::BufferChanged);
                 }
@@ -234,19 +239,19 @@ impl HighTerm {
         }
     }
 
-    fn run_binding(&self, action: &str) {
+    fn run_binding(&self, action: &str) -> Option<Event> {
         tracing::trace!(target: "tau_cli::input", action, "running prompt binding");
         let Some(action) = PromptShellAction::parse(action) else {
             self.print_local(&format!("binding: unknown action `{action}`"));
-            return;
+            return None;
         };
-        self.run_prompt_action(action);
+        self.run_prompt_action(action)
     }
 
     /// Runs a [`PromptShellAction`] and applies its result to the
     /// input buffer. Errors (spawn failure, bad utf-8, no editor)
     /// surface as a themed info line above the prompt.
-    fn run_prompt_action(&self, action: PromptShellAction) {
+    fn run_prompt_action(&self, action: PromptShellAction) -> Option<Event> {
         match run_prompt_shell_action(
             &self.term,
             &self.handle,
@@ -264,12 +269,14 @@ impl HighTerm {
                 buffer.insert_str(cursor, &text);
                 self.handle.set_buffer(buffer, cursor + text.len());
             }
+            Ok(Some(PromptShellResult::FastToggle)) => return Some(Event::FastToggle),
             Ok(Some(PromptShellResult::History(delta))) => {
                 self.term.trigger_history_step(delta);
             }
             Ok(None) => {} // shell exited non-zero or no output applies.
             Err(msg) => self.print_local(&format!("prompt action: {msg}")),
         }
+        None
     }
 
     fn print_local(&self, message: &str) {
@@ -300,6 +307,7 @@ struct PromptShellCommand {
 enum PromptShellAction {
     Insert(PromptShellCommand),
     Edit(PromptShellCommand),
+    FastToggle,
     PromptNext,
     PromptPrevious,
 }
@@ -314,12 +322,14 @@ pub struct EditorContext {
 enum PromptShellResult {
     Insert(String),
     Replace(String),
+    FastToggle,
     History(isize),
 }
 
 impl PromptShellAction {
     fn parse(action: &str) -> Option<Self> {
         match action {
+            "fast-toggle" => return Some(Self::FastToggle),
             "prompt-next" => return Some(Self::PromptNext),
             "prompt-previous" => return Some(Self::PromptPrevious),
             _ => {}
@@ -350,6 +360,7 @@ fn run_prompt_shell_action(
     let shell = match &action {
         PromptShellAction::PromptNext => return Ok(Some(PromptShellResult::History(1))),
         PromptShellAction::PromptPrevious => return Ok(Some(PromptShellResult::History(-1))),
+        PromptShellAction::FastToggle => return Ok(Some(PromptShellResult::FastToggle)),
         PromptShellAction::Insert(shell) | PromptShellAction::Edit(shell) => shell,
     };
     let current = trim_prompt_newlines(&handle.get_buffer()).to_owned();
@@ -362,7 +373,9 @@ fn run_prompt_shell_action(
     let file_text = match action {
         PromptShellAction::Edit(_) => append_prompt_trailer(&current, &editor_context),
         PromptShellAction::Insert(_) => current.clone(),
-        PromptShellAction::PromptNext | PromptShellAction::PromptPrevious => unreachable!(),
+        PromptShellAction::FastToggle
+        | PromptShellAction::PromptNext
+        | PromptShellAction::PromptPrevious => unreachable!(),
     };
     std::fs::write(tmp.path(), file_text.as_bytes())
         .map_err(|e| format!("could not write tempfile: {e}"))?;
@@ -421,7 +434,9 @@ fn run_prompt_shell_action(
             let new_text = trim_prompt_newlines(new_text).to_owned();
             Ok(Some(PromptShellResult::Replace(new_text)))
         }
-        PromptShellAction::PromptNext | PromptShellAction::PromptPrevious => unreachable!(),
+        PromptShellAction::FastToggle
+        | PromptShellAction::PromptNext
+        | PromptShellAction::PromptPrevious => unreachable!(),
     }
 }
 

@@ -1677,6 +1677,12 @@ impl Harness {
                     );
                     self.publish_event(
                         None,
+                        Event::HarnessServiceTierChanged(tau_proto::HarnessServiceTierChanged {
+                            service_tier: self.selected_params.service_tier,
+                        }),
+                    );
+                    self.publish_event(
+                        None,
                         Event::HarnessVerbosityChanged(tau_proto::HarnessVerbosityChanged {
                             level: self.selected_params.verbosity,
                         }),
@@ -1757,6 +1763,32 @@ impl Harness {
                     None,
                     Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
                         level: self.selected_params.effort,
+                    }),
+                );
+                Ok(true)
+            }
+            Event::UiSetServiceTier(req) => {
+                self.selected_params.service_tier = req.service_tier;
+                save_harness_state(
+                    &self.dirs,
+                    self.selected_model.as_ref(),
+                    self.selected_params,
+                );
+                let status = match req.service_tier {
+                    Some(tier) => tier.as_str(),
+                    None => "off",
+                };
+                self.publish_event(
+                    None,
+                    Event::HarnessInfo(tau_proto::HarnessInfo {
+                        message: format!("Fast mode set to {status}"),
+                        level: tau_proto::HarnessInfoLevel::Normal,
+                    }),
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessServiceTierChanged(tau_proto::HarnessServiceTierChanged {
+                        service_tier: self.selected_params.service_tier,
                     }),
                 );
                 Ok(true)

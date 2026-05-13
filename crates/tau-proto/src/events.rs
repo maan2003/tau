@@ -221,6 +221,8 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "context_usage_changed");
     pub const HARNESS_EFFORT_CHANGED: Self =
         Self::from_static(EventCategory::Harness, "effort_changed");
+    pub const HARNESS_SERVICE_TIER_CHANGED: Self =
+        Self::from_static(EventCategory::Harness, "service_tier_changed");
     pub const HARNESS_EFFORTS_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "efforts_available");
     pub const HARNESS_VERBOSITY_CHANGED: Self =
@@ -235,6 +237,7 @@ impl EventName {
     pub const UI_PROMPT_SUBMITTED: Self = Self::from_static(EventCategory::Ui, "prompt_submitted");
     pub const UI_MODEL_SELECT: Self = Self::from_static(EventCategory::Ui, "model_select");
     pub const UI_SET_EFFORT: Self = Self::from_static(EventCategory::Ui, "set_effort");
+    pub const UI_SET_SERVICE_TIER: Self = Self::from_static(EventCategory::Ui, "set_service_tier");
     pub const UI_SET_VERBOSITY: Self = Self::from_static(EventCategory::Ui, "set_verbosity");
     pub const UI_SET_THINKING_SUMMARY: Self =
         Self::from_static(EventCategory::Ui, "set_thinking_summary");
@@ -666,6 +669,42 @@ pub struct HarnessEffortChanged {
     pub level: Effort,
 }
 
+/// Optional upstream service tier. `Fast` enables Fast mode on providers
+/// that expose it; `Flex` is an explicit lower-priority service tier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceTier {
+    Fast,
+    Flex,
+}
+
+impl ServiceTier {
+    /// Config/event spelling used by Codex (`fast` / `flex`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Flex => "flex",
+        }
+    }
+
+    /// OpenAI wire spelling used by Codex requests (`priority` / `flex`).
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Fast => "priority",
+            Self::Flex => "flex",
+        }
+    }
+}
+
+/// The harness announces the current service tier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessServiceTierChanged {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ServiceTier>,
+}
+
 /// Output verbosity hint sent to providers that support it (OpenAI
 /// GPT-5 family: `verbosity` on Chat Completions, `text.verbosity` on
 /// Responses). Providers that don't advertise `supportsVerbosity`
@@ -978,6 +1017,8 @@ pub struct ModelParams {
     pub verbosity: Verbosity,
     #[serde(default, skip_serializing_if = "ThinkingSummary::is_default")]
     pub thinking_summary: ThinkingSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ServiceTier>,
 }
 
 /// The harness announces which efforts are valid for the
@@ -1516,6 +1557,13 @@ pub struct UiDetachRequest {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiSetEffort {
     pub level: Effort,
+}
+
+/// The user requests a service-tier change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiSetServiceTier {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ServiceTier>,
 }
 
 /// The user requests a verbosity change.
@@ -2281,6 +2329,8 @@ pub enum Event {
     HarnessContextUsageChanged(HarnessContextUsageChanged),
     #[serde(rename = "harness.effort_changed")]
     HarnessEffortChanged(HarnessEffortChanged),
+    #[serde(rename = "harness.service_tier_changed")]
+    HarnessServiceTierChanged(HarnessServiceTierChanged),
     #[serde(rename = "harness.efforts_available")]
     HarnessEffortsAvailable(HarnessEffortsAvailable),
     #[serde(rename = "harness.verbosity_changed")]
@@ -2301,6 +2351,8 @@ pub enum Event {
     UiModelSelect(UiModelSelect),
     #[serde(rename = "ui.set_effort")]
     UiSetEffort(UiSetEffort),
+    #[serde(rename = "ui.set_service_tier")]
+    UiSetServiceTier(UiSetServiceTier),
     #[serde(rename = "ui.set_verbosity")]
     UiSetVerbosity(UiSetVerbosity),
     #[serde(rename = "ui.set_thinking_summary")]
@@ -2385,6 +2437,7 @@ impl Event {
             Self::HarnessModelSelected(_) => EventName::HARNESS_MODEL_SELECTED,
             Self::HarnessContextUsageChanged(_) => EventName::HARNESS_CONTEXT_USAGE_CHANGED,
             Self::HarnessEffortChanged(_) => EventName::HARNESS_EFFORT_CHANGED,
+            Self::HarnessServiceTierChanged(_) => EventName::HARNESS_SERVICE_TIER_CHANGED,
             Self::HarnessEffortsAvailable(_) => EventName::HARNESS_EFFORTS_AVAILABLE,
             Self::HarnessVerbosityChanged(_) => EventName::HARNESS_VERBOSITY_CHANGED,
             Self::HarnessVerbositiesAvailable(_) => EventName::HARNESS_VERBOSITIES_AVAILABLE,
@@ -2396,6 +2449,7 @@ impl Event {
             Self::UiPromptDraft(_) => EventName::UI_PROMPT_DRAFT,
             Self::UiModelSelect(_) => EventName::UI_MODEL_SELECT,
             Self::UiSetEffort(_) => EventName::UI_SET_EFFORT,
+            Self::UiSetServiceTier(_) => EventName::UI_SET_SERVICE_TIER,
             Self::UiSetVerbosity(_) => EventName::UI_SET_VERBOSITY,
             Self::UiSetThinkingSummary(_) => EventName::UI_SET_THINKING_SUMMARY,
             Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,

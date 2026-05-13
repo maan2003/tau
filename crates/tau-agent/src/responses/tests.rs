@@ -40,6 +40,42 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
 }
 
 #[test]
+fn build_request_includes_service_tier_when_configured() {
+    let config = ResponsesConfig {
+        base_url: "https://chatgpt.com/backend-api".into(),
+        api_key: "test".into(),
+        model_id: "gpt-5-codex".into(),
+        account_id: None,
+        supports_reasoning_effort: false,
+        supports_verbosity: false,
+        supports_phase: false,
+        supports_reasoning_summary: false,
+        supports_websocket: false,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        supports_encrypted_reasoning: false,
+    };
+    let request = PromptPayload {
+        system_prompt: "system",
+        messages: &[],
+        tools: &[],
+        params: tau_proto::ModelParams {
+            service_tier: Some(tau_proto::ServiceTier::Fast),
+            ..Default::default()
+        },
+        tool_choice: tau_proto::ToolChoice::default(),
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        session_id: &tau_proto::SessionId::new("test-session"),
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+
+    assert_eq!(body["service_tier"], "priority");
+}
+
+#[test]
 fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
     let config = ResponsesConfig {
         base_url: "https://chatgpt.com/backend-api".into(),

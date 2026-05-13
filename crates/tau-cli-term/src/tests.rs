@@ -704,6 +704,14 @@ mod prompt_action_parse {
     }
 
     #[test]
+    fn parses_fast_toggle() {
+        assert!(matches!(
+            PromptShellAction::parse("fast-toggle"),
+            Some(PromptShellAction::FastToggle)
+        ));
+    }
+
+    #[test]
     fn unknown_action_returns_none() {
         assert!(PromptShellAction::parse("not-a-real-action").is_none());
         assert!(PromptShellAction::parse("shell-prompt-bogus:trim:cmd").is_none());

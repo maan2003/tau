@@ -284,11 +284,16 @@ pub(crate) fn selected_params_for_model(
         .map(|p| p.thinking_summary)
         .or(last.map(|p| p.thinking_summary))
         .unwrap_or_else(|| default_thinking_summary(&allowed_thinking));
+    let service_tier = default_entry
+        .map(|p| p.service_tier)
+        .or(last.map(|p| p.service_tier))
+        .flatten();
 
     ModelParams {
         effort: clamp_effort(effort, &allowed_effort),
         verbosity: clamp_verbosity(verbosity, &allowed_verbosity),
         thinking_summary: clamp_thinking_summary(thinking_summary, &allowed_thinking),
+        service_tier,
     }
 }
 

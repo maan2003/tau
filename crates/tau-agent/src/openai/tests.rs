@@ -36,6 +36,38 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
 }
 
 #[test]
+fn build_request_includes_service_tier_when_configured() {
+    let config = OpenAiConfig {
+        base_url: "https://api.openai.com/v1".into(),
+        api_key: "test".into(),
+        model_id: "gpt-5".into(),
+        supports_reasoning_effort: false,
+        supports_verbosity: false,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        supports_llama_cpp_cache: false,
+    };
+    let request = PromptPayload {
+        system_prompt: "system",
+        messages: &[],
+        tools: &[],
+        params: tau_proto::ModelParams {
+            service_tier: Some(tau_proto::ServiceTier::Fast),
+            ..Default::default()
+        },
+        tool_choice: tau_proto::ToolChoice::default(),
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        session_id: &tau_proto::SessionId::new("test-session"),
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
+
+    assert_eq!(body["service_tier"], "priority");
+}
+
+#[test]
 fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
     let config = OpenAiConfig {
         base_url: "https://example.com/v1".into(),

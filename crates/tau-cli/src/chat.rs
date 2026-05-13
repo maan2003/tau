@@ -285,6 +285,7 @@ pub(crate) fn run_chat(
             "/verbosity",
             "Set output verbosity: low, medium, high (provider-dependent)",
         ),
+        SlashCommand::new("/fast", "Toggle Fast mode"),
         SlashCommand::new(
             "/thinking-summary",
             "Set reasoning summary mode: off, auto, concise, detailed",
@@ -354,6 +355,7 @@ pub(crate) fn run_chat(
         build_set_arg_completer(renderer.cli_state_mirror()),
     );
     let effort_state = renderer.effort_state();
+    let fast_mode_state = renderer.fast_mode_state();
     let efforts_available = renderer.efforts_available();
     let editor_context = renderer.editor_context();
     term.set_editor_context_handle(editor_context.clone());
@@ -392,6 +394,7 @@ pub(crate) fn run_chat(
         &mut active_session_id,
         TerminalInputLoopCtx {
             effort_state,
+            fast_mode_state,
             efforts_available,
             theme,
             renderer_tx: event_tx,
@@ -471,6 +474,7 @@ enum RendererCmd {
 
 struct TerminalInputLoopCtx {
     effort_state: Arc<std::sync::atomic::AtomicU8>,
+    fast_mode_state: Arc<std::sync::atomic::AtomicBool>,
     /// Set of effort levels the harness currently accepts, kept in
     /// sync with `HarnessEffortsAvailable` by the renderer. The
     /// Shift+Tab cycle reads it so we don't ask for a level the
@@ -596,6 +600,25 @@ fn terminal_input_loop(
                 }
                 if text == "/effort" {
                     print_local("/effort <level> — one of: off, minimal, low, medium, high, xhigh");
+                    continue;
+                }
+                if text == "/fast" {
+                    let enabled = ctx
+                        .fast_mode_state
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let service_tier = if enabled {
+                        None
+                    } else {
+                        Some(tau_proto::ServiceTier::Fast)
+                    };
+                    let _ = send_event(
+                        writer,
+                        &Event::UiSetServiceTier(tau_proto::UiSetServiceTier { service_tier }),
+                    );
+                    continue;
+                }
+                if text.starts_with("/fast ") {
+                    print_local("/fast toggles Fast mode");
                     continue;
                 }
                 if let Some(arg) = text.strip_prefix("/verbosity ") {
@@ -735,6 +758,20 @@ fn terminal_input_loop(
                     tracing::trace!(target: "tau_cli::ui", "prompt draft updated");
                     cv.notify_one();
                 }
+            }
+            TermEvent::FastToggle => {
+                let enabled = ctx
+                    .fast_mode_state
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let service_tier = if enabled {
+                    None
+                } else {
+                    Some(tau_proto::ServiceTier::Fast)
+                };
+                let _ = send_event(
+                    writer,
+                    &Event::UiSetServiceTier(tau_proto::UiSetServiceTier { service_tier }),
+                );
             }
             TermEvent::BackTab => {
                 // Pi-style: cycle effort. Read the current level

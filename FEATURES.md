@@ -67,9 +67,9 @@ The harness prepends `prefix` to the resolved command. Anything that gives you
 a stdio pipe to a remote process works the same way (`docker exec`, `nsenter`,
 `bwrap`, …).
 
-### Model parameters: effort, verbosity, thinking summary
+### Model parameters: effort, verbosity, thinking summary, service tier
 
-Three per-prompt knobs are bundled into a single `ModelParams` struct
+Per-prompt knobs are bundled into a single `ModelParams` struct
 that the harness stamps onto every `SessionPromptCreated` and that
 backends thread through to the provider request:
 
@@ -91,6 +91,9 @@ backends thread through to the provider request:
 - **`thinking_summary`** — reasoning-summary mode (`off`, `auto`,
   `concise`, `detailed`). Sent as `reasoning.summary` on providers
   that set `supportsReasoningSummary`; ignored otherwise.
+- **`service_tier`** — optional upstream service tier. `/fast`
+  toggles Codex's `fast` tier. Backends serialize Codex's exact
+  OpenAI wire values: `priority` for Fast and `flex` for Flex.
 
 Per-model escape hatches in `models.json5`:
 
@@ -125,10 +128,10 @@ level (e.g. `/effort xhigh` on a mini model, `/verbosity high` on a
 provider that doesn't support it) degrades and surfaces a
 `HarnessInfo` notice rather than silently dropping the field.
 
-The status bar renders effort always; non-default verbosity and
-thinking-summary are appended as `, v=<level>` / `, ts=<level>` so a
-fresh session reads `gpt-5 (medium)` and only grows when the user
-changes a knob.
+The status bar renders effort always; Fast mode, non-default verbosity,
+and thinking-summary are appended as `, fast` / `, v=<level>` /
+`, ts=<level>` so a fresh session reads `gpt-5 (medium)` and only grows
+when the user changes a knob.
 
 ### Prompt input caching
 
@@ -267,6 +270,7 @@ Type `/` for menu autocompletion. The built-in set:
 | `/model <id>`       | Switch model (Tab completes from provider list)      |
 | `/effort <level>`   | Set reasoning effort (`Shift+Tab` cycles)            |
 | `/verbosity <level>`| Set output verbosity (`low`/`medium`/`high`)         |
+| `/fast` | Toggle Codex Fast mode (`service_tier: fast`)      |
 | `/thinking-summary <mode>` | Set reasoning-summary mode (`off`/`auto`/`concise`/`detailed`) |
 | `/tree [id]`        | Print session tree; with `id`, rewind head           |
 | `/set <name> <val>` | Set a UI setting (Tab cycles names + values)         |
@@ -316,6 +320,8 @@ Supported actions:
   command, then replace the prompt with the file contents on success.
 - `shell-prompt-insert`: run the shell command and insert its stdout at the
   cursor on success.
+- `fast-toggle`: toggle Fast mode directly without reading, submitting, or
+  clearing the current draft. For example: `{ action: "fast-toggle" }`.
 
 Command environment:
 

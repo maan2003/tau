@@ -517,6 +517,7 @@ fn model_params_serializes_skipping_defaults() {
         effort: Effort::High,
         verbosity: Verbosity::Low,
         thinking_summary: ThinkingSummary::Concise,
+        service_tier: Some(ServiceTier::Fast),
     })
     .expect("serialize");
     assert_eq!(
@@ -525,6 +526,7 @@ fn model_params_serializes_skipping_defaults() {
             "effort": "high",
             "verbosity": "low",
             "thinking_summary": "concise",
+            "service_tier": "fast",
         })
     );
 }
