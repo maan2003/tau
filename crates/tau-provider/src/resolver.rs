@@ -343,23 +343,25 @@ fn is_builtin_openai_codex_endpoint(base_url: &str) -> bool {
 }
 
 /// Model-id whitelist for assistant-phase emission. Matches the
-/// deployment-checklist guidance: `gpt-5.3-codex` and later. We
-/// match by prefix rather than enumerating every snapshot so that
-/// `gpt-5.3-codex-2026-01-15`-style date suffixes are handled
-/// without a settings update.
+/// deployment-checklist guidance: `gpt-5.3-codex` and later, plus
+/// the general `gpt-5.4` line and later. We match by family rather
+/// than enumerating every snapshot so that dated and variant suffixes
+/// are handled without a settings update.
 fn is_known_phase_capable_model_id(model_id: &str) -> bool {
     let trimmed = model_id.trim();
-    // `gpt-5.3-codex` and its dated snapshots, plus any future minor
-    // bumps in the same major. `gpt-5-codex` and `gpt-5.2-codex` do
-    // NOT match — those predate the field.
-    if let Some(rest) = trimmed.strip_prefix("gpt-5.") {
-        if let Some((minor, _)) = rest.split_once("-codex").or_else(|| rest.split_once('-')) {
-            if let Ok(n) = minor.parse::<u32>() {
-                return n >= 3 && rest.starts_with(&format!("{minor}-codex"));
-            }
-        }
-    }
-    false
+    let Some(rest) = trimmed.strip_prefix("gpt-5.") else {
+        return false;
+    };
+    let (minor, suffix) = rest.split_once('-').unwrap_or((rest, ""));
+    let Ok(n) = minor.parse::<u32>() else {
+        return false;
+    };
+
+    // `gpt-5.4` and later support phase whether or not the model id
+    // includes the `-codex` family marker. `gpt-5.3` only supports it
+    // on the Codex family; `gpt-5-codex` and `gpt-5.2-codex` predate
+    // the field.
+    n >= 4 || (n == 3 && suffix.starts_with("codex"))
 }
 
 fn supports_prompt_cache_retention(provider: &ProviderConfig, base_url: &str) -> bool {

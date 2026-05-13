@@ -128,11 +128,11 @@ fn non_builtin_backend_skips_retention_default() {
 }
 
 /// The ChatGPT Codex Responses endpoint auto-enables `supports_phase`
-/// for models known to emit the field (`gpt-5.3-codex` and later) so
-/// users on the built-in OAuth flow get the field plumbed through
-/// without having to touch their settings. Older Codex models stay
-/// off the feature — older variants reject unknown fields, and the
-/// docs only call out 5.3+.
+/// for models known to emit the field (`gpt-5.3-codex` and later,
+/// plus the general `gpt-5.4` line and later) so users on the
+/// built-in OAuth flow get the field plumbed through without having
+/// to touch their settings. Older Codex models stay off the feature —
+/// older variants reject unknown fields.
 #[test]
 fn codex_backend_auto_enables_phase_for_supported_models() {
     let provider = ProviderConfig::default();
@@ -152,6 +152,21 @@ fn codex_backend_auto_enables_phase_for_supported_models() {
         "https://chatgpt.com/backend-api",
         "gpt-5.4-codex"
     ));
+    assert!(supports_phase(
+        &provider,
+        "https://chatgpt.com/backend-api",
+        "gpt-5.4"
+    ));
+    assert!(supports_phase(
+        &provider,
+        "https://chatgpt.com/backend-api",
+        "gpt-5.5"
+    ));
+    assert!(supports_phase(
+        &provider,
+        "https://chatgpt.com/backend-api",
+        "gpt-5.5-pro"
+    ));
     assert!(
         !supports_phase(&provider, "https://chatgpt.com/backend-api", "gpt-5-codex"),
         "the pre-5.3 codex line predates the field"
@@ -165,8 +180,8 @@ fn codex_backend_auto_enables_phase_for_supported_models() {
         "5.2-codex is below the doc-cited 5.3 floor"
     );
     assert!(
-        !supports_phase(&provider, "https://chatgpt.com/backend-api", "gpt-5.5"),
-        "non-codex models don't get the auto-enable"
+        !supports_phase(&provider, "https://chatgpt.com/backend-api", "gpt-5.3"),
+        "plain 5.3 is below the general-model floor"
     );
 }
 
