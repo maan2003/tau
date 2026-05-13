@@ -163,11 +163,10 @@ fn build_request_omits_parallel_tool_calls_without_tools() {
 }
 
 /// `ToolChoice::None` must serialize as `tool_choice: "none"` while
-/// the `tools` array stays declared. This is the lever the harness
-/// uses for non-tool extension side queries (idle summary): the
-/// model is told not to call anything, but the prompt-cache prefix
-/// (system prompt + tool definitions) stays byte-identical to the
-/// parent conversation's, so cache reuse is preserved.
+/// the `tools` array stays declared. This is valid when a caller
+/// intentionally wants a different wire request. Cache-sharing side
+/// queries must not use this lever because the serialized
+/// `tool_choice` participates in provider request equivalence.
 #[test]
 fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
     let config = OpenAiConfig {

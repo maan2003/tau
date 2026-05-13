@@ -1372,14 +1372,13 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
         side_prompt.messages,
     );
 
-    // Tool calls are disabled on this turn so the summarizer can't
-    // accidentally fire `write` / `edit` / `delegate` — and the
-    // tools list still goes out unchanged so the cache prefix
-    // matches the parent conv's.
+    // Tool execution is blocked locally by the harness. The provider
+    // request must still keep `tool_choice: Auto` so the side query's
+    // non-input fields match the parent conv's cached chain.
     assert_eq!(
         side_prompt.tool_choice,
-        tau_proto::ToolChoice::None,
-        "non-tool ext-agent query must disable tool calls for the side conv's turn",
+        tau_proto::ToolChoice::Auto,
+        "non-tool ext-agent query must preserve wire tool_choice for cache compatibility",
     );
 
     // The parent conv's head must not have moved sideways because of
@@ -1395,15 +1394,17 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
     h.shutdown().expect("shutdown");
 }
 
-/// A non-tool ext-agent query (idle-summary path) flips per-turn
-/// `tool_choice` to `None` while leaving system prompt, tools, and
-/// model params identical. That `tool_choice` change must NOT bust
-/// the chain anchor: the side conv has to inherit the parent's
+/// A non-tool ext-agent query (idle-summary path) must not execute
+/// tools, but it also must not mutate provider-visible request fields
+/// to enforce that policy. The side conv inherits the parent's
 /// `previous_response_id` so the upstream prompt cache is reused
 /// instead of paying for a full transcript replay (~50k tokens per
-/// idle summary in real sessions).
+/// idle summary in real sessions). It must preserve `tool_choice:
+/// Auto`; flipping it to `None` changes the wire request and was
+/// observed to collapse cache usage to near zero even with a valid
+/// `previous_response_id`.
 #[test]
-fn non_tool_ext_agent_query_preserves_chain_anchor() {
+fn non_tool_ext_agent_query_preserves_chain_anchor_and_tool_choice() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -1455,8 +1456,8 @@ fn non_tool_ext_agent_query_preserves_chain_anchor() {
 
     assert_eq!(
         side_prompt.tool_choice,
-        tau_proto::ToolChoice::None,
-        "sanity: idle-summary query still flips tool_choice to None",
+        tau_proto::ToolChoice::Auto,
+        "idle-summary query must preserve the parent's wire tool_choice; the harness enforces no-tool execution locally",
     );
     assert!(
         side_prompt.share_user_cache_key,
@@ -1466,7 +1467,7 @@ fn non_tool_ext_agent_query_preserves_chain_anchor() {
     );
     let prev = side_prompt.previous_response.as_ref().expect(
         "idle-summary side conv must inherit parent's chain anchor — \
-         tool_choice flipping is intentional and must not bust the cache",
+         the wire request stays cache-compatible with the parent",
     );
     assert_eq!(prev.id, "resp_parent");
 }

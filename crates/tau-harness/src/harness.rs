@@ -3056,21 +3056,21 @@ impl Harness {
         let session_id = conv.session_id.clone();
         let originator = conv.originator.clone();
         // Non-tool extension side conversations (`std-notifications`'
-        // idle summary, etc.) must not call tools — their whole job
-        // is to produce a one-line summary, and unfettered tool
+        // idle summary, etc.) must not execute tools — their whole
+        // job is to produce a one-line summary, and unfettered tool
         // access has historically caused destructive `write`/`edit`
-        // calls. We keep the tools list and system prompt unchanged
-        // so the prompt-cache prefix continues to match the parent
-        // conv; only the per-turn `tool_choice` flips to `None`.
+        // calls. Do NOT enforce that by flipping the provider
+        // `tool_choice` to `none`: `tool_choice` is serialized on the
+        // wire and changing it breaks the request-body equivalence the
+        // `previous_response_id` cache relies on. Keep the wire
+        // request identical to the parent (`Auto`) and enforce the
+        // no-tools rule locally before dispatching any returned tool
+        // calls.
         let is_non_tool_ext_query = matches!(
             conv.originator,
             tau_proto::PromptOriginator::Extension { .. }
         ) && conv.parent_tool_call_id.is_none();
-        let tool_choice = if is_non_tool_ext_query {
-            tau_proto::ToolChoice::None
-        } else {
-            tau_proto::ToolChoice::Auto
-        };
+        let tool_choice = tau_proto::ToolChoice::Auto;
         // Single-shot side queries (idle-summary) reuse the user's
         // `prompt_cache_key` bucket so they hit the user's warm
         // prefix cache instead of cold-starting their own. Delegate
@@ -3106,6 +3106,7 @@ impl Harness {
             &system_prompt,
             &tools,
             &self.selected_params,
+            tool_choice,
         );
         // Stateful-chain hint: if the prior turn for this conversation
         // produced a `response_id` AND the anchor is still consistent
@@ -3273,6 +3274,13 @@ impl Harness {
                 call.display = build_tool_args_display(name.as_str(), &call.arguments);
             }
         }
+        let is_non_tool_ext_query = self.conversations.get(&cid).is_some_and(|conv| {
+            matches!(
+                conv.originator,
+                tau_proto::PromptOriginator::Extension { .. }
+            ) && conv.parent_tool_call_id.is_none()
+        });
+
         // Publish via the owning conversation's branch — when text is
         // present the SessionTree fold appends an `AgentMessage` as a
         // child of `tree.head`, so an unsnapped publish would land on
@@ -3330,16 +3338,24 @@ impl Harness {
             ref name,
             ref query_id,
         } = response.originator
-            && response.tool_calls.is_empty()
+            && (response.tool_calls.is_empty() || is_non_tool_ext_query)
         {
             let source = self
                 .conversations
                 .get(&cid)
                 .and_then(|c| c.source_connection.clone());
+            let error = if is_non_tool_ext_query && !response.tool_calls.is_empty() {
+                Some(format!(
+                    "non-tool extension query attempted to call {} tool(s); refusing to execute",
+                    response.tool_calls.len()
+                ))
+            } else {
+                None
+            };
             let result = tau_proto::ExtAgentQueryResult {
                 query_id: query_id.clone(),
                 text: response.text.clone().unwrap_or_default(),
-                error: None,
+                error,
             };
             if let Some(source) = source {
                 let _ = self.bus.send_to(

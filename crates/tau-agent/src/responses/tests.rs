@@ -324,7 +324,7 @@ fn build_request_share_user_cache_key_pins_extension_to_user_bucket() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
-        tool_choice: tau_proto::ToolChoice::None,
+        tool_choice: tau_proto::ToolChoice::Auto,
         previous_response: None,
         originator: &ext,
         share_user_cache_key: true,
@@ -334,13 +334,65 @@ fn build_request_share_user_cache_key_pins_extension_to_user_bucket() {
     assert_eq!(body["prompt_cache_key"], "tau-base");
 }
 
+#[test]
+fn build_request_cache_shared_extension_matches_user_wire_body() {
+    let config = ResponsesConfig {
+        prompt_cache_key: Some("tau-base".into()),
+        ..chain_test_config()
+    };
+    let ext = tau_proto::PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("std-notifications"),
+        query_id: "idle-0".into(),
+    };
+    let tool = tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("shell"),
+        description: Some("run shell commands".to_owned()),
+        parameters: None,
+    };
+    let messages = [user_text("summarize")];
+    let previous_response = Some(PreviousResponse {
+        id: "resp_parent",
+        message_index: 0,
+    });
+    let user_request = PromptPayload {
+        system_prompt: "sys",
+        messages: &messages,
+        tools: std::slice::from_ref(&tool),
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        previous_response,
+        originator: &tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        session_id: &tau_proto::SessionId::new("test-session"),
+    };
+    let shared_ext_request = PromptPayload {
+        system_prompt: "sys",
+        messages: &messages,
+        tools: std::slice::from_ref(&tool),
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        previous_response,
+        originator: &ext,
+        share_user_cache_key: true,
+        session_id: &tau_proto::SessionId::new("test-session"),
+    };
+
+    let user_body = serde_json::to_value(build_request(&config, &user_request)).expect("serialize");
+    let ext_body =
+        serde_json::to_value(build_request(&config, &shared_ext_request)).expect("serialize");
+
+    assert_eq!(ext_body, user_body);
+    assert_eq!(ext_body["prompt_cache_key"], "tau-base");
+    assert_eq!(ext_body["tool_choice"], "auto");
+    assert_eq!(ext_body["previous_response_id"], "resp_parent");
+}
+
 /// `ToolChoice::None` emits `tool_choice: "none"` on the Responses
-/// body while leaving the `tools` array fully declared. The harness
-/// uses this for non-tool extension side queries (e.g. idle summary)
-/// so the model is forced to produce a text reply while the cache
-/// prefix (system_prompt + tools) keeps matching the parent
-/// conversation's. Verified here on a request that carries real
-/// tool definitions.
+/// body while leaving the `tools` array fully declared. That is valid
+/// for callers that intentionally want a different wire request, but
+/// the harness must not use it for cache-sharing side queries because
+/// the field participates in provider request equivalence. Verified
+/// here on a request that carries real tool definitions.
 #[test]
 fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
     let config = chain_test_config();

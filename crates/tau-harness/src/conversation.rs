@@ -21,7 +21,7 @@ use std::collections::VecDeque;
 use tau_core::NodeId;
 use tau_proto::{
     ConnectionId, ModelId, ModelParams, PromptOriginator, SessionId, SessionPromptId, ToolCallId,
-    ToolDefinition,
+    ToolChoice, ToolDefinition,
 };
 
 use crate::dedup::ResultDedupMap;
@@ -34,12 +34,14 @@ use crate::dedup::ResultDedupMap;
 /// when the anchor is minted) and the anchor-validity check before
 /// sending the next prompt.
 ///
-/// `tool_choice` is intentionally NOT hashed: it's a per-turn directive
-/// to the model (call tools or don't), not part of the cached prefix.
-/// Hashing it broke the chain on every `std-notifications` idle-summary
-/// query — those flip `tool_choice` to `None` while keeping tools/system
-/// identical, exactly to preserve the cache prefix per the design
-/// comment in `tau_agent::responses::build_request`.
+/// `tool_choice` is hashed too. It is serialized on the wire by both
+/// Responses and Chat Completions backends; carrying a
+/// `previous_response_id` across a `tool_choice` flip sends a request
+/// whose non-input fields no longer match the anchored response and
+/// can silently fall off the provider cache. Non-tool extension side
+/// queries therefore preserve `ToolChoice::Auto` and the harness
+/// enforces "no tool execution" locally instead of mutating the wire
+/// request.
 ///
 /// Domain-separated by a NUL byte between fields so e.g. a system
 /// prompt ending in `"]"` can't be confused with the start of the
@@ -50,6 +52,7 @@ pub(crate) fn compute_chain_fingerprint(
     system_prompt: &str,
     tools: &[ToolDefinition],
     model_params: &ModelParams,
+    tool_choice: ToolChoice,
 ) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(system_prompt.as_bytes());
@@ -57,6 +60,8 @@ pub(crate) fn compute_chain_fingerprint(
     hasher.update(&serde_json::to_vec(tools).unwrap_or_default());
     hasher.update(b"\0params:");
     hasher.update(&serde_json::to_vec(model_params).unwrap_or_default());
+    hasher.update(b"\0tool_choice:");
+    hasher.update(&serde_json::to_vec(&tool_choice).unwrap_or_default());
     *hasher.finalize().as_bytes()
 }
 
@@ -267,43 +272,83 @@ mod tests {
     /// regression before any real session loses cache.
     #[test]
     fn fingerprint_changes_when_real_inputs_drift() {
-        let base = compute_chain_fingerprint("sys", &[tool("a")], &ModelParams::default());
+        let base = compute_chain_fingerprint(
+            "sys",
+            &[tool("a")],
+            &ModelParams::default(),
+            tau_proto::ToolChoice::Auto,
+        );
 
         assert_ne!(
             base,
-            compute_chain_fingerprint("sys-changed", &[tool("a")], &ModelParams::default()),
+            compute_chain_fingerprint(
+                "sys-changed",
+                &[tool("a")],
+                &ModelParams::default(),
+                tau_proto::ToolChoice::Auto,
+            ),
             "system_prompt drift must change the fingerprint",
         );
         assert_ne!(
             base,
-            compute_chain_fingerprint("sys", &[tool("a"), tool("b")], &ModelParams::default()),
+            compute_chain_fingerprint(
+                "sys",
+                &[tool("a"), tool("b")],
+                &ModelParams::default(),
+                tau_proto::ToolChoice::Auto,
+            ),
             "tools drift must change the fingerprint",
         );
-        let mut params = ModelParams::default();
-        params.effort = tau_proto::Effort::High;
+        let params = ModelParams {
+            effort: tau_proto::Effort::High,
+            ..ModelParams::default()
+        };
         assert_ne!(
             base,
-            compute_chain_fingerprint("sys", &[tool("a")], &params),
+            compute_chain_fingerprint("sys", &[tool("a")], &params, tau_proto::ToolChoice::Auto),
             "model_params drift must change the fingerprint",
         );
     }
 
-    /// Inverse: `tool_choice` is intentionally NOT hashed because it's
-    /// a per-turn directive, not part of the cached prefix. Without
-    /// this exclusion the std-notifications idle-summary side conv
-    /// (which flips `tool_choice` to `None` while leaving everything
-    /// else identical) busts the chain anchor and pays for a full
-    /// transcript replay each time. If anyone re-adds `tool_choice`
-    /// to the hash inputs, this test should be updated alongside —
-    /// not silently broken.
     #[test]
-    fn fingerprint_is_stable_across_unrelated_inputs() {
+    fn fingerprint_changes_when_tool_choice_drifts() {
+        let base = compute_chain_fingerprint(
+            "sys",
+            &[tool("a")],
+            &ModelParams::default(),
+            tau_proto::ToolChoice::Auto,
+        );
+
+        assert_ne!(
+            base,
+            compute_chain_fingerprint(
+                "sys",
+                &[tool("a")],
+                &ModelParams::default(),
+                tau_proto::ToolChoice::None,
+            ),
+            "tool_choice drift must change the fingerprint because it changes the wire request",
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_stable_across_repeated_calls() {
         // Whatever inputs `compute_chain_fingerprint` accepts must
         // produce the same hash when called twice with the same
         // values. Guards against accidental nondeterminism (e.g. if
         // someone reaches for `HashMap` serialization for tools).
-        let a = compute_chain_fingerprint("sys", &[tool("a")], &ModelParams::default());
-        let b = compute_chain_fingerprint("sys", &[tool("a")], &ModelParams::default());
+        let a = compute_chain_fingerprint(
+            "sys",
+            &[tool("a")],
+            &ModelParams::default(),
+            tau_proto::ToolChoice::Auto,
+        );
+        let b = compute_chain_fingerprint(
+            "sys",
+            &[tool("a")],
+            &ModelParams::default(),
+            tau_proto::ToolChoice::Auto,
+        );
         assert_eq!(a, b, "fingerprint must be deterministic");
     }
 }
