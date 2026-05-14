@@ -3,6 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
+const DEBUG_STRING_COMPACT_THRESHOLD: usize = 100;
+const DEBUG_STRING_COMPACT_EDGE_BYTES: usize = 20;
+
 use tau_proto::{ConnectionId, Event, UnixMicros};
 
 use crate::error::HarnessError;
@@ -49,7 +52,8 @@ impl DebugEventLog {
                     }
                     tau_proto::Frame::Message(_) => "<message>".to_owned(),
                 };
-                let frame_json = serde_json::to_value(frame).unwrap_or_default();
+                let mut frame_json = serde_json::to_value(frame).unwrap_or_default();
+                compact_debug_json_strings(&mut frame_json);
                 serde_json::json!({
                     "type": "from_connection",
                     "recorded_at_micros": recorded_at,
@@ -88,7 +92,8 @@ impl DebugEventLog {
         event: &Event,
         recorded_at: UnixMicros,
     ) {
-        let event_json = serde_json::to_value(event).unwrap_or_default();
+        let mut event_json = serde_json::to_value(event).unwrap_or_default();
+        compact_debug_json_strings(&mut event_json);
         let entry = serde_json::json!({
             "type": "published",
             "recorded_at_micros": recorded_at.get(),
@@ -105,6 +110,48 @@ impl DebugEventLog {
         let _ = self.file.write_all(b"\n");
         let _ = self.file.flush();
     }
+}
+
+fn compact_debug_json_strings(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => {
+            *s = compact_debug_string(s);
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                compact_debug_json_strings(value);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for value in map.values_mut() {
+                compact_debug_json_strings(value);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn compact_debug_string(s: &str) -> String {
+    if s.len() <= DEBUG_STRING_COMPACT_THRESHOLD {
+        return s.to_owned();
+    }
+
+    let mut prefix_end = DEBUG_STRING_COMPACT_EDGE_BYTES;
+    while !s.is_char_boundary(prefix_end) {
+        prefix_end -= 1;
+    }
+
+    let mut suffix_start = s.len() - DEBUG_STRING_COMPACT_EDGE_BYTES;
+    while suffix_start < s.len() && !s.is_char_boundary(suffix_start) {
+        suffix_start += 1;
+    }
+
+    format!(
+        "{}┄total {}┄{}",
+        &s[..prefix_end],
+        s.len(),
+        &s[suffix_start..]
+    )
 }
 
 #[cfg(test)]
@@ -161,6 +208,34 @@ mod tests {
         assert_eq!(usage["prompt_cached_tokens"], 800);
         assert_eq!(usage["response_received_tokens"], 42);
         assert_eq!(usage["model"], "openai/gpt-5");
+    }
+
+    #[test]
+    fn published_line_compacts_long_strings() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut log = DebugEventLog::open(td.path()).expect("open");
+        let event = Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: SessionPromptId::from("sp-0"),
+            text: "x".repeat(101),
+            thinking: Some(format!("{}{}{}", "α".repeat(30), "middle", "ω".repeat(30))),
+            originator: PromptOriginator::User,
+        });
+
+        log.log_published_event(None, &event, UnixMicros::now());
+
+        let lines = read_lines(log.path());
+        assert_eq!(lines.len(), 1);
+        let payload = &lines[0]["event"]["payload"];
+        assert_eq!(
+            payload["text"],
+            "xxxxxxxxxxxxxxxxxxxx┄total 101┄xxxxxxxxxxxxxxxxxxxx"
+        );
+        assert_eq!(payload["thinking"], "αααααααααα┄total 126┄ωωωωωωωωωω");
+    }
+
+    #[test]
+    fn compact_debug_string_keeps_short_strings() {
+        assert_eq!(compact_debug_string(&"x".repeat(100)), "x".repeat(100));
     }
 
     #[test]
