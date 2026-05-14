@@ -98,7 +98,7 @@ pub(crate) struct EventRenderer {
     /// Tool block visibility mode.
     show_tools: tau_config::settings::ShowTools,
     /// Tool summary blocks keyed by their block id. Hidden when
-    /// `show_tools` is `On`, rendered in summarize modes.
+    /// `show_tools` is `Full` or `Compact`, rendered in summarize modes.
     tool_summaries: HashMap<tau_cli_term::BlockId, ToolSummaryDisplay>,
     /// In `summarize-prompt` mode, the single summary block for the
     /// active user prompt. Reused across the follow-up agent turns the
@@ -421,16 +421,7 @@ impl EventRenderer {
         }
         self.diffs_expanded = on;
         for entry in &self.diff_blocks {
-            let block = if matches!(self.show_tools, tau_config::settings::ShowTools::On) {
-                render_diff_tool_block(
-                    &self.theme,
-                    &entry.display,
-                    &entry.diff,
-                    self.diffs_expanded,
-                )
-            } else {
-                Self::empty_block()
-            };
+            let block = self.render_diff_history_block(&entry.display, &entry.diff);
             self.handle.set_block(entry.block_id, block);
         }
         self.invalidate_for_retroactive_toggle();
@@ -517,11 +508,19 @@ impl EventRenderer {
     }
 
     fn render_tool_history_block(&self, display: &ToolCallDisplay) -> tau_cli_term::StyledBlock {
-        if matches!(self.show_tools, tau_config::settings::ShowTools::On) {
-            render_tool_block(&self.theme, display)
-        } else {
-            Self::empty_block()
+        match self.show_tools {
+            tau_config::settings::ShowTools::Full => render_tool_block(&self.theme, display),
+            tau_config::settings::ShowTools::Compact => self.render_compact_tool_block(display),
+            tau_config::settings::ShowTools::Off
+            | tau_config::settings::ShowTools::SummarizeTurn
+            | tau_config::settings::ShowTools::SummarizePrompt => Self::empty_block(),
         }
+    }
+
+    fn render_compact_tool_block(&self, display: &ToolCallDisplay) -> tau_cli_term::StyledBlock {
+        let mut display = display.clone();
+        display.payload = None;
+        render_tool_block(&self.theme, &display)
     }
 
     fn render_diff_history_block(
@@ -529,10 +528,14 @@ impl EventRenderer {
         display: &ToolCallDisplay,
         diff: &tau_proto::DiffSummary,
     ) -> tau_cli_term::StyledBlock {
-        if matches!(self.show_tools, tau_config::settings::ShowTools::On) {
-            render_diff_tool_block(&self.theme, display, diff, self.diffs_expanded)
-        } else {
-            Self::empty_block()
+        match self.show_tools {
+            tau_config::settings::ShowTools::Full => {
+                render_diff_tool_block(&self.theme, display, diff, self.diffs_expanded)
+            }
+            tau_config::settings::ShowTools::Compact => self.render_compact_tool_block(display),
+            tau_config::settings::ShowTools::Off
+            | tau_config::settings::ShowTools::SummarizeTurn
+            | tau_config::settings::ShowTools::SummarizePrompt => Self::empty_block(),
         }
     }
 

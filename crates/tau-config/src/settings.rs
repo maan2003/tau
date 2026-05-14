@@ -174,7 +174,7 @@ pub struct CliState {
     /// responses. Controlled by `/set show-token-stats <true|false>`.
     pub show_token_stats: bool,
     /// How tool calls are rendered in the transcript. Controlled by
-    /// `/set show-tools <off|summarize-turn|summarize-prompt|on>`.
+    /// `/set show-tools <off|summarize-turn|summarize-prompt|compact|full>`.
     pub show_tools: ShowTools,
 }
 
@@ -186,9 +186,11 @@ pub enum ShowTools {
     SummarizeTurn,
     #[serde(rename = "summarize-prompt")]
     SummarizePrompt,
-    #[serde(rename = "on")]
+    #[serde(rename = "compact")]
+    Compact,
+    #[serde(rename = "full", alias = "on")]
     #[default]
-    On,
+    Full,
 }
 
 impl ShowTools {
@@ -198,7 +200,8 @@ impl ShowTools {
             Self::Off => "off",
             Self::SummarizeTurn => "summarize-turn",
             Self::SummarizePrompt => "summarize-prompt",
-            Self::On => "on",
+            Self::Compact => "compact",
+            Self::Full => "full",
         }
     }
 
@@ -208,7 +211,8 @@ impl ShowTools {
             "off" => Some(Self::Off),
             "summarize-turn" => Some(Self::SummarizeTurn),
             "summarize-prompt" => Some(Self::SummarizePrompt),
-            "on" => Some(Self::On),
+            "compact" => Some(Self::Compact),
+            "full" | "on" => Some(Self::Full),
             _ => None,
         }
     }
@@ -220,7 +224,7 @@ impl Default for CliState {
             show_diff: false,
             show_thinking: true,
             show_token_stats: false,
-            show_tools: ShowTools::On,
+            show_tools: ShowTools::Full,
         }
     }
 }

@@ -79,6 +79,19 @@ fn cli_state_round_trip_through_save_and_load() {
 }
 
 #[test]
+fn cli_state_loads_legacy_show_tools_on_as_full() {
+    let td = TempDir::new().expect("tempdir");
+    let dirs = TauDirs {
+        config_dir: None,
+        state_dir: Some(td.path().to_path_buf()),
+    };
+    std::fs::write(td.path().join("cli.json"), r#"{"show_tools":"on"}"#).expect("write");
+
+    let loaded = CliState::load(&dirs);
+    assert_eq!(loaded.show_tools, crate::settings::ShowTools::Full);
+}
+
+#[test]
 fn harness_settings_user_override_wins_over_built_in() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();

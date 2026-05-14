@@ -1274,6 +1274,67 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
 }
 
 #[test]
+fn show_tools_compact_hides_payload_body() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.apply_setting("show-tools", "compact");
+
+    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+        session_prompt_id: "sp-0".into(),
+        text: None,
+        tool_calls: vec![tau_proto::AgentToolCall {
+            id: "call-1".into(),
+            name: "read".into(),
+            arguments: CborValue::Null,
+            display: Some(tau_proto::ToolDisplay {
+                args: "src/main.rs".into(),
+                status: tau_proto::ToolDisplayStatus::InProgress,
+                status_text: "…".into(),
+                ..Default::default()
+            }),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        response_id: None,
+        phase: None,
+        reasoning_items: Vec::new(),
+        ws_pool_delta: None,
+    }));
+    renderer.handle(&Event::ToolResult(ToolResult {
+        call_id: "call-1".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        result: CborValue::Null,
+        display: Some(tau_proto::ToolDisplay {
+            args: "src/main.rs".into(),
+            stats: tau_proto::ToolDisplayStats {
+                matches: None,
+                lines: Some(1),
+                bytes: Some(13),
+            },
+            status: tau_proto::ToolDisplayStatus::Success,
+            status_text: "ok".into(),
+            payload: Some(tau_proto::ToolDisplayPayload::Text {
+                text: "fn main() {}\n".into(),
+            }),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "read src/main.rs (1L, 13B) ok"));
+    assert!(!vt.screen_contains(80, "fn main()"));
+}
+
+#[test]
 fn show_tools_off_hides_tool_blocks() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(

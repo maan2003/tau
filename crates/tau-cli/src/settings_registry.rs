@@ -59,7 +59,11 @@ const SHOW_TOOLS_VALUES: &[SettingValue] = &[
         description: "show one summary per user prompt",
     },
     SettingValue {
-        value: "on",
+        value: "compact",
+        description: "show tool headers without payloads",
+    },
+    SettingValue {
+        value: "full",
         description: "show every tool block",
     },
 ];
