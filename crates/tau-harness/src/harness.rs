@@ -235,6 +235,9 @@ pub(crate) struct Harness {
     pub(crate) available_models: Vec<ModelId>,
     /// Available agent roles.
     pub(crate) available_roles: std::collections::HashMap<String, tau_config::settings::AgentRole>,
+    /// Named role-selectable tool enablement overlays loaded from
+    /// `harness.json5`.
+    pub(crate) tools_profiles: tau_config::settings::ToolsProfiles,
     /// Persisted role overrides loaded from state and changed at runtime.
     pub(crate) role_overrides: std::collections::HashMap<String, tau_config::settings::AgentRole>,
     /// Currently selected role, if any.
@@ -423,6 +426,7 @@ impl Harness {
             sessions_dir.clone(),
             harness_settings.session_retention(),
         );
+        let tools_profiles = harness_settings.tools_profiles.clone();
         let selected_params = selected_model
             .as_ref()
             .map(|m| {
@@ -492,6 +496,7 @@ impl Harness {
             pending_user_prompt_dispatches: VecDeque::new(),
             available_models,
             available_roles,
+            tools_profiles,
             role_overrides,
             selected_role,
             selected_model,
@@ -653,6 +658,7 @@ impl Harness {
             sessions_dir.clone(),
             harness_settings.session_retention(),
         );
+        let tools_profiles = harness_settings.tools_profiles.clone();
         let selected_params = selected_model
             .as_ref()
             .map(|m| {
@@ -722,6 +728,7 @@ impl Harness {
             pending_user_prompt_dispatches: VecDeque::new(),
             available_models,
             available_roles,
+            tools_profiles,
             role_overrides,
             selected_role,
             selected_model,
@@ -2068,6 +2075,14 @@ impl Harness {
                                     self.emit_info("/role: fast-mode must be on/off");
                                 }
                             },
+                            "tools-profile" | "toolsProfile" => {
+                                if self.tools_profiles.contains_key(&value) {
+                                    next_role.tools_profile = Some(value.clone());
+                                } else {
+                                    valid = false;
+                                    self.emit_info("/role: unknown tools-profile");
+                                }
+                            }
                             _ => {
                                 valid = false;
                                 self.emit_info("/role: unknown setting");
@@ -2104,6 +2119,7 @@ impl Harness {
                         roles: role_infos(
                             &self.model_registry,
                             &self.available_roles,
+                            &self.tools_profiles,
                             &self.available_models,
                         ),
                     }),
@@ -3776,12 +3792,35 @@ impl Harness {
         self.registry
             .all_tools()
             .into_iter()
+            .filter(|spec| self.is_tool_enabled_for_current_role(spec))
             .map(|spec| ToolDefinition {
                 name: spec.name.clone(),
                 description: spec.description.clone(),
                 parameters: spec.parameters.clone(),
             })
             .collect()
+    }
+
+    fn current_tools_profile(&self) -> Option<&tau_config::settings::ToolsProfile> {
+        let role_name = self.selected_role.as_deref()?;
+        let profile_name = self
+            .available_roles
+            .get(role_name)
+            .and_then(|role| role.tools_profile.as_deref())?;
+        self.tools_profiles.get(profile_name)
+    }
+
+    fn is_tool_enabled_for_current_role(&self, spec: &tau_proto::ToolSpec) -> bool {
+        self.current_tools_profile()
+            .and_then(|profile| profile.get(&spec.name).copied())
+            .unwrap_or(spec.enabled_by_default)
+    }
+
+    fn is_tool_name_enabled_for_current_role(&self, name: &ToolName) -> bool {
+        self.registry
+            .resolve_provider(name.as_str())
+            .map(|provider| self.is_tool_enabled_for_current_role(&provider.tool))
+            .unwrap_or(true)
     }
 
     fn maybe_emit_cache_miss_diagnostic(
@@ -4432,6 +4471,35 @@ impl Harness {
                 return Ok(());
             }
         };
+
+        if !self.is_tool_name_enabled_for_current_role(&tool_name) {
+            let call_id: ToolCallId = call.id.clone();
+            self.tool_conversations.insert(call_id.clone(), cid.clone());
+            self.pending_tool_names
+                .insert(call_id.clone(), tool_name.clone());
+            self.bump_tools_started_for(cid);
+            let request = ToolRequest {
+                call_id: call_id.clone(),
+                tool_name: tool_name.clone(),
+                arguments: call.arguments.clone(),
+                originator: tau_proto::PromptOriginator::User,
+            };
+            self.publish_for_conversation(cid, Event::ToolRequest(request));
+            self.publish_for_conversation(
+                cid,
+                Event::ToolError(ToolError {
+                    call_id: call_id.clone(),
+                    tool_name,
+                    message: "tool is not enabled for the current role".to_owned(),
+                    details: None,
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+            );
+            self.on_tool_call_complete(call_id.as_str());
+            self.clear_tool_call_tracking(call_id.as_str());
+            return Ok(());
+        }
 
         // Handle harness-owned tools directly.
         if tool_name.as_str() == "skill" {

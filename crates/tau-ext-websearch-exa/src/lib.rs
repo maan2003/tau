@@ -227,6 +227,7 @@ fn tool_spec() -> ToolSpec {
             },
             "required": ["query"]
         })),
+        enabled_by_default: true,
         side_effects: ToolSideEffects::Pure,
     }
 }

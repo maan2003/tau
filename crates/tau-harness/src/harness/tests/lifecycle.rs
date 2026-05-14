@@ -140,6 +140,92 @@ fn disconnected_tool_is_removed_cleanly() {
 }
 
 #[test]
+fn role_disabled_tool_is_reported_without_dispatch() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    std::fs::write(
+        config_dir.join("harness.json5"),
+        r#"{
+            toolsProfiles: {
+                read_only: {
+                    shell: false,
+                },
+            },
+        }"#,
+    )
+    .expect("write harness");
+    std::fs::write(
+        config_dir.join("models.json5"),
+        r#"{
+            defaultRoles: {
+                smart: { toolsProfile: "read_only" },
+            },
+        }"#,
+    )
+    .expect("write models");
+
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(state_dir.clone()),
+    };
+    let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("start");
+
+    h.selected_model = Some("test/model".into());
+    let cid = h.default_conversation_id.clone();
+    seed_agent_thinking(&mut h, &cid, "sp-x");
+    h.prompt_conversations.insert("sp-x".into(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "do it".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: "sp-x".into(),
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: CborValue::Map(Vec::new()),
+            display: None,
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        response_id: None,
+        phase: None,
+        reasoning_items: Vec::new(),
+        ws_pool_delta: None,
+    })
+    .expect("disabled tool call should be handled");
+
+    let branch = h.store.session("s1").expect("session").current_branch();
+    assert!(branch.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionEntry::ToolActivity(ToolActivityRecord {
+                call_id,
+                outcome: ToolActivityOutcome::Error { message, .. },
+                ..
+            }) if call_id.as_str() == "c1" && message == "tool is not enabled for the current role"
+        )
+    }));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn agents_context_is_injected_at_session_init() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -224,6 +310,7 @@ fn empty_tool_name_does_not_panic_and_surfaces_error() {
             name: ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -325,6 +412,7 @@ fn empty_tool_call_id_is_normalized_to_synthetic_id() {
             name: ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );

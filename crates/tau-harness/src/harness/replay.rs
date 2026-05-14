@@ -86,6 +86,7 @@ impl Harness {
             roles: role_infos(
                 &self.model_registry,
                 &self.available_roles,
+                &self.tools_profiles,
                 &self.available_models,
             ),
         });

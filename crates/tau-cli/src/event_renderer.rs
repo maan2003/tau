@@ -187,6 +187,7 @@ struct RoleCompletionDetails {
     verbosity: Option<String>,
     thinking_summary: Option<String>,
     fast_mode: Option<bool>,
+    tools_profile: Option<String>,
 }
 
 impl RoleCompletionDetails {
@@ -197,6 +198,7 @@ impl RoleCompletionDetails {
             verbosity: None,
             thinking_summary: None,
             fast_mode: Some(false),
+            tools_profile: None,
         };
 
         if description == "no model" {
@@ -217,6 +219,7 @@ impl RoleCompletionDetails {
                 "effort" => details.effort = Some(value.to_owned()),
                 "verbosity" => details.verbosity = Some(value.to_owned()),
                 "thinking-summary" => details.thinking_summary = Some(value.to_owned()),
+                "tools-profile" => details.tools_profile = Some(value.to_owned()),
                 _ => {}
             }
         }
@@ -241,6 +244,9 @@ impl RoleCompletionDetails {
         if self.fast_mode == Some(true) {
             parts.push("fast".to_owned());
         }
+        if let Some(tools_profile) = self.tools_profile.as_deref() {
+            parts.push(format!("tp={tools_profile}"));
+        }
         if parts.is_empty() {
             "no model".to_owned()
         } else {
@@ -263,6 +269,7 @@ impl RoleCompletionDetails {
                 Some(false) => "off".to_owned(),
                 None => "unset".to_owned(),
             },
+            "tools-profile" => self.tools_profile.as_deref().unwrap_or("unset").to_owned(),
             _ => "unset".to_owned(),
         }
     }
@@ -1580,6 +1587,7 @@ impl EventRenderer {
                                     verbosity: None,
                                     thinking_summary: None,
                                     fast_mode: None,
+                                    tools_profile: None,
                                 });
                             [
                                 ("delete", "delete this in-memory/persisted role".to_owned()),
@@ -1591,6 +1599,10 @@ impl EventRenderer {
                                     details.current_description("thinking-summary"),
                                 ),
                                 ("fast-mode", details.current_description("fast-mode")),
+                                (
+                                    "tools-profile",
+                                    details.current_description("tools-profile"),
+                                ),
                             ]
                             .into_iter()
                             .filter(|(value, _)| matches(value, args[1]))
@@ -1730,19 +1742,19 @@ mod tests {
     #[test]
     fn role_details_abbreviate_description() {
         let details = RoleCompletionDetails::from_description(
-            "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off",
+            "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, tools-profile=read_only",
         );
 
         assert_eq!(
             details.short_description(),
-            "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off"
+            "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off tp=read_only"
         );
     }
 
     #[test]
     fn role_details_report_single_current_field() {
         let details = RoleCompletionDetails::from_description(
-            "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, fast",
+            "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, fast, tools-profile=read_only",
         );
 
         assert_eq!(details.current_description("model"), "codex-dpcpw/gpt-5.5");
@@ -1750,6 +1762,7 @@ mod tests {
         assert_eq!(details.current_description("verbosity"), "medium");
         assert_eq!(details.current_description("thinking-summary"), "off");
         assert_eq!(details.current_description("fast-mode"), "on");
+        assert_eq!(details.current_description("tools-profile"), "read_only");
     }
 
     #[test]

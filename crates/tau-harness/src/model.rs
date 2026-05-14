@@ -128,6 +128,7 @@ pub(crate) fn selected_params_for_role(
 pub(crate) fn describe_role(
     registry: &tau_config::settings::ModelRegistry,
     roles: &HashMap<String, AgentRole>,
+    tools_profiles: &tau_config::settings::ToolsProfiles,
     role: &str,
     available: &[ModelId],
 ) -> String {
@@ -135,27 +136,39 @@ pub(crate) fn describe_role(
         return "no model".to_owned();
     };
     let params = selected_params_for_role(registry, roles, role, &model);
+    let current = roles.get(role);
     let fast = if matches!(params.service_tier, Some(tau_proto::ServiceTier::Fast)) {
         ", fast"
     } else {
         ""
     };
+    let tools_profile = current
+        .and_then(|r| r.tools_profile.as_deref())
+        .map(|name| {
+            if tools_profiles.contains_key(name) {
+                format!(", tools-profile={name}")
+            } else {
+                format!(", tools-profile={name} (missing)")
+            }
+        })
+        .unwrap_or_default();
     format!(
-        "model={}, effort={}, verbosity={}, thinking-summary={}{}",
-        model, params.effort, params.verbosity, params.thinking_summary, fast
+        "model={}, effort={}, verbosity={}, thinking-summary={}{}{}",
+        model, params.effort, params.verbosity, params.thinking_summary, fast, tools_profile
     )
 }
 
 pub(crate) fn role_infos(
     registry: &tau_config::settings::ModelRegistry,
     roles: &HashMap<String, AgentRole>,
+    tools_profiles: &tau_config::settings::ToolsProfiles,
     available: &[ModelId],
 ) -> Vec<tau_proto::HarnessRoleInfo> {
     let mut out: Vec<_> = roles
         .keys()
         .map(|name| tau_proto::HarnessRoleInfo {
             name: name.clone(),
-            description: describe_role(registry, roles, name, available),
+            description: describe_role(registry, roles, tools_profiles, name, available),
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));

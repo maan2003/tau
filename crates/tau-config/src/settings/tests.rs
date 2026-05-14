@@ -124,6 +124,28 @@ fn harness_settings_user_override_wins_over_built_in() {
 }
 
 #[test]
+fn harness_settings_load_tools_profiles() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.json5"),
+        r#"{
+                toolsProfiles: {
+                    read_only: {
+                        shell: false,
+                        write: false,
+                    },
+                },
+            }"#,
+    )
+    .expect("write");
+
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(s.tools_profiles["read_only"]["shell"], false);
+    assert_eq!(s.tools_profiles["read_only"]["write"], false);
+}
+
+#[test]
 fn cli_settings_drop_in_layers_on_top_of_base() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
@@ -187,8 +209,8 @@ fn models_default_roles_merge_with_built_ins() {
         dir.join("models.json5"),
         r#"{
             defaultRoles: {
-                smart: { model: "openai/gpt-5.5" },
-                custom: { effort: "medium" },
+                smart: { model: "openai/gpt-5.5", toolsProfile: "full" },
+                custom: { effort: "medium", toolsProfile: "read_only" },
                 deep: { model: "openai/gpt-5.5" },
             },
         }"#,
@@ -205,12 +227,20 @@ fn models_default_roles_merge_with_built_ins() {
         Some(tau_proto::Effort::Medium)
     );
     assert_eq!(
+        m.default_roles["custom"].tools_profile.as_deref(),
+        Some("read_only")
+    );
+    assert_eq!(
         m.default_roles["smart"]
             .model
             .as_ref()
             .map(ToString::to_string)
             .as_deref(),
         Some("openai/gpt-5.5")
+    );
+    assert_eq!(
+        m.default_roles["smart"].tools_profile.as_deref(),
+        Some("full")
     );
 
     let deep = &m.default_roles["deep"];

@@ -99,6 +99,7 @@ where
                 "properties": {},
                 "additionalProperties": false,
             })),
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         })
         .ready_message("test dummy tools ready")

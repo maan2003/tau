@@ -64,6 +64,7 @@ impl Harness {
                     },
                     "required": ["action"]
                 })),
+                enabled_by_default: true,
                 side_effects: tau_proto::ToolSideEffects::Pure,
             },
         );

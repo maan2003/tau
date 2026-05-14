@@ -866,6 +866,7 @@ fn tools_drift_invalidates_chain_anchor() {
             name: ToolName::new("late_tool"),
             description: Some("appeared between turns".to_owned()),
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
     );
@@ -1138,6 +1139,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -1283,6 +1285,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -1637,6 +1640,7 @@ fn delegate_ext_agent_query_keeps_tool_choice_auto() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -1798,6 +1802,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -1808,6 +1813,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
             name: tau_proto::ToolName::new("websearch"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
     );
@@ -1943,6 +1949,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -2025,6 +2032,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -2102,6 +2110,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -2112,6 +2121,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
             name: tau_proto::ToolName::new("websearch"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
     );
@@ -2264,6 +2274,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -2481,6 +2492,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -2622,6 +2634,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -2750,6 +2763,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -2926,6 +2940,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );
@@ -3109,6 +3124,7 @@ fn tool_events_carry_owning_conversation_originator() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );

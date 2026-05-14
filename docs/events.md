@@ -86,7 +86,8 @@ Tool events span three emitters: extensions register/implement tools,
 the agent requests calls, and the harness orchestrates dispatch.
 
 - **`tool.register`** *(extension)* — A tool provider advertises a tool
-  spec (name, description, JSON-schema parameters, side-effect class).
+  spec (name, description, JSON-schema parameters, `enabled_by_default`,
+  side-effect class).
 - **`tool.unregister`** *(extension)* — A previously registered tool is
   withdrawn.
 - **`tool.request`** *(agent)* — The agent asks for a tool call by id,

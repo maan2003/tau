@@ -9,6 +9,7 @@ A role can set:
 - `verbosity`: `low`, `medium`, or `high`
 - `thinkingSummary`: `off`, `auto`, `concise`, or `detailed`
 - `fastMode`: `true` or `false`
+- `toolsProfile`: name of a tool-availability profile from `harness.json5`
 
 Roles live in `models.json5` under `defaultRoles`:
 
@@ -18,6 +19,7 @@ Roles live in `models.json5` under `defaultRoles`:
     smart: {
       model: "openai/gpt-5.3-codex",
       effort: "medium",
+      toolsProfile: "full",
     },
     deep: {
       effort: "xhigh",
@@ -30,6 +32,24 @@ Roles live in `models.json5` under `defaultRoles`:
   },
 }
 ```
+
+Tool profiles themselves live in `harness.json5` under `toolsProfiles`:
+
+```json5
+{
+  toolsProfiles: {
+    full: {},
+    read_only: {
+      shell: false,
+      write: false,
+      edit: false,
+    },
+  },
+}
+```
+
+When a role selects `toolsProfile`, each listed tool name overrides that
+tool's extension-provided `enabled_by_default` setting.
 
 Missing fields use Tau's hardcoded defaults for the selected model.
 
@@ -48,7 +68,7 @@ Use `/model <role>`.
 Use:
 
 ```text
-/role <role> <delete|model|effort|verbosity|thinking-summary|fast-mode> [value]
+/role <role> <delete|model|effort|verbosity|thinking-summary|fast-mode|tools-profile> [value]
 ```
 
 Examples:
@@ -57,6 +77,7 @@ Examples:
 /role smart model openai/gpt-5.3-codex
 /role deep effort xhigh
 /role rush fast-mode on
+/role smart tools-profile read_only
 /role temporary model anthropic/claude-sonnet-4-20250514
 /role temporary delete
 ```

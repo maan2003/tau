@@ -7,6 +7,7 @@ fn representative_events() -> Vec<Event> {
                 name: ToolName::new("echo"),
                 description: Some("Echo a payload".to_owned()),
                 parameters: None,
+                enabled_by_default: true,
                 side_effects: ToolSideEffects::Pure,
             },
         }),
@@ -470,6 +471,33 @@ fn tool_name_maybe_serializes_as_transparent_string() {
     let reparsed: ToolNameMaybe =
         serde_json::from_str("\"bad.name\"").expect("deserialize invalid");
     assert!(matches!(reparsed, ToolNameMaybe::Invalid(_)));
+}
+
+#[test]
+fn tool_spec_enabled_by_default_defaults_true_when_omitted() {
+    let parsed: ToolSpec = serde_json::from_value(serde_json::json!({
+        "name": "echo",
+        "description": "Echo a payload",
+        "side_effects": "pure"
+    }))
+    .expect("deserialize tool spec");
+    assert!(parsed.enabled_by_default);
+
+    let serialized = serde_json::to_value(&parsed).expect("serialize tool spec");
+    assert!(serialized.get("enabled_by_default").is_none());
+
+    let disabled = ToolSpec {
+        name: ToolName::new("echo"),
+        description: Some("Echo a payload".to_owned()),
+        parameters: None,
+        enabled_by_default: false,
+        side_effects: ToolSideEffects::Pure,
+    };
+    let serialized = serde_json::to_value(&disabled).expect("serialize disabled tool spec");
+    assert_eq!(
+        serialized["enabled_by_default"],
+        serde_json::Value::Bool(false)
+    );
 }
 
 /// `Verbosity::next_in` mirrors `Effort::next_in`. Even though the CLI

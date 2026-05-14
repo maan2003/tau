@@ -694,3 +694,44 @@ fn skill_tool_registered_in_tool_list() {
         defs.iter().map(|d| &d.name).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn gather_tool_definitions_respects_role_tools_profile() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    std::fs::write(
+        config_dir.join("harness.json5"),
+        r#"{
+            toolsProfiles: {
+                read_only: {
+                    shell: false,
+                    skill: false,
+                },
+            },
+        }"#,
+    )
+    .expect("write harness");
+    std::fs::write(
+        config_dir.join("models.json5"),
+        r#"{
+            defaultRoles: {
+                smart: { toolsProfile: "read_only" },
+            },
+        }"#,
+    )
+    .expect("write models");
+
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(state_dir.clone()),
+    };
+    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("start");
+    let defs = h.gather_tool_definitions();
+
+    assert!(defs.iter().any(|d| d.name == "read"));
+    assert!(!defs.iter().any(|d| d.name == "shell"));
+    assert!(!defs.iter().any(|d| d.name == "skill"));
+}

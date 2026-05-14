@@ -3,6 +3,16 @@
   // `defaultRoles`. Use `/model <role>` to switch and `/role ...` to edit
   // persisted role overrides.
 
+  // Optional named per-role tool overlays. Each entry maps tool name to
+  // enabled/disabled and overrides that tool's `enabled_by_default` hint.
+  // toolsProfiles: {
+  //   read_only: {
+  //     shell: false,
+  //     write: false,
+  //     edit: false,
+  //   },
+  // },
+
   // Optional built-in extension overrides.
   // extensions: {
   //   "core-shell": { enable: false },

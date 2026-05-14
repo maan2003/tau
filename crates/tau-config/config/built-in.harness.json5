@@ -6,4 +6,5 @@
     default_params: {},
     session_retention_days: 60,
     extensions: {},
+    toolsProfiles: {},
 }

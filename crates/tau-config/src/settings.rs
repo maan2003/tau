@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{ModelId, ModelName, ProviderName};
+use tau_proto::{ModelId, ModelName, ProviderName, ToolName};
 
 // ---------------------------------------------------------------------------
 // Built-in configs
@@ -272,6 +272,11 @@ impl CliState {
 // Harness settings
 // ---------------------------------------------------------------------------
 
+/// One named tools-profile: tool name -> enabled/disabled override.
+pub type ToolsProfile = HashMap<ToolName, bool>;
+/// All named tools-profiles loaded from `harness.json5`.
+pub type ToolsProfiles = HashMap<String, ToolsProfile>;
+
 /// Harness/agent settings loaded from `harness.json5`.
 ///
 /// Has no `Default` impl on purpose — the baseline lives in
@@ -313,6 +318,12 @@ pub struct HarnessSettings {
     /// }
     /// ```
     pub extensions: HashMap<String, ExtensionEntry>,
+
+    /// Named per-tool enablement overlays keyed by tool name. Each
+    /// role may opt into one profile via `toolsProfile`; profile
+    /// entries override an extension tool's `enabled_by_default` hint.
+    #[serde(default, rename = "toolsProfiles")]
+    pub tools_profiles: ToolsProfiles,
 }
 
 impl HarnessSettings {
@@ -455,6 +466,8 @@ pub struct AgentRole {
     pub fast_mode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "serviceTier")]
     pub service_tier: Option<tau_proto::ServiceTier>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "toolsProfile")]
+    pub tools_profile: Option<String>,
 }
 
 impl AgentRole {
@@ -465,6 +478,10 @@ impl AgentRole {
         self.thinking_summary = self.thinking_summary.or(fallback.thinking_summary);
         self.fast_mode = self.fast_mode.or(fallback.fast_mode);
         self.service_tier = self.service_tier.or(fallback.service_tier);
+        self.tools_profile = self
+            .tools_profile
+            .clone()
+            .or_else(|| fallback.tools_profile.clone());
     }
 }
 

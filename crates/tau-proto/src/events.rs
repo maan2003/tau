@@ -1066,12 +1066,24 @@ pub struct ToolSpec {
     /// JSON Schema describing the tool's input parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
+    /// Whether this tool should be advertised to the agent when no
+    /// role-level `toolsProfile` overrides its default.
+    #[serde(default = "tool_enabled_by_default", skip_serializing_if = "is_true")]
+    pub enabled_by_default: bool,
     /// Side-effect class used by the harness dispatch state machine to
     /// serialize mutating calls with respect to pure ones. Unknown /
     /// unset declarations default to `Mutating` so extensions that
     /// haven't been updated don't silently lose ordering.
     #[serde(default)]
     pub side_effects: ToolSideEffects,
+}
+
+const fn tool_enabled_by_default() -> bool {
+    true
+}
+
+const fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// Whether a tool observably mutates state. Purely informational for

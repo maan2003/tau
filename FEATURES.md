@@ -114,11 +114,15 @@ Defaults are normally selected through agent roles in `models.json5`:
 
 ```json5
 defaultRoles: {
-  smart: { model: "openai/gpt-5.5", effort: "medium" },
+  smart: { model: "openai/gpt-5.5", effort: "medium", toolsProfile: "full" },
   deep: { effort: "xhigh", thinkingSummary: "detailed" },
   rush: { effort: "low", fastMode: true },
 },
 ```
+
+Roles can also select a named `toolsProfile`. Profiles live in
+`harness.json5` under `toolsProfiles` and map tool names to booleans,
+overriding each tool's extension-declared `enabled_by_default` hint.
 
 `/model <role>` switches roles; `/role <role> <setting> <value>` edits role
 settings, with built-in/configured role overrides persisted. See

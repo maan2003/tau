@@ -68,6 +68,7 @@ where
         name: tau_proto::ToolName::new(ECHO_TOOL_NAME),
         description: Some("Echo the provided payload unchanged".to_owned()),
         parameters: None,
+        enabled_by_default: true,
         side_effects: ToolSideEffects::Pure,
     });
     #[cfg(not(any(test, feature = "echo-agent")))]
@@ -104,6 +105,7 @@ where
                 },
                 "required": ["path"]
             })),
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
@@ -129,6 +131,7 @@ where
                 },
                 "required": ["path", "content"]
             })),
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
         ToolSpec {
@@ -174,6 +177,7 @@ where
                 },
                 "required": ["path", "edits"]
             })),
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
         ToolSpec {
@@ -219,6 +223,7 @@ where
                 },
                 "required": ["pattern"]
             })),
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
@@ -248,6 +253,7 @@ where
                 },
                 "required": ["pattern"]
             })),
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
@@ -270,6 +276,7 @@ where
                     }
                 }
             })),
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
@@ -295,6 +302,7 @@ where
                 },
                 "required": ["command"]
             })),
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     ]);

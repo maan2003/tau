@@ -225,6 +225,7 @@ fn provider_can_register_tool_and_receive_invocations() {
             name: tau_proto::ToolName::new("echo"),
             description: Some("Echo a payload".to_owned()),
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
     );
@@ -274,6 +275,7 @@ fn duplicate_tool_registrations_warn_but_remain_available() {
             name: tau_proto::ToolName::new("echo"),
             description: Some("Echo".to_owned()),
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
     );
@@ -285,6 +287,7 @@ fn duplicate_tool_registrations_warn_but_remain_available() {
             name: tau_proto::ToolName::new("echo"),
             description: Some("Echo from another provider".to_owned()),
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
     );
@@ -319,6 +322,7 @@ fn disconnect_cleanup_removes_stale_tool_providers() {
             name: tau_proto::ToolName::new("echo"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
     );
@@ -328,6 +332,7 @@ fn disconnect_cleanup_removes_stale_tool_providers() {
             name: tau_proto::ToolName::new("echo"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
     );
@@ -337,6 +342,7 @@ fn disconnect_cleanup_removes_stale_tool_providers() {
             name: tau_proto::ToolName::new("demo_upper"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Pure,
         },
     );
@@ -369,6 +375,7 @@ fn register_events_map_cleanly_to_registry_state() {
                 name: tau_proto::ToolName::new("echo"),
                 description: Some("Echo".to_owned()),
                 parameters: None,
+                enabled_by_default: true,
                 side_effects: ToolSideEffects::Pure,
             },
         }

@@ -23,6 +23,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
             name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
+            enabled_by_default: true,
             side_effects: ToolSideEffects::Mutating,
         },
     );

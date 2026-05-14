@@ -3,6 +3,7 @@
     // General baseline role. If model is omitted, Tau uses the first available model.
     smart: {
       // model: "local/llama-3",
+      // toolsProfile: "read_only",
     },
     // Deeper reasoning defaults.
     deep: {

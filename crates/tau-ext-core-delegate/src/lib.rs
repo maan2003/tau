@@ -223,6 +223,7 @@ fn tool_spec() -> ToolSpec {
             },
             "required": ["task_name", "prompt"]
         })),
+        enabled_by_default: true,
         // Conservative default at registration time. The harness
         // overrides this per-call when `read_only: true` is set in the
         // arguments, so two read-only delegations from the same agent

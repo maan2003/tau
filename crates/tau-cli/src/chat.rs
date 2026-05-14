@@ -958,7 +958,7 @@ fn handle_role_command(text: &str, writer: &WriterHandle, print_local: &impl Fn(
     let extra = parts.next();
     let (Some(role), Some(command)) = (role, command) else {
         print_local(
-            "/role <role> <delete|model|effort|verbosity|thinking-summary|fast-mode> [value]",
+            "/role <role> <delete|model|effort|verbosity|thinking-summary|fast-mode|tools-profile> [value]",
         );
         return;
     };
@@ -990,6 +990,7 @@ fn handle_role_command(text: &str, writer: &WriterHandle, print_local: &impl Fn(
         "verbosity",
         "thinking-summary",
         "fast-mode",
+        "tools-profile",
     ];
     if !allowed.contains(&command) {
         print_local("/role: unknown setting");
