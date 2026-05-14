@@ -202,6 +202,7 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
         session_prompt_id: "sp-1".into(),
         session_id: "session-1".into(),
         system_prompt: "You are helpful.".to_owned(),
+        system_prompt_ref: None,
         messages: vec![ConversationMessage {
             role: ConversationRole::User,
             content: vec![ContentBlock::Text {

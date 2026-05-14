@@ -107,6 +107,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
             session_prompt_id: spid.clone(),
             session_id: "s1".into(),
             system_prompt: String::new(),
+            system_prompt_ref: None,
             messages: Vec::new(),
             message_prefix: None,
             tools: Vec::new(),

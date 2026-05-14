@@ -457,9 +457,13 @@ fn session_prompt_created_uses_refs_for_linear_extension() {
     let spid2 = h.send_prompt_to_agent("s1");
     let raw2 = read_raw_prompt_created(&h, &spid2);
     let prompt2 = read_prompt_created(&h, &spid2);
+    let system_prompt_ref = raw2.system_prompt_ref.expect("system prompt reference");
     let prefix = raw2.message_prefix.expect("prefix reference");
     let tools_ref = raw2.tools_ref.expect("tools reference");
 
+    assert_eq!(system_prompt_ref.base_session_prompt_id, spid1);
+    assert!(raw2.system_prompt.is_empty());
+    assert_eq!(prompt2.system_prompt, prompt1.system_prompt);
     assert_eq!(prefix.base_session_prompt_id, spid1);
     assert_eq!(prefix.message_count, prompt1.messages.len());
     assert_eq!(raw2.messages, prompt2.messages[prompt1.messages.len()..]);

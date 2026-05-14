@@ -60,6 +60,7 @@ fn representative_events() -> Vec<Event> {
             session_prompt_id: "sp-1".into(),
             session_id: "s1".into(),
             system_prompt: "You are helpful.".to_owned(),
+            system_prompt_ref: None,
             messages: vec![ConversationMessage {
                 role: ConversationRole::User,
                 content: vec![ContentBlock::Text {

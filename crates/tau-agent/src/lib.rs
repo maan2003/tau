@@ -33,6 +33,18 @@ fn materialize_prompt(
     snapshots: &HashMap<tau_proto::SessionPromptId, tau_proto::SessionPromptCreated>,
 ) -> Result<tau_proto::SessionPromptCreated, String> {
     let mut materialized = prompt.clone();
+    if let Some(system_prompt_ref) = &prompt.system_prompt_ref {
+        let base = snapshots
+            .get(&system_prompt_ref.base_session_prompt_id)
+            .ok_or_else(|| {
+                format!(
+                    "missing prompt system prompt base {}",
+                    system_prompt_ref.base_session_prompt_id
+                )
+            })?;
+        materialized.system_prompt = base.system_prompt.clone();
+        materialized.system_prompt_ref = None;
+    }
     if let Some(prefix) = &prompt.message_prefix {
         let base = snapshots
             .get(&prefix.base_session_prompt_id)

@@ -15,9 +15,10 @@ use tau_core::{
 use tau_proto::{
     AgentResponseFinished, AgentTokenUsage, AgentToolCall, CborValue, ClientKind, Disconnect,
     Event, EventSelector, ExtensionName, Frame, HarnessContextUsageChanged, HarnessModelSelected,
-    Message, ModelId, PromptMessagePrefix, PromptToolsRef, SessionId, SessionPromptCreated,
-    SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, TokenUsageStats,
-    ToolCallId, ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest, UiCancelPrompt,
+    Message, ModelId, PromptMessagePrefix, PromptSystemPromptRef, PromptToolsRef, SessionId,
+    SessionPromptCreated, SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued,
+    TokenUsageStats, ToolCallId, ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest,
+    UiCancelPrompt,
 };
 
 use crate::conversation::{Conversation, ConversationId, ConversationTurnState};
@@ -941,6 +942,13 @@ impl Harness {
         prompt: &SessionPromptCreated,
     ) -> Option<SessionPromptCreated> {
         let mut materialized = prompt.clone();
+        if let Some(system_prompt_ref) = &prompt.system_prompt_ref {
+            let base = self
+                .prompt_snapshots
+                .get(&system_prompt_ref.base_session_prompt_id)?;
+            materialized.system_prompt = base.system_prompt.clone();
+            materialized.system_prompt_ref = None;
+        }
         if let Some(prefix) = &prompt.message_prefix {
             let base = self.prompt_snapshots.get(&prefix.base_session_prompt_id)?;
             if base.messages.len() < prefix.message_count {
@@ -3305,6 +3313,19 @@ impl Harness {
                     .get(base_id)
                     .map(|base| (base_id, base))
             });
+        let (system_prompt, system_prompt_ref) = base_prompt
+            .as_ref()
+            .and_then(|(base_id, base)| {
+                (system_prompt == base.system_prompt).then(|| {
+                    (
+                        String::new(),
+                        Some(PromptSystemPromptRef {
+                            base_session_prompt_id: (*base_id).clone(),
+                        }),
+                    )
+                })
+            })
+            .unwrap_or((system_prompt, None));
         let (messages, message_prefix) = base_prompt
             .as_ref()
             .and_then(|(base_id, base)| {
@@ -3337,6 +3358,7 @@ impl Harness {
             session_prompt_id: session_prompt_id.clone(),
             session_id,
             system_prompt,
+            system_prompt_ref,
             messages,
             message_prefix,
             tools,
@@ -4214,6 +4236,17 @@ impl Harness {
             cursor = entry.seq + 1;
             if let Event::SessionPromptCreated(prompt) = entry.event {
                 let mut materialized = prompt.clone();
+                if let Some(system_prompt_ref) = &prompt.system_prompt_ref {
+                    let base = snapshots
+                        .get(&system_prompt_ref.base_session_prompt_id)
+                        .ok_or_else(|| {
+                            HarnessError::Participant(
+                                "prompt system prompt base missing".to_owned(),
+                            )
+                        })?;
+                    materialized.system_prompt = base.system_prompt.clone();
+                    materialized.system_prompt_ref = None;
+                }
                 if let Some(prefix) = &prompt.message_prefix {
                     let base = snapshots
                         .get(&prefix.base_session_prompt_id)

@@ -1826,6 +1826,13 @@ pub struct PromptMessagePrefix {
     pub message_count: usize,
 }
 
+/// Reference to a system prompt carried by an earlier prompt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PromptSystemPromptRef {
+    /// Prompt whose materialized system prompt contains the full text.
+    pub base_session_prompt_id: SessionPromptId,
+}
+
 /// Reference to tool definitions carried by an earlier prompt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PromptToolsRef {
@@ -1839,7 +1846,11 @@ pub struct PromptToolsRef {
 pub struct SessionPromptCreated {
     pub session_prompt_id: SessionPromptId,
     pub session_id: SessionId,
+    /// System prompt, or empty when [`Self::system_prompt_ref`] is set.
     pub system_prompt: String,
+    /// Optional reference to a full system prompt from an earlier prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_ref: Option<PromptSystemPromptRef>,
     /// Conversation messages, or only the suffix when
     /// [`Self::message_prefix`] is set.
     pub messages: Vec<ConversationMessage>,
