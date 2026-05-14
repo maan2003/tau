@@ -179,8 +179,9 @@ where
         ToolSpec {
             name: tau_proto::ToolName::new(GREP_TOOL_NAME),
             description: Some(
-                "Search file contents for a pattern using ripgrep. Returns matching lines with \
-                 file paths and line numbers. Respects .gitignore. Output is truncated at \
+                "Search file contents for a pattern using ripgrep. Patterns are literal by default; \
+                 regex metacharacters like `|` require `regex: true`. Returns matching lines \
+                 with file paths and line numbers. Respects .gitignore. Output is truncated at \
                  `limit` matches or 50KB. Long lines are truncated to 500 chars."
                     .to_owned(),
             ),
