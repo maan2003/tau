@@ -29,10 +29,11 @@ pub(crate) fn format_context_chip(
 #[cfg(test)]
 pub(crate) fn format_token_stats_line(
     usage: &tau_proto::AgentTokenUsage,
+    previous_usage: Option<&tau_proto::AgentTokenUsage>,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> String {
-    token_stats_parts(usage, turn_latency, total_latency)
+    token_stats_parts(usage, previous_usage, turn_latency, total_latency)
         .into_iter()
         .map(|part| part.text)
         .collect()
@@ -41,6 +42,7 @@ pub(crate) fn format_token_stats_line(
 pub(crate) fn render_token_stats_block(
     theme: &tau_themes::Theme,
     usage: &tau_proto::AgentTokenUsage,
+    previous_usage: Option<&tau_proto::AgentTokenUsage>,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> tau_cli_term::StyledBlock {
@@ -50,7 +52,7 @@ pub(crate) fn render_token_stats_block(
     let mut themed = ThemedText::new();
     let root = themed.add_style(names::TOKEN_STATS);
     let mut children = Vec::new();
-    for part in token_stats_parts(usage, turn_latency, total_latency) {
+    for part in token_stats_parts(usage, previous_usage, turn_latency, total_latency) {
         let style = themed.add_style(part.style_name);
         children.push(SpanTree::span(style, vec![SpanTree::text(part.text)]));
     }
@@ -58,8 +60,10 @@ pub(crate) fn render_token_stats_block(
     tau_cli_term::StyledBlock::new(themed_text(theme, &themed))
 }
 
-const CACHE_HIT_WARNING_PERCENT: u8 = 95;
-const CACHE_HIT_WARNING_MIN_TOKENS: u64 = 1024;
+const CACHE_HIT_WARNING_PERCENT: u8 = 90;
+// Prompt-cache hits only accrue in coarse provider cache blocks; allow
+// the last partial block to miss without flagging the turn.
+const CACHE_GRANULARITY_TOKENS: u64 = 512;
 
 struct TokenStatsPart {
     text: String,
@@ -77,44 +81,31 @@ impl TokenStatsPart {
 
 fn token_stats_parts(
     usage: &tau_proto::AgentTokenUsage,
+    previous_usage: Option<&tau_proto::AgentTokenUsage>,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> Vec<TokenStatsPart> {
     use tau_themes::names;
 
-    let prompt_uncached_tokens = usage
-        .prompt_sent_tokens
-        .saturating_sub(usage.prompt_cached_tokens);
-    let total_uncached_tokens = usage
-        .stats
-        .total
-        .sent_tokens
-        .saturating_sub(usage.stats.total.cached_tokens);
-    let turn_cache_possible = turn_cache_possible_tokens(usage);
-    let total_cache_possible = total_cache_possible_tokens(usage);
+    let previous_sent_tokens = previous_usage.map_or(0, |usage| usage.prompt_sent_tokens);
+    let previous_received_tokens = previous_usage.map_or(0, |usage| usage.response_received_tokens);
+    let turn_cache_possible = previous_sent_tokens.saturating_add(previous_received_tokens);
     let mut parts = Vec::new();
 
     parts.push(TokenStatsPart::new("Δ", names::TOKEN_STATS_DELTA));
-    // Per-turn cache-hit %. Lets the user spot a regression (e.g. tool
-    // reordering breaking the prefix) directly on the offending turn.
-    // The denominator is only the already-sent prefix, not new input
-    // from this turn, because new data cannot realistically be cached.
-    if let Some(percent) =
-        cache_hit_percent(Some(turn_cache_possible), Some(usage.prompt_cached_tokens))
-        && 0 < turn_cache_possible
-    {
-        parts.push(TokenStatsPart::new(
-            format!("{percent}%"),
-            cache_hit_style_name(percent, turn_cache_possible),
-        ));
-    }
-    parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
+    let turn_cache_hit_percent =
+        cache_hit_percent(Some(turn_cache_possible), Some(usage.prompt_cached_tokens)).unwrap_or(0);
     parts.push(TokenStatsPart::new(
         format!(
-            "{}/{}",
-            format_token_count(prompt_uncached_tokens),
-            format_token_count(usage.prompt_sent_tokens),
+            "{turn_cache_hit_percent}% {}/{}",
+            format_token_count(usage.prompt_cached_tokens),
+            format_token_count(turn_cache_possible),
         ),
+        cache_hit_style_name(turn_cache_possible, usage.prompt_cached_tokens),
+    ));
+    parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
+    parts.push(TokenStatsPart::new(
+        format_token_count(usage.prompt_sent_tokens),
         names::TOKEN_STATS_INPUT,
     ));
     parts.push(TokenStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
@@ -130,26 +121,11 @@ fn token_stats_parts(
     }
 
     parts.push(TokenStatsPart::new(" Σ", names::TOKEN_STATS_SIGMA));
-    // Session-cumulative cache-hit %. Smooths out per-turn noise and
-    // surfaces sessions that are thrashing cache overall even when no
-    // single turn looks bad. The cumulative denominator is the sum of
-    // previous prompt sizes for all completed requests, i.e. total sent
-    // tokens minus the current request's prompt tokens.
-    if let Some(percent) = cache_hit_percent(
-        Some(total_cache_possible),
-        Some(usage.stats.total.cached_tokens),
-    ) && 0 < total_cache_possible
-    {
-        parts.push(TokenStatsPart::new(
-            format!("{percent}%"),
-            cache_hit_style_name(percent, total_cache_possible),
-        ));
-    }
     parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
     parts.push(TokenStatsPart::new(
         format!(
             "{}/{}",
-            format_token_count(total_uncached_tokens),
+            format_token_count(usage.stats.total.cached_tokens),
             format_token_count(usage.stats.total.sent_tokens),
         ),
         names::TOKEN_STATS_INPUT,
@@ -169,30 +145,19 @@ fn token_stats_parts(
     parts
 }
 
-fn turn_cache_possible_tokens(usage: &tau_proto::AgentTokenUsage) -> u64 {
-    let previously_sent_tokens = usage
-        .stats
-        .total
-        .sent_tokens
-        .saturating_sub(usage.prompt_sent_tokens);
-    usage.prompt_sent_tokens.min(previously_sent_tokens)
-}
-
-fn total_cache_possible_tokens(usage: &tau_proto::AgentTokenUsage) -> u64 {
-    usage
-        .stats
-        .total
-        .sent_tokens
-        .saturating_sub(usage.prompt_sent_tokens)
-}
-
-fn cache_hit_style_name(percent: u8, possible_tokens: u64) -> &'static str {
+fn cache_hit_style_name(possible_cached_tokens: u64, cached_tokens: u64) -> &'static str {
     use tau_themes::names;
 
-    if percent < CACHE_HIT_WARNING_PERCENT && CACHE_HIT_WARNING_MIN_TOKENS < possible_tokens {
-        names::TOKEN_STATS_CACHE_MISS
-    } else {
+    let cacheable_prefix_floor =
+        possible_cached_tokens / CACHE_GRANULARITY_TOKENS * CACHE_GRANULARITY_TOKENS;
+    if cacheable_prefix_floor <= cached_tokens {
         names::TOKEN_STATS_CACHE_HIT
+    } else if cache_hit_percent(Some(possible_cached_tokens), Some(cached_tokens))
+        .is_some_and(|percent| CACHE_HIT_WARNING_PERCENT < percent)
+    {
+        names::TOKEN_STATS_CACHE_WARN
+    } else {
+        names::TOKEN_STATS_CACHE_MISS
     }
 }
 

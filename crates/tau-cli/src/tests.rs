@@ -1645,17 +1645,26 @@ fn format_token_stats_line_appends_hit_percent_when_cache_hits() {
         },
         ..Default::default()
     };
+    let previous_usage = tau_proto::AgentTokenUsage {
+        prompt_sent_tokens: 16_000,
+        response_received_tokens: 1_341,
+        ..Default::default()
+    };
     let line = format_token_stats_line(
         &usage,
+        Some(&previous_usage),
         Some(Duration::from_millis(1_240)),
         Some(Duration::from_millis(4_560)),
     );
 
-    assert_eq!(line, "Δ97% ↑445/17.3k ↓29 1240ms Σ60% ↑50k/100k ↓0 4560ms",);
+    assert_eq!(
+        line,
+        "Δ97% 16.8k/17.3k ↑17.3k ↓29 1240ms Σ ↑50k/100k ↓0 4560ms",
+    );
 }
 
 #[test]
-fn format_token_stats_line_uses_possible_cached_tokens_for_hit_percent() {
+fn format_token_stats_line_uses_previous_turn_for_hit_percent() {
     let usage = tau_proto::AgentTokenUsage {
         prompt_sent_tokens: 20_100,
         prompt_cached_tokens: 19_000,
@@ -1669,13 +1678,17 @@ fn format_token_stats_line_uses_possible_cached_tokens_for_hit_percent() {
         },
         ..Default::default()
     };
-    let line = format_token_stats_line(&usage, None, None);
+    let previous_usage = tau_proto::AgentTokenUsage {
+        prompt_sent_tokens: 20_000,
+        ..Default::default()
+    };
+    let line = format_token_stats_line(&usage, Some(&previous_usage), None, None);
 
-    assert_eq!(line, "Δ95% ↑1.1k/20.1k ↓0 Σ95% ↑21.1k/40.1k ↓0");
+    assert_eq!(line, "Δ95% 19k/20k ↑20.1k ↓0 Σ ↑19k/40.1k ↓0");
 }
 
 #[test]
-fn format_token_stats_line_omits_hit_chip_when_nothing_could_be_cached() {
+fn format_token_stats_line_shows_zero_hit_when_nothing_could_be_cached() {
     let usage = tau_proto::AgentTokenUsage {
         prompt_sent_tokens: 1_000,
         stats: tau_proto::TokenUsageStats {
@@ -1687,19 +1700,17 @@ fn format_token_stats_line_omits_hit_chip_when_nothing_could_be_cached() {
         },
         ..Default::default()
     };
-    let line = format_token_stats_line(&usage, None, None);
+    let line = format_token_stats_line(&usage, None, None, None);
 
-    assert_eq!(line, "Δ ↑1k/1k ↓0 Σ ↑1k/1k ↓0");
-    assert!(!line.contains('%'), "{line}");
+    assert_eq!(line, "Δ0% 0/0 ↑1k ↓0 Σ ↑0/1k ↓0");
 }
 
 #[test]
-fn format_token_stats_line_omits_hit_chip_when_no_prompt_sent() {
+fn format_token_stats_line_shows_zero_hit_when_no_prompt_sent() {
     let usage = tau_proto::AgentTokenUsage::default();
-    let line = format_token_stats_line(&usage, None, None);
+    let line = format_token_stats_line(&usage, None, None, None);
 
-    assert_eq!(line, "Δ ↑0/0 ↓0 Σ ↑0/0 ↓0");
-    assert!(!line.contains('%'), "{line}");
+    assert_eq!(line, "Δ0% 0/0 ↑0 ↓0 Σ ↑0/0 ↓0");
 }
 
 #[test]
@@ -1719,13 +1730,23 @@ fn render_token_stats_block_uses_dedicated_styles() {
         },
         ..Default::default()
     };
-    let block = render_token_stats_block(&tau_themes::Theme::builtin(), &usage, None, None);
+    let previous_usage = tau_proto::AgentTokenUsage {
+        prompt_sent_tokens: 1_000,
+        ..Default::default()
+    };
+    let block = render_token_stats_block(
+        &tau_themes::Theme::builtin(),
+        &usage,
+        Some(&previous_usage),
+        None,
+        None,
+    );
     let spans = block.content.spans();
 
     assert_eq!(spans[0].text, "Δ");
     assert!(spans[0].style.bold);
     assert_eq!(spans[0].style.fg, Some(Color::DarkGrey));
-    assert_eq!(spans[1].text, "90%");
+    assert_eq!(spans[1].text, "90% 900/1k");
     assert!(!spans[1].style.bold);
     assert_eq!(spans[1].style.fg, Some(Color::DarkGrey));
     let sigma = spans
@@ -1737,52 +1758,99 @@ fn render_token_stats_block_uses_dedicated_styles() {
 }
 
 #[test]
-fn render_token_stats_block_highlights_large_cache_miss_percent() {
+fn render_token_stats_block_greys_cache_hit_within_512_rounding_bucket() {
     let usage = tau_proto::AgentTokenUsage {
         prompt_sent_tokens: 20_100,
-        prompt_cached_tokens: 18_999,
+        prompt_cached_tokens: 19_456,
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
                 sent_tokens: 40_100,
-                cached_tokens: 18_999,
+                cached_tokens: 19_456,
                 ..Default::default()
             },
             ..Default::default()
         },
         ..Default::default()
     };
-    let block = render_token_stats_block(&tau_themes::Theme::builtin(), &usage, None, None);
+    let previous_usage = tau_proto::AgentTokenUsage {
+        prompt_sent_tokens: 19_500,
+        ..Default::default()
+    };
+    let block = render_token_stats_block(
+        &tau_themes::Theme::builtin(),
+        &usage,
+        Some(&previous_usage),
+        None,
+        None,
+    );
     let spans = block.content.spans();
 
-    assert_eq!(spans[1].text, "94%");
-    assert_eq!(spans[1].style.fg, Some(Color::Red));
-    let red_percent_count = spans
-        .iter()
-        .filter(|span| span.text == "94%" && span.style.fg == Some(Color::Red))
-        .count();
-    assert_eq!(red_percent_count, 2);
+    assert_eq!(spans[1].text, "99% 19.4k/19.5k");
+    assert_eq!(spans[1].style.fg, Some(Color::DarkGrey));
 }
 
 #[test]
-fn render_token_stats_block_does_not_highlight_small_cache_miss_percent() {
+fn render_token_stats_block_warns_cache_hit_above_90_percent() {
     let usage = tau_proto::AgentTokenUsage {
-        prompt_sent_tokens: 1_100,
-        prompt_cached_tokens: 949,
+        prompt_sent_tokens: 10_100,
+        prompt_cached_tokens: 9_100,
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
-                sent_tokens: 2_100,
-                cached_tokens: 949,
+                sent_tokens: 20_100,
+                cached_tokens: 9_100,
                 ..Default::default()
             },
             ..Default::default()
         },
         ..Default::default()
     };
-    let block = render_token_stats_block(&tau_themes::Theme::builtin(), &usage, None, None);
+    let previous_usage = tau_proto::AgentTokenUsage {
+        prompt_sent_tokens: 10_000,
+        ..Default::default()
+    };
+    let block = render_token_stats_block(
+        &tau_themes::Theme::builtin(),
+        &usage,
+        Some(&previous_usage),
+        None,
+        None,
+    );
     let spans = block.content.spans();
 
-    assert_eq!(spans[1].text, "94%");
-    assert_eq!(spans[1].style.fg, Some(Color::DarkGrey));
+    assert_eq!(spans[1].text, "91% 9.1k/10k");
+    assert_eq!(spans[1].style.fg, Some(Color::DarkYellow));
+}
+
+#[test]
+fn render_token_stats_block_highlights_cache_hit_at_or_below_90_percent() {
+    let usage = tau_proto::AgentTokenUsage {
+        prompt_sent_tokens: 10_100,
+        prompt_cached_tokens: 9_000,
+        stats: tau_proto::TokenUsageStats {
+            total: tau_proto::TokenUsageCounts {
+                sent_tokens: 20_100,
+                cached_tokens: 9_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let previous_usage = tau_proto::AgentTokenUsage {
+        prompt_sent_tokens: 10_000,
+        ..Default::default()
+    };
+    let block = render_token_stats_block(
+        &tau_themes::Theme::builtin(),
+        &usage,
+        Some(&previous_usage),
+        None,
+        None,
+    );
+    let spans = block.content.spans();
+
+    assert_eq!(spans[1].text, "90% 9k/10k");
+    assert_eq!(spans[1].style.fg, Some(Color::Red));
 }
 
 #[test]

@@ -510,11 +510,16 @@ impl EventRenderer {
             return;
         }
         self.show_token_stats = on;
-        for entry in &self.token_stats_history {
+        for (index, entry) in self.token_stats_history.iter().enumerate() {
+            let previous_usage = index
+                .checked_sub(1)
+                .and_then(|previous_index| self.token_stats_history.get(previous_index))
+                .map(|previous_entry| &previous_entry.usage);
             let block = if self.show_token_stats {
                 render_token_stats_block(
                     &self.theme,
                     &entry.usage,
+                    previous_usage,
                     entry.turn_latency,
                     entry.total_latency,
                 )
@@ -1067,10 +1072,12 @@ impl EventRenderer {
                     ));
                 }
                 if let Some(usage) = finished.token_usage.clone() {
+                    let previous_usage = self.token_stats_history.last().map(|entry| &entry.usage);
                     let block = if self.show_token_stats {
                         render_token_stats_block(
                             &self.theme,
                             &usage,
+                            previous_usage,
                             turn_latency,
                             Some(self.cumulative_agent_latency),
                         )

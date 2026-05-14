@@ -59,6 +59,7 @@ pub const TOKEN_STATS_SIGMA: &str = "token.stats.symbol.sigma";
 pub const TOKEN_STATS_UP: &str = "token.stats.symbol.up";
 pub const TOKEN_STATS_DOWN: &str = "token.stats.symbol.down";
 pub const TOKEN_STATS_CACHE_HIT: &str = "token.stats.metric.cache_hit";
+pub const TOKEN_STATS_CACHE_WARN: &str = "token.stats.metric.cache_warn";
 pub const TOKEN_STATS_CACHE_MISS: &str = "token.stats.metric.cache_miss";
 pub const TOKEN_STATS_INPUT: &str = "token.stats.metric.input";
 pub const TOKEN_STATS_OUTPUT: &str = "token.stats.metric.output";
