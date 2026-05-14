@@ -153,6 +153,14 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError>
 pub fn format_session_entry(entry: &SessionEntry) -> String {
     match entry {
         SessionEntry::UserMessage { text } => format!("user: {text}"),
+        SessionEntry::CompactedSummary { summary, .. } => {
+            let preview = if summary.len() > 80 {
+                format!("{}...", &summary[..80])
+            } else {
+                summary.clone()
+            };
+            format!("compacted: {preview}")
+        }
         SessionEntry::AgentMessage { text, .. } => {
             // `text` is now Option<String> — tool-only turns with
             // reasoning persist as an AgentMessage with text=None.
@@ -213,6 +221,7 @@ pub fn latest_agent_preview(session: &SessionTree) -> Option<String> {
         .rev()
         .find_map(|e| match e {
             SessionEntry::AgentMessage { text, .. } => text.clone(),
+            SessionEntry::CompactedSummary { .. } => None,
             _ => None,
         })
 }

@@ -143,6 +143,7 @@ fn new_session_clears_session_ui_state() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -177,6 +178,7 @@ fn new_session_clears_session_ui_state() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     renderer.handle(&Event::ToolResult(ToolResult {
@@ -300,6 +302,7 @@ fn single_prompt_response_cycle() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -339,6 +342,7 @@ fn single_prompt_response_cycle() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -371,6 +375,7 @@ fn thinking_renders_as_separate_block_above_response() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -443,6 +448,7 @@ fn thinking_renders_as_separate_block_above_response() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -484,6 +490,7 @@ fn set_show_thinking_round_trip_restores_history() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -512,6 +519,7 @@ fn set_show_thinking_round_trip_restores_history() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -584,6 +592,7 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -612,6 +621,7 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -648,6 +658,7 @@ fn no_thinking_block_when_summary_absent() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -679,6 +690,7 @@ fn no_thinking_block_when_summary_absent() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -709,6 +721,7 @@ fn queued_prompt_renders_after_first_completes() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -754,6 +767,7 @@ fn queued_prompt_renders_after_first_completes() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -767,6 +781,7 @@ fn queued_prompt_renders_after_first_completes() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -818,6 +833,7 @@ fn queued_prompt_renders_after_first_completes() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -859,6 +875,7 @@ fn three_queued_prompts_render_sequentially() {
                 system_prompt_ref: None,
                 messages: Vec::new(),
                 message_prefix: None,
+                compacted_input_items: Vec::new(),
                 tools: Vec::new(),
                 tools_ref: None,
                 model: None,
@@ -888,6 +905,7 @@ fn three_queued_prompts_render_sequentially() {
                 system_prompt_ref: None,
                 messages: Vec::new(),
                 message_prefix: None,
+                compacted_input_items: Vec::new(),
                 tools: Vec::new(),
                 tools_ref: None,
                 model: None,
@@ -920,6 +938,7 @@ fn three_queued_prompts_render_sequentially() {
             response_id: None,
             phase: None,
             reasoning_items: Vec::new(),
+            compacted_input_items: Vec::new(),
             ws_pool_delta: None,
         }));
         sync(&handle);
@@ -959,6 +978,7 @@ fn streaming_indicator_appends_during_updates() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -996,11 +1016,93 @@ fn streaming_indicator_appends_during_updates() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "Hello"));
     assert!(!vt.screen_contains(80, "Hello …"));
+}
+
+#[test]
+fn compaction_lifecycle_renders_status_line() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::SessionCompactionStarted(
+        tau_proto::SessionCompactionStarted {
+            session_id: "s1".into(),
+        },
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "compact …"));
+
+    renderer.handle(&Event::SessionCompacted(tau_proto::SessionCompacted {
+        session_id: "s1".into(),
+        summary: "Conversation compacted.".to_owned(),
+        compacted_input_items: vec!["{}".to_owned()],
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "compact …"));
+    assert!(!vt.screen_contains(80, "compact ok"));
+
+    renderer.handle(&Event::SessionCompactionFinished(
+        tau_proto::SessionCompactionFinished {
+            session_id: "s1".into(),
+            outcome: tau_proto::SessionCompactionOutcome::Succeeded,
+            message: None,
+        },
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "compact ok"));
+    assert!(!vt.screen_contains(80, "compact …"));
+}
+
+#[test]
+fn replayed_compacted_event_renders_success_status() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::SessionCompacted(tau_proto::SessionCompacted {
+        session_id: "s1".into(),
+        summary: "Conversation compacted.".to_owned(),
+        compacted_input_items: vec!["{}".to_owned()],
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "compact ok"));
+}
+
+#[test]
+fn failed_compaction_renders_error_status() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::SessionCompactionStarted(
+        tau_proto::SessionCompactionStarted {
+            session_id: "s1".into(),
+        },
+    ));
+    renderer.handle(&Event::SessionCompactionFinished(
+        tau_proto::SessionCompactionFinished {
+            session_id: "s1".into(),
+            outcome: tau_proto::SessionCompactionOutcome::Failed,
+            message: Some("provider unavailable".to_owned()),
+        },
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "compact err: provider unavailable"));
 }
 
 #[test]
@@ -1041,6 +1143,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -1126,6 +1229,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -1203,6 +1307,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     renderer.handle(&Event::ToolResult(ToolResult {
@@ -1250,6 +1355,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -1315,6 +1421,7 @@ fn show_tools_compact_hides_payload_body() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     renderer.handle(&Event::ToolResult(ToolResult {
@@ -1372,6 +1479,7 @@ fn show_tools_off_hides_tool_blocks() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     renderer.handle(&Event::ToolResult(ToolResult {
@@ -1436,6 +1544,7 @@ fn streaming_block_does_not_duplicate_on_finish() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -1467,6 +1576,7 @@ fn streaming_block_does_not_duplicate_on_finish() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -1937,6 +2047,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -2009,6 +2120,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -2026,6 +2138,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -2057,6 +2170,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -2074,6 +2188,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -2105,6 +2220,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -2167,6 +2283,7 @@ fn emoji_in_response_renders_correctly() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -2201,6 +2318,7 @@ fn emoji_in_response_renders_correctly() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -2251,6 +2369,7 @@ fn multiple_emoji_no_column_drift() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -2279,6 +2398,7 @@ fn multiple_emoji_no_column_drift() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);
@@ -2317,6 +2437,7 @@ fn overflowing_stream_replaced_cleanly_on_finish() {
         system_prompt_ref: None,
         messages: Vec::new(),
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: Vec::new(),
         tools_ref: None,
         model: None,
@@ -2358,6 +2479,7 @@ fn overflowing_stream_replaced_cleanly_on_finish() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
     sync(&handle);

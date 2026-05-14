@@ -211,6 +211,7 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
             phase: None,
         }],
         message_prefix: None,
+        compacted_input_items: Vec::new(),
         tools: vec![ToolDefinition {
             name: tau_proto::ToolName::new("echo"),
             model_visible_name: None,

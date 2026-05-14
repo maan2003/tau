@@ -59,6 +59,7 @@ fn store_agent_message(store: &mut SessionStore, session_id: &str, text: &str) -
                 response_id: None,
                 phase: None,
                 reasoning_items: Vec::new(),
+                compacted_input_items: Vec::new(),
                 ws_pool_delta: None,
             }),
         )
@@ -137,6 +138,7 @@ fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
                 response_id: None,
                 phase: None,
                 reasoning_items: Vec::new(),
+                compacted_input_items: Vec::new(),
                 ws_pool_delta: None,
             })),
         )
@@ -200,6 +202,7 @@ fn connection_abstraction_is_transport_independent_for_in_memory_clients() {
             response_id: None,
             phase: None,
             reasoning_items: Vec::new(),
+            compacted_input_items: Vec::new(),
             ws_pool_delta: None,
         },
     )));
@@ -591,6 +594,7 @@ fn session_tree_captures_phase_from_agent_response_finished() {
         response_id: None,
         phase: Some(MessagePhase::Commentary),
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     }));
 
@@ -606,6 +610,27 @@ fn session_tree_captures_phase_from_agent_response_finished() {
         }
         other => panic!("expected AgentMessage, got {other:?}"),
     }
+}
+
+#[test]
+fn session_tree_captures_compacted_summary() {
+    let mut tree = crate::session::SessionTree::from_events("session-1".into(), &[]);
+    tree.apply_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "session-1".into(),
+        text: "hello".to_owned(),
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    tree.apply_event(&Event::SessionCompacted(tau_proto::SessionCompacted {
+        session_id: "session-1".into(),
+        summary: "summary text".to_owned(),
+        compacted_input_items: Vec::new(),
+    }));
+
+    assert!(matches!(
+        tree.current_branch().last(),
+        Some(SessionEntry::CompactedSummary { summary, .. }) if summary == "summary text"
+    ));
 }
 
 #[test]

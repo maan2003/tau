@@ -35,6 +35,9 @@ impl Harness {
             "dispatch_user_prompt only valid for the default conversation",
         );
         let cid = self.default_conversation_id.clone();
+        if self.maybe_start_auto_compaction_for_user_prompt(&cid, &text) {
+            return Ok(());
+        }
         self.dispatch_prompt_for_conversation(&cid, text)
     }
 

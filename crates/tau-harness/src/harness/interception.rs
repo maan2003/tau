@@ -92,9 +92,15 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::UI_PROMPT_SUBMITTED,
     EventName::SESSION_USER_MESSAGE_INJECTED,
     EventName::SESSION_PROMPT_STEERED,
-    // Agent prompt life-cycle: the agent extension consumes
-    // `SessionPromptCreated` to know when to talk to the LLM.
-    // Dropping it wedges the conversation.
+    // Durable compaction state: once the harness has accepted a provider
+    // compaction result, dropping this event would make the UI report
+    // success while the next prompt still replays the un-compacted branch.
+    EventName::SESSION_COMPACTED,
+    // Agent request life-cycle: the agent extension consumes normal
+    // `SessionPromptCreated` turns and `SessionCompactionRequested`
+    // requests to know when to talk to the LLM. Dropping either wedges
+    // the conversation.
+    EventName::SESSION_COMPACTION_REQUESTED,
     EventName::SESSION_PROMPT_CREATED,
     // Agent response: dropping this would wedge `c.head` /
     // `prompt_conversations` bookkeeping and the conversation

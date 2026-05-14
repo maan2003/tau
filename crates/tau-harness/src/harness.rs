@@ -16,10 +16,10 @@ use tau_proto::{
     AgentCacheMissDiagnostic, AgentResponseFinished, AgentTokenUsage, AgentToolCall, CborValue,
     ClientKind, Disconnect, Event, EventSelector, ExtensionName, Frame, HarnessContextUsageChanged,
     HarnessModelSelected, Message, ModelId, PreviousResponseRef, PromptMessagePrefix,
-    PromptOriginator, PromptSystemPromptRef, PromptToolsRef, SessionId, SessionPromptCreated,
-    SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, TokenUsageStats,
-    ToolCallId, ToolChoice, ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest,
-    UiCancelPrompt,
+    PromptOriginator, PromptSystemPromptRef, PromptToolsRef, SessionCompactionRequested, SessionId,
+    SessionPromptCreated, SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued,
+    TokenUsageStats, ToolCallId, ToolChoice, ToolDefinition, ToolError, ToolName, ToolRegister,
+    ToolRequest, UiCancelPrompt,
 };
 
 use crate::conversation::{Conversation, ConversationId, ConversationTurnState};
@@ -50,13 +50,15 @@ use crate::model::{
     thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::prompt::{
-    assemble_conversation_from, build_system_prompt, cbor_map_bool, render_agents_context_message,
+    assemble_conversation_from, assemble_prompt_context_from, build_system_prompt, cbor_map_bool,
+    render_agents_context_message,
 };
 use crate::settings::{Config, load_harness_settings_or_warn};
 use crate::turn::{PromptSubmission, TurnState};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+const AUTO_COMPACTION_CONTEXT_PERCENT: u8 = 90;
 
 fn hex_bytes(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -103,6 +105,20 @@ pub(crate) struct CurrentSessionState {
     pub(crate) context_percent_used: Option<u8>,
     /// Current-session token usage totals.
     pub(crate) token_usage: TokenUsageStats,
+}
+
+#[derive(Debug)]
+enum PendingCompactionResume {
+    UserPrompt(String),
+    FollowupTurn,
+    None,
+}
+
+#[derive(Debug)]
+struct PendingCompaction {
+    target_cid: ConversationId,
+    session_id: SessionId,
+    resume: PendingCompactionResume,
 }
 
 pub(crate) struct Harness {
@@ -300,6 +316,9 @@ pub(crate) struct Harness {
     /// Prompt ids canceled by `/cancel`. Late agent events for these
     /// prompts are ignored and never folded into session state.
     pub(crate) canceled_prompts: std::collections::HashSet<SessionPromptId>,
+    /// In-flight auto-compaction summaries keyed by the temporary
+    /// side-conversation that is generating them.
+    pending_compactions: std::collections::HashMap<ConversationId, PendingCompaction>,
     /// Directory layout (config + state) the harness reads and writes.
     pub(crate) dirs: tau_config::settings::TauDirs,
 }
@@ -512,6 +531,7 @@ impl Harness {
             pending_tool_invocations: VecDeque::new(),
             in_flight_tool_kinds: std::collections::HashMap::new(),
             canceled_prompts: std::collections::HashSet::new(),
+            pending_compactions: std::collections::HashMap::new(),
             dirs,
         };
 
@@ -744,6 +764,7 @@ impl Harness {
             pending_tool_invocations: VecDeque::new(),
             in_flight_tool_kinds: std::collections::HashMap::new(),
             canceled_prompts: std::collections::HashSet::new(),
+            pending_compactions: std::collections::HashMap::new(),
             dirs,
         };
 
@@ -1234,11 +1255,18 @@ impl Harness {
             Event::UiSwitchSession(req) => Some(req.new_session_id.clone()),
             Event::UiTreeRequest(req) => Some(req.session_id.clone()),
             Event::UiNavigateTree(req) => Some(req.session_id.clone()),
+            Event::UiCompactRequest(req) => Some(req.session_id.clone()),
             Event::UiCancelPrompt(req) => Some(req.session_id.clone()),
             Event::SessionPromptQueued(queued) => Some(queued.session_id.clone()),
             Event::SessionPromptSteered(steered) => Some(steered.session_id.clone()),
             Event::SessionStarted(started) => Some(started.session_id.clone()),
             Event::SessionShutdown(shutdown) => Some(shutdown.session_id.clone()),
+            Event::SessionCompactionStarted(started) => Some(started.session_id.clone()),
+            Event::SessionCompactionFinished(finished) => Some(finished.session_id.clone()),
+            Event::SessionCompacted(compacted) => Some(compacted.session_id.clone()),
+            Event::SessionCompactionRequested(requested) => {
+                Some(requested.prompt.session_id.clone())
+            }
             Event::SessionPromptCreated(created) => Some(created.session_id.clone()),
             Event::SessionPromptPrewarmRequested(prewarm) => Some(prewarm.session_id.clone()),
             Event::SessionUserMessageInjected(injected) => Some(injected.session_id.clone()),
@@ -2385,6 +2413,11 @@ impl Harness {
                 }
                 Ok(true)
             }
+            Event::UiCompactRequest(req) => {
+                self.publish_event(Some(client_id), Event::UiCompactRequest(req.clone()));
+                self.handle_compact_request(req.session_id);
+                Ok(true)
+            }
             Event::UiCancelPrompt(req) => {
                 self.handle_cancel_prompt(&req.session_id);
                 Ok(true)
@@ -3020,6 +3053,143 @@ impl Harness {
         }
     }
 
+    fn maybe_start_auto_compaction_for_user_prompt(
+        &mut self,
+        cid: &ConversationId,
+        text: &str,
+    ) -> bool {
+        if !self.should_auto_compact_for_conversation(cid) {
+            return false;
+        }
+        self.start_auto_compaction_for_conversation(
+            cid,
+            PendingCompactionResume::UserPrompt(text.to_owned()),
+        );
+        true
+    }
+
+    fn handle_compact_request(&mut self, session_id: SessionId) {
+        if session_id != self.current_session_id {
+            self.emit_info(&format!(
+                "cannot compact session `{session_id}` in this harness; active session is `{}`",
+                self.current_session_id
+            ));
+            return;
+        }
+        let cid = self.default_conversation_id.clone();
+        if self.pending_compaction_targeted_at(&cid) {
+            self.emit_info("compaction is already in progress");
+            return;
+        }
+        if self.dispatch_blocked_for(&cid) {
+            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            return;
+        }
+        if !self.selected_model_supports_compaction() {
+            self.emit_info("selected model does not support remote compaction");
+            return;
+        }
+        let Some(conv) = self.conversations.get(&cid) else {
+            self.emit_info("default conversation is missing");
+            return;
+        };
+        let Some(tree) = self.store.session(conv.session_id.as_str()) else {
+            self.emit_info("nothing to compact yet");
+            return;
+        };
+        let prompt_context = assemble_prompt_context_from(tree, conv.head);
+        if prompt_context.messages.is_empty() && prompt_context.compacted_input_items.is_empty() {
+            self.emit_info("nothing to compact yet");
+            return;
+        }
+        self.start_auto_compaction_for_conversation(&cid, PendingCompactionResume::None);
+    }
+
+    fn maybe_start_auto_compaction_for_followup(&mut self, cid: &ConversationId) -> bool {
+        if !self.should_auto_compact_for_conversation(cid) {
+            return false;
+        }
+        self.start_auto_compaction_for_conversation(cid, PendingCompactionResume::FollowupTurn);
+        true
+    }
+
+    fn should_auto_compact_for_conversation(&self, cid: &ConversationId) -> bool {
+        if self.pending_compaction_targeted_at(cid) {
+            return false;
+        }
+        if !self.selected_model_supports_compaction() {
+            return false;
+        }
+        let current_percent = self
+            .conversations
+            .get(cid)
+            .and_then(|conv| conv.context_percent_used)
+            .or(self.current_session_state.context_percent_used);
+        current_percent.is_some_and(|p| p >= AUTO_COMPACTION_CONTEXT_PERCENT)
+    }
+
+    fn selected_model_supports_compaction(&self) -> bool {
+        let Some(model) = self.selected_model.as_ref() else {
+            return false;
+        };
+        self.model_registry
+            .providers
+            .get(&model.provider)
+            .is_some_and(tau_config::settings::ProviderConfig::supports_remote_compaction)
+    }
+
+    fn pending_compaction_targeted_at(&self, cid: &ConversationId) -> bool {
+        self.pending_compactions
+            .values()
+            .any(|pending| pending.target_cid == *cid)
+    }
+
+    fn start_auto_compaction_for_conversation(
+        &mut self,
+        target_cid: &ConversationId,
+        resume: PendingCompactionResume,
+    ) {
+        let Some(target_conv) = self.conversations.get(target_cid) else {
+            return;
+        };
+        let target_head = target_conv.head;
+        let target_session_id = target_conv.session_id.clone();
+        let summary_cid = ConversationId::new(format!("compact-{}", self.next_session_prompt_id));
+        let conv = Conversation::new(
+            summary_cid.clone(),
+            target_session_id.clone(),
+            tau_proto::PromptOriginator::Extension {
+                name: HARNESS_CONNECTION_ID.into(),
+                query_id: format!("auto-compact-{target_cid}"),
+            },
+            target_head,
+            Some(HARNESS_CONNECTION_ID.into()),
+        );
+        self.conversations.insert(summary_cid.clone(), conv);
+        self.pending_compactions.insert(
+            summary_cid.clone(),
+            PendingCompaction {
+                target_cid: target_cid.clone(),
+                session_id: target_session_id.clone(),
+                resume,
+            },
+        );
+        if let Some(target) = self.conversations.get_mut(target_cid) {
+            target.turn_state = ConversationTurnState::Compacting;
+        }
+        self.publish_event(
+            None,
+            Event::SessionCompactionStarted(tau_proto::SessionCompactionStarted {
+                session_id: target_session_id,
+            }),
+        );
+        if self.pending_intercept.is_some() || !self.deferred_publishes.is_empty() {
+            self.pending_user_prompt_dispatches.push_back(summary_cid);
+        } else {
+            self.send_prompt_to_agent_for(&summary_cid);
+        }
+    }
+
     /// Queue a prompt when it cannot be sent directly yet, or dispatch
     /// it immediately when the session is initialized and the harness is
     /// ready to talk to the agent.
@@ -3251,6 +3421,7 @@ impl Harness {
         self.pending_tool_names.clear();
         self.pending_tool_providers.clear();
         self.prompt_conversations.clear();
+        self.pending_compactions.clear();
 
         // Token and context accounting are session-scoped. Reset them
         // before `SessionStarted` so clients recreating status UI for
@@ -3553,7 +3724,8 @@ impl Harness {
     }
 
     /// Mints a new `SessionPromptId`, registers it with `cid`'s
-    /// conversation, and dispatches a `SessionPromptCreated` to the
+    /// conversation, and dispatches either a normal
+    /// `SessionPromptCreated` or a `SessionCompactionRequested` to the
     /// agent. Reads `system_prompt` / `messages` / `tools` from the
     /// conversation's session tree.
     ///
@@ -3603,9 +3775,14 @@ impl Harness {
         let head = conv.head;
 
         let tree = self.store.session(session_id.as_str());
-        let messages = tree
-            .map(|t| assemble_conversation_from(t, head))
-            .unwrap_or_default();
+        let prompt_context = tree
+            .map(|t| assemble_prompt_context_from(t, head))
+            .unwrap_or_else(|| crate::prompt::AssembledPromptContext {
+                compacted_input_items: Vec::new(),
+                messages: Vec::new(),
+            });
+        let messages = prompt_context.messages;
+        let compacted_input_items = prompt_context.compacted_input_items;
         let tools = self.gather_tool_definitions();
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
@@ -3702,7 +3879,9 @@ impl Harness {
             };
         }
 
-        // Publish SessionPromptCreated — both the agent and UI see it.
+        // Publish the prompt-shaped request event. Normal turns use
+        // `SessionPromptCreated`; provider-side compaction uses the
+        // dedicated `SessionCompactionRequested` envelope.
         let model = self.selected_model.clone();
         if let Some(model) = model.as_ref() {
             self.current_session_state.token_usage.start_request(model);
@@ -3765,24 +3944,28 @@ impl Harness {
                 })
             })
             .unwrap_or((tools, None));
-        self.prompt_cache_diagnostics.insert(
-            session_prompt_id.clone(),
-            PromptCacheDiagnosticContext {
-                model: model.clone(),
-                previous_response: previous_response.clone(),
-                message_prefix_count: message_prefix.as_ref().map(|p| p.message_count),
-                originator: originator.clone(),
-                tool_choice,
-                request_fingerprint: request_fingerprint.digest,
-            },
-        );
-        let event = Event::SessionPromptCreated(SessionPromptCreated {
+        let is_compaction_request = self.pending_compactions.contains_key(cid);
+        if !is_compaction_request {
+            self.prompt_cache_diagnostics.insert(
+                session_prompt_id.clone(),
+                PromptCacheDiagnosticContext {
+                    model: model.clone(),
+                    previous_response: previous_response.clone(),
+                    message_prefix_count: message_prefix.as_ref().map(|p| p.message_count),
+                    originator: originator.clone(),
+                    tool_choice,
+                    request_fingerprint: request_fingerprint.digest,
+                },
+            );
+        }
+        let prompt = SessionPromptCreated {
             session_prompt_id: session_prompt_id.clone(),
             session_id,
             system_prompt,
             system_prompt_ref,
             messages,
             message_prefix,
+            compacted_input_items,
             tools,
             tools_ref,
             model,
@@ -3792,7 +3975,18 @@ impl Harness {
             share_user_cache_key,
             ctx_id,
             previous_response,
-        });
+        };
+        let event = if is_compaction_request {
+            Event::SessionCompactionRequested(SessionCompactionRequested {
+                prompt: SessionPromptCreated {
+                    ctx_id: None,
+                    previous_response: None,
+                    ..prompt
+                },
+            })
+        } else {
+            Event::SessionPromptCreated(prompt)
+        };
         self.publish_event(None, event);
 
         session_prompt_id
@@ -3924,6 +4118,98 @@ impl Harness {
         );
     }
 
+    fn finish_pending_compaction(
+        &mut self,
+        summary_cid: ConversationId,
+        response: AgentResponseFinished,
+    ) -> Result<(), HarnessError> {
+        let Some(pending) = self.pending_compactions.remove(&summary_cid) else {
+            return Ok(());
+        };
+
+        self.publish_for_conversation(&summary_cid, Event::AgentResponseFinished(response.clone()));
+        self.prompt_conversations
+            .remove(response.session_prompt_id.as_str());
+        self.prompt_models.remove(&response.session_prompt_id);
+        self.prompt_fingerprints.remove(&response.session_prompt_id);
+        self.prompt_cache_diagnostics
+            .remove(&response.session_prompt_id);
+        self.completed_prompts
+            .insert(response.session_prompt_id.clone());
+        self.conversations.remove(&summary_cid);
+
+        let Some(target_conv) = self.conversations.get_mut(&pending.target_cid) else {
+            self.publish_event(
+                None,
+                Event::SessionCompactionFinished(tau_proto::SessionCompactionFinished {
+                    session_id: pending.session_id,
+                    outcome: tau_proto::SessionCompactionOutcome::Failed,
+                    message: Some("target conversation no longer exists".to_owned()),
+                }),
+            );
+            return Ok(());
+        };
+        target_conv.turn_state = ConversationTurnState::Idle;
+        target_conv.chain_anchor = None;
+        target_conv.last_prompt_id = None;
+        target_conv.context_input_tokens = None;
+        target_conv.context_percent_used = None;
+        target_conv.result_dedup = crate::dedup::ResultDedupMap::new();
+
+        self.update_context_usage(None, None);
+
+        let (outcome, message) = if !response.tool_calls.is_empty() {
+            (
+                tau_proto::SessionCompactionOutcome::Failed,
+                Some("tool call attempted".to_owned()),
+            )
+        } else if !response.compacted_input_items.is_empty() {
+            let summary = response
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .unwrap_or("Conversation compacted.");
+            self.publish_for_conversation(
+                &pending.target_cid,
+                Event::SessionCompacted(tau_proto::SessionCompacted {
+                    session_id: pending.session_id.clone(),
+                    summary: summary.to_owned(),
+                    compacted_input_items: response.compacted_input_items.clone(),
+                }),
+            );
+            (tau_proto::SessionCompactionOutcome::Succeeded, None)
+        } else {
+            let message = response
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty() && *text != "Conversation compacted.")
+                .map(|text| text.strip_prefix("LLM error: ").unwrap_or(text).to_owned())
+                .unwrap_or_else(|| "no compacted window".to_owned());
+            (tau_proto::SessionCompactionOutcome::Failed, Some(message))
+        };
+        self.publish_event(
+            None,
+            Event::SessionCompactionFinished(tau_proto::SessionCompactionFinished {
+                session_id: pending.session_id.clone(),
+                outcome,
+                message,
+            }),
+        );
+
+        match pending.resume {
+            PendingCompactionResume::UserPrompt(text) => {
+                self.dispatch_prompt_for_conversation(&pending.target_cid, text)
+            }
+            PendingCompactionResume::FollowupTurn => {
+                self.send_prompt_to_agent_for(&pending.target_cid);
+                Ok(())
+            }
+            PendingCompactionResume::None => Ok(()),
+        }
+    }
+
     fn handle_agent_response_finished(
         &mut self,
         mut response: AgentResponseFinished,
@@ -4003,6 +4289,9 @@ impl Harness {
             if let tau_proto::ToolNameMaybe::Valid(ref name) = call.name {
                 call.display = build_tool_args_display(name.as_str(), &call.arguments);
             }
+        }
+        if self.pending_compactions.contains_key(&cid) {
+            return self.finish_pending_compaction(cid, response);
         }
         let is_non_tool_ext_query = self.conversations.get(&cid).is_some_and(|conv| {
             matches!(
@@ -4443,6 +4732,9 @@ impl Harness {
         };
         if should_send {
             self.fold_pending_prompts_as_steered(&cid);
+            if self.maybe_start_auto_compaction_for_followup(&cid) {
+                return;
+            }
             // If folding the steered prompts parked any of them in
             // interception (e.g. an extension intercepting
             // `session.prompt_steered`), defer the agent dispatch

@@ -207,6 +207,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("disabled tool call should be handled");
@@ -354,6 +355,7 @@ fn empty_tool_name_does_not_panic_and_surfaces_error() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     };
 
@@ -467,6 +469,7 @@ fn empty_tool_call_id_is_normalized_to_synthetic_id() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     };
 

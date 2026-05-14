@@ -441,6 +441,7 @@ fn without_previous_response<'a>(
         previous_response: None,
         system_prompt: request.system_prompt,
         messages: request.messages,
+        compacted_input_items: &[],
         tools: request.tools,
         params: request.params,
         tool_choice: request.tool_choice,
@@ -502,6 +503,7 @@ mod tests {
             let request = PromptPayload {
                 system_prompt: "sys",
                 messages: &[],
+                compacted_input_items: &[],
                 tools: &[],
                 params: tau_proto::ModelParams::default(),
                 tool_choice: tau_proto::ToolChoice::default(),
@@ -600,6 +602,7 @@ mod tests {
         let request = PromptPayload {
             system_prompt: "sys",
             messages: &[],
+            compacted_input_items: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
@@ -637,6 +640,7 @@ mod tests {
         let prewarm = PromptPayload {
             system_prompt: "sys",
             messages: &prewarmed_messages,
+            compacted_input_items: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
@@ -650,6 +654,7 @@ mod tests {
 
         let real = PromptPayload {
             messages: &real_messages,
+            compacted_input_items: &[],
             ..prewarm
         };
         run_turn_through_pool(&mut pool, &config, "session-prewarm", &real, &mut on_update)
@@ -696,6 +701,7 @@ mod tests {
         let request = PromptPayload {
             system_prompt: "sys",
             messages: &[],
+            compacted_input_items: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
@@ -755,6 +761,7 @@ mod tests {
         let req1 = PromptPayload {
             system_prompt: "sys",
             messages: &[],
+            compacted_input_items: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
@@ -774,6 +781,7 @@ mod tests {
         let req2 = PromptPayload {
             system_prompt: "sys",
             messages: &[],
+            compacted_input_items: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
@@ -1038,6 +1046,7 @@ mod tests {
         let request = PromptPayload {
             system_prompt: "sys",
             messages: &[],
+            compacted_input_items: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
@@ -1060,6 +1069,7 @@ mod tests {
             supports_verbosity: false,
             supports_phase: false,
             supports_websocket: true,
+            supports_compaction: false,
             supports_prompt_cache_key: false,
             prompt_cache_retention: None,
             supports_encrypted_reasoning: false,

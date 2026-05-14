@@ -1,7 +1,8 @@
 //! First-party agent process.
 //!
-//! Receives `SessionPromptCreated` from the harness and emits
-//! `AgentResponseUpdated` / `AgentResponseFinished` events.
+//! Receives `SessionPromptCreated` / `SessionCompactionRequested`
+//! from the harness and emits `AgentResponseUpdated` /
+//! `AgentResponseFinished` events.
 
 pub mod common;
 pub(crate) mod openai;
@@ -109,6 +110,7 @@ where
     })))?;
     writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
         selectors: vec![
+            EventSelector::Exact(EventName::SESSION_COMPACTION_REQUESTED),
             EventSelector::Exact(EventName::SESSION_PROMPT_CREATED),
             EventSelector::Exact(EventName::SESSION_PROMPT_PREWARM_REQUESTED),
             EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
@@ -155,13 +157,13 @@ where
     // Spids the harness asked us to cancel via a targeted
     // `UiCancelPrompt` (`session_prompt_id: Some(...)`). Populated
     // from two places: (a) the main loop below, when a cancel is
-    // received before the corresponding `SessionPromptCreated` has
+    // received before the corresponding prompt/compaction request has
     // been dispatched, and (b) `RetryContext::sleep_or_abort`, when
     // a cancel for a *different* spid arrives mid-retry on the
-    // currently in-flight one. Each `SessionPromptCreated` is
+    // currently in-flight one. Each prompt-shaped request is
     // checked against this set before being handed to
-    // `handle_prompt`, and dropped with a stub finished event if
-    // present. This is the gate that prevents the
+    // `handle_prompt` / `handle_compaction_request`, and dropped with a stub
+    // finished event if present. This is the gate that prevents the
     // `preempt_blocking_ext_side_conversations` cancel from running
     // a still-queued side conv that the harness has already given
     // up on.
@@ -185,6 +187,147 @@ where
             Frame::Event(Event::SessionPromptPrewarmRequested(prewarm)) => {
                 handle_prewarm(&prewarm, &model_registry, &mut ws_pool, &mut ws_disabled);
             }
+            Frame::Event(Event::SessionCompactionRequested(request)) => {
+                let session_prompt_id = request.prompt.session_prompt_id.clone();
+
+                let prompt = match materialize_prompt(&request.prompt, &prompt_snapshots) {
+                    Ok(prompt) => prompt,
+                    Err(error) => {
+                        writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+                            AgentResponseFinished {
+                                session_prompt_id: session_prompt_id.clone(),
+                                text: Some(error),
+                                tool_calls: Vec::new(),
+                                input_tokens: None,
+                                cached_tokens: None,
+                                output_tokens: None,
+                                thinking: None,
+                                token_usage: None,
+                                originator: request.prompt.originator.clone(),
+                                backend: None,
+                                response_id: None,
+                                phase: None,
+                                reasoning_items: Vec::new(),
+                                compacted_input_items: Vec::new(),
+                                ws_pool_delta: None,
+                            },
+                        )))?;
+                        writer.flush()?;
+                        if let Some(id) = log_id {
+                            writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
+                            writer.flush()?;
+                        }
+                        continue;
+                    }
+                };
+
+                if canceled_spids.remove(&session_prompt_id) {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        session_prompt_id = %session_prompt_id,
+                        "skipping compaction request — already canceled by harness",
+                    );
+                    writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+                        AgentResponseFinished {
+                            session_prompt_id: session_prompt_id.clone(),
+                            text: Some("(cancelled by harness)".to_owned()),
+                            tool_calls: Vec::new(),
+                            input_tokens: None,
+                            cached_tokens: None,
+                            output_tokens: None,
+                            thinking: None,
+                            token_usage: None,
+                            originator: prompt.originator.clone(),
+                            backend: None,
+                            response_id: None,
+                            phase: None,
+                            reasoning_items: Vec::new(),
+                            compacted_input_items: Vec::new(),
+                            ws_pool_delta: None,
+                        },
+                    )))?;
+                    writer.flush()?;
+                    if let Some(id) = log_id {
+                        writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
+                        writer.flush()?;
+                    }
+                    continue;
+                }
+
+                if tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
+                    match serde_json::to_string_pretty(&request) {
+                        Ok(json) => tracing::trace!(
+                            target: LOG_TARGET,
+                            session_prompt_id = %session_prompt_id,
+                            "agent compaction request:\n{json}"
+                        ),
+                        Err(error) => tracing::trace!(
+                            target: LOG_TARGET,
+                            session_prompt_id = %session_prompt_id,
+                            "agent compaction request (failed to serialize for log: {error})"
+                        ),
+                    }
+                }
+
+                writer.write_frame(&Frame::Event(Event::AgentPromptSubmitted(
+                    AgentPromptSubmitted {
+                        session_prompt_id: session_prompt_id.clone(),
+                        originator: prompt.originator.clone(),
+                    },
+                )))?;
+                writer.flush()?;
+
+                let mut retry_ctx = RetryContext {
+                    frame_rx: &frame_rx,
+                    deferred: &mut deferred,
+                    canceled_spids: &mut canceled_spids,
+                };
+
+                let mut auth_store = tau_provider::storage::load().unwrap_or_default();
+                let backend = prompt
+                    .model
+                    .as_ref()
+                    .and_then(|m| tau_provider::resolve(m, &model_registry, &mut auth_store))
+                    .map(BackendConfig::from);
+
+                match backend {
+                    Some(backend) => {
+                        handle_compaction_request(
+                            &session_prompt_id,
+                            &backend,
+                            &prompt,
+                            &mut writer,
+                            &mut retry_ctx,
+                        )?;
+                    }
+                    None => {
+                        let msg = match &prompt.model {
+                            Some(m) => format!("cannot resolve model config for: {m}"),
+                            None => "no model specified".to_owned(),
+                        };
+                        writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+                            AgentResponseFinished {
+                                session_prompt_id,
+                                text: Some(msg),
+                                tool_calls: Vec::new(),
+                                input_tokens: None,
+                                cached_tokens: None,
+                                output_tokens: None,
+                                thinking: None,
+                                token_usage: None,
+                                originator: prompt.originator.clone(),
+                                backend: None,
+                                response_id: None,
+                                phase: None,
+                                reasoning_items: Vec::new(),
+                                compacted_input_items: Vec::new(),
+                                ws_pool_delta: None,
+                            },
+                        )))?;
+                        writer.flush()?;
+                    }
+                }
+            }
             Frame::Event(Event::SessionPromptCreated(prompt)) => {
                 let session_prompt_id = prompt.session_prompt_id.clone();
 
@@ -206,6 +349,7 @@ where
                                 response_id: None,
                                 phase: None,
                                 reasoning_items: Vec::new(),
+                                compacted_input_items: Vec::new(),
                                 ws_pool_delta: None,
                             },
                         )))?;
@@ -250,6 +394,7 @@ where
                             response_id: None,
                             phase: None,
                             reasoning_items: Vec::new(),
+                            compacted_input_items: Vec::new(),
                             ws_pool_delta: None,
                         },
                     )))?;
@@ -339,6 +484,7 @@ where
                                 response_id: None,
                                 phase: None,
                                 reasoning_items: Vec::new(),
+                                compacted_input_items: Vec::new(),
                                 ws_pool_delta: None,
                             },
                         )))?;
@@ -524,6 +670,7 @@ impl From<tau_provider::resolver::ResolvedBackend> for BackendConfig {
                     supports_phase: cfg.supports_phase,
                     supports_encrypted_reasoning: cfg.supports_encrypted_reasoning,
                     supports_websocket: cfg.supports_websocket,
+                    supports_compaction: cfg.supports_compaction,
                     supports_prompt_cache_key: cfg.supports_prompt_cache_key,
                     prompt_cache_retention: cfg.prompt_cache_retention,
                 })
@@ -793,6 +940,7 @@ fn handle_prewarm(
     let request = common::PromptPayload {
         system_prompt: &prewarm.system_prompt,
         messages: &prewarm.messages,
+        compacted_input_items: &[],
         tools: &prewarm.tools,
         params: prewarm.model_params,
         tool_choice: prewarm.tool_choice,
@@ -832,6 +980,7 @@ fn handle_prompt<W: Write>(
     let request = common::PromptPayload {
         system_prompt: &prompt.system_prompt,
         messages: &prompt.messages,
+        compacted_input_items: &prompt.compacted_input_items,
         tools: &prompt.tools,
         params: prompt.model_params,
         tool_choice: prompt.tool_choice,
@@ -910,6 +1059,66 @@ fn handle_prompt<W: Write>(
     Ok(())
 }
 
+fn handle_compaction_request<W: Write>(
+    session_prompt_id: &str,
+    backend: &BackendConfig,
+    prompt: &tau_proto::SessionPromptCreated,
+    writer: &mut FrameWriter<BufWriter<W>>,
+    retry_ctx: &mut RetryContext<'_>,
+) -> Result<(), Box<dyn Error>> {
+    let request = common::PromptPayload {
+        system_prompt: &prompt.system_prompt,
+        messages: &prompt.messages,
+        compacted_input_items: &prompt.compacted_input_items,
+        tools: &prompt.tools,
+        params: prompt.model_params,
+        tool_choice: prompt.tool_choice,
+        previous_response: None,
+        originator: &prompt.originator,
+        share_user_cache_key: prompt.share_user_cache_key,
+        session_id: &prompt.session_id,
+    };
+    let backend_descriptor = backend.descriptor(tau_proto::AgentBackendTransport::HttpSse);
+    let result = match backend {
+        BackendConfig::Responses(cfg) if cfg.supports_compaction => with_llm_retry(
+            session_prompt_id,
+            &prompt.originator,
+            writer,
+            retry_ctx,
+            |_writer| {
+                responses::responses_compact(cfg, &request).map(|items| common::StreamState {
+                    text: "Conversation compacted.".to_owned(),
+                    compacted_input_items: items,
+                    ..common::StreamState::new()
+                })
+            },
+        ),
+        _ => Err(common::LlmError::HttpStatus(
+            0,
+            "provider does not support remote compaction".to_owned(),
+        )),
+    };
+    match result {
+        Ok(state) => finish_stream(
+            session_prompt_id,
+            &prompt.originator,
+            &backend_descriptor,
+            state,
+            None,
+            writer,
+        )?,
+        Err(error) => finish_error(
+            session_prompt_id,
+            &prompt.originator,
+            &backend_descriptor,
+            error,
+            None,
+            writer,
+        )?,
+    }
+    Ok(())
+}
+
 /// Subtract `before` from `after` (saturating, clamped to `u32`) so
 /// the wire payload stays tight. The pool counters are monotonic so
 /// the saturating-sub fence is purely defensive against a counter
@@ -953,6 +1162,7 @@ fn finish_stream<W: Write>(
     let phase = state.phase;
     let mut state = state;
     let reasoning_items = std::mem::take(&mut state.reasoning_items);
+    let compacted_input_items = std::mem::take(&mut state.compacted_input_items);
     let tool_calls = state.into_tool_calls();
     let thinking_empty = thinking.as_ref().is_none_or(|thinking| thinking.is_empty());
     let text = if text_empty {
@@ -984,6 +1194,7 @@ fn finish_stream<W: Write>(
             response_id,
             phase,
             reasoning_items,
+            compacted_input_items,
             ws_pool_delta,
         },
     )))?;
@@ -1014,6 +1225,7 @@ fn finish_error<W: Write>(
             response_id: None,
             phase: None,
             reasoning_items: Vec::new(),
+            compacted_input_items: Vec::new(),
             ws_pool_delta,
         },
     )))?;
@@ -1045,6 +1257,7 @@ where
     })))?;
     writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
         selectors: vec![
+            EventSelector::Exact(EventName::SESSION_COMPACTION_REQUESTED),
             EventSelector::Exact(EventName::SESSION_PROMPT_CREATED),
             EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
         ],
@@ -1064,6 +1277,74 @@ where
         };
         let (log_id, inner) = frame.peel_log();
         match inner {
+            Frame::Event(Event::SessionCompactionRequested(request)) => {
+                let spid = request.prompt.session_prompt_id.clone();
+                let prompt = match materialize_prompt(&request.prompt, &prompt_snapshots) {
+                    Ok(prompt) => prompt,
+                    Err(error) => {
+                        writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+                            AgentResponseFinished {
+                                session_prompt_id: spid,
+                                text: Some(error),
+                                tool_calls: Vec::new(),
+                                input_tokens: None,
+                                cached_tokens: None,
+                                output_tokens: None,
+                                thinking: None,
+                                token_usage: None,
+                                originator: request.prompt.originator.clone(),
+                                backend: None,
+                                response_id: None,
+                                phase: None,
+                                reasoning_items: Vec::new(),
+                                compacted_input_items: Vec::new(),
+                                ws_pool_delta: None,
+                            },
+                        )))?;
+                        writer.flush()?;
+                        continue;
+                    }
+                };
+                writer.write_frame(&Frame::Event(Event::AgentPromptSubmitted(
+                    AgentPromptSubmitted {
+                        session_prompt_id: spid.clone(),
+                        originator: prompt.originator.clone(),
+                    },
+                )))?;
+                writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+                    AgentResponseFinished {
+                        session_prompt_id: spid,
+                        text: Some("Conversation compacted.".to_owned()),
+                        tool_calls: Vec::new(),
+                        input_tokens: None,
+                        cached_tokens: None,
+                        output_tokens: None,
+                        thinking: None,
+                        token_usage: None,
+                        originator: prompt.originator.clone(),
+                        backend: None,
+                        response_id: None,
+                        phase: None,
+                        reasoning_items: Vec::new(),
+                        compacted_input_items: vec![
+                            serde_json::json!({
+                                "type": "message",
+                                "role": "assistant",
+                                "status": "completed",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": "Conversation compacted.",
+                                    "annotations": [],
+                                    "logprobs": []
+                                }]
+                            })
+                            .to_string(),
+                        ],
+                        ws_pool_delta: None,
+                    },
+                )))?;
+                writer.flush()?;
+            }
             Frame::Event(Event::SessionPromptCreated(prompt)) => {
                 let spid = prompt.session_prompt_id.clone();
                 let prompt = match materialize_prompt(&prompt, &prompt_snapshots) {
@@ -1084,6 +1365,7 @@ where
                                 response_id: None,
                                 phase: None,
                                 reasoning_items: Vec::new(),
+                                compacted_input_items: Vec::new(),
                                 ws_pool_delta: None,
                             },
                         )))?;
@@ -1133,6 +1415,7 @@ where
                             response_id: None,
                             phase: None,
                             reasoning_items: Vec::new(),
+                            compacted_input_items: Vec::new(),
                             ws_pool_delta: None,
                         },
                     )))?;
@@ -1202,6 +1485,7 @@ where
                             response_id: None,
                             phase: None,
                             reasoning_items: Vec::new(),
+                            compacted_input_items: Vec::new(),
                             ws_pool_delta: None,
                         },
                     )))?;

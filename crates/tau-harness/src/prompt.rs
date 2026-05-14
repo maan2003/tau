@@ -143,11 +143,24 @@ pub(crate) fn chrono_free_date() -> String {
 /// delegate's tool result arriving moments later), `tree.head()` is
 /// not reliable as the prompt-assembly cursor — use the conv's own
 /// head instead.
+pub(crate) struct AssembledPromptContext {
+    pub(crate) compacted_input_items: Vec<String>,
+    pub(crate) messages: Vec<ConversationMessage>,
+}
+
 pub(crate) fn assemble_conversation_from(
     tree: &tau_core::SessionTree,
     head: Option<tau_core::NodeId>,
 ) -> Vec<ConversationMessage> {
+    assemble_prompt_context_from(tree, head).messages
+}
+
+pub(crate) fn assemble_prompt_context_from(
+    tree: &tau_core::SessionTree,
+    head: Option<tau_core::NodeId>,
+) -> AssembledPromptContext {
     let mut messages: Vec<ConversationMessage> = Vec::new();
+    let mut compacted_input_items: Vec<String> = Vec::new();
 
     for entry in tree.branch_from(head) {
         match entry {
@@ -157,6 +170,22 @@ pub(crate) fn assemble_conversation_from(
                     content: vec![ContentBlock::Text { text: text.clone() }],
                     phase: None,
                 });
+            }
+            SessionEntry::CompactedSummary {
+                summary,
+                input_items,
+            } => {
+                messages.clear();
+                compacted_input_items = input_items.clone();
+                if compacted_input_items.is_empty() {
+                    messages.push(ConversationMessage {
+                        role: ConversationRole::Assistant,
+                        content: vec![ContentBlock::Text {
+                            text: format!("Summary of earlier conversation:\n{summary}"),
+                        }],
+                        phase: None,
+                    });
+                }
             }
             SessionEntry::AgentMessage {
                 text,
@@ -253,7 +282,10 @@ pub(crate) fn assemble_conversation_from(
         }
     }
 
-    messages
+    AssembledPromptContext {
+        compacted_input_items,
+        messages,
+    }
 }
 
 /// Extract a string value from a CBOR map by key.
@@ -446,6 +478,7 @@ mod tests {
                 response_id: None,
                 phase: Some(tau_proto::MessagePhase::Commentary),
                 reasoning_items: Vec::new(),
+                compacted_input_items: Vec::new(),
                 ws_pool_delta: None,
             },
         ));
@@ -456,6 +489,60 @@ mod tests {
             .find(|m| matches!(m.role, tau_proto::ConversationRole::Assistant))
             .expect("assistant message");
         assert_eq!(assistant.phase, Some(tau_proto::MessagePhase::Commentary));
+    }
+
+    #[test]
+    fn assemble_conversation_restarts_from_compacted_summary() {
+        let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
+        tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+            text: "first question".to_owned(),
+            session_id: "session-1".into(),
+            originator: tau_proto::PromptOriginator::default(),
+            ctx_id: None,
+        }));
+        tree.apply_event(&Event::AgentResponseFinished(
+            tau_proto::AgentResponseFinished {
+                session_prompt_id: "sp-1".into(),
+                text: Some("first answer".to_owned()),
+                tool_calls: Vec::new(),
+                input_tokens: None,
+                cached_tokens: None,
+                output_tokens: None,
+                thinking: None,
+                token_usage: None,
+                originator: tau_proto::PromptOriginator::User,
+                backend: None,
+                response_id: None,
+                phase: None,
+                reasoning_items: Vec::new(),
+                compacted_input_items: Vec::new(),
+                ws_pool_delta: None,
+            },
+        ));
+        tree.apply_event(&Event::SessionCompacted(tau_proto::SessionCompacted {
+            session_id: "session-1".into(),
+            summary: "- User is debugging compaction\n- Keep edits focused".to_owned(),
+            compacted_input_items: Vec::new(),
+        }));
+        tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+            text: "continue".to_owned(),
+            session_id: "session-1".into(),
+            originator: tau_proto::PromptOriginator::default(),
+            ctx_id: None,
+        }));
+
+        let messages = assemble_conversation_from(&tree, tree.head());
+        assert_eq!(messages.len(), 2, "pre-compaction history must be dropped");
+        assert!(matches!(
+            &messages[0].content[0],
+            ContentBlock::Text { text }
+                if text.contains("Summary of earlier conversation:")
+                    && text.contains("debugging compaction")
+        ));
+        assert!(matches!(
+            &messages[1].content[0],
+            ContentBlock::Text { text } if text == "continue"
+        ));
     }
 
     /// Encrypted-reasoning replay: when `AgentResponseFinished` carries
@@ -496,6 +583,7 @@ mod tests {
                 response_id: None,
                 phase: None,
                 reasoning_items: vec![blob.clone()],
+                compacted_input_items: Vec::new(),
                 ws_pool_delta: None,
             },
         ));
@@ -557,6 +645,7 @@ mod tests {
                 response_id: None,
                 phase: None,
                 reasoning_items: vec![blob.clone()],
+                compacted_input_items: Vec::new(),
                 ws_pool_delta: None,
             },
         ));

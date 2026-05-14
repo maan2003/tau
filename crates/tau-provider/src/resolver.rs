@@ -45,6 +45,8 @@ pub struct ResolvedResponses {
     /// Provider exposes the Responses API over a persistent
     /// WebSocket. See [`ProviderCompat::supports_websocket`].
     pub supports_websocket: bool,
+    /// Provider exposes a standalone Responses compaction endpoint.
+    pub supports_compaction: bool,
     pub supports_prompt_cache_key: bool,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
 }
@@ -139,6 +141,7 @@ fn responses_backend(
         supports_phase: supports_phase(provider, base_url, model_id),
         supports_encrypted_reasoning: supports_encrypted_reasoning(provider, base_url),
         supports_websocket: supports_websocket(provider, base_url),
+        supports_compaction: supports_compaction(provider, base_url),
         supports_prompt_cache_key: supports_prompt_cache_key(provider, base_url),
         prompt_cache_retention: prompt_cache_retention(provider, base_url, model_id),
     }))
@@ -302,6 +305,10 @@ fn supports_encrypted_reasoning(provider: &ProviderConfig, base_url: &str) -> bo
 /// HTTP+SSE-only unless their `models.json5` flips the flag.
 fn supports_websocket(provider: &ProviderConfig, base_url: &str) -> bool {
     provider.compat.supports_websocket || is_builtin_openai_codex_endpoint(base_url)
+}
+
+fn supports_compaction(provider: &ProviderConfig, _base_url: &str) -> bool {
+    provider.supports_remote_compaction()
 }
 
 /// True for the ChatGPT Codex Responses backend specifically — the

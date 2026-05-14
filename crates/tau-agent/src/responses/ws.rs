@@ -241,6 +241,7 @@ impl WsConn {
                             previous_response: Some(owned_previous),
                             system_prompt: request.system_prompt,
                             messages: request.messages,
+                            compacted_input_items: &[],
                             tools: request.tools,
                             params: request.params,
                             tool_choice: request.tool_choice,

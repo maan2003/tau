@@ -12,6 +12,9 @@ use tau_proto::{
 pub struct PromptPayload<'a> {
     pub system_prompt: &'a str,
     pub messages: &'a [ConversationMessage],
+    /// Opaque Responses-API input items produced by a prior
+    /// provider-side compaction pass.
+    pub compacted_input_items: &'a [String],
     pub tools: &'a [ToolDefinition],
     /// Per-prompt model knobs (effort / verbosity / thinking-summary).
     /// Each field is honored only when the backend's config reports
@@ -190,6 +193,9 @@ pub struct StreamState {
     /// out of them — and are surfaced on `AgentResponseFinished` so
     /// the harness can replay them on subsequent turns.
     pub reasoning_items: Vec<String>,
+    /// Opaque Responses-API input items returned by a standalone
+    /// compaction call.
+    pub compacted_input_items: Vec<String>,
 }
 
 /// Accumulates one tool call across streaming chunks.
@@ -218,6 +224,7 @@ impl StreamState {
             response_id: None,
             phase: None,
             reasoning_items: Vec::new(),
+            compacted_input_items: Vec::new(),
         }
     }
 

@@ -18,6 +18,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
     let request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -50,6 +51,7 @@ fn build_request_includes_service_tier_when_configured() {
     let request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams {
             service_tier: Some(tau_proto::ServiceTier::Fast),
@@ -82,6 +84,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
     let request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -115,6 +118,7 @@ fn build_request_includes_llama_cpp_cache_prompt_when_configured() {
     let request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -152,6 +156,7 @@ fn build_request_sets_parallel_tool_calls_when_tools_offered() {
     let request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -182,6 +187,7 @@ fn build_request_omits_parallel_tool_calls_without_tools() {
     let request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -220,6 +226,7 @@ fn build_request_uses_model_visible_tool_name_when_present() {
     let request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -262,6 +269,7 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
     let request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::None,
@@ -307,6 +315,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
     let user_request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -318,6 +327,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
     let ext_request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),

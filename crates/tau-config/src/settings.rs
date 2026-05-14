@@ -601,6 +601,17 @@ impl ProviderConfig {
             Some(other) => Err(other),
         }
     }
+
+    /// Whether Tau should treat this provider as supporting the
+    /// standalone Responses compaction endpoint.
+    ///
+    /// Explicit provider compat opt-in wins. The built-in OpenAI Codex
+    /// auth flow also implies support because it always resolves to the
+    /// ChatGPT Codex Responses endpoint.
+    #[must_use]
+    pub fn supports_remote_compaction(&self) -> bool {
+        self.compat.supports_compaction || self.auth_type().ok() == Some(AuthType::OpenaiCodex)
+    }
 }
 
 /// Compatibility flags for providers that don't support all features.
@@ -662,6 +673,11 @@ pub struct ProviderCompat {
     /// built-in OpenAI Codex endpoint at resolver time, so users
     /// don't need to flip it on for the OAuth flow.
     pub supports_websocket: bool,
+    /// Provider exposes a standalone Responses compaction endpoint.
+    /// When on, Tau can replace a long transcript with the provider's
+    /// opaque compacted window instead of synthesizing a local text
+    /// summary.
+    pub supports_compaction: bool,
 }
 
 impl Default for ProviderCompat {
@@ -678,6 +694,7 @@ impl Default for ProviderCompat {
             supports_phase: false,
             supports_encrypted_reasoning: false,
             supports_websocket: false,
+            supports_compaction: false,
         }
     }
 }

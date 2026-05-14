@@ -16,6 +16,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         supports_phase: false,
         supports_reasoning_summary: false,
         supports_websocket: false,
+        supports_compaction: false,
         supports_prompt_cache_key: true,
         prompt_cache_retention: Some(PromptCacheRetention::InMemory),
         supports_encrypted_reasoning: false,
@@ -23,6 +24,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
     let request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -51,6 +53,7 @@ fn build_request_includes_service_tier_when_configured() {
         supports_phase: false,
         supports_reasoning_summary: false,
         supports_websocket: false,
+        supports_compaction: false,
         supports_prompt_cache_key: false,
         prompt_cache_retention: None,
         supports_encrypted_reasoning: false,
@@ -58,6 +61,7 @@ fn build_request_includes_service_tier_when_configured() {
     let request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams {
             service_tier: Some(tau_proto::ServiceTier::Fast),
@@ -87,6 +91,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         supports_phase: false,
         supports_reasoning_summary: false,
         supports_websocket: false,
+        supports_compaction: false,
         supports_prompt_cache_key: false,
         prompt_cache_retention: None,
         supports_encrypted_reasoning: false,
@@ -94,6 +99,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
     let request = PromptPayload {
         system_prompt: "system",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -122,6 +128,7 @@ fn build_request_first_turn_replays_full_history_without_chain() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -149,6 +156,32 @@ fn build_request_first_turn_replays_full_history_without_chain() {
     );
 }
 
+#[test]
+fn build_compact_request_omits_store_field() {
+    let config = chain_test_config();
+    let messages = vec![user_text("hello")];
+    let request = PromptPayload {
+        system_prompt: "sys",
+        messages: &messages,
+        compacted_input_items: &[],
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
+    };
+
+    let body = serde_json::to_value(build_compact_request(&config, &request)).expect("serialize");
+    let object = body.as_object().expect("request body is an object");
+
+    assert!(
+        !object.contains_key("store"),
+        "the compact endpoint rejects store entirely"
+    );
+}
+
 /// Stateful-chain turn: when the harness supplies a
 /// `previous_response`, the request body slices off the prefix
 /// already covered by that response and pins the prior `response.id`.
@@ -172,6 +205,7 @@ fn build_request_chain_turn_sends_delta_and_previous_response_id() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -211,6 +245,7 @@ fn build_request_chain_with_oob_index_falls_back_to_full_replay() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -276,6 +311,7 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -311,6 +347,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
     let user_request = PromptPayload {
         system_prompt: "sys",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -322,6 +359,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
     let ext_request = PromptPayload {
         system_prompt: "sys",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -358,6 +396,7 @@ fn build_request_share_user_cache_key_pins_extension_to_user_bucket() {
     let shared_request = PromptPayload {
         system_prompt: "sys",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -396,6 +435,7 @@ fn build_request_cache_shared_extension_matches_user_wire_body() {
     let user_request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -407,6 +447,7 @@ fn build_request_cache_shared_extension_matches_user_wire_body() {
     let shared_ext_request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -446,6 +487,7 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &[],
+        compacted_input_items: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::None,
@@ -477,6 +519,7 @@ fn chain_test_config() -> ResponsesConfig {
         supports_phase: false,
         supports_reasoning_summary: false,
         supports_websocket: false,
+        supports_compaction: false,
         supports_prompt_cache_key: false,
         prompt_cache_retention: None,
         supports_encrypted_reasoning: false,
@@ -537,6 +580,7 @@ fn build_request_stamps_phase_on_assistant_messages_when_supported() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -575,6 +619,7 @@ fn build_request_omits_phase_when_unsupported() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -627,6 +672,7 @@ fn build_request_stamps_phase_on_pre_tool_call_text_flush() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -719,6 +765,7 @@ fn build_request_emits_include_when_encrypted_reasoning_supported() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -743,6 +790,7 @@ fn build_request_omits_include_when_encrypted_reasoning_unsupported() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -792,6 +840,7 @@ fn build_request_replays_reasoning_item_as_top_level_input() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -861,6 +910,7 @@ fn build_request_emits_custom_tool_definition_and_round_trips_custom_tool_output
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -954,6 +1004,7 @@ fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -1034,6 +1085,7 @@ fn ws_envelope_adds_type_and_drops_stream() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &[],
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1070,6 +1122,7 @@ fn ws_prewarm_envelope_sets_generate_false_and_drops_previous_response() {
     let request = PromptPayload {
         system_prompt: "sys",
         messages: &messages,
+        compacted_input_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),

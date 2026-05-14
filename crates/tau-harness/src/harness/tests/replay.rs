@@ -110,6 +110,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
             system_prompt_ref: None,
             messages: Vec::new(),
             message_prefix: None,
+            compacted_input_items: Vec::new(),
             tools: Vec::new(),
             tools_ref: None,
             model: None,
@@ -132,6 +133,20 @@ fn late_joining_ui_client_replays_only_final_session_events() {
     );
     h.publish_event(
         None,
+        Event::SessionCompactionStarted(tau_proto::SessionCompactionStarted {
+            session_id: "s1".into(),
+        }),
+    );
+    h.publish_event(
+        None,
+        Event::SessionCompacted(tau_proto::SessionCompacted {
+            session_id: "s1".into(),
+            summary: "Conversation compacted.".to_owned(),
+            compacted_input_items: vec!["{}".to_owned()],
+        }),
+    );
+    h.publish_event(
+        None,
         Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: spid,
             text: Some("final".to_owned()),
@@ -147,6 +162,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
             response_id: None,
             phase: None,
             reasoning_items: Vec::new(),
+            compacted_input_items: Vec::new(),
             ws_pool_delta: None,
         }),
     );
@@ -186,6 +202,8 @@ fn late_joining_ui_client_replays_only_final_session_events() {
     }
 
     assert!(replayed.contains(&tau_proto::EventName::AGENT_RESPONSE_FINISHED));
+    assert!(replayed.contains(&tau_proto::EventName::SESSION_COMPACTED));
+    assert!(!replayed.contains(&tau_proto::EventName::SESSION_COMPACTION_STARTED));
     assert!(!replayed.contains(&tau_proto::EventName::SESSION_PROMPT_QUEUED));
     assert!(!replayed.contains(&tau_proto::EventName::SESSION_PROMPT_CREATED));
     assert!(!replayed.contains(&tau_proto::EventName::AGENT_RESPONSE_UPDATED));
@@ -363,6 +381,7 @@ fn resumed_harness_replays_persisted_session_history() {
             response_id: None,
             phase: None,
             reasoning_items: Vec::new(),
+            compacted_input_items: Vec::new(),
             ws_pool_delta: None,
         })
         .expect("persist agent response");
@@ -430,6 +449,7 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("persist agent response");

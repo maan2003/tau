@@ -106,6 +106,7 @@ fn pure_mutating_pure_serializes_through_dispatch_state_machine() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     };
 
@@ -215,6 +216,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     };
     h.handle_agent_response_finished(response)
@@ -309,6 +311,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("agent response with tool call");
@@ -456,6 +459,7 @@ fn session_prompt_created_uses_refs_for_linear_extension() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -508,6 +512,7 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("persist first agent response");
@@ -569,6 +574,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
         response_id: Some("resp_abc".to_owned()),
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -614,6 +620,7 @@ fn chained_low_corrected_cache_hit_emits_diagnostic() {
         response_id: Some("resp_abc".to_owned()),
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -635,6 +642,7 @@ fn chained_low_corrected_cache_hit_emits_diagnostic() {
         response_id: Some("resp_def".to_owned()),
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: Some(tau_proto::WsPoolDelta {
             upgrades: 0,
             silent_reconnects: 0,
@@ -694,6 +702,7 @@ fn model_switch_invalidates_chain_anchor() {
         response_id: Some("resp_abc".to_owned()),
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -749,6 +758,7 @@ fn params_drift_invalidates_chain_anchor() {
         response_id: Some("resp_abc".to_owned()),
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -799,6 +809,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
         response_id: Some("resp_skills".to_owned()),
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -859,6 +870,7 @@ fn tools_drift_invalidates_chain_anchor() {
         response_id: Some("resp_tools".to_owned()),
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -923,6 +935,7 @@ fn stable_params_preserve_chain_anchor() {
         response_id: Some("resp_xyz".to_owned()),
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -968,6 +981,7 @@ fn missing_response_id_leaves_chain_unset() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -1019,6 +1033,7 @@ fn queued_prompt_extends_completed_first_prompt() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -1126,6 +1141,349 @@ fn switch_session_rebinds_default_conversation() {
     h.shutdown().expect("shutdown");
 }
 
+#[test]
+fn user_prompt_auto_compacts_before_submission() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = Some("test/model".into());
+    h.model_registry.providers.insert(
+        tau_proto::ProviderName::new("test"),
+        tau_config::settings::ProviderConfig {
+            models: vec![tau_config::settings::ModelConfig {
+                id: tau_proto::ModelName::new("model"),
+                name: None,
+                max_output_tokens: None,
+                context_window: Some(1_000),
+                supports_xhigh: None,
+                reasoning_efforts: None,
+                supports_verbosity: None,
+                verbosities: None,
+            }],
+            compat: tau_config::settings::ProviderCompat {
+                supports_compaction: true,
+                ..tau_config::settings::ProviderCompat::default()
+            },
+            ..tau_config::settings::ProviderConfig::default()
+        },
+    );
+
+    append_user_message_via_event(&mut h, "s1", "earlier question");
+    let cid = h.default_conversation_id.clone();
+    h.publish_for_conversation(
+        &cid,
+        Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-old".into(),
+            text: Some("earlier answer".to_owned()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            output_tokens: None,
+            thinking: None,
+            token_usage: None,
+            originator: tau_proto::PromptOriginator::User,
+            backend: None,
+            response_id: None,
+            phase: None,
+            reasoning_items: Vec::new(),
+            compacted_input_items: Vec::new(),
+            ws_pool_delta: None,
+        }),
+    );
+    h.current_session_state.context_input_tokens = Some(950);
+    h.current_session_state.context_percent_used = Some(95);
+
+    h.dispatch_user_prompt("s1".into(), "new question".to_owned())
+        .expect("dispatch");
+
+    assert_eq!(
+        h.pending_compactions.len(),
+        1,
+        "compaction should start first"
+    );
+    assert!(matches!(
+        h.conversations[&cid].turn_state,
+        ConversationTurnState::Compacting
+    ));
+    assert!(
+        h.store
+            .session("s1")
+            .expect("session")
+            .current_branch()
+            .iter()
+            .all(|entry| !matches!(entry, SessionEntry::UserMessage { text } if text == "new question")),
+        "user prompt must not be persisted until compaction finishes"
+    );
+
+    let (summary_cid, summary_spid) = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| {
+            (prompt_cid != &cid).then_some((prompt_cid.clone(), spid.clone()))
+        })
+        .expect("compaction prompt");
+    let summary_prompt = read_compaction_requested(&h, &summary_spid);
+    assert!(
+        summary_prompt.previous_response.is_none(),
+        "compaction requests should not reuse previous_response_id chaining"
+    );
+
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: summary_spid,
+        text: Some("Conversation compacted.".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: Some(400),
+        cached_tokens: None,
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: HARNESS_CONNECTION_ID.into(),
+            query_id: format!("auto-compact-{cid}"),
+        },
+        backend: None,
+        response_id: None,
+        phase: None,
+        reasoning_items: Vec::new(),
+        compacted_input_items: vec![
+            serde_json::json!({
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": "Conversation compacted.",
+                    "annotations": [],
+                    "logprobs": []
+                }]
+            })
+            .to_string(),
+        ],
+        ws_pool_delta: None,
+    })
+    .expect("summary finished");
+
+    assert!(!h.conversations.contains_key(&summary_cid));
+    assert!(h.pending_compactions.is_empty());
+    assert!(matches!(
+        h.conversations[&cid].turn_state,
+        ConversationTurnState::AgentThinking { .. }
+    ));
+    assert_eq!(h.current_session_state.context_input_tokens, None);
+    assert_eq!(h.current_session_state.context_percent_used, None);
+
+    let branch = h.store.session("s1").expect("session").current_branch();
+    assert!(matches!(
+        branch.get(branch.len().saturating_sub(2)),
+        Some(SessionEntry::CompactedSummary { summary, input_items })
+            if summary == "Conversation compacted." && !input_items.is_empty()
+    ));
+    assert!(matches!(
+        branch.last(),
+        Some(SessionEntry::UserMessage { text }) if text == "new question"
+    ));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn user_prompt_does_not_auto_compact_without_context_percent_signal() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = Some("test/model".into());
+    h.model_registry.providers.insert(
+        tau_proto::ProviderName::new("test"),
+        tau_config::settings::ProviderConfig {
+            models: vec![tau_config::settings::ModelConfig {
+                id: tau_proto::ModelName::new("model"),
+                name: None,
+                max_output_tokens: None,
+                context_window: Some(10),
+                supports_xhigh: None,
+                reasoning_efforts: None,
+                supports_verbosity: None,
+                verbosities: None,
+            }],
+            compat: tau_config::settings::ProviderCompat {
+                supports_compaction: true,
+                ..tau_config::settings::ProviderCompat::default()
+            },
+            ..tau_config::settings::ProviderConfig::default()
+        },
+    );
+
+    let large_text = "earlier context ".repeat(40);
+    append_user_message_via_event(&mut h, "s1", &large_text);
+    let cid = h.default_conversation_id.clone();
+    h.publish_for_conversation(
+        &cid,
+        Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-old".into(),
+            text: Some(large_text.clone()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            output_tokens: None,
+            thinking: None,
+            token_usage: None,
+            originator: tau_proto::PromptOriginator::User,
+            backend: None,
+            response_id: None,
+            phase: None,
+            reasoning_items: Vec::new(),
+            compacted_input_items: Vec::new(),
+            ws_pool_delta: None,
+        }),
+    );
+    h.current_session_state.context_percent_used = None;
+
+    h.dispatch_user_prompt("s1".into(), "new question".to_owned())
+        .expect("dispatch");
+
+    assert!(h.pending_compactions.is_empty());
+    assert!(matches!(
+        h.conversations[&cid].turn_state,
+        ConversationTurnState::AgentThinking { .. }
+    ));
+    let spid = h.conversations[&cid]
+        .in_flight_prompt
+        .clone()
+        .expect("in-flight prompt");
+    let prompt = read_prompt_created(&h, &spid);
+    assert_eq!(
+        prompt.messages.last(),
+        Some(&tau_proto::ConversationMessage {
+            role: tau_proto::ConversationRole::User,
+            content: vec![tau_proto::ContentBlock::Text {
+                text: "new question".to_owned(),
+            }],
+            phase: None,
+        })
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn manual_compact_forces_compaction_without_followup_turn() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = Some("test/model".into());
+    h.model_registry.providers.insert(
+        tau_proto::ProviderName::new("test"),
+        tau_config::settings::ProviderConfig {
+            models: vec![tau_config::settings::ModelConfig {
+                id: tau_proto::ModelName::new("model"),
+                name: None,
+                max_output_tokens: None,
+                context_window: Some(1_000),
+                supports_xhigh: None,
+                reasoning_efforts: None,
+                supports_verbosity: None,
+                verbosities: None,
+            }],
+            compat: tau_config::settings::ProviderCompat {
+                supports_compaction: true,
+                ..tau_config::settings::ProviderCompat::default()
+            },
+            ..tau_config::settings::ProviderConfig::default()
+        },
+    );
+
+    append_user_message_via_event(&mut h, "s1", "earlier question");
+    let cid = h.default_conversation_id.clone();
+    h.publish_for_conversation(
+        &cid,
+        Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-old".into(),
+            text: Some("earlier answer".to_owned()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            output_tokens: None,
+            thinking: None,
+            token_usage: None,
+            originator: tau_proto::PromptOriginator::User,
+            backend: None,
+            response_id: None,
+            phase: None,
+            reasoning_items: Vec::new(),
+            compacted_input_items: Vec::new(),
+            ws_pool_delta: None,
+        }),
+    );
+
+    h.handle_compact_request("s1".into());
+
+    assert_eq!(h.pending_compactions.len(), 1);
+    let (summary_cid, summary_spid) = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| {
+            (prompt_cid != &cid).then_some((prompt_cid.clone(), spid.clone()))
+        })
+        .expect("compaction prompt");
+    let summary_prompt = read_compaction_requested(&h, &summary_spid);
+    assert!(summary_prompt.previous_response.is_none());
+
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: summary_spid,
+        text: Some("Conversation compacted.".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: Some(300),
+        cached_tokens: None,
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: HARNESS_CONNECTION_ID.into(),
+            query_id: format!("auto-compact-{cid}"),
+        },
+        backend: None,
+        response_id: None,
+        phase: None,
+        reasoning_items: Vec::new(),
+        compacted_input_items: vec![
+            serde_json::json!({
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": "Conversation compacted.",
+                    "annotations": [],
+                    "logprobs": []
+                }]
+            })
+            .to_string(),
+        ],
+        ws_pool_delta: None,
+    })
+    .expect("summary finished");
+
+    assert!(!h.conversations.contains_key(&summary_cid));
+    assert!(h.pending_compactions.is_empty());
+    assert!(matches!(
+        h.conversations[&cid].turn_state,
+        ConversationTurnState::Idle
+    ));
+    assert!(h.conversations[&cid].in_flight_prompt.is_none());
+
+    let branch = h.store.session("s1").expect("session").current_branch();
+    assert!(matches!(
+        branch.last(),
+        Some(SessionEntry::CompactedSummary { summary, input_items })
+            if summary == "Conversation compacted." && !input_items.is_empty()
+    ));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// While a parent's `delegate` tool call is in flight, the harness
 /// must still dispatch the spawned side conversation's prompt
 /// immediately — the parent's `ToolsRunning` turn state is logically
@@ -1190,6 +1548,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("tool response");
@@ -1246,6 +1605,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("side finished");
@@ -1341,6 +1701,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("tool response");
@@ -1461,6 +1822,7 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -1594,6 +1956,7 @@ fn non_tool_ext_agent_query_preserves_chain_anchor_and_tool_choice() {
         response_id: Some("resp_parent".to_owned()),
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -1701,6 +2064,7 @@ fn delegate_ext_agent_query_keeps_tool_choice_auto() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -1883,6 +2247,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -1932,6 +2297,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("side response");
@@ -2035,6 +2401,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2117,6 +2484,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2207,6 +2575,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2260,6 +2629,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("side response");
@@ -2366,6 +2736,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2416,6 +2787,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("outer response");
@@ -2462,6 +2834,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("nested final");
@@ -2588,6 +2961,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2632,6 +3006,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("outer response");
@@ -2734,6 +3109,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2772,6 +3148,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("side final");
@@ -2868,6 +3245,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2912,6 +3290,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("top response");
@@ -3059,6 +3438,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -3151,6 +3531,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("A response");
@@ -3252,6 +3633,7 @@ fn tool_events_carry_owning_conversation_originator() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -3296,6 +3678,7 @@ fn tool_events_carry_owning_conversation_originator() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("sub response");

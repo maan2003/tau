@@ -191,8 +191,8 @@ fn should_replay_session_event_to_late_subscriber(event: &Event) -> bool {
     // Replay final, durable transcript facts, not progress. In
     // particular, skip `AgentResponseUpdated` streaming chunks and
     // `SessionPromptCreated` pending markers, but keep
-    // `UiPromptSubmitted` and `AgentResponseFinished` so a resumed UI
-    // can reconstruct completed turns.
+    // `UiPromptSubmitted`, `AgentResponseFinished`, and completed
+    // compaction facts so a resumed UI can reconstruct completed turns.
     match event {
         Event::UiPromptSubmitted(_)
         | Event::SessionPromptSteered(_)
@@ -202,6 +202,7 @@ fn should_replay_session_event_to_late_subscriber(event: &Event) -> bool {
         | Event::ToolError(_)
         | Event::ShellCommandFinished(_)
         | Event::SessionStarted(_)
+        | Event::SessionCompacted(_)
         | Event::SessionShutdown(_)
         | Event::ExtAgentsMdAvailable(_)
         | Event::ExtensionContextReady(_)

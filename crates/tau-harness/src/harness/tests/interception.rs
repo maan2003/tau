@@ -88,6 +88,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -524,6 +525,44 @@ fn interception_drop_of_must_pass_event_is_overridden() {
         .get_next_from(baseline_seq)
         .expect("must-pass event still committed despite Drop");
     assert_eq!(entry.event, prompt);
+}
+
+#[test]
+fn interception_drop_of_session_compacted_is_overridden() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        Frame::Message(Message::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SESSION_COMPACTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let compacted = Event::SessionCompacted(tau_proto::SessionCompacted {
+        session_id: "s1".into(),
+        summary: "Conversation compacted.".to_owned(),
+        compacted_input_items: vec!["{}".to_owned()],
+    });
+    h.publish_event(None, compacted.clone());
+    h.handle_extension_event(
+        "interceptor",
+        Frame::Message(Message::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("session.compacted must commit despite Drop");
+    assert_eq!(entry.event, compacted);
 }
 
 #[test]

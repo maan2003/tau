@@ -263,6 +263,16 @@ pub(crate) enum ToolStatus {
     DiffRemoved,
 }
 
+/// Status variants for session compaction lifecycle lines. Kept
+/// separate from tool-call display state because compaction is not a
+/// model-visible tool invocation.
+#[derive(Clone, Copy)]
+pub(crate) enum CompactionStatus {
+    Success,
+    Error,
+    Progress,
+}
+
 #[derive(Clone)]
 pub(crate) struct ToolSuffixSegment {
     pub(crate) text: String,
@@ -638,6 +648,38 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
         suffixes,
         payload: None,
     }
+}
+
+/// Render the provider-side compaction lifecycle as a compact session
+/// status line: `compact …`, then `compact ok` or `compact err: …`.
+/// Compaction is not a model-visible tool invocation, so this paints the
+/// small lifecycle line directly instead of fabricating a `ToolDisplay`.
+pub(crate) fn render_compaction_block(
+    theme: &tau_themes::Theme,
+    status_text: impl Into<String>,
+    status: CompactionStatus,
+) -> tau_cli_term::StyledBlock {
+    use tau_cli_term::resolve::themed_text;
+    use tau_themes::{SpanTree, ThemedText, names};
+
+    let mut themed = ThemedText::new();
+    let output = themed.add_style(names::TOOL_OUTPUT);
+    let name = themed.add_style(names::TOOL_NAME);
+    let spacer = themed.add_style(names::TOOL_ARGS);
+    let status_style = themed.add_style(match status {
+        CompactionStatus::Success => names::TOOL_STATUS_SUCCESS,
+        CompactionStatus::Error => names::TOOL_STATUS_ERROR,
+        CompactionStatus::Progress => names::PROGRESS_INDICATOR,
+    });
+    themed.push_tree(SpanTree::span(
+        output,
+        vec![
+            SpanTree::span(name, vec![SpanTree::text("compact")]),
+            SpanTree::span(spacer, vec![SpanTree::text(" ")]),
+            SpanTree::span(status_style, vec![SpanTree::text(status_text.into())]),
+        ],
+    ));
+    tau_cli_term::StyledBlock::new(themed_text(theme, &themed))
 }
 
 /// Paints a [`ToolCallDisplay`] onto a themed block.

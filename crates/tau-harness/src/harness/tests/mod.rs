@@ -18,9 +18,9 @@ use tau_core::{
 use tau_proto::{
     AgentResponseFinished, AgentResponseUpdated, AgentToolCall, CborValue, Disconnect, Event,
     EventSelector, ExtAgentQuery, Frame, FrameReader, FrameWriter, Intercept, InterceptAction,
-    InterceptReply, InterceptionPriority, Message, SessionPromptCreated, SessionPromptId,
-    SessionPromptQueued, Subscribe, ToolCallId, ToolName, ToolResult, ToolSideEffects, ToolSpec,
-    UiPromptDraft, UiPromptSubmitted,
+    InterceptReply, InterceptionPriority, Message, SessionCompactionRequested,
+    SessionPromptCreated, SessionPromptId, SessionPromptQueued, Subscribe, ToolCallId, ToolName,
+    ToolResult, ToolSideEffects, ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
 use tau_session_inspect::{
     default_session_id, format_session_entry, open_session_store, policy_lines, session_lines,
@@ -28,7 +28,7 @@ use tau_session_inspect::{
 };
 use tempfile::TempDir;
 
-use super::Harness;
+use super::{HARNESS_CONNECTION_ID, Harness};
 use crate::conversation::ConversationTurnState;
 use crate::daemon::{
     ServeOptions, bind_listener, run_daemon_with_echo, run_embedded_message_with_echo,
@@ -288,9 +288,37 @@ fn read_raw_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPrompt
     }
 }
 
+fn read_raw_compaction_requested(
+    h: &Harness,
+    spid: &SessionPromptId,
+) -> SessionCompactionRequested {
+    let mut cursor = 0;
+    loop {
+        let entry = h
+            .event_log
+            .get_next_from(cursor)
+            .expect("compaction request event in log");
+        cursor = entry.seq + 1;
+        match entry.event {
+            Event::SessionCompactionRequested(request)
+                if &request.prompt.session_prompt_id == spid =>
+            {
+                return request;
+            }
+            _ => {}
+        }
+    }
+}
+
 fn read_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPromptCreated {
     h.read_session_prompt_created(spid)
         .expect("materialized prompt event")
+}
+
+fn read_compaction_requested(h: &Harness, spid: &SessionPromptId) -> SessionPromptCreated {
+    let request = read_raw_compaction_requested(h, spid);
+    h.materialize_session_prompt_created(&request.prompt)
+        .expect("materialized compaction request")
 }
 
 fn intercepted_payload(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> (Event, bool) {

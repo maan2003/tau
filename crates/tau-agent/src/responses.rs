@@ -73,6 +73,8 @@ pub struct ResponsesConfig {
     /// provider instead of one-shot HTTP+SSE. See
     /// [`tau_config::settings::ProviderCompat::supports_websocket`].
     pub supports_websocket: bool,
+    /// Whether this provider exposes a standalone compaction endpoint.
+    pub supports_compaction: bool,
     /// Whether this provider accepts the `prompt_cache_key` field.
     /// The wire key is derived per `(base_url, session_id)`, then
     /// split by extension name for extension-originated turns.
@@ -119,6 +121,7 @@ pub fn responses_stream(
         previous_response: None,
         system_prompt: request.system_prompt,
         messages: request.messages,
+        compacted_input_items: request.compacted_input_items,
         tools: request.tools,
         params: request.params,
         tool_choice: request.tool_choice,
@@ -127,6 +130,42 @@ pub fn responses_stream(
         share_user_cache_key: false,
     };
     responses_stream_once(config, &fallback, on_update)
+}
+
+pub fn responses_compact(
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+) -> Result<Vec<String>, LlmError> {
+    let url = format!(
+        "{}/codex/responses/compact",
+        config.base_url.trim_end_matches('/')
+    );
+    let body = build_compact_request(config, request);
+    let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
+
+    let mut req = tau_provider::oauth::proxy_agent()
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .set("Authorization", &format!("Bearer {}", config.api_key))
+        .set("OpenAI-Beta", "responses=experimental");
+    if let Some(ref account_id) = config.account_id {
+        req = req.set("chatgpt-account-id", account_id);
+    }
+
+    let response = req.send_string(&body_str).map_err(|e| match e {
+        ureq::Error::Status(code, resp) => {
+            let body = resp.into_string().unwrap_or_default();
+            LlmError::HttpStatus(code, body)
+        }
+        other => LlmError::Http(Box::new(other)),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_reader(response.into_reader()).map_err(LlmError::Json)?;
+    let output = value
+        .get("output")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| LlmError::HttpStatus(0, "compaction response missing output".to_owned()))?;
+    Ok(output.iter().map(serde_json::Value::to_string).collect())
 }
 
 /// True for the narrow class of 4xx errors that say the prior
@@ -458,12 +497,12 @@ struct ResponsesRequest {
     /// specific fields like `stream` and `background` are not used".
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
-    /// Always `false` on the ChatGPT Codex Responses endpoint — it
-    /// rejects `store: true` even when chaining (see `build_request`).
-    /// Kept as a serialized field rather than dropped because future
-    /// public-API support will need it set to `true` for chained
-    /// turns.
-    store: bool,
+    /// Always `Some(false)` on the ChatGPT Codex Responses endpoint —
+    /// it rejects `store: true` even when chaining (see
+    /// `build_request`). Omitted for the standalone compaction endpoint,
+    /// which rejects the field entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -540,22 +579,16 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
             _ => (request.messages, None),
         };
 
-    let mut input = Vec::new();
-    // Track call_id -> tool type across the *full* conversation, not
-    // just the sliced suffix for this request. On a chained turn the
-    // suffix often contains only the user-side tool result while the
-    // matching assistant-side ToolUse lives before the chain anchor.
-    // If we only scan `input_messages`, we lose that linkage and can
-    // mis-emit a custom tool result as `function_call_output`.
-    let mut tool_types_by_call_id = collect_tool_types(request.messages);
-    for msg in input_messages {
-        convert_message(
-            msg,
-            config.supports_phase,
-            &mut tool_types_by_call_id,
-            &mut input,
-        );
-    }
+    let input = build_input_items(
+        config,
+        request.messages,
+        input_messages,
+        if previous_response_id.is_none() {
+            request.compacted_input_items
+        } else {
+            &[]
+        },
+    );
 
     let tools: Vec<serde_json::Value> = request.tools.iter().map(convert_tool_definition).collect();
 
@@ -628,7 +661,7 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         // only routes the Responses backend through Codex, so
         // hardcoding `false` is correct; if/when the public Responses
         // API becomes reachable this needs to become endpoint-aware.
-        store: false,
+        store: Some(false),
         tools,
         tool_choice,
         reasoning,
@@ -642,6 +675,62 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
             .map(tau_proto::ServiceTier::as_wire),
         previous_response_id,
     }
+}
+
+fn build_compact_request(
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+) -> ResponsesRequest {
+    let mut body = build_request(
+        config,
+        &PromptPayload {
+            system_prompt: request.system_prompt,
+            messages: request.messages,
+            compacted_input_items: request.compacted_input_items,
+            tools: request.tools,
+            params: request.params,
+            tool_choice: request.tool_choice,
+            previous_response: None,
+            originator: request.originator,
+            share_user_cache_key: request.share_user_cache_key,
+            session_id: request.session_id,
+        },
+    );
+    body.stream = None;
+    body.previous_response_id = None;
+    body.store = None;
+    body.tool_choice = None;
+    body.prompt_cache_key = None;
+    body.prompt_cache_retention = None;
+    body.service_tier = None;
+    body.include.clear();
+    body
+}
+
+fn build_input_items(
+    config: &ResponsesConfig,
+    messages: &[ConversationMessage],
+    input_messages: &[ConversationMessage],
+    compacted_input_items: &[String],
+) -> Vec<serde_json::Value> {
+    let mut input: Vec<serde_json::Value> = compacted_input_items
+        .iter()
+        .filter_map(|item| serde_json::from_str(item).ok())
+        .collect();
+    // Track call_id -> tool type across the full conversation, not
+    // just the suffix we send on a chained request. Tool results can
+    // remain in the suffix after their matching ToolUse was anchored
+    // by `previous_response_id`.
+    let mut tool_types_by_call_id = collect_tool_types(messages);
+    for msg in input_messages {
+        convert_message(
+            msg,
+            config.supports_phase,
+            &mut tool_types_by_call_id,
+            &mut input,
+        );
+    }
+    input
 }
 
 /// WebSocket-side wrapper around a [`ResponsesRequest`]. The OpenAI

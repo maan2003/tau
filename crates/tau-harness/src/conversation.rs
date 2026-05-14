@@ -142,6 +142,7 @@ impl std::borrow::Borrow<str> for ConversationId {
 pub(crate) enum ConversationTurnState {
     #[default]
     Idle,
+    Compacting,
     AgentThinking {
         #[allow(dead_code)]
         session_prompt_id: SessionPromptId,

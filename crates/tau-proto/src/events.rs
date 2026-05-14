@@ -250,6 +250,7 @@ impl EventName {
     pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
     pub const UI_TREE_REQUEST: Self = Self::from_static(EventCategory::Ui, "tree_request");
     pub const UI_NAVIGATE_TREE: Self = Self::from_static(EventCategory::Ui, "navigate_tree");
+    pub const UI_COMPACT_REQUEST: Self = Self::from_static(EventCategory::Ui, "compact_request");
     pub const UI_PROMPT_DRAFT: Self = Self::from_static(EventCategory::Ui, "prompt_draft");
     pub const UI_CANCEL_PROMPT: Self = Self::from_static(EventCategory::Ui, "cancel_prompt");
 
@@ -267,6 +268,13 @@ impl EventName {
         Self::from_static(EventCategory::Session, "prompt_steered");
     pub const SESSION_STARTED: Self = Self::from_static(EventCategory::Session, "started");
     pub const SESSION_SHUTDOWN: Self = Self::from_static(EventCategory::Session, "shutdown");
+    pub const SESSION_COMPACTION_STARTED: Self =
+        Self::from_static(EventCategory::Session, "compaction_started");
+    pub const SESSION_COMPACTION_FINISHED: Self =
+        Self::from_static(EventCategory::Session, "compaction_finished");
+    pub const SESSION_COMPACTED: Self = Self::from_static(EventCategory::Session, "compacted");
+    pub const SESSION_COMPACTION_REQUESTED: Self =
+        Self::from_static(EventCategory::Session, "compaction_requested");
     pub const SESSION_PROMPT_CREATED: Self =
         Self::from_static(EventCategory::Session, "prompt_created");
     pub const SESSION_PROMPT_PREWARM_REQUESTED: Self =
@@ -1707,6 +1715,13 @@ pub struct UiNavigateTree {
     pub node_id: u64,
 }
 
+/// The user typed `/compact`: force a provider-side compaction pass on
+/// the current session history before the next prompt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiCompactRequest {
+    pub session_id: SessionId,
+}
+
 /// Stop advancing an in-flight prompt at the next harness boundary.
 ///
 /// Originally tied to the user typing `/cancel`, now also published
@@ -1942,8 +1957,11 @@ pub struct PromptToolsRef {
     pub base_session_prompt_id: SessionPromptId,
 }
 
-/// The harness persisted a user prompt and assigned it an ID.
-/// Also carries the assembled conversation context for the agent.
+/// The harness persisted a normal assistant-generation prompt and
+/// assigned it an ID.
+///
+/// Carries the assembled conversation context for the agent's normal
+/// response path.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionPromptCreated {
     pub session_prompt_id: SessionPromptId,
@@ -1961,6 +1979,12 @@ pub struct SessionPromptCreated {
     /// `base.messages[..message_count] + messages`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_prefix: Option<PromptMessagePrefix>,
+    /// Opaque Responses-API input items returned by a prior
+    /// provider-side compaction pass. These items form the canonical
+    /// next prompt prefix and must be forwarded back to the provider
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compacted_input_items: Vec<String>,
     /// Tool definitions, or empty when [`Self::tools_ref`] is set.
     pub tools: Vec<ToolDefinition>,
     /// Optional reference to full tool definitions from an earlier prompt.
@@ -2018,6 +2042,19 @@ pub struct SessionPromptCreated {
     pub previous_response: Option<PreviousResponseRef>,
 }
 
+/// The harness assembled a provider-side compaction request and
+/// assigned it an ID.
+///
+/// Compaction reuses the same prefix-compression and materialization
+/// scheme as [`SessionPromptCreated`], but it is a distinct agent
+/// operation with its own event name so consumers do not need to infer
+/// alternate semantics from a mode flag on a normal prompt event.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionCompactionRequested {
+    #[serde(flatten)]
+    pub prompt: SessionPromptCreated,
+}
+
 /// Best-effort provider-side prompt-cache prewarm request.
 ///
 /// Carries the same stable prefix fields as the first real
@@ -2046,6 +2083,51 @@ pub struct SessionPromptPrewarmRequested {
     /// Preserve the first real user prompt's cache-key derivation.
     #[serde(default, skip_serializing_if = "is_false")]
     pub share_user_cache_key: bool,
+}
+
+/// A provider-side compaction pass has started for this session.
+///
+/// This is a transient lifecycle event for clients to render progress;
+/// successful compaction is recorded durably by [`SessionCompacted`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionCompactionStarted {
+    pub session_id: SessionId,
+}
+
+/// Final status of a provider-side compaction lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCompactionOutcome {
+    Succeeded,
+    Failed,
+}
+
+/// A provider-side compaction pass finished.
+///
+/// This is transient UI/status metadata. On success, a separate
+/// [`SessionCompacted`] event carries the durable compacted input items.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionCompactionFinished {
+    pub session_id: SessionId,
+    pub outcome: SessionCompactionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// The harness replaced earlier branch history with a compact summary.
+///
+/// The durable event log remains append-only: compaction does not delete
+/// prior events from disk. Instead, prompt assembly treats this event as a
+/// history reset point and replays only the summary plus the entries that
+/// follow it on the current branch.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionCompacted {
+    pub session_id: SessionId,
+    pub summary: String,
+    /// Canonical opaque Responses-API input items returned by the
+    /// provider's compaction endpoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compacted_input_items: Vec<String>,
 }
 
 /// Reference to a prior turn's response, used to enable stateful
@@ -2199,6 +2281,10 @@ pub struct AgentResponseFinished {
     /// chain — same role as Pi's `thinkingSignature` blob.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_items: Vec<String>,
+    /// Opaque Responses-API input items returned by a standalone
+    /// provider compaction call. Empty on normal generation turns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compacted_input_items: Vec<String>,
     /// Per-turn delta of the agent's Codex WS pool counters. `Some(_)`
     /// only for Responses-backend turns where the WS path was
     /// attempted (i.e. `cfg.supports_websocket` and the per-session
@@ -2562,6 +2648,8 @@ pub enum Event {
     UiTreeRequest(UiTreeRequest),
     #[serde(rename = "ui.navigate_tree")]
     UiNavigateTree(UiNavigateTree),
+    #[serde(rename = "ui.compact_request")]
+    UiCompactRequest(UiCompactRequest),
     #[serde(rename = "ui.cancel_prompt")]
     UiCancelPrompt(UiCancelPrompt),
 
@@ -2584,6 +2672,14 @@ pub enum Event {
     SessionStarted(SessionStarted),
     #[serde(rename = "session.shutdown")]
     SessionShutdown(SessionShutdown),
+    #[serde(rename = "session.compaction_started")]
+    SessionCompactionStarted(SessionCompactionStarted),
+    #[serde(rename = "session.compaction_finished")]
+    SessionCompactionFinished(SessionCompactionFinished),
+    #[serde(rename = "session.compacted")]
+    SessionCompacted(SessionCompacted),
+    #[serde(rename = "session.compaction_requested")]
+    SessionCompactionRequested(SessionCompactionRequested),
     #[serde(rename = "session.prompt_created")]
     SessionPromptCreated(SessionPromptCreated),
     #[serde(rename = "session.prompt_prewarm_requested")]
@@ -2657,6 +2753,7 @@ impl Event {
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiTreeRequest(_) => EventName::UI_TREE_REQUEST,
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
+            Self::UiCompactRequest(_) => EventName::UI_COMPACT_REQUEST,
             Self::UiCancelPrompt(_) => EventName::UI_CANCEL_PROMPT,
             Self::Osc1337SetUserVar(_) => EventName::TERM_OSC1337_SET_USER_VAR,
             Self::ShellCommandProgress(_) => EventName::SHELL_COMMAND_PROGRESS,
@@ -2665,6 +2762,10 @@ impl Event {
             Self::SessionPromptSteered(_) => EventName::SESSION_PROMPT_STEERED,
             Self::SessionStarted(_) => EventName::SESSION_STARTED,
             Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
+            Self::SessionCompactionStarted(_) => EventName::SESSION_COMPACTION_STARTED,
+            Self::SessionCompactionFinished(_) => EventName::SESSION_COMPACTION_FINISHED,
+            Self::SessionCompacted(_) => EventName::SESSION_COMPACTED,
+            Self::SessionCompactionRequested(_) => EventName::SESSION_COMPACTION_REQUESTED,
             Self::SessionPromptCreated(_) => EventName::SESSION_PROMPT_CREATED,
             Self::SessionPromptPrewarmRequested(_) => EventName::SESSION_PROMPT_PREWARM_REQUESTED,
             Self::SessionUserMessageInjected(_) => EventName::SESSION_USER_MESSAGE_INJECTED,
@@ -2685,6 +2786,9 @@ impl Event {
                 | Self::ToolProgress(_)
                 | Self::ToolDelegateProgress(_)
                 | Self::ShellCommandProgress(_)
+                | Self::SessionCompactionStarted(_)
+                | Self::SessionCompactionFinished(_)
+                | Self::UiCompactRequest(_)
                 | Self::UiPromptDraft(_)
         )
     }

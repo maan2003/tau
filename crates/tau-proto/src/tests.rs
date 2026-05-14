@@ -61,6 +61,43 @@ fn representative_events() -> Vec<Event> {
             session_id: "s1".into(),
             reason: SessionStartReason::Initial,
         }),
+        Event::SessionCompactionStarted(SessionCompactionStarted {
+            session_id: "s1".into(),
+        }),
+        Event::SessionCompactionFinished(SessionCompactionFinished {
+            session_id: "s1".into(),
+            outcome: SessionCompactionOutcome::Succeeded,
+            message: None,
+        }),
+        Event::SessionCompactionRequested(SessionCompactionRequested {
+            prompt: SessionPromptCreated {
+                session_prompt_id: "sp-compact-1".into(),
+                session_id: "s1".into(),
+                system_prompt: "You are helpful.".to_owned(),
+                system_prompt_ref: None,
+                messages: vec![ConversationMessage {
+                    role: ConversationRole::User,
+                    content: vec![ContentBlock::Text {
+                        text: "compact this".to_owned(),
+                    }],
+                    phase: None,
+                }],
+                message_prefix: None,
+                compacted_input_items: Vec::new(),
+                tools: Vec::new(),
+                tools_ref: None,
+                model: None,
+                model_params: ModelParams::default(),
+                tool_choice: ToolChoice::default(),
+                originator: PromptOriginator::Extension {
+                    name: ExtensionName::new("harness"),
+                    query_id: "auto-compact-default".to_owned(),
+                },
+                share_user_cache_key: false,
+                ctx_id: None,
+                previous_response: None,
+            },
+        }),
         Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-1".into(),
             session_id: "s1".into(),
@@ -74,6 +111,7 @@ fn representative_events() -> Vec<Event> {
                 phase: None,
             }],
             message_prefix: None,
+            compacted_input_items: Vec::new(),
             tools: vec![ToolDefinition {
                 name: ToolName::new("read"),
                 model_visible_name: None,
@@ -106,6 +144,7 @@ fn representative_events() -> Vec<Event> {
             response_id: None,
             phase: None,
             reasoning_items: Vec::new(),
+            compacted_input_items: Vec::new(),
             ws_pool_delta: None,
         }),
         Event::ExtensionStarting(ExtensionStarting {
@@ -425,6 +464,14 @@ fn event_defaults_to_transient_marks_progress_kinds() {
         Event::UiPromptDraft(UiPromptDraft {
             session_id: "s1".into(),
             text: "draft".to_owned(),
+        }),
+        Event::SessionCompactionStarted(SessionCompactionStarted {
+            session_id: "s1".into(),
+        }),
+        Event::SessionCompactionFinished(SessionCompactionFinished {
+            session_id: "s1".into(),
+            outcome: SessionCompactionOutcome::Succeeded,
+            message: None,
         }),
     ];
     for event in &transient {

@@ -9,12 +9,12 @@ use tau_proto::{CborValue, Event};
 
 use crate::build_banner;
 use crate::tool_render::{
-    ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
+    CompactionStatus, ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
     build_osc1337_set_user_var, build_tool_summary_display, extension_status_block, extract_diff,
-    format_context_chip, format_tool_call, render_diff_tool_block, render_harness_info,
-    render_shell_block, render_token_stats_block, render_tool_block, render_tool_display,
-    session_status_block, streaming_block, synthesize_fallback_display, system_loaded_block,
-    system_status_block, ui_dir_block,
+    format_context_chip, format_tool_call, render_compaction_block, render_diff_tool_block,
+    render_harness_info, render_shell_block, render_token_stats_block, render_tool_block,
+    render_tool_display, session_status_block, streaming_block, synthesize_fallback_display,
+    system_loaded_block, system_status_block, ui_dir_block,
 };
 
 pub(crate) struct EventRenderer {
@@ -29,6 +29,10 @@ pub(crate) struct EventRenderer {
     /// per-prompt cleanup is a single `prompts.remove(spid)` instead of
     /// four separate `.remove()` calls easy to forget when extending.
     prompts: HashMap<String, PromptState>,
+    /// Live provider-side compaction blocks keyed by session id.
+    /// Compaction has first-class session lifecycle events rather than
+    /// being inferred from the hidden compact prompt sent to the agent.
+    compaction_blocks: HashMap<tau_proto::SessionId, tau_cli_term::BlockId>,
     /// Block ID of the last user message (for moving on queue).
     last_user_block: Option<tau_cli_term::BlockId>,
     /// Queued user-message blocks (in above_sticky zone).
@@ -407,6 +411,7 @@ impl EventRenderer {
             completion_data,
             theme,
             prompts: HashMap::new(),
+            compaction_blocks: HashMap::new(),
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
             tool_calls: HashMap::new(),
@@ -647,6 +652,68 @@ impl EventRenderer {
         tau_cli_term::StyledBlock::new(tau_cli_term::StyledText::from(String::new()))
     }
 
+    fn compaction_error_status(message: Option<&str>) -> String {
+        let label = message
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or("failed");
+        let mut short: String = label.chars().take(48).collect();
+        if label.chars().nth(48).is_some() {
+            short.push('…');
+        }
+        format!("err: {short}")
+    }
+
+    fn handle_compaction_event(&mut self, event: &Event) -> bool {
+        match event {
+            Event::SessionCompactionStarted(started) => {
+                if let Some(existing) = self.compaction_blocks.remove(&started.session_id) {
+                    self.handle.remove_block(existing);
+                }
+                let block = render_compaction_block(&self.theme, "…", CompactionStatus::Progress);
+                let id = self.handle.new_block(block);
+                self.handle.push_above_active(id);
+                self.handle.redraw();
+                self.compaction_blocks
+                    .insert(started.session_id.clone(), id);
+                true
+            }
+            Event::SessionCompacted(compacted) => {
+                // `SessionCompacted` is the durable success fact replayed to
+                // late-joining UIs. During a live compaction we still wait for
+                // `SessionCompactionFinished` to replace the in-flight block;
+                // on replay there is no lifecycle block, so render the final
+                // status from this event.
+                if !self.compaction_blocks.contains_key(&compacted.session_id) {
+                    self.handle.print_output(render_compaction_block(
+                        &self.theme,
+                        "ok",
+                        CompactionStatus::Success,
+                    ));
+                }
+                true
+            }
+            Event::SessionCompactionFinished(finished) => {
+                if let Some(block_id) = self.compaction_blocks.remove(&finished.session_id) {
+                    self.handle.remove_block(block_id);
+                }
+                let (status_text, status) = match finished.outcome {
+                    tau_proto::SessionCompactionOutcome::Succeeded => {
+                        ("ok".to_owned(), CompactionStatus::Success)
+                    }
+                    tau_proto::SessionCompactionOutcome::Failed => (
+                        Self::compaction_error_status(finished.message.as_deref()),
+                        CompactionStatus::Error,
+                    ),
+                };
+                self.handle
+                    .print_output(render_compaction_block(&self.theme, status_text, status));
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn render_tool_history_block(&self, display: &ToolCallDisplay) -> tau_cli_term::StyledBlock {
         match self.show_tools {
             tau_config::settings::ShowTools::Full => render_tool_block(&self.theme, display),
@@ -793,6 +860,7 @@ impl EventRenderer {
     /// and `show-thinking` are intentionally preserved.
     fn clear_for_new_session(&mut self) {
         self.prompts.clear();
+        self.compaction_blocks.clear();
         self.last_user_block = None;
         self.queued_user_blocks.clear();
         self.tool_calls.clear();
@@ -931,6 +999,10 @@ impl EventRenderer {
     pub(crate) fn handle(&mut self, event: &Event) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
+
+        if self.handle_compaction_event(event) {
+            return;
+        }
 
         // Side-conversation `AgentResponseFinished` events get filtered
         // out by `originator_of(event).is_user()` below — but we still

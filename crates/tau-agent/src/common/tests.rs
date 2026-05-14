@@ -32,6 +32,7 @@ fn into_tool_calls_drops_nameless_accumulator_artifacts() {
         response_id: None,
         phase: None,
         reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
     };
 
     let calls = state.into_tool_calls();

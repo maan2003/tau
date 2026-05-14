@@ -24,6 +24,10 @@ pub enum SessionEntry {
     UserMessage {
         text: String,
     },
+    CompactedSummary {
+        summary: String,
+        input_items: Vec<String>,
+    },
     AgentMessage {
         /// Visible message text. `None` for tool-only turns where the
         /// model emitted nothing but `function_call` items — those
@@ -322,6 +326,13 @@ impl SessionTree {
                 parent,
                 SessionEntry::UserMessage {
                     text: steered.text.clone(),
+                },
+            )),
+            Event::SessionCompacted(compacted) => Some(self.append_node_at(
+                parent,
+                SessionEntry::CompactedSummary {
+                    summary: compacted.summary.clone(),
+                    input_items: compacted.compacted_input_items.clone(),
                 },
             )),
             Event::AgentResponseFinished(response) => {

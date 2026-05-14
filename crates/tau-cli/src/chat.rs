@@ -279,6 +279,10 @@ pub(crate) fn run_chat(
             "Print the session tree (`/tree <id>` rewinds head to that node)",
         ),
         SlashCommand::new(
+            "/compact",
+            "Force a provider-side compaction pass on the current session",
+        ),
+        SlashCommand::new(
             "/effort",
             "Set reasoning effort: off, minimal, low, medium, high, xhigh (Shift+Tab to cycle)",
         ),
@@ -591,6 +595,19 @@ fn terminal_input_loop(
                             print_local("/tree <id>: id must be a non-negative integer");
                         }
                     }
+                    continue;
+                }
+                if text == "/compact" {
+                    let _ = send_event(
+                        writer,
+                        &Event::UiCompactRequest(tau_proto::UiCompactRequest {
+                            session_id: session_id.as_str().into(),
+                        }),
+                    );
+                    continue;
+                }
+                if text.starts_with("/compact ") {
+                    print_local("/compact forces a compaction pass and takes no arguments");
                     continue;
                 }
                 if let Some(arg) = text.strip_prefix("/effort ") {
