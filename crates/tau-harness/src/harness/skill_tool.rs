@@ -254,7 +254,10 @@ impl Harness {
         let display_args = format!("search: {queries_label}{scope_label}");
 
         let mut display = skill_ok_display(&display_args);
-        display.info_chips.push(format!("({}L)", hits.len()));
+        display.stats = skill_search_stats(&hits);
+        if hits.is_empty() {
+            display.status_text = "ok: no matches".to_owned();
+        }
 
         let matches = CborValue::Array(
             hits.into_iter()
@@ -395,6 +398,17 @@ fn text_stats_for_skill(text: &str) -> ToolDisplayStats {
         lines: Some(text.lines().count() as u64),
         bytes: Some(text.len() as u64),
     }
+}
+
+fn skill_search_stats(matches: &[(usize, String, String)]) -> ToolDisplayStats {
+    let output = matches
+        .iter()
+        .map(|(_, name, description)| format!("{name}: {description}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut stats = text_stats_for_skill(&output);
+    stats.matches = Some(matches.len() as u64);
+    stats
 }
 
 fn error_chip_text(message: &str) -> String {

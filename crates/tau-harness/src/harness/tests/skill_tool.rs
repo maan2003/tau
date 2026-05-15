@@ -436,12 +436,27 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
             })
             .collect()
     };
+    let read_display = |h: &Harness, call_id: &str| -> tau_proto::ToolDisplay {
+        let events = h.store.session_events("s1").expect("events");
+        events
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.event {
+                Event::ToolResult(r) if r.call_id.as_str() == call_id => r.display.clone(),
+                _ => None,
+            })
+            .expect("tool result display")
+    };
 
     // Description match: KW only appears in zqx-alpha's description.
     seed_tools_running(&mut h, &cid, vec!["call-1".into()]);
     h.handle_skill_tool_call(&cid, &call_search(KW, false, "call-1"))
         .expect("search 1");
     assert_eq!(read_matches(&h, "call-1"), vec!["zqx-alpha"]);
+    let display = read_display(&h, "call-1");
+    assert_eq!(display.stats.matches, Some(1));
+    assert_eq!(display.stats.lines, Some(1));
+    assert!(display.stats.bytes.is_some_and(|bytes| 0 < bytes));
 
     // Default scope must NOT search content: BODY_KW appears only in
     // alpha and beta bodies. With search_content=false → no hits.
@@ -450,6 +465,11 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
         .expect("search 2");
     let empty: Vec<String> = Vec::new();
     assert_eq!(read_matches(&h, "call-2"), empty);
+    let display = read_display(&h, "call-2");
+    assert_eq!(display.stats.matches, Some(0));
+    assert_eq!(display.stats.lines, None);
+    assert_eq!(display.stats.bytes, None);
+    assert_eq!(display.status_text, "ok: no matches");
 
     // Opt into content search: now alpha and beta both match,
     // sorted alphabetically.
