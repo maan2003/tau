@@ -627,17 +627,23 @@ impl BackendConfig {
     /// backend produced it without each request having to log
     /// separately. `transport` is the actual wire path the turn took
     /// — captured at dispatch time by [`stream_with_dispatch`].
-    fn descriptor(&self, transport: tau_proto::AgentBackendTransport) -> tau_proto::AgentBackend {
+    fn descriptor(
+        &self,
+        transport: tau_proto::AgentBackendTransport,
+        stale_chain_fallback: bool,
+    ) -> tau_proto::AgentBackend {
         match self {
             Self::ChatCompletions(cfg) => tau_proto::AgentBackend {
                 kind: tau_proto::AgentBackendKind::ChatCompletions,
                 base_url: cfg.base_url.clone(),
                 transport,
+                stale_chain_fallback,
             },
             Self::Responses(cfg) => tau_proto::AgentBackend {
                 kind: tau_proto::AgentBackendKind::Responses,
                 base_url: cfg.base_url.clone(),
                 transport,
+                stale_chain_fallback,
             },
         }
     }
@@ -838,22 +844,18 @@ fn stream_with_dispatch(
         let session_id = request.session_id.as_str();
         let try_ws = cfg.supports_websocket && !ws_disabled.contains(session_id);
         if try_ws {
+            let ws_request =
+                request_for_transport(request, tau_proto::AgentBackendTransport::Websocket);
             match responses::pool::run_turn_through_pool(
-                ws_pool, cfg, session_id, request, on_update,
+                ws_pool,
+                cfg,
+                session_id,
+                &ws_request,
+                on_update,
             ) {
                 Ok(state) => {
                     *transport_taken = tau_proto::AgentBackendTransport::Websocket;
                     return Ok(state);
-                }
-                Err(responses::pool::WsTurnError::HttpFallbackRecommended(error)) => {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        session_id,
-                        "WS chain unavailable ({error}); falling back to HTTP for this session",
-                    );
-                    ws_disabled.insert(session_id.to_owned());
-                    *transport_taken = tau_proto::AgentBackendTransport::HttpSse;
-                    return backend.stream_http(request, on_update);
                 }
                 Err(error) if should_disable_ws_error(&error) => {
                     let error = error.into_llm_error();
@@ -870,7 +872,42 @@ fn stream_with_dispatch(
         }
     }
     *transport_taken = tau_proto::AgentBackendTransport::HttpSse;
-    backend.stream_http(request, on_update)
+    let http_request = request_for_transport(request, tau_proto::AgentBackendTransport::HttpSse);
+    backend.stream_http(&http_request, on_update)
+}
+
+fn request_for_transport<'a>(
+    request: &common::PromptPayload<'a>,
+    transport: tau_proto::AgentBackendTransport,
+) -> common::PromptPayload<'a> {
+    let previous_response =
+        request
+            .previous_response
+            .and_then(|previous_response| match previous_response.transport {
+                Some(previous_transport) if previous_transport != transport => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        session_id = %request.session_id,
+                        previous_transport = ?previous_transport,
+                        current_transport = ?transport,
+                        "stripping transport-incompatible previous_response_id",
+                    );
+                    None
+                }
+                _ => Some(previous_response),
+            });
+    common::PromptPayload {
+        previous_response,
+        system_prompt: request.system_prompt,
+        messages: request.messages,
+        compacted_input_items: request.compacted_input_items,
+        tools: request.tools,
+        params: request.params,
+        tool_choice: request.tool_choice,
+        originator: request.originator,
+        session_id: request.session_id,
+        share_user_cache_key: request.share_user_cache_key,
+    }
 }
 
 /// True for WS-side failures that should trigger sticky fallback to
@@ -885,7 +922,6 @@ fn stream_with_dispatch(
 ///   another doomed upgrade.
 fn should_disable_ws_error(error: &responses::pool::WsTurnError) -> bool {
     match error {
-        responses::pool::WsTurnError::HttpFallbackRecommended(_) => false,
         responses::pool::WsTurnError::Other(error) => should_disable_ws(error),
     }
 }
@@ -990,6 +1026,7 @@ fn handle_prompt<W: Write>(
             .map(|p| common::PreviousResponse {
                 id: p.id.as_str(),
                 message_index: p.message_index,
+                transport: p.transport,
             }),
         originator: &prompt.originator,
         share_user_cache_key: prompt.share_user_cache_key,
@@ -1036,25 +1073,31 @@ fn handle_prompt<W: Write>(
             )
         },
     );
-    let backend_descriptor = backend.descriptor(transport_taken);
     let ws_pool_delta = ws_pool_before.map(|before| compute_ws_pool_delta(before, ws_pool.stats()));
     match result {
-        Ok(state) => finish_stream(
-            session_prompt_id,
-            &prompt.originator,
-            &backend_descriptor,
-            state,
-            ws_pool_delta,
-            writer,
-        )?,
-        Err(error) => finish_error(
-            session_prompt_id,
-            &prompt.originator,
-            &backend_descriptor,
-            error,
-            ws_pool_delta,
-            writer,
-        )?,
+        Ok(state) => {
+            let backend_descriptor =
+                backend.descriptor(transport_taken, state.stale_chain_fallback);
+            finish_stream(
+                session_prompt_id,
+                &prompt.originator,
+                &backend_descriptor,
+                state,
+                ws_pool_delta,
+                writer,
+            )?
+        }
+        Err(error) => {
+            let backend_descriptor = backend.descriptor(transport_taken, false);
+            finish_error(
+                session_prompt_id,
+                &prompt.originator,
+                &backend_descriptor,
+                error,
+                ws_pool_delta,
+                writer,
+            )?
+        }
     }
     Ok(())
 }
@@ -1078,7 +1121,7 @@ fn handle_compaction_request<W: Write>(
         share_user_cache_key: prompt.share_user_cache_key,
         session_id: &prompt.session_id,
     };
-    let backend_descriptor = backend.descriptor(tau_proto::AgentBackendTransport::HttpSse);
+    let backend_descriptor = backend.descriptor(tau_proto::AgentBackendTransport::HttpSse, false);
     let result = match backend {
         BackendConfig::Responses(cfg) if cfg.supports_compaction => with_llm_retry(
             session_prompt_id,

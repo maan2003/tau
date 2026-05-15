@@ -236,6 +236,7 @@ impl WsConn {
                         owned_previous = PreviousResponse {
                             id: &anchor.response_id,
                             message_index: anchor.message_count,
+                            transport: Some(tau_proto::AgentBackendTransport::Websocket),
                         };
                         chained_request = PromptPayload {
                             previous_response: Some(owned_previous),

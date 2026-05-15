@@ -3838,6 +3838,7 @@ impl Harness {
                     Some(tau_proto::PreviousResponseRef {
                         id: a.response_id.clone(),
                         message_index: a.message_count,
+                        transport: Some(a.transport),
                     })
                 } else {
                     tracing::debug!(
@@ -4337,6 +4338,12 @@ impl Harness {
         if let (Some(response_id), Some(model), Some(request_fingerprint)) =
             (response.response_id.clone(), turn_model, turn_fingerprint)
         {
+            let transport = response
+                .backend
+                .as_ref()
+                .map_or(tau_proto::AgentBackendTransport::HttpSse, |backend| {
+                    backend.transport
+                });
             let (conv_head, conv_session) = self
                 .conversations
                 .get(&cid)
@@ -4353,6 +4360,7 @@ impl Harness {
                     head: conv_head.flatten(),
                     model,
                     message_count,
+                    transport,
                     request_fingerprint: request_fingerprint.digest,
                     request_fingerprint_parts: request_fingerprint.parts,
                 });

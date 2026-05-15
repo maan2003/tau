@@ -129,7 +129,9 @@ pub fn responses_stream(
         session_id: request.session_id,
         share_user_cache_key: false,
     };
-    responses_stream_once(config, &fallback, on_update)
+    let mut state = responses_stream_once(config, &fallback, on_update)?;
+    state.stale_chain_fallback = true;
+    Ok(state)
 }
 
 pub fn responses_compact(

@@ -212,6 +212,7 @@ fn build_request_chain_turn_sends_delta_and_previous_response_id() {
         previous_response: Some(PreviousResponse {
             id: "resp_abc",
             message_index: 2,
+            transport: Some(tau_proto::AgentBackendTransport::HttpSse),
         }),
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -252,6 +253,7 @@ fn build_request_chain_with_oob_index_falls_back_to_full_replay() {
         previous_response: Some(PreviousResponse {
             id: "resp_abc",
             message_index: 99,
+            transport: Some(tau_proto::AgentBackendTransport::HttpSse),
         }),
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -318,6 +320,7 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
         previous_response: Some(PreviousResponse {
             id: "resp_abc",
             message_index: 2,
+            transport: Some(tau_proto::AgentBackendTransport::HttpSse),
         }),
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -431,6 +434,7 @@ fn build_request_cache_shared_extension_matches_user_wire_body() {
     let previous_response = Some(PreviousResponse {
         id: "resp_parent",
         message_index: 0,
+        transport: Some(tau_proto::AgentBackendTransport::HttpSse),
     });
     let user_request = PromptPayload {
         system_prompt: "sys",
@@ -1011,6 +1015,7 @@ fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
         previous_response: Some(PreviousResponse {
             id: "resp_prev",
             message_index: 1,
+            transport: Some(tau_proto::AgentBackendTransport::HttpSse),
         }),
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -1129,6 +1134,7 @@ fn ws_prewarm_envelope_sets_generate_false_and_drops_previous_response() {
         previous_response: Some(PreviousResponse {
             id: "resp_previous",
             message_index: 1,
+            transport: Some(tau_proto::AgentBackendTransport::HttpSse),
         }),
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),

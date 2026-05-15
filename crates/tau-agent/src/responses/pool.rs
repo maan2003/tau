@@ -220,18 +220,13 @@ impl Default for WsPool {
 /// WS dispatch failed in a way the caller can classify.
 #[derive(Debug)]
 pub(crate) enum WsTurnError {
-    /// The WS chain is gone, but the request has a `previous_response_id`.
-    /// Retrying over HTTP can keep the cheap delta request instead of opening
-    /// a fresh WS socket that must strip the chain id and replay the full
-    /// transcript.
-    HttpFallbackRecommended(LlmError),
     Other(LlmError),
 }
 
 impl WsTurnError {
     pub(crate) fn into_llm_error(self) -> LlmError {
         match self {
-            Self::HttpFallbackRecommended(error) | Self::Other(error) => error,
+            Self::Other(error) => error,
         }
     }
 }
@@ -243,19 +238,11 @@ impl WsTurnError {
 ///
 /// Transparent reconnect: the Codex WS endpoint's
 /// `previous_response_id` cache is **connection-local** (per the
-/// OpenAI deployment-checklist WS guide). Two consequences this
-/// function has to handle:
-///
-/// 1. A fresh socket from `WsConn::connect` has an empty chain cache, so a
-///    `previous_response_id` carried in `request` would 404 on the server.
-///    Instead of stripping it and replaying a huge transcript over cold WS, we
-///    ask the caller to retry over HTTP, where the chain id can still produce a
-///    cheap delta request.
-/// 2. If a cached socket dies mid-turn (server-side 60-minute reap, keepalive
-///    timeout, transport reset), the in-flight WS chain is gone with it. When a
-///    provider chain id exists, the caller should move the turn to HTTP rather
-///    than silently burning a full uncached replay on a fresh socket. Only
-///    turns with no chain id use the fresh-WS retry.
+/// OpenAI deployment-checklist WS guide). A fresh socket from
+/// `WsConn::connect` has an empty chain cache, so a `previous_response_id`
+/// carried in `request` would 404 on the server. The recovery path strips the
+/// chain id, replays the full prompt once over the new WS, and releases that
+/// socket back into the pool so the following turn is warm again.
 pub(crate) fn run_turn_through_pool(
     pool: &mut WsPool,
     config: &ResponsesConfig,
@@ -283,10 +270,10 @@ pub(crate) fn run_turn_through_pool(
                     "Codex WS connection lost mid-turn",
                 );
                 drop(conn);
-                if request.previous_response.is_some() {
-                    return Err(WsTurnError::HttpFallbackRecommended(err));
-                }
-                // Fall through to the fresh-open path below.
+                // Fall through to the fresh-open path below. If this was a
+                // chained turn, the fresh request will strip the stale
+                // connection-local id and rebuild WS warmth with one full
+                // replay.
             }
             Err(other) => {
                 drop(conn);
@@ -295,23 +282,9 @@ pub(crate) fn run_turn_through_pool(
         }
     }
 
-    // Fresh socket path. The chain cache here is empty by definition. If this
-    // turn has a chain id, do not strip it and burn a huge WS replay: ask the
-    // caller to retry over HTTP, whose response-id state is not tied to this
-    // new socket. If HTTP rejects the stale id, its own fallback will do the
-    // unavoidable full replay.
-    if request.previous_response.is_some() {
-        tracing::info!(
-            target: crate::LOG_TARGET,
-            session_id,
-            "fresh Codex WS socket would strip previous_response_id; retrying over HTTP to avoid full replay",
-        );
-        return Err(WsTurnError::HttpFallbackRecommended(LlmError::HttpStatus(
-            0,
-            "stream error: Codex WS chain unavailable".to_owned(),
-        )));
-    }
-
+    // Fresh socket path. The chain cache here is empty by definition, so strip
+    // any prior `previous_response_id` and pay one cold full replay on WS. That
+    // is cheaper over the next turns than switching to HTTP and staying cold.
     let mut conn = WsConn::connect(config).map_err(WsTurnError::Other)?;
     pool.stats.upgrades += 1;
     let fresh_request = without_previous_response(request);
@@ -683,15 +656,13 @@ mod tests {
         );
     }
 
-    /// Codex's WS `previous_response_id` cache is connection-local.
-    /// When the pool opens a fresh socket for a chained turn, the new socket
-    /// has no knowledge of the prior response id. The old behavior stripped
-    /// the id and replayed the full transcript, which made reconnects burn
-    /// 100k+ uncached tokens. The pool now asks the caller to retry over HTTP
-    /// instead, preserving the cheap delta request when the provider still has
-    /// the response id globally.
+    /// Codex's WS `previous_response_id` cache is connection-local. When the
+    /// pool opens a fresh socket for a chained turn, the new socket has no
+    /// knowledge of the prior response id. The pool strips the id, replays the
+    /// full prompt once over WS, and keeps the fresh socket warm for the next
+    /// turn instead of sticky-falling back to HTTP.
     #[test]
-    fn fresh_open_with_previous_response_requests_http_fallback() {
+    fn fresh_open_with_previous_response_rebuilds_ws_warmth() {
         let (addr, server) = spawn_fake_codex_server();
         let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
         let mut pool = WsPool::new();
@@ -708,42 +679,41 @@ mod tests {
             previous_response: Some(crate::common::PreviousResponse {
                 id: "resp_from_a_dead_socket",
                 message_index: 0,
+                transport: Some(tau_proto::AgentBackendTransport::Websocket),
             }),
             originator: &tau_proto::PromptOriginator::User,
             session_id: &session_id,
             share_user_cache_key: false,
         };
-        let err = match run_turn_through_pool(
+        run_turn_through_pool(
             &mut pool,
             &config,
             "session-fresh",
             &request,
             &mut on_update,
-        ) {
-            Ok(_) => panic!("fresh chained WS turn should move to HTTP"),
-            Err(err) => err,
-        };
+        )
+        .expect("fresh chained WS turn should rebuild warmth");
 
-        assert!(
-            matches!(err, WsTurnError::HttpFallbackRecommended(_)),
-            "expected HTTP fallback recommendation, got {err:?}"
-        );
         let s = server.lock().expect("server lock");
-        assert_eq!(s.upgrade_count, 0, "must not open a cold WS socket");
-        assert!(s.requests.is_empty(), "must not burn a WS full replay");
+        assert_eq!(s.upgrade_count, 1, "must open a replacement WS socket");
+        assert_eq!(s.requests.len(), 1, "expected one WS full replay envelope");
+        assert!(
+            s.requests[0].get("previous_response_id").is_none(),
+            "fresh WS socket must not receive a stale chain id"
+        );
         assert_eq!(
             pool.stats().chain_strips_on_fresh,
-            0,
-            "chain id should be preserved for the HTTP retry"
+            1,
+            "chain strip counter should report the cold WS rebuild"
         );
     }
 
-    /// A cached connection dies mid-turn (keepalive timeout / TCP
-    /// reset). If the request has a `previous_response_id`, the pool must NOT
-    /// reopen a fresh WS socket and strip the chain id. It returns an HTTP
-    /// fallback recommendation so the caller can keep the delta request cheap.
+    /// A cached connection dies mid-turn (keepalive timeout / TCP reset). If
+    /// the request has a `previous_response_id`, the pool must reopen a fresh
+    /// WS socket, strip the stale chain id, and leave the replacement socket in
+    /// the pool so later turns regain cache warmth.
     #[test]
-    fn mid_stream_close_with_chain_requests_http_fallback() {
+    fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
         let (addr, server) = spawn_fake_codex_server();
         // Make connection #0 die mid-turn-#2 (after_turn=1 -> the
         // second arriving turn on conn 0 is the one that gets closed).
@@ -775,9 +745,9 @@ mod tests {
                 .expect("first turn ok");
         let prev_id = state1.response_id.expect("first turn yielded response_id");
 
-        // Turn 2: harness wants to chain via `prev_id`. The cached
-        // socket dies mid-stream; pool must ask the caller to retry over HTTP
-        // rather than reopening cold WS and stripping the chain id.
+        // Turn 2: harness wants to chain via `prev_id`. The cached socket dies
+        // mid-stream; pool must reopen cold WS and strip the chain id rather
+        // than sticky-disabling WS for the session.
         let req2 = PromptPayload {
             system_prompt: "sys",
             messages: &[],
@@ -788,38 +758,42 @@ mod tests {
             previous_response: Some(crate::common::PreviousResponse {
                 id: &prev_id,
                 message_index: 0,
+                transport: Some(tau_proto::AgentBackendTransport::Websocket),
             }),
             originator: &tau_proto::PromptOriginator::User,
             session_id: &session_id,
             share_user_cache_key: false,
         };
-        let err =
-            match run_turn_through_pool(&mut pool, &config, "session-die", &req2, &mut on_update) {
-                Ok(_) => panic!("chained reconnect should move to HTTP"),
-                Err(err) => err,
-            };
-        assert!(
-            matches!(err, WsTurnError::HttpFallbackRecommended(_)),
-            "expected HTTP fallback recommendation, got {err:?}"
-        );
+        run_turn_through_pool(&mut pool, &config, "session-die", &req2, &mut on_update)
+            .expect("chained reconnect should rebuild WS warmth");
 
         let s = server.lock().expect("server lock");
         assert_eq!(
-            s.upgrade_count, 1,
-            "mid-stream close should not force a cold WS reopen"
+            s.upgrade_count, 2,
+            "mid-stream close should force one replacement WS upgrade"
         );
-        // Two captured requests in arrival order:
+        // Three captured requests in arrival order:
         //   #0: turn-1 on conn-0 (no chain id, no prior response)
         //   #1: turn-2 on conn-0 (had chain id; this is the one that died)
-        assert_eq!(s.requests.len(), 2, "expected no WS replay envelope");
+        //   #2: turn-2 replay on conn-1 (chain stripped for fresh WS)
+        assert_eq!(s.requests.len(), 3, "expected one WS replay envelope");
         assert!(
             s.requests[1].get("previous_response_id").is_some(),
             "turn-2 on the warm socket should still carry the chain id (warm cache path)"
+        );
+        assert!(
+            s.requests[2].get("previous_response_id").is_none(),
+            "replacement socket must not receive a stale chain id"
         );
         assert_eq!(
             pool.stats().silent_reconnects,
             1,
             "stat counter should record the silent reconnect"
+        );
+        assert_eq!(
+            pool.stats().chain_strips_on_fresh,
+            1,
+            "stat counter should record the cold WS rebuild"
         );
     }
 

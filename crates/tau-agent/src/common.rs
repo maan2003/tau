@@ -5,7 +5,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tau_proto::{
-    AgentToolCall, CborValue, ConversationMessage, PromptOriginator, SessionId, ToolDefinition,
+    AgentBackendTransport, AgentToolCall, CborValue, ConversationMessage, PromptOriginator,
+    SessionId, ToolDefinition,
 };
 
 /// The parts of a prompt needed by an LLM backend client.
@@ -60,6 +61,7 @@ pub struct PromptPayload<'a> {
 pub struct PreviousResponse<'a> {
     pub id: &'a str,
     pub message_index: usize,
+    pub transport: Option<AgentBackendTransport>,
 }
 
 /// Transport / protocol error returned from any LLM backend stream.
@@ -196,6 +198,9 @@ pub struct StreamState {
     /// Opaque Responses-API input items returned by a standalone
     /// compaction call.
     pub compacted_input_items: Vec<String>,
+    /// A stale `previous_response_id` was rejected and this successful stream
+    /// came from the full-replay retry.
+    pub stale_chain_fallback: bool,
 }
 
 /// Accumulates one tool call across streaming chunks.
@@ -225,6 +230,7 @@ impl StreamState {
             phase: None,
             reasoning_items: Vec::new(),
             compacted_input_items: Vec::new(),
+            stale_chain_fallback: false,
         }
     }
 

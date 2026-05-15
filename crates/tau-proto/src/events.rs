@@ -2147,6 +2147,11 @@ pub struct PreviousResponseRef {
     /// added since the prior response begin. Backends slicing for a
     /// delta call use `messages[message_index..]`.
     pub message_index: usize,
+    /// Transport that produced `id`, when known. Codex response ids can be
+    /// transport-scoped, so the agent uses this to avoid sending a WS-origin
+    /// id over HTTP after the socket that owned it died.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<AgentBackendTransport>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2383,6 +2388,11 @@ pub struct AgentBackend {
     /// before this field existed.
     #[serde(default)]
     pub transport: AgentBackendTransport,
+    /// The backend retried a rejected `previous_response_id` as a full replay.
+    /// Surfaced here so the harness and offline tools can tell a successful
+    /// response still paid the stale-chain recovery cost.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stale_chain_fallback: bool,
 }
 
 /// The provider API shape an [`AgentBackend`] talks.

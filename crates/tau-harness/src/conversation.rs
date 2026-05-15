@@ -20,8 +20,8 @@ use std::collections::VecDeque;
 
 use tau_core::NodeId;
 use tau_proto::{
-    ConnectionId, ModelId, ModelParams, PromptOriginator, SessionId, SessionPromptId, ToolCallId,
-    ToolChoice, ToolDefinition,
+    AgentBackendTransport, ConnectionId, ModelId, ModelParams, PromptOriginator, SessionId,
+    SessionPromptId, ToolCallId, ToolChoice, ToolDefinition,
 };
 
 use crate::dedup::ResultDedupMap;
@@ -259,6 +259,10 @@ pub(crate) struct ChainAnchor {
     /// `messages[message_count..]` to get the new content the upstream
     /// API hasn't seen yet.
     pub(crate) message_count: usize,
+    /// Transport that produced `response_id`. Codex chain ids can be scoped to
+    /// a transport (and WS ids are effectively socket-local), so the agent uses
+    /// this metadata to avoid invalid cross-transport chaining.
+    pub(crate) transport: AgentBackendTransport,
     /// Blake3 fingerprint of `(system_prompt, tools, model_params,
     /// tool_choice)` as observed when the anchor was minted. Codex rejects
     /// (or silently misinterprets) a chained request whose non-input fields
