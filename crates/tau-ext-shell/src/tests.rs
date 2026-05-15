@@ -13,11 +13,13 @@ use crate::agents::{discover_agents_files_from, discover_agents_files_from_roots
 use crate::argument::{
     cbor_map_int, cbor_map_text, optional_argument_bool, optional_argument_text,
 };
+use crate::tools::edit::edit_file;
 use crate::tools::find::run_find;
 use crate::tools::grep::{RipgrepError, classify_ripgrep_stderr, grep_result_map, run_grep};
 use crate::tools::ls::run_ls;
 use crate::tools::read::{format_read_range, read_file, slice_lines};
 use crate::tools::shell::{command_details_value, run_command};
+use crate::tools::write::write_file;
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, LS_TOOL_NAME,
     READ_TOOL_NAME, SHELL_TOOL_NAME, WRITE_TOOL_NAME,
@@ -104,6 +106,16 @@ fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
     match value {
         CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
             (CborValue::Text(k), CborValue::Integer(n)) if k == key => Some((*n).into()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+fn cbor_bool_field(value: &CborValue, key: &str) -> Option<bool> {
+    match value {
+        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
+            (CborValue::Text(k), CborValue::Bool(n)) if k == key => Some(*n),
             _ => None,
         }),
         _ => None,
@@ -303,7 +315,7 @@ fn extension_reads_file() {
     };
     assert_eq!(result.tool_name, READ_TOOL_NAME);
     assert_eq!(
-        optional_argument_text(&result.result, "content"),
+        optional_argument_text(&result.result, "line-numbered content"),
         Some("1 hello from file".to_owned())
     );
 
@@ -342,6 +354,85 @@ fn extension_read_missing_file_reports_error() {
         .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
+}
+
+#[test]
+fn write_result_reports_status_without_model_diff() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("output.txt");
+    fs::write(&file_path, "alpha beta gamma\nsame\n").expect("write fixture");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(file_path.display().to_string()),
+        ),
+        (
+            CborValue::Text("content".to_owned()),
+            CborValue::Text("alpha BETA gamma\nsame\n".to_owned()),
+        ),
+    ]);
+    let result = write_file(&args).expect("write").result;
+
+    assert_eq!(cbor_int_field(&result, "bytes_written"), Some(22));
+    assert_eq!(cbor_bool_field(&result, "created"), Some(false));
+    assert_eq!(cbor_bool_field(&result, "changed"), Some(true));
+    assert!(cbor_map_text(&result, "diff").is_none());
+}
+
+#[test]
+fn write_new_file_reports_created_without_model_diff() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("new.txt");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(file_path.display().to_string()),
+        ),
+        (
+            CborValue::Text("content".to_owned()),
+            CborValue::Text("created\n".to_owned()),
+        ),
+    ]);
+    let result = write_file(&args).expect("write").result;
+
+    assert_eq!(cbor_int_field(&result, "bytes_written"), Some(8));
+    assert_eq!(cbor_bool_field(&result, "created"), Some(true));
+    assert_eq!(cbor_bool_field(&result, "changed"), Some(true));
+    assert!(cbor_map_text(&result, "diff").is_none());
+}
+
+#[test]
+fn edit_self_replacement_counts_without_diff() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "same\n").expect("write fixture");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(file_path.display().to_string()),
+        ),
+        (
+            CborValue::Text("edits".to_owned()),
+            CborValue::Array(vec![CborValue::Map(vec![
+                (
+                    CborValue::Text("oldText".to_owned()),
+                    CborValue::Text("same".to_owned()),
+                ),
+                (
+                    CborValue::Text("newText".to_owned()),
+                    CborValue::Text("same".to_owned()),
+                ),
+            ])]),
+        ),
+    ]);
+    let result = edit_file(&args).expect("edit").result;
+
+    assert_eq!(cbor_int_field(&result, "replacements"), Some(1));
+    assert_eq!(cbor_bool_field(&result, "changed"), Some(false));
+    assert!(cbor_map_text(&result, "diff").is_none());
 }
 
 #[test]
@@ -1939,7 +2030,7 @@ fn read_file_honors_start_line_and_line_count() {
     let result = output.result;
     assert_eq!(output.display.args, format!("{} 2..4", path.display()));
     assert_eq!(
-        cbor_map_text(&result, "content"),
+        cbor_map_text(&result, "line-numbered content"),
         Some("2 line 2\n3 line 3\n4 line 4")
     );
     assert_eq!(cbor_int_field(&result, "start_line"), Some(2));
@@ -1967,7 +2058,7 @@ fn read_file_reports_empty_file_as_zero_lines() {
     )]);
     let result = read_file(&args).expect("read").result;
 
-    assert_eq!(cbor_map_text(&result, "content"), Some(""));
+    assert_eq!(cbor_map_text(&result, "line-numbered content"), Some(""));
     assert_eq!(cbor_int_field(&result, "start_line"), Some(1));
     assert_eq!(cbor_int_field(&result, "line_count"), Some(0));
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(0));
@@ -1985,7 +2076,10 @@ fn read_file_reports_no_trailing_newline_as_one_line() {
     )]);
     let result = read_file(&args).expect("read").result;
 
-    assert_eq!(cbor_map_text(&result, "content"), Some("1 text"));
+    assert_eq!(
+        cbor_map_text(&result, "line-numbered content"),
+        Some("1 text")
+    );
     assert_eq!(cbor_int_field(&result, "start_line"), Some(1));
     assert_eq!(cbor_int_field(&result, "line_count"), Some(1));
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(1));
@@ -2040,7 +2134,7 @@ fn read_file_truncates_large_output() {
         CborValue::Text(path.display().to_string()),
     )]);
     let result = read_file(&args).expect("read").result;
-    let content = cbor_map_text(&result, "content").expect("content field");
+    let content = cbor_map_text(&result, "line-numbered content").expect("content field");
     assert!(content.contains("line 1\n"));
     assert!(content.contains("[Showing lines 1-"));
     assert!(content.contains("Use start_line and line_count to continue reading."));

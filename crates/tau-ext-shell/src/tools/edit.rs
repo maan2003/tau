@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use tau_proto::{CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
 
 use crate::argument::{argument_array, argument_text, cbor_map_int, cbor_map_text};
-use crate::diff::{compute_diff, encode_diff};
+use crate::diff::{compute_diff, unified_diff};
 use crate::display::{ToolFailure, ToolOutput};
 
 pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
@@ -77,7 +77,9 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         result.replace_range(*start..*end, new_text);
     }
 
-    fs::write(&path_buf, &result).map_err(|e| with_args(ToolFailure::from(e.to_string())))?;
+    if result != original {
+        fs::write(&path_buf, &result).map_err(|e| with_args(ToolFailure::from(e.to_string())))?;
+    }
 
     let diff = compute_diff(&original, &result);
 
@@ -89,17 +91,7 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         ..Default::default()
     };
     Ok(ToolOutput {
-        result: CborValue::Map(vec![
-            (
-                CborValue::Text("path".to_owned()),
-                CborValue::Text(display_args),
-            ),
-            (
-                CborValue::Text("replacements".to_owned()),
-                CborValue::Integer((replacements.len() as i64).into()),
-            ),
-            (CborValue::Text("diff".to_owned()), encode_diff(&diff)),
-        ]),
+        result: edit_result_value(display_args, replacements.len(), &diff),
         display,
     })
 }
@@ -151,4 +143,26 @@ fn byte_offset_for_line(line_starts: &[usize], line: usize, eof: usize) -> usize
         .get(line.saturating_sub(1))
         .copied()
         .unwrap_or(eof)
+}
+
+fn edit_result_value(
+    path: String,
+    replacements: usize,
+    diff: &tau_proto::DiffSummary,
+) -> CborValue {
+    let mut entries = vec![
+        (CborValue::Text("path".to_owned()), CborValue::Text(path)),
+        (
+            CborValue::Text("replacements".to_owned()),
+            CborValue::Integer((replacements as i64).into()),
+        ),
+        (
+            CborValue::Text("changed".to_owned()),
+            CborValue::Bool(!diff.hunks.is_empty()),
+        ),
+    ];
+    if let Some(unified) = unified_diff(diff) {
+        entries.push((CborValue::Text("diff".to_owned()), CborValue::Text(unified)));
+    }
+    CborValue::Map(entries)
 }

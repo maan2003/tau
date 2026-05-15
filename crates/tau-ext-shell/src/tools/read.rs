@@ -33,7 +33,7 @@ pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
             CborValue::Text(display_args.clone()),
         ),
         (
-            CborValue::Text("content".to_owned()),
+            CborValue::Text("line-numbered content".to_owned()),
             CborValue::Text(truncated.content.clone()),
         ),
         (

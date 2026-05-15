@@ -1,7 +1,5 @@
 //! Text-diff helpers for the `write` and `edit` tools.
 
-use tau_proto::CborValue;
-
 /// Number of unchanged lines to keep around each hunk's edits.
 const DIFF_CONTEXT_LINES: usize = 3;
 
@@ -110,9 +108,59 @@ fn make_modify(old: &str, new: &str) -> tau_proto::DiffLine {
     }
 }
 
-/// Encode a [`tau_proto::DiffSummary`] as a [`CborValue`] sub-tree
-/// embedded in a tool result. `Value::serialized` honours the struct's
-/// serde derives without round-tripping bytes.
-pub(crate) fn encode_diff(summary: &tau_proto::DiffSummary) -> CborValue {
-    CborValue::serialized(summary).unwrap_or(CborValue::Null)
+pub(crate) fn unified_diff(summary: &tau_proto::DiffSummary) -> Option<String> {
+    if summary.hunks.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    for (index, hunk) in summary.hunks.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count
+        ));
+        for line in &hunk.lines {
+            match line {
+                tau_proto::DiffLine::Equal { text } => {
+                    out.push(' ');
+                    out.push_str(text);
+                    out.push('\n');
+                }
+                tau_proto::DiffLine::Remove { text } => {
+                    out.push('-');
+                    out.push_str(text);
+                    out.push('\n');
+                }
+                tau_proto::DiffLine::Add { text } => {
+                    out.push('+');
+                    out.push_str(text);
+                    out.push('\n');
+                }
+                tau_proto::DiffLine::Modify { old, new } => {
+                    out.push('-');
+                    out.push_str(&segments_text(old));
+                    out.push('\n');
+                    out.push('+');
+                    out.push_str(&segments_text(new));
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+fn segments_text(segments: &[tau_proto::DiffSegment]) -> String {
+    let mut text = String::new();
+    for segment in segments {
+        match segment {
+            tau_proto::DiffSegment::Equal { text: segment }
+            | tau_proto::DiffSegment::Remove { text: segment }
+            | tau_proto::DiffSegment::Add { text: segment } => text.push_str(segment),
+        }
+    }
+    text
 }

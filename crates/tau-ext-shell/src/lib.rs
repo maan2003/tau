@@ -87,8 +87,8 @@ where
                  Prefer one full read. Pass `start_line`/`line_count` only to \
                  resume past a previous truncation, or to fetch a specific \
                  known slice of a file you already know is large. Each returned \
-                 content line is prefixed by its 1-based line number and a space. \
-                 The result returns `path`, `content`, the `start_line` and \
+                 `line-numbered content` line is prefixed by its 1-based line number and a space. \
+                 The result returns `path`, `line-numbered content`, the `start_line` and \
                  `line_count` actually read, and the file's `total_lines`."
                     .to_owned(),
             ),
@@ -120,9 +120,8 @@ where
             model_visible_name: None,
             description: Some(
                 "Write content to a file, creating it if it does not exist. \
-                 Returns the path, bytes written, and a `diff` object \
-                 describing the change against the previous contents \
-                 (every line is an Add when the file is being created)."
+                 Returns the path, bytes written, whether the file was created, \
+                 and whether the contents changed."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
