@@ -46,6 +46,22 @@ Each debug log line includes fields such as:
 
 Use the durable `events.cbor` when debugging replay, persistence, or session-tree reconstruction. Use `events.jsonl` when debugging runtime behavior.
 
+## Drive a running session
+
+Use `cargo r -- dev send <session_id> <line...>` to inject user-equivalent input into a running daemon-bound session. This is useful for agent-powered debugging because it goes through the socket protocol and normal UI event path instead of editing persisted logs by hand.
+
+Examples:
+
+```bash
+cargo r -- dev send <session_id> "normal user message"
+cargo r -- dev send <session_id> /cancel
+cargo r -- dev send <session_id> /model smart
+cargo r -- dev send <session_id> /compact
+cargo r -- dev send <session_id> '!pwd'
+```
+
+The command requires the session id and finds the matching running daemon via its runtime `tau.session_id` marker. It supports normal prompts, core slash commands, and `!` / `!!` shell-command submissions.
+
 ## Quick inspection workflow
 
 1. Identify the session id. If unsure, list `~/.local/state/tau/sessions/` and sort by `meta.json` or directory mtime.

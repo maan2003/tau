@@ -113,6 +113,16 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum DevCommand {
+    /// Send one line to a running session.
+    Send {
+        /// Running session identifier.
+        session_id: String,
+
+        /// Line to submit. Slash commands are interpreted like the TUI.
+        #[arg(required = true, trailing_var_arg = true)]
+        line: Vec<String>,
+    },
+
     /// Dump the initial provider prompt built from local config.
     DumpInitialPrompt {
         /// Output path.

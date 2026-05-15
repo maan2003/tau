@@ -6,6 +6,7 @@ pub mod cli;
 mod chat;
 mod daemon;
 mod event_renderer;
+mod send;
 mod settings_registry;
 mod tool_render;
 mod ui_logging;
@@ -358,6 +359,9 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             }
 
             cli::Command::Dev { command } => match command {
+                cli::DevCommand::Send { session_id, line } => {
+                    send::run_send(&session_id, &line.join(" "))
+                }
                 cli::DevCommand::DumpInitialPrompt { out, message } => {
                     tau_harness::dump_initial_prompt(&out, &message)?;
                     println!("wrote {}", out.display());
