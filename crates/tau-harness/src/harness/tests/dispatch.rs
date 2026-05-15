@@ -684,9 +684,72 @@ fn chained_low_corrected_cache_hit_emits_diagnostic() {
     assert_eq!(diagnostic.input_tokens, 1_100);
     assert_eq!(diagnostic.cached_tokens, 0);
     assert_eq!(diagnostic.previous_input_tokens, 1_000);
-    assert_eq!(diagnostic.cacheable_input_tokens, 1_000);
+    assert_eq!(diagnostic.cacheable_input_tokens, 512);
     assert_eq!(diagnostic.corrected_cache_efficiency, 0.0);
     assert_eq!(diagnostic.request_body_fingerprint.len(), 64);
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    h.submit_user_prompt("s1".into(), "first".to_owned())
+        .expect("submit first");
+    let spid1: SessionPromptId = "sp-0".into();
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid1,
+        text: Some("first answer".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: Some(500),
+        cached_tokens: Some(0),
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        response_id: Some("resp_abc".to_owned()),
+        phase: None,
+        reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
+        ws_pool_delta: None,
+    })
+    .expect("finish first");
+
+    h.submit_user_prompt("s1".into(), "second".to_owned())
+        .expect("submit second");
+    let spid2: SessionPromptId = "sp-1".into();
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid2,
+        text: Some("second answer".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: Some(500),
+        cached_tokens: Some(0),
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        response_id: Some("resp_def".to_owned()),
+        phase: None,
+        reasoning_items: Vec::new(),
+        compacted_input_items: Vec::new(),
+        ws_pool_delta: None,
+    })
+    .expect("finish second");
+
+    let mut cursor = 0;
+    while let Some(entry) = h.event_log.get_next_from(cursor) {
+        cursor = entry.seq + 1;
+        assert!(
+            !matches!(entry.event, Event::AgentCacheMissDiagnostic(_)),
+            "sub-cache-chunk turn must not emit cache miss diagnostic"
+        );
+    }
 
     h.shutdown().expect("shutdown");
 }

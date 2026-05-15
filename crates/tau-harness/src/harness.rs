@@ -4086,14 +4086,19 @@ impl Harness {
         ) else {
             return;
         };
+        const PROMPT_CACHE_CHUNK_TOKENS: u64 = 512;
+
         let cacheable_input_tokens = previous_input_tokens.min(input_tokens);
+        let cacheable_input_tokens =
+            cacheable_input_tokens / PROMPT_CACHE_CHUNK_TOKENS * PROMPT_CACHE_CHUNK_TOKENS;
         if cacheable_input_tokens == 0 {
             return;
         }
         // Corrected efficiency ignores newly-added prompt content by
         // comparing cached tokens to the smaller of the previous and
-        // current input totals. Emit only clear misses; healthy
-        // chained turns should be close to 1.0 here.
+        // current input totals, rounded down to the provider cache
+        // chunk size. Emit only clear misses; healthy chained turns
+        // should be close to 1.0 here.
         if cacheable_input_tokens < cached_tokens.saturating_mul(2) {
             return;
         }
