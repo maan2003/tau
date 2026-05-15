@@ -545,8 +545,7 @@ fn touch_meta_for_event(path: &Path, event: &Event) -> Result<(), SessionStoreEr
 
 fn user_prompt_text(event: &Event) -> Option<&str> {
     match event {
-        Event::UiPromptSubmitted(prompt) => Some(&prompt.text),
-        Event::SessionUserMessageInjected(injected) => Some(&injected.text),
+        Event::UiPromptSubmitted(prompt) if prompt.originator.is_user() => Some(&prompt.text),
         Event::SessionPromptSteered(steered) => Some(&steered.text),
         _ => None,
     }

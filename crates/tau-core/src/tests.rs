@@ -1,7 +1,8 @@
 use tau_proto::{
     AgentResponseFinished, CborValue, ClientKind, ConnectionId, Event, EventName, EventSelector,
-    Frame, ToolRegister, ToolRequest, ToolResult, ToolSideEffects, ToolSpec, ToolType,
-    UiNavigateTree, UiPromptSubmitted,
+    Frame, PromptOriginator, SessionPromptSteered, SessionUserMessageInjected, ToolRegister,
+    ToolRequest, ToolResult, ToolSideEffects, ToolSpec, ToolType, UiNavigateTree,
+    UiPromptSubmitted,
 };
 use tempfile::TempDir;
 
@@ -12,7 +13,7 @@ use crate::connection::{
 use crate::memory::{MemoryInbox, MemorySink, memory_connection};
 use crate::policy::{DefaultSubscriptionPolicy, PolicyStore, SubscriptionApproval};
 use crate::session::{NodeId, SessionEntry, ToolActivityOutcome, ToolActivityRecord};
-use crate::session_store::SessionStore;
+use crate::session_store::{SessionStore, list_session_metas};
 use crate::tool_registry::{ToolRegistry, ToolRegistryWarning};
 
 /// Helper used by the SessionStore-focused unit tests below: append
@@ -674,6 +675,74 @@ fn session_tree_persists_across_reopen() {
     assert_eq!(
         tree.node(NodeId::new(1)).expect("node 1").parent_id,
         Some(NodeId::new(0))
+    );
+}
+
+#[test]
+fn session_meta_preview_tracks_only_user_authored_prompts() {
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let store_path = tempdir.path().join("state");
+    let session_id = "preview-session";
+
+    let mut store = SessionStore::open(&store_path).expect("store should open");
+    store_user_message(&mut store, session_id, "initial user prompt");
+    store
+        .append_session_event(
+            session_id,
+            None,
+            Event::UiPromptSubmitted(UiPromptSubmitted {
+                session_id: session_id.into(),
+                text: "idle summary side query".to_owned(),
+                originator: PromptOriginator::Extension {
+                    name: "std-notifications".into(),
+                    query_id: "idle-0".to_owned(),
+                },
+                ctx_id: None,
+            }),
+        )
+        .expect("append extension side query");
+    store
+        .append_session_event(
+            session_id,
+            None,
+            Event::SessionUserMessageInjected(SessionUserMessageInjected {
+                session_id: session_id.into(),
+                text: "harness injected context".to_owned(),
+            }),
+        )
+        .expect("append injected message");
+
+    let metas = list_session_metas(&store_path).expect("list session metas");
+    let meta = metas
+        .iter()
+        .find(|(sid, _)| sid.as_str() == session_id)
+        .map(|(_, meta)| meta)
+        .expect("session meta exists");
+    assert_eq!(
+        meta.latest_user_prompt_preview.as_deref(),
+        Some("initial user prompt")
+    );
+
+    store
+        .append_session_event(
+            session_id,
+            None,
+            Event::SessionPromptSteered(SessionPromptSteered {
+                session_id: session_id.into(),
+                text: "queued user followup".to_owned(),
+            }),
+        )
+        .expect("append queued user prompt");
+
+    let metas = list_session_metas(&store_path).expect("list session metas");
+    let meta = metas
+        .iter()
+        .find(|(sid, _)| sid.as_str() == session_id)
+        .map(|(_, meta)| meta)
+        .expect("session meta exists");
+    assert_eq!(
+        meta.latest_user_prompt_preview.as_deref(),
+        Some("queued user followup")
     );
 }
 
