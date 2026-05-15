@@ -1302,9 +1302,9 @@ pub struct ToolDisplay {
 }
 
 /// One labelled counter rendered as an info chip. Shape depends on
-/// `unit` and which of `current` / `total` are populated:
-/// - `Count`: `N` (current only) or `N/M` (both).
-/// - `Percent`: `N%` (current only) or `N%/M` (both — `M` is e.g. a context
+/// `unit` and which of `complete` / `total` are populated:
+/// - `Count`: `N` (complete only) or `N/M` (both).
+/// - `Percent`: `N%` (complete only) or `N%/M` (both — `M` is e.g. a context
 ///   window size, formatted by [`format_token_count`]).
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ProgressCounter {
@@ -1313,11 +1313,11 @@ pub struct ProgressCounter {
     /// unlabelled chip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// What `current` and `total` represent. Picks the rendering.
+    /// What `complete` and `total` represent. Picks the rendering.
     pub unit: ProgressUnit,
-    /// Current value. `None` is rendered as `?`.
+    /// Completed amount. `None` is rendered as `?`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current: Option<u64>,
+    pub complete: Option<u64>,
     /// Optional denominator. For `Count`, the cumulative total; for
     /// `Percent`, the underlying span (e.g. context window size).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1331,7 +1331,7 @@ pub enum ProgressUnit {
     /// doesn't specify.
     #[default]
     Count,
-    /// `current` is a percent 0..=100. Renders as `N%` or
+    /// `complete` is a percent 0..=100. Renders as `N%` or
     /// `N%/format_token_count(total)`.
     Percent,
 }

@@ -494,13 +494,13 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
 
 fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolSuffixSegment {
     let body = match counter.unit {
-        tau_proto::ProgressUnit::Count => match (counter.current, counter.total) {
+        tau_proto::ProgressUnit::Count => match (counter.complete, counter.total) {
             (Some(c), Some(t)) => format!("{c}/{t}"),
             (Some(c), None) => c.to_string(),
             (None, Some(t)) => format!("?/{t}"),
             (None, None) => "?".to_owned(),
         },
-        tau_proto::ProgressUnit::Percent => match (counter.current, counter.total) {
+        tau_proto::ProgressUnit::Percent => match (counter.complete, counter.total) {
             (Some(p), Some(t)) => format!("{p}%/{}", format_token_count(t)),
             (Some(p), None) => format!("{p}%"),
             (None, Some(t)) => format!("?%/{}", format_token_count(t)),

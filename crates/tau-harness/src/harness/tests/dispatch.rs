@@ -2,7 +2,7 @@ use super::*;
 
 fn assert_delegate_tools_counter(
     progress: &tau_proto::DelegateProgress,
-    current: Option<u64>,
+    complete: Option<u64>,
     total: Option<u64>,
 ) {
     let display = progress
@@ -14,7 +14,7 @@ fn assert_delegate_tools_counter(
         .iter()
         .find(|counter| counter.label.as_deref() == Some("tools"))
         .expect("tools progress counter");
-    assert_eq!(counter.current, current);
+    assert_eq!(counter.complete, complete);
     assert_eq!(counter.total, total);
 }
 

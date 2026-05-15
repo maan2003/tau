@@ -5358,7 +5358,7 @@ fn build_delegate_progress_display(
         counters.push(ProgressCounter {
             label: Some("ctx".to_owned()),
             unit: ProgressUnit::Percent,
-            current: ctx_percent.map(u64::from),
+            complete: ctx_percent.map(u64::from),
             total: ctx_window,
         });
     }
@@ -5366,7 +5366,7 @@ fn build_delegate_progress_display(
     counters.push(ProgressCounter {
         label: Some("tools".to_owned()),
         unit: ProgressUnit::Count,
-        current: Some(u64::from(tools_completed)),
+        complete: Some(u64::from(tools_completed)),
         total: Some(u64::from(tools_total)),
     });
     tau_proto::ToolDisplay {
