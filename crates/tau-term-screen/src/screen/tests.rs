@@ -899,3 +899,42 @@ fn scrollback_rebuilt_after_resize() {
     assert_eq!(scrolled[1], "bbbbbbbb", "scrollback row 1 after resize");
     assert_eq!(scrolled[2], "cccccccc", "scrollback row 2 after resize");
 }
+
+#[test]
+fn repeated_scrolling_growth_does_not_duplicate_overflow_rows() {
+    let width = 5;
+    let height = 3;
+    let mut term = vt100::Parser::new(height, width, 20);
+    let mut screen = Screen::new(width as usize);
+
+    let frames: Vec<Vec<&str>> = vec![
+        vec!["aaaaa", "bbbbb", "ccccc"],
+        vec!["aaaaa", "bbbbb", "ccccc", "ddddd"],
+        vec!["aaaaa", "bbbbb", "ccccc", "ddddd", "eeeee"],
+    ];
+
+    let mut prev_visible_start = 0;
+    for frame in &frames {
+        let lines = plain_cell_lines(frame);
+        let mut buf = Vec::new();
+        let cursor_row = frame.len().saturating_sub(1);
+        screen
+            .render_scrolling(
+                &mut buf,
+                &lines,
+                prev_visible_start,
+                height as usize,
+                (cursor_row, width as usize),
+            )
+            .expect("scroll render should succeed");
+        term.process(&buf);
+        prev_visible_start = frame.len().saturating_sub(height as usize);
+    }
+
+    let visible: Vec<String> = term.screen().rows(0, width).collect();
+    assert_eq!(visible, vec!["ccccc", "ddddd", "eeeee"]);
+
+    term.screen_mut().set_scrollback(2);
+    let scrolled: Vec<String> = term.screen().rows(0, width).collect();
+    assert_eq!(scrolled, vec!["aaaaa", "bbbbb", "ccccc"]);
+}
