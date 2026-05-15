@@ -1,5 +1,23 @@
 use super::*;
 
+fn assert_delegate_tools_counter(
+    progress: &tau_proto::DelegateProgress,
+    current: Option<u64>,
+    total: Option<u64>,
+) {
+    let display = progress
+        .display
+        .as_ref()
+        .expect("delegate progress display");
+    let counter = display
+        .progress_counters
+        .iter()
+        .find(|counter| counter.label.as_deref() == Some("tools"))
+        .expect("tools progress counter");
+    assert_eq!(counter.current, current);
+    assert_eq!(counter.total, total);
+}
+
 #[test]
 fn cross_session_prompt_is_rejected() {
     // The harness owns one session at a time. A UserMessage with
@@ -2599,6 +2617,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     assert_eq!(initial.task_name, "look it up");
     assert_eq!(initial.tools_in_flight, 0);
     assert_eq!(initial.tools_total, 0);
+    assert_delegate_tools_counter(&initial, Some(0), Some(0));
 
     let side_spid = h
         .prompt_conversations
@@ -2645,6 +2664,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     assert_eq!(latest.task_name, "look it up");
     assert_eq!(latest.tools_in_flight, 1, "websearch is in flight");
     assert_eq!(latest.tools_total, 1, "websearch counts toward total");
+    assert_delegate_tools_counter(&latest, Some(0), Some(1));
     assert_eq!(latest.ctx_input_tokens, Some(1234));
 
     // Complete the sub-agent's tool — counters should drop and a
@@ -2665,6 +2685,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         .expect("DelegateProgress after sub-tool completion");
     assert_eq!(after_complete.tools_in_flight, 0);
     assert_eq!(after_complete.tools_total, 1);
+    assert_delegate_tools_counter(&after_complete, Some(1), Some(1));
 
     h.shutdown().expect("shutdown");
 }
