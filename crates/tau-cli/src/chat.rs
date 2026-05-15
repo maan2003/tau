@@ -520,6 +520,14 @@ fn terminal_input_loop(
             themed_block(&ctx.theme, names::SYSTEM_INFO, message.to_owned()),
         );
     };
+    let print_local_command = |text: &str| {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+        local_handle.print_output(
+            "user-command",
+            themed_block(&ctx.theme, names::USER_PROMPT, text.to_owned()),
+        );
+    };
     use tau_cli_term::Event as TermEvent;
 
     loop {
@@ -531,6 +539,9 @@ fn terminal_input_loop(
                 }
                 if let Ok(mut context) = ctx.editor_context.lock() {
                     context.previous_prompt = Some(text.to_owned());
+                }
+                if is_local_slash_command(text) {
+                    print_local_command(text);
                 }
                 if text == "/quit" {
                     return Ok(InputLoopExit::Quit);
@@ -919,6 +930,27 @@ fn build_set_arg_completer(
         }
         _ => Vec::new(),
     })
+}
+
+pub(crate) fn is_local_slash_command(text: &str) -> bool {
+    let command = text.split_whitespace().next().unwrap_or(text);
+    matches!(
+        command,
+        "/quit"
+            | "/cancel"
+            | "/detach"
+            | "/new"
+            | "/tree"
+            | "/compact"
+            | "/effort"
+            | "/fast"
+            | "/verbosity"
+            | "/thinking-summary"
+            | "/provider-auth"
+            | "/set"
+            | "/role"
+            | "/model"
+    )
 }
 
 /// Parse and dispatch `/set <name> <value>`. Validation lives here

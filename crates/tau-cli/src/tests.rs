@@ -10,12 +10,21 @@ use tau_proto::{
     UiPromptSubmitted, Verbosity,
 };
 
-use super::chat::{DraftSlot, should_send_draft_snapshot};
+use super::chat::{DraftSlot, is_local_slash_command, should_send_draft_snapshot};
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
     ToolStatus, build_osc1337_set_user_var, cache_hit_percent, format_token_stats_line,
     render_token_stats_block, render_tool_display, streaming_block, synthesize_fallback_display,
 };
+
+#[test]
+fn local_slash_commands_are_identified_for_history_rendering() {
+    assert!(is_local_slash_command("/model smart"));
+    assert!(is_local_slash_command("/set show-tools compact"));
+    assert!(is_local_slash_command("/quit"));
+    assert!(!is_local_slash_command("/unknown please answer"));
+    assert!(!is_local_slash_command("hello /model smart"));
+}
 
 /// Writer that feeds bytes into a vt100::Parser. Bytes are
 /// buffered per-write and flushed atomically to the parser on
