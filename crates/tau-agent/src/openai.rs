@@ -78,7 +78,7 @@ pub fn chat_completion_stream(
     let reader = std::io::BufReader::new(response.into_reader());
     let mut state = StreamState::new();
 
-    for line in reader.lines() {
+    for (line_index, line) in reader.lines().enumerate() {
         let line = line.map_err(LlmError::Io)?;
 
         // SSE format: lines starting with "data: "
@@ -86,13 +86,31 @@ pub fn chat_completion_stream(
             continue;
         };
 
+        tracing::trace!(
+            target: crate::LOG_TARGET,
+            session_id = %request.session_id,
+            line_index,
+            sse_data = %data,
+            "chat completions raw SSE data"
+        );
+
         if data == "[DONE]" {
             break;
         }
 
         let chunk: StreamChunk = match serde_json::from_str(data) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(error) => {
+                tracing::trace!(
+                    target: crate::LOG_TARGET,
+                    session_id = %request.session_id,
+                    line_index,
+                    %error,
+                    sse_data = %data,
+                    "ignored malformed chat completions SSE data"
+                );
+                continue;
+            }
         };
 
         if tracing::enabled!(target: crate::LOG_TARGET, tracing::Level::TRACE)
