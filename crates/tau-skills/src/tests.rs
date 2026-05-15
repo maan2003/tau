@@ -439,27 +439,47 @@ fn load_from_dirs_is_sorted_by_name() {
 }
 
 #[test]
-fn discover_does_not_follow_symlinks() {
-    // Symlinks would otherwise let a cycle (or a stray link into the
-    // user's home) recurse forever. Make sure we just skip them.
+fn discover_follows_symlinked_dirs() {
     use std::os::unix::fs::symlink;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let real = tmp.path().join("real");
+    let real = tmp.path().join("real-skill");
     fs::create_dir_all(&real).expect("mkdir");
     fs::write(
         real.join("SKILL.md"),
-        "---\nname: real\ndescription: real skill\n---\n",
+        "---\nname: real-skill\ndescription: real skill\n---\n",
     )
     .expect("write");
 
     let link = tmp.path().join("link");
     symlink(&real, &link).expect("symlink");
 
-    let paths = discover_skill_paths(tmp.path());
-    // Only the non-symlinked copy is discovered.
+    let paths = discover_skill_paths(&link);
     assert_eq!(paths.len(), 1);
-    assert!(paths[0].starts_with(&real));
+    assert!(paths[0].starts_with(&link));
+}
+
+#[test]
+fn discover_symlink_cycles_do_not_recurse_forever() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real = tmp.path().join("real");
+    let b = real.join("b");
+    fs::create_dir_all(&b).expect("mkdir");
+    fs::write(
+        b.join("SKILL.md"),
+        "---\nname: b\ndescription: nested skill\n---\n",
+    )
+    .expect("write");
+    symlink(&real, b.join("cycle")).expect("symlink");
+
+    let link = tmp.path().join("link");
+    symlink(&real, &link).expect("symlink");
+
+    let paths = discover_skill_paths(&link);
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].ends_with("b/SKILL.md"));
 }
 
 // -- strip_frontmatter --------------------------------------------------

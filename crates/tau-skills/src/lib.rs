@@ -337,7 +337,8 @@ pub fn load_skill_from_content(
 ///    skills.
 /// 3. Recurse into subdirectories to find `SKILL.md`.
 /// 4. Skip dot-prefixed entries and `node_modules`.
-/// 5. Symlinks are not followed (avoids unbounded recursion through cycles).
+/// 5. Symlinked directories are checked only for their own `SKILL.md`, without
+///    recursing into children.
 pub fn discover_skill_paths(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     discover_skill_paths_inner(root, true, &mut paths);
@@ -379,19 +380,38 @@ fn discover_skill_paths_inner(dir: &Path, is_root: bool, out: &mut Vec<PathBuf>)
             continue;
         };
 
-        // Refuse to follow symlinks — discovery is local-only and we don't
-        // want a cycle (or a stray link into the user's home) to blow the
-        // stack or pull in unrelated files.
-        if file_type.is_symlink() {
-            continue;
-        }
-
         let path = entry.path();
         if file_type.is_dir() {
             discover_skill_paths_inner(&path, false, out);
+        } else if file_type.is_symlink() {
+            scan_symlink_dir_once(&path, out);
         } else if file_type.is_file() && is_root && name_str.ends_with(".md") {
             out.push(path);
         }
+    }
+}
+
+fn scan_symlink_dir_once(path: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    if !metadata.is_dir() {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    let children: Vec<fs::DirEntry> = entries.flatten().collect();
+
+    let skill_md = children.iter().find(|e| {
+        if e.file_name() != SKILL_FILENAME {
+            return false;
+        }
+        e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+    });
+    if let Some(entry) = skill_md {
+        out.push(entry.path());
     }
 }
 
