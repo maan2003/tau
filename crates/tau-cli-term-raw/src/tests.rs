@@ -1226,6 +1226,64 @@ fn multiline_buffer_layout_tracks_cursor_after_paste() {
 }
 
 #[test]
+fn long_multiline_prompt_scrolls_viewport_to_cursor() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(5, 10, 20);
+
+    let (term, handle, input_tx) =
+        Term::new_virtual(10, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    let text = (0..8)
+        .map(|idx| format!("line{idx:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    input_tx
+        .send(RawEvent::Paste(text.clone()))
+        .expect("send paste");
+    assert!(matches!(
+        term.get_next_event().expect("paste event"),
+        Event::BufferChanged
+    ));
+    flush_redraws(&handle, &buf, &mut parser);
+    assert_eq!(vt100_rows(&parser, 10)[0], "line03");
+
+    let full_renders = handle.full_render_count();
+    for _ in 0..5 {
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            )))
+            .expect("send up");
+        assert!(matches!(
+            term.get_next_event().expect("up event"),
+            Event::BufferChanged
+        ));
+    }
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_eq!(vt100_rows(&parser, 10)[0], "line02");
+    assert_eq!(parser.screen().cursor_position(), (0, 6));
+    assert_eq!(handle.full_render_count(), full_renders + 1);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('X'),
+            KeyModifiers::NONE,
+        )))
+        .expect("send char");
+    assert!(matches!(
+        term.get_next_event().expect("type event"),
+        Event::BufferChanged
+    ));
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert!(handle.get_buffer().contains("line02X\nline03"));
+    assert_eq!(vt100_rows(&parser, 10)[0], "line02X");
+    assert_eq!(parser.screen().cursor_position(), (0, 7));
+}
+
+#[test]
 fn paste_normalizes_crlf_so_cursor_matches_rendered_multiline_buffer() {
     let buf = SharedBuffer::new();
     let mut parser = vt100::Parser::new(5, 10, 20);

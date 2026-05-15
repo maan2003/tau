@@ -1642,6 +1642,7 @@ struct TerminalModel {
 }
 
 impl TerminalModel {
+    #[cfg(test)]
     fn desired_viewport_start(layout: &LayoutAll, height: usize) -> usize {
         layout.all_lines.len().saturating_sub(height)
     }
@@ -1682,8 +1683,28 @@ impl TerminalModel {
         }
     }
 
+    #[cfg(test)]
     fn bottom_aligned_plan(layout: &LayoutAll, height: usize) -> ViewPlan {
         let mut plan = Self::build_plan(layout, Self::desired_viewport_start(layout, height), 0);
+        plan.viewport_start = plan.visible_start(height);
+        plan
+    }
+
+    fn keep_cursor_visible(mut plan: ViewPlan, height: usize) -> ViewPlan {
+        let height = height.max(1);
+        let bottom_start = plan.visible_start(height);
+        let viewport_start = viewport_start_with_cursor(
+            bottom_start,
+            plan.cursor_row,
+            plan.render_lines.len(),
+            height,
+        );
+
+        if viewport_start < bottom_start {
+            let viewport_end = (viewport_start + height).min(plan.render_lines.len());
+            plan.render_lines.truncate(viewport_end);
+        }
+
         plan.viewport_start = plan.visible_start(height);
         plan
     }
@@ -1715,9 +1736,8 @@ impl TerminalModel {
         }
 
         viewport_start = viewport_start.min(log_height);
-        let mut plan = Self::build_plan(layout, viewport_start, rubber_height);
-        plan.viewport_start = plan.visible_start(height);
-        plan
+        let plan = Self::build_plan(layout, viewport_start, rubber_height);
+        Self::keep_cursor_visible(plan, height)
     }
 
     fn reset_to_plan(&mut self, layout: LayoutAll, plan: &ViewPlan) {
@@ -1946,7 +1966,8 @@ fn redraw_loop(
             } else {
                 "force_full"
             };
-            let visible_start = TerminalModel::desired_viewport_start(&layout, height);
+            let plan = terminal_model.plan_view(&layout, height);
+            let visible_start = plan.viewport_start;
             mark_full_render(
                 &state,
                 &layout,
@@ -1959,7 +1980,6 @@ fn redraw_loop(
                     previous_source: None,
                 },
             );
-            let plan = TerminalModel::bottom_aligned_plan(&layout, height);
             if let Err(e) = full_render(&mut writer, &mut screen, &layout, &plan, width, height) {
                 tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
             }
@@ -1971,7 +1991,28 @@ fn redraw_loop(
             let plan = terminal_model.plan_view(&layout, height);
             let visible_start = plan.viewport_start;
 
-            if hidden_prefix_changed {
+            if visible_start < terminal_model.viewport_start {
+                // The desired viewport moved upward to keep the input cursor
+                // visible. Rows that should re-enter the screen may currently
+                // exist only in terminal scrollback, which cannot be pulled
+                // back incrementally.
+                mark_full_render(
+                    &state,
+                    &layout,
+                    FullRenderMark {
+                        reason: "viewport_moved_up",
+                        prev_visible_start: terminal_model.viewport_start,
+                        visible_start,
+                        height,
+                        changed_line: None,
+                        previous_source: None,
+                    },
+                );
+                if let Err(e) = full_render(&mut writer, &mut screen, &layout, &plan, width, height)
+                {
+                    tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
+                }
+            } else if hidden_prefix_changed {
                 // The terminal scrollback contains rows whose logical content
                 // changed. Rebuild it from logical content instead of trying to
                 // patch it incrementally. Rows that are still physically
@@ -2113,6 +2154,25 @@ fn describe_line_source(source: Option<&LineSource>) -> String {
         Some(LineSource::Input { wrapped_row }) => format!("input row {wrapped_row}"),
         None => "<missing>".to_owned(),
     }
+}
+
+fn viewport_start_with_cursor(
+    viewport_start: usize,
+    cursor_row: usize,
+    total_rows: usize,
+    height: usize,
+) -> usize {
+    let height = height.max(1);
+    let max_start = total_rows.saturating_sub(height);
+    let mut start = viewport_start.min(max_start);
+
+    if cursor_row < start {
+        start = cursor_row;
+    } else if start + height <= cursor_row {
+        start = (cursor_row + 1).saturating_sub(height);
+    }
+
+    start.min(max_start)
 }
 
 fn hidden_lines_changed(
