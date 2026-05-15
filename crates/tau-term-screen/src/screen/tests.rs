@@ -670,13 +670,13 @@ fn render_scrolling_after_exact_width_line_does_not_duplicate_rows() {
     screen
         .render_scrolling(&mut buf, &all_lines, 0, height, (3, width))
         .expect("scroll render should succeed");
-    let has_bare_lf = buf
+    let has_unanchored_lf = buf
         .iter()
         .enumerate()
-        .any(|(idx, byte)| *byte == b'\n' && (idx == 0 || buf[idx - 1] != b'\r'));
+        .any(|(idx, byte)| *byte == b'\n' && (idx == 0 || buf[idx - 1] != b'G'));
     assert!(
-        !has_bare_lf,
-        "scrolling movement must reset to column 0 before moving down: {buf:?}"
+        !has_unanchored_lf,
+        "scrolling movement must move to column 0 before moving down: {buf:?}"
     );
     term.process(&buf);
 
@@ -898,6 +898,139 @@ fn scrollback_rebuilt_after_resize() {
     assert_eq!(scrolled[0], "aaaaaaaa", "scrollback row 0 after resize");
     assert_eq!(scrolled[1], "bbbbbbbb", "scrollback row 1 after resize");
     assert_eq!(scrolled[2], "cccccccc", "scrollback row 2 after resize");
+}
+
+struct PendingWrapTerm {
+    width: usize,
+    height: usize,
+    rows: Vec<String>,
+    scrollback: Vec<String>,
+    row: usize,
+    col: usize,
+    pending_wrap: bool,
+}
+
+impl PendingWrapTerm {
+    fn new(width: usize, rows: &[&str], cursor: (usize, usize)) -> Self {
+        Self {
+            width,
+            height: rows.len(),
+            rows: rows.iter().map(|row| (*row).to_owned()).collect(),
+            scrollback: Vec::new(),
+            row: cursor.0,
+            col: cursor.1.min(width.saturating_sub(1)),
+            pending_wrap: cursor.1 == width,
+        }
+    }
+
+    fn process(&mut self, bytes: &[u8]) {
+        let mut idx = 0;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'\x1b' => {
+                    idx = self.process_escape(bytes, idx + 1);
+                }
+                b'\r' => {
+                    self.col = 0;
+                    idx += 1;
+                }
+                b'\n' => {
+                    if self.pending_wrap {
+                        self.advance_line();
+                        self.pending_wrap = false;
+                    }
+                    self.advance_line();
+                    idx += 1;
+                }
+                byte => {
+                    self.print(byte as char);
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    fn process_escape(&mut self, bytes: &[u8], mut idx: usize) -> usize {
+        if bytes.get(idx) != Some(&b'[') {
+            return idx;
+        }
+        idx += 1;
+        let start = idx;
+        while bytes.get(idx).is_some_and(u8::is_ascii_digit) {
+            idx += 1;
+        }
+        let n = std::str::from_utf8(&bytes[start..idx])
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1);
+        match bytes.get(idx) {
+            Some(b'A') => {
+                self.row = self.row.saturating_sub(n);
+                self.pending_wrap = false;
+                idx + 1
+            }
+            Some(b'G') => {
+                self.col = n.saturating_sub(1).min(self.width.saturating_sub(1));
+                self.pending_wrap = false;
+                idx + 1
+            }
+            Some(b'K') => {
+                self.rows[self.row].truncate(self.col);
+                self.pending_wrap = false;
+                idx + 1
+            }
+            _ => idx,
+        }
+    }
+
+    fn print(&mut self, ch: char) {
+        if self.pending_wrap {
+            self.advance_line();
+            self.pending_wrap = false;
+        }
+        while self.rows[self.row].len() < self.col {
+            self.rows[self.row].push(' ');
+        }
+        if self.col < self.rows[self.row].len() {
+            self.rows[self.row].replace_range(self.col..self.col + 1, &ch.to_string());
+        } else {
+            self.rows[self.row].push(ch);
+        }
+        if self.col + 1 == self.width {
+            self.pending_wrap = true;
+        } else {
+            self.col += 1;
+        }
+    }
+
+    fn advance_line(&mut self) {
+        if self.row + 1 == self.height {
+            self.scrollback.push(self.rows.remove(0));
+            self.rows.push(String::new());
+        } else {
+            self.row += 1;
+        }
+    }
+}
+
+#[test]
+fn scrolling_from_pending_wrap_scrolls_once() {
+    let width = 5;
+    let height = 3;
+    let mut screen = Screen::new(width);
+    screen.reset_to(plain_cell_lines(&["bbbbb", "ccccc", "ddddd"]), 2, width);
+
+    let all = plain_cell_lines(&["aaaaa", "bbbbb", "ccccc", "ddddd", "eeeee"]);
+    let mut buf = Vec::new();
+    screen
+        .render_scrolling(&mut buf, &all, 1, height, (4, width))
+        .expect("scroll render should succeed");
+
+    let mut term = PendingWrapTerm::new(width, &["bbbbb", "ccccc", "ddddd"], (2, width));
+    term.process(&buf);
+
+    assert_eq!(term.scrollback, vec!["bbbbb"]);
+    assert_eq!(term.rows, vec!["ccccc", "ddddd", "eeeee"]);
 }
 
 #[test]

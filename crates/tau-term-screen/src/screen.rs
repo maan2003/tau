@@ -257,11 +257,11 @@ impl Screen {
         if render_start > viewport_bottom() {
             let to_bottom = (height - 1).saturating_sub(self.cursor_row);
             for _ in 0..to_bottom {
-                w.queue(Print("\r\n"))?;
+                self.move_down_one(w)?;
             }
             let scroll = render_start - viewport_bottom();
             for _ in 0..scroll {
-                w.queue(Print("\r\n"))?;
+                self.move_down_one(w)?;
             }
             viewport_top += scroll;
             self.cursor_row = height - 1;
@@ -269,14 +269,14 @@ impl Screen {
         let start_screen_row = render_start - viewport_top;
         self.move_to(w, start_screen_row, 0)?;
 
-        // Render changed lines. \r\n between lines; scrolling
-        // happens naturally when the cursor is at the bottom.
+        // Render changed lines. Downward movement scrolls naturally
+        // when the cursor is at the bottom.
         for i in render_start..=last {
             if i > render_start {
-                w.queue(Print("\r\n"))?;
+                self.move_down_one(w)?;
                 let screen_row = self.cursor_row + 1;
                 if screen_row >= height {
-                    // The \r\n scrolled the terminal.
+                    // Moving down scrolled the terminal.
                     viewport_top += 1;
                     self.cursor_row = height - 1;
                 } else {
@@ -296,7 +296,7 @@ impl Screen {
         let old_end = prev_viewport_top + self.lines.len();
         if rendered_up_to < old_end {
             for _ in rendered_up_to..old_end.min(viewport_top + height) {
-                w.queue(Print("\r\n"))?;
+                self.move_down_one(w)?;
                 w.queue(terminal::Clear(ClearType::UntilNewLine))?;
                 if self.cursor_row + 1 < height {
                     self.cursor_row += 1;
@@ -342,15 +342,14 @@ impl Screen {
         if row < self.cursor_row {
             w.queue(MoveUp((self.cursor_row - row) as u16))?;
         } else if row > self.cursor_row {
-            // Use \r\n for downward movement:
+            // Use an explicit column reset before LF for downward movement:
             // - \n scrolls at the screen bottom (unlike MoveDown which silently stops)
-            // - \r resets the column to 0, which is needed because \n alone preserves the
-            //   column, and in pending-wrap state the column may be past the screen edge
+            // - the column reset is needed because \n alone preserves the column, and
+            //   pending-wrap state after an exact-width line is unsafe
             let down = row - self.cursor_row;
             for _ in 0..down {
-                w.queue(Print("\r\n"))?;
+                self.move_down_one(w)?;
             }
-            self.cursor_col = 0;
         }
 
         // Horizontal movement.
@@ -360,6 +359,20 @@ impl Screen {
 
         self.cursor_row = row;
         self.cursor_col = col;
+        Ok(())
+    }
+
+    /// Moves down one terminal row after first forcing the terminal
+    /// cursor to column zero.
+    ///
+    /// This avoids relying on CR/LF behavior while the terminal is in
+    /// pending-wrap state after printing in the last column.
+    fn move_down_one(&mut self, w: &mut impl Write) -> io::Result<()> {
+        if self.cursor_col != 0 {
+            w.queue(MoveToColumn(0))?;
+            self.cursor_col = 0;
+        }
+        w.queue(Print("\n"))?;
         Ok(())
     }
 }
