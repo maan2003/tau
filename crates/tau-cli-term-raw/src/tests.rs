@@ -1664,6 +1664,13 @@ fn shift_or_alt_enter_inserts_newline_without_submitting() {
 }
 
 #[test]
+fn viewport_moved_up_requires_full_render() {
+    assert!(viewport_moved_up(3, 2));
+    assert!(!viewport_moved_up(2, 2));
+    assert!(!viewport_moved_up(2, 3));
+}
+
+#[test]
 fn scrolling_when_dropping_changed_top_row_prefers_full_render() {
     let prev = plain_lines(&["aaaaa", "bbbbb", "ccccc"]);
     let next = plain_lines(&["AAAAA", "bbbbb", "ccccc", "ddddd"]);

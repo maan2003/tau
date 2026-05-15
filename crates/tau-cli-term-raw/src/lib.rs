@@ -1698,7 +1698,14 @@ fn redraw_loop(
                 visible_start,
             );
 
-            if hidden_prefix_changed || dropping_lines_changed {
+            if viewport_moved_up(prev_visible_start, visible_start) {
+                // The desired viewport moved upward (content shrank). Rows that
+                // should re-enter the screen may currently exist only in terminal
+                // scrollback, which cannot be pulled back incrementally.
+                if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
+                    tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
+                }
+            } else if hidden_prefix_changed || dropping_lines_changed {
                 // The terminal scrollback contains, or is about to receive,
                 // rows whose logical content changed. Rebuild it from logical
                 // content instead of trying to patch it incrementally.
@@ -1753,6 +1760,10 @@ fn redraw_loop(
 /// position cursor. Used on resize and when content grows beyond
 /// the viewport. After rendering, Screen tracks the visible
 /// viewport for subsequent differential updates.
+fn viewport_moved_up(prev_visible_start: usize, visible_start: usize) -> bool {
+    visible_start < prev_visible_start
+}
+
 fn dropping_lines_changed(
     prev_all_lines: &[Vec<Cell>],
     all_lines: &[Vec<Cell>],
