@@ -1691,10 +1691,17 @@ fn redraw_loop(
 
             let hidden_prefix_changed =
                 hidden_lines_changed(&prev_all_lines, &layout.all_lines, prev_visible_start);
+            let dropping_lines_changed = dropping_lines_changed(
+                &prev_all_lines,
+                &layout.all_lines,
+                prev_visible_start,
+                visible_start,
+            );
 
-            if hidden_prefix_changed {
-                // The terminal scrollback contains rows we can no longer
-                // address incrementally. Rebuild it from logical content.
+            if hidden_prefix_changed || dropping_lines_changed {
+                // The terminal scrollback contains, or is about to receive,
+                // rows whose logical content changed. Rebuild it from logical
+                // content instead of trying to patch it incrementally.
                 if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                     tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
                 }
@@ -1746,6 +1753,15 @@ fn redraw_loop(
 /// position cursor. Used on resize and when content grows beyond
 /// the viewport. After rendering, Screen tracks the visible
 /// viewport for subsequent differential updates.
+fn dropping_lines_changed(
+    prev_all_lines: &[Vec<Cell>],
+    all_lines: &[Vec<Cell>],
+    prev_visible_start: usize,
+    visible_start: usize,
+) -> bool {
+    (prev_visible_start..visible_start).any(|idx| prev_all_lines.get(idx) != all_lines.get(idx))
+}
+
 fn hidden_lines_changed(
     prev_all_lines: &[Vec<Cell>],
     all_lines: &[Vec<Cell>],

@@ -1664,6 +1664,22 @@ fn shift_or_alt_enter_inserts_newline_without_submitting() {
 }
 
 #[test]
+fn scrolling_when_dropping_changed_top_row_prefers_full_render() {
+    let prev = plain_lines(&["aaaaa", "bbbbb", "ccccc"]);
+    let next = plain_lines(&["AAAAA", "bbbbb", "ccccc", "ddddd"]);
+
+    assert!(dropping_lines_changed(&prev, &next, 0, 1));
+}
+
+#[test]
+fn scrolling_when_dropping_unchanged_top_row_can_incremental_render() {
+    let prev = plain_lines(&["aaaaa", "bbbbb", "ccccc"]);
+    let next = plain_lines(&["aaaaa", "bbbbb", "ccccc", "ddddd"]);
+
+    assert!(!dropping_lines_changed(&prev, &next, 0, 1));
+}
+
+#[test]
 fn hidden_lines_changed_ignores_visible_changes() {
     let prev = plain_lines(&["old hidden", "visible"]);
     let next = plain_lines(&["old hidden", "VISIBLE"]);
