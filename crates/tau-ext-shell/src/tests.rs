@@ -1,4 +1,5 @@
 use std::io::{BufReader, BufWriter};
+use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::{fs, thread};
@@ -116,6 +117,16 @@ fn cbor_bool_field(value: &CborValue, key: &str) -> Option<bool> {
     match value {
         CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
             (CborValue::Text(k), CborValue::Bool(n)) if k == key => Some(*n),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+fn cbor_map_field<'a>(value: &'a CborValue, key: &str) -> Option<&'a CborValue> {
+    match value {
+        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match k {
+            CborValue::Text(k) if k == key => Some(v),
             _ => None,
         }),
         _ => None,
@@ -401,6 +412,68 @@ fn write_new_file_reports_created_without_model_diff() {
     assert_eq!(cbor_bool_field(&result, "created"), Some(true));
     assert_eq!(cbor_bool_field(&result, "changed"), Some(true));
     assert!(cbor_map_text(&result, "diff").is_none());
+    assert!(cbor_map_field(&result, "symlink").is_none());
+}
+
+#[test]
+fn write_symlink_reports_target_metadata() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let target_path = tempdir.path().join("target.txt");
+    let link_path = tempdir.path().join("link.txt");
+    fs::write(&target_path, "old\n").expect("write fixture");
+    symlink("target.txt", &link_path).expect("symlink");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(link_path.display().to_string()),
+        ),
+        (
+            CborValue::Text("content".to_owned()),
+            CborValue::Text("new\n".to_owned()),
+        ),
+    ]);
+    let result = write_file(&args).expect("write").result;
+    let symlink = cbor_map_field(&result, "symlink").expect("symlink metadata");
+
+    assert_eq!(cbor_bool_field(&result, "created"), Some(false));
+    assert_eq!(cbor_bool_field(&result, "changed"), Some(true));
+    assert_eq!(cbor_map_text(symlink, "target"), Some("target.txt"));
+    assert_eq!(
+        cbor_map_text(symlink, "resolved_target_path"),
+        Some(target_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(cbor_bool_field(symlink, "target_created"), Some(false));
+    assert_eq!(
+        fs::read_to_string(&target_path).expect("read target"),
+        "new\n"
+    );
+}
+
+#[test]
+fn write_dangling_symlink_reports_target_created() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let target_path = tempdir.path().join("target.txt");
+    let link_path = tempdir.path().join("link.txt");
+    symlink("target.txt", &link_path).expect("symlink");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(link_path.display().to_string()),
+        ),
+        (
+            CborValue::Text("content".to_owned()),
+            CborValue::Text(String::new()),
+        ),
+    ]);
+    let result = write_file(&args).expect("write").result;
+    let symlink = cbor_map_field(&result, "symlink").expect("symlink metadata");
+
+    assert_eq!(cbor_bool_field(&result, "created"), Some(false));
+    assert_eq!(cbor_bool_field(&result, "changed"), Some(true));
+    assert_eq!(cbor_bool_field(symlink, "target_created"), Some(true));
+    assert_eq!(fs::read_to_string(&target_path).expect("read target"), "");
 }
 
 #[test]

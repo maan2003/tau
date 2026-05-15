@@ -123,7 +123,8 @@ where
                 "Write content to a file, creating it and any missing parent directories \
                  if they do not exist. Follows symlinks and overwrites the symlink target \
                  instead of replacing the symlink. Returns the path, bytes written, whether \
-                 the file was created, and whether filesystem contents changed."
+                 the requested path was created, whether filesystem contents changed, and \
+                 symlink target metadata when the requested path was a symlink."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
