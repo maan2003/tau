@@ -1204,12 +1204,46 @@ fn multiline_buffer_layout_tracks_cursor_after_paste() {
     let buf = SharedBuffer::new();
     let mut parser = vt100::Parser::new(5, 10, 20);
 
-    let (_term, handle, _input_tx) =
+    let (term, handle, input_tx) =
         Term::new_virtual(10, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
 
-    handle.set_buffer("abc\ndefghijkl".to_owned(), "abc\ndefghijkl".len());
+    input_tx
+        .send(RawEvent::Paste("abc\ndefghijkl".to_owned()))
+        .expect("send paste");
+    assert!(matches!(
+        term.get_next_event().expect("paste event"),
+        Event::BufferChanged
+    ));
     flush_redraws(&handle, &buf, &mut parser);
 
+    assert_eq!(handle.get_buffer(), "abc\ndefghijkl");
+    assert_eq!(handle.get_cursor(), "abc\ndefghijkl".len());
+    assert_eq!(
+        vt100_rows(&parser, 10),
+        vec!["> abc", "defghijkl", "", "", ""]
+    );
+    assert_eq!(parser.screen().cursor_position(), (1, 9));
+}
+
+#[test]
+fn paste_normalizes_crlf_so_cursor_matches_rendered_multiline_buffer() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(5, 10, 20);
+
+    let (term, handle, input_tx) =
+        Term::new_virtual(10, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+
+    input_tx
+        .send(RawEvent::Paste("abc\r\ndefghijkl".to_owned()))
+        .expect("send paste");
+    assert!(matches!(
+        term.get_next_event().expect("paste event"),
+        Event::BufferChanged
+    ));
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_eq!(handle.get_buffer(), "abc\ndefghijkl");
+    assert_eq!(handle.get_cursor(), "abc\ndefghijkl".len());
     assert_eq!(
         vt100_rows(&parser, 10),
         vec!["> abc", "defghijkl", "", "", ""]

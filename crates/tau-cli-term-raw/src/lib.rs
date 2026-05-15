@@ -987,6 +987,7 @@ impl Term {
                         self.handle.redraw.notify();
                         continue;
                     }
+                    let text = normalize_paste_text(text);
                     {
                         let mut st = self.handle.lock();
                         let cursor = st.cursor;
@@ -2207,6 +2208,26 @@ fn term_size() -> (usize, usize) {
     terminal::size()
         .map(|(w, h)| (w as usize, h as usize))
         .unwrap_or((80, 24))
+}
+
+fn normalize_paste_text(text: String) -> String {
+    if !text.contains('\r') {
+        return text;
+    }
+
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            normalized.push('\n');
+        } else {
+            normalized.push(ch);
+        }
+    }
+    normalized
 }
 
 fn initial_buffer_position(initial_cols: usize, width: usize) -> (usize, usize) {
