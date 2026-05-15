@@ -284,6 +284,36 @@ fn session_skill_dirs_include_config_agents() {
 }
 
 #[test]
+fn skill_diagnostics_are_emitted_as_harness_info() {
+    let temp = TempDir::new().expect("tempdir");
+    let skills_dir = temp.path().join(".agents").join("skills");
+    let skill_dir = skills_dir.join("bad-skill");
+    fs::create_dir_all(&skill_dir).expect("create skill dir");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: bad skill\ndescription: bad skill\n---\n\n# Bad\n",
+    )
+    .expect("write skill");
+
+    let result = tau_skills::load_skills_from_dirs(&[skills_dir]);
+    assert!(result.skills.is_empty());
+
+    let mut events = Vec::new();
+    push_skill_diagnostic_events(&mut events, result.diagnostics);
+
+    let skipped = events.iter().find_map(|event| match event {
+        Event::HarnessInfo(info) if info.message.contains("skill skipped:") => Some(info),
+        _ => None,
+    });
+    let Some(info) = skipped else {
+        panic!("expected skipped skill harness info event, got {events:?}");
+    };
+    assert_eq!(info.level, tau_proto::HarnessInfoLevel::Important);
+    assert!(info.message.contains("bad-skill/SKILL.md"));
+    assert!(info.message.contains("name contains invalid characters"));
+}
+
+#[test]
 fn session_started_emits_ready_after_startup() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);

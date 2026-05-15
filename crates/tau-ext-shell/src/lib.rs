@@ -511,6 +511,7 @@ fn build_session_started_events(started: SessionStarted) -> Vec<Event> {
     let skill_dirs = session_skill_dirs(std::env::current_dir().ok(), dirs::home_dir());
 
     let result = tau_skills::load_skills_from_dirs(&skill_dirs);
+    push_skill_diagnostic_events(&mut events, result.diagnostics);
     for skill in result.skills {
         let file_path = skill.file_path.canonicalize().unwrap_or(skill.file_path);
         events.push(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
@@ -536,6 +537,31 @@ fn build_session_started_events(started: SessionStarted) -> Vec<Event> {
         },
     ));
     events
+}
+
+fn push_skill_diagnostic_events(
+    events: &mut Vec<Event>,
+    diagnostics: Vec<tau_skills::SkillDiagnostic>,
+) {
+    for diagnostic in diagnostics {
+        let (kind, level) = match diagnostic.kind {
+            tau_skills::DiagnosticKind::Warning => ("warning", tau_proto::HarnessInfoLevel::Normal),
+            tau_skills::DiagnosticKind::Collision => {
+                ("collision", tau_proto::HarnessInfoLevel::Important)
+            }
+            tau_skills::DiagnosticKind::Skipped => {
+                ("skipped", tau_proto::HarnessInfoLevel::Important)
+            }
+        };
+        events.push(Event::HarnessInfo(tau_proto::HarnessInfo {
+            message: format!(
+                "skill {kind}: {}\n{}",
+                diagnostic.path.display(),
+                diagnostic.message
+            ),
+            level,
+        }));
+    }
 }
 
 fn session_skill_dirs(
