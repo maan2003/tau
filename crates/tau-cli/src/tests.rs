@@ -323,7 +323,7 @@ fn model_status_uses_symbol_prefixed_chips() {
         .find(|row| row.contains("+smart"))
         .expect("status row");
     assert!(status_row.starts_with("+smart ~high @tau-agent-test"));
-    assert!(status_row.ends_with("#6% 12k/200k"));
+    assert!(status_row.ends_with("#12k/200k"));
     assert!(!vt.screen_contains(80, "=test/model"));
     assert!(!vt.screen_contains(80, "v=high"));
     assert!(!vt.screen_contains(80, "ctx:"));

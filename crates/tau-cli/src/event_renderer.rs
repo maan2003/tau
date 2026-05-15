@@ -1124,8 +1124,8 @@ impl EventRenderer {
             self.current_context_input_tokens,
             self.current_context_window,
         ) {
-            (Some(percent), Some(input), Some(window)) => Some(format!(
-                "{percent}% {}/{}",
+            (_, Some(input), Some(window)) => Some(format!(
+                "{}/{}",
                 format_token_count(input),
                 format_token_count(window)
             )),
@@ -1133,11 +1133,6 @@ impl EventRenderer {
                 Some(format!("{percent}%/{}", format_token_count(window)))
             }
             (Some(percent), _, None) => Some(format!("{percent}%")),
-            (None, Some(input), Some(window)) => Some(format!(
-                "{}/{}",
-                format_token_count(input),
-                format_token_count(window)
-            )),
             (None, Some(input), None) => Some(format_token_count(input)),
             (None, None, Some(window)) => Some(format!("?/{}", format_token_count(window))),
             (None, None, None) => None,
