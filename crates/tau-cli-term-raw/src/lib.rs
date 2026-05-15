@@ -78,14 +78,28 @@ pub struct CompletionView {
     pub selected: Option<usize>,
 }
 
+#[derive(Clone)]
+struct PromptSnapshot {
+    buffer: String,
+    cursor: usize,
+}
+
+#[derive(Clone)]
+struct PromptDraft {
+    buffer: String,
+    cursor: usize,
+    undo: Vec<PromptSnapshot>,
+    redo: Vec<PromptSnapshot>,
+}
+
 /// State for input-history navigation. Present only while Up/Down
 /// has recalled a previous line and the user hasn't submitted or
 /// dismissed yet.
 struct HistoryNav {
     /// Snapshot of `input_history` plus the user's WIP buffer at
     /// `entries.last()`. Editing in history mode mutates the entry
-    /// at `index`.
-    entries: Vec<String>,
+    /// at `index`, including that entry's per-prompt undo history.
+    entries: Vec<PromptDraft>,
     /// Current position within `entries`.
     index: usize,
 }
@@ -134,8 +148,12 @@ struct SharedState {
     /// column. Cleared by any cursor change that isn't a vertical
     /// motion.
     sticky_col: Option<usize>,
-    /// Append-only log of submitted lines.
-    input_history: Vec<String>,
+    /// Append-only log of submitted lines. Each entry carries its own
+    /// undo/redo stacks so history navigation can preserve draft-local
+    /// editing state.
+    input_history: Vec<PromptDraft>,
+    current_undo: Vec<PromptSnapshot>,
+    current_redo: Vec<PromptSnapshot>,
     /// Active history navigation, if any. Independent of `completion`.
     history_nav: Option<HistoryNav>,
     /// Active completion menu, if any. Independent of `history_nav`.
@@ -182,6 +200,8 @@ impl SharedState {
             cursor: 0,
             sticky_col: None,
             input_history: Vec::new(),
+            current_undo: Vec::new(),
+            current_redo: Vec::new(),
             history_nav: None,
             completion: None,
             width,
@@ -202,12 +222,44 @@ impl SharedState {
         id
     }
 
-    /// Mirrors edits made to `buffer` into the live history-nav slot
-    /// so navigating Down then Up returns to the user's edited copy.
-    /// No-op when not navigating history.
+    fn current_snapshot(&self) -> PromptSnapshot {
+        PromptSnapshot {
+            buffer: self.buffer.clone(),
+            cursor: self.cursor,
+        }
+    }
+
+    fn current_draft(&self) -> PromptDraft {
+        PromptDraft {
+            buffer: self.buffer.clone(),
+            cursor: self.cursor,
+            undo: self.current_undo.clone(),
+            redo: self.current_redo.clone(),
+        }
+    }
+
+    fn load_draft(&mut self, draft: PromptDraft) {
+        self.buffer = draft.buffer;
+        self.current_undo = draft.undo;
+        self.current_redo = draft.redo;
+        self.cursor = draft.cursor.min(self.buffer.len());
+    }
+
+    fn record_undo(&mut self) {
+        self.current_undo.push(self.current_snapshot());
+        self.current_redo.clear();
+    }
+
+    /// Mirrors edits made to `buffer` and undo state into the live
+    /// history-nav slot so navigating Down then Up returns to the
+    /// user's edited copy. No-op when not navigating history.
     fn sync_buffer_to_history_nav(&mut self) {
+        let draft = self.current_draft();
         if let Some(nav) = self.history_nav.as_mut() {
-            nav.entries[nav.index] = self.buffer.clone();
+            nav.entries[nav.index] = draft.clone();
+            if nav.index < self.input_history.len() {
+                self.input_history[nav.index] = draft;
+            }
         }
     }
 
@@ -266,16 +318,40 @@ impl SharedState {
         self.cursor = new_cursor;
     }
 
-    /// Pushes `line` onto the input history and resets to a fresh
-    /// empty prompt. No-op when `line` is empty (and returns `false`).
-    /// Clears the sticky column via `write_cursor`.
-    fn push_buffer_as_history_entry(&mut self, line: String) -> bool {
-        if line.is_empty() {
+    /// Pushes the current prompt onto input history and resets to a
+    /// fresh empty prompt. No-op when the prompt is empty (and returns
+    /// `false`). Clears the sticky column via `write_cursor`.
+    fn push_current_as_history_entry(&mut self) -> bool {
+        if self.buffer.is_empty() {
             return false;
         }
-        self.input_history.push(line);
+        self.input_history.push(self.current_draft());
         self.buffer.clear();
+        self.current_undo.clear();
+        self.current_redo.clear();
         self.write_cursor(0);
+        true
+    }
+
+    fn undo(&mut self) -> bool {
+        let Some(snapshot) = self.current_undo.pop() else {
+            return false;
+        };
+        self.current_redo.push(self.current_snapshot());
+        self.buffer = snapshot.buffer;
+        self.write_cursor(snapshot.cursor.min(self.buffer.len()));
+        self.sync_buffer_to_history_nav();
+        true
+    }
+
+    fn redo(&mut self) -> bool {
+        let Some(snapshot) = self.current_redo.pop() else {
+            return false;
+        };
+        self.current_undo.push(self.current_snapshot());
+        self.buffer = snapshot.buffer;
+        self.write_cursor(snapshot.cursor.min(self.buffer.len()));
+        self.sync_buffer_to_history_nav();
         true
     }
 
@@ -360,8 +436,7 @@ impl SharedState {
         let target_col = self.vertical_target_col();
         if self.history_nav.is_none() {
             if 0 < delta {
-                let line = std::mem::take(&mut self.buffer);
-                return self.push_buffer_as_history_entry(line);
+                return self.push_current_as_history_entry();
             }
             return self.enter_history_nav(target_col);
         }
@@ -376,11 +451,11 @@ impl SharedState {
             return false;
         }
         let mut entries = self.input_history.clone();
-        entries.push(self.buffer.clone());
+        entries.push(self.current_draft());
         // The WIP buffer sits at `entries.last()`; the previous
         // history entry is one slot before it.
         let index = entries.len() - 2;
-        self.buffer = entries[index].clone();
+        self.load_draft(entries[index].clone());
         let new_cursor = self.cursor_byte_at(self.last_visual_row(), target_col);
         self.write_cursor_keep_sticky(new_cursor);
         self.history_nav = Some(HistoryNav { entries, index });
@@ -392,19 +467,27 @@ impl SharedState {
     /// onto history and returns to a fresh prompt, mirroring Down
     /// from `Editing`.
     fn advance_history_nav(&mut self, delta: isize, target_col: usize) -> bool {
+        let current = self.current_draft();
         let nav = self.history_nav.as_mut().expect("caller checked Some");
         let new_index = nav.index as isize + delta;
         if new_index < 0 {
             return false;
         }
         if new_index >= nav.entries.len() as isize {
-            let wip = nav.entries.last().cloned().unwrap_or_default();
+            let wip = nav.entries.last().cloned();
             self.history_nav = None;
-            return self.push_buffer_as_history_entry(wip);
+            if let Some(wip) = wip {
+                self.load_draft(wip);
+            }
+            return self.push_current_as_history_entry();
+        }
+        nav.entries[nav.index] = current.clone();
+        if nav.index < self.input_history.len() {
+            self.input_history[nav.index] = current;
         }
         nav.index = new_index as usize;
-        let new_buffer = nav.entries[nav.index].clone();
-        self.buffer = new_buffer;
+        let new_draft = nav.entries[nav.index].clone();
+        self.load_draft(new_draft);
         let target_row = if delta < 0 { self.last_visual_row() } else { 0 };
         let new_cursor = self.cursor_byte_at(target_row, target_col);
         self.write_cursor_keep_sticky(new_cursor);
@@ -473,6 +556,8 @@ pub enum Event {
     BackTab,
     /// The user activated a configured key binding.
     Binding(String),
+    /// A local prompt notice should be printed above the prompt.
+    Notice(String),
     /// The user requested an external editor (Ctrl-O / Ctrl-G).
     /// Caller is expected to call [`Term::pause_for_external`], spawn
     /// `$VISUAL`/`$EDITOR`, and call [`Term::resume_after_external`].
@@ -733,14 +818,17 @@ impl TermHandle {
     }
 
     /// Replaces the input buffer and cursor position. Also clears
-    /// any active history-navigation or completion menu state — an
-    /// external buffer set is treated as a fresh starting point.
+    /// any active history-navigation, completion menu, and prompt undo
+    /// state — an external buffer set is treated as a fresh starting
+    /// point.
     pub fn set_buffer(&self, text: String, cursor: usize) {
         let mut st = self.lock();
         let new_cursor = cursor.min(text.len());
         st.buffer = text;
         st.history_nav = None;
         st.completion = None;
+        st.current_undo.clear();
+        st.current_redo.clear();
         st.write_cursor(new_cursor);
     }
 
@@ -990,6 +1078,7 @@ impl Term {
                     let text = normalize_paste_text(text);
                     {
                         let mut st = self.handle.lock();
+                        st.record_undo();
                         let cursor = st.cursor;
                         st.buffer.insert_str(cursor, &text);
                         st.write_cursor(cursor + text.len());
@@ -1048,10 +1137,10 @@ impl Term {
     /// The following Ctrl chords are reserved built-in editing keys
     /// and cannot be overridden — bindings to them are silently
     /// dropped: `Ctrl-A` (beginning-of-line), `Ctrl-C` (clear /
-    /// EOF on empty), `Ctrl-D` (EOF on empty), `Ctrl-E`
+    /// notice on empty), `Ctrl-D` (EOF on empty), `Ctrl-E`
     /// (end-of-line), `Ctrl-U` (kill-to-start), `Ctrl-W`
-    /// (kill-word). Every other Ctrl chord (including the defaults
-    /// `Ctrl-O`/`Ctrl-G`/`Ctrl-J`/`Ctrl-K`) may be rebound.
+    /// (kill-word). Every other Ctrl chord (including default
+    /// action bindings like `Ctrl-Z`/`Ctrl-Y`) may be rebound.
     pub fn set_bindings(&mut self, bindings: impl IntoIterator<Item = (String, String)>) {
         self.bindings = bindings
             .into_iter()
@@ -1176,6 +1265,18 @@ impl Term {
         st.step_history(delta);
     }
 
+    pub fn trigger_undo(&self) -> bool {
+        let mut st = self.handle.lock();
+        st.completion = None;
+        st.undo()
+    }
+
+    pub fn trigger_redo(&self) -> bool {
+        let mut st = self.handle.lock();
+        st.completion = None;
+        st.redo()
+    }
+
     fn step_history_event(&self, delta: isize) -> io::Result<Option<Event>> {
         self.trigger_history_step(delta);
         Ok(Some(Event::BufferChanged))
@@ -1216,6 +1317,7 @@ impl Term {
                 {
                     let mut st = self.handle.lock();
                     st.completion = None;
+                    st.record_undo();
                     let cursor = st.cursor;
                     st.buffer.insert(cursor, '\n');
                     st.write_cursor(cursor + 1);
@@ -1239,8 +1341,8 @@ impl Term {
                     let mut st = self.handle.lock();
                     st.completion = None;
                     st.history_nav = None;
-                    let line = std::mem::take(&mut st.buffer);
-                    st.push_buffer_as_history_entry(line.clone());
+                    let line = st.buffer.clone();
+                    st.push_current_as_history_entry();
                     line
                 };
                 return Ok(Some(Event::Line(line)));
@@ -1261,8 +1363,9 @@ impl Term {
             KeyCode::Char('c') if ctrl => {
                 let mut st = self.handle.lock();
                 if st.buffer.is_empty() {
-                    return Ok(Some(Event::Eof));
+                    return Ok(Some(Event::Notice("Use Ctrl+D to exit".to_owned())));
                 }
+                st.record_undo();
                 st.buffer.clear();
                 st.history_nav = None;
                 st.completion = None;
@@ -1274,6 +1377,7 @@ impl Term {
             KeyCode::Char('u') if ctrl => {
                 {
                     let mut st = self.handle.lock();
+                    st.record_undo();
                     let cursor = st.cursor;
                     st.buffer.drain(..cursor);
                     st.write_cursor(0);
@@ -1292,6 +1396,7 @@ impl Term {
                             .rfind(' ')
                             .map(|i| i + 1)
                             .unwrap_or(0);
+                        st.record_undo();
                         let cursor = st.cursor;
                         st.buffer.drain(new_end..cursor);
                         st.write_cursor(new_end);
@@ -1349,6 +1454,7 @@ impl Term {
             KeyCode::Char(ch) => {
                 {
                     let mut st = self.handle.lock();
+                    st.record_undo();
                     let cursor = st.cursor;
                     st.buffer.insert(cursor, ch);
                     st.write_cursor(cursor + ch.len_utf8());
@@ -1362,6 +1468,7 @@ impl Term {
                 let changed = {
                     let mut st = self.handle.lock();
                     if st.cursor > 0 {
+                        st.record_undo();
                         let prev = prev_char_boundary(&st.buffer, st.cursor);
                         let cursor = st.cursor;
                         st.buffer.drain(prev..cursor);
@@ -1382,6 +1489,7 @@ impl Term {
                 let changed = {
                     let mut st = self.handle.lock();
                     if st.cursor < st.buffer.len() {
+                        st.record_undo();
                         let cursor = st.cursor;
                         let next = next_char_boundary(&st.buffer, cursor);
                         st.buffer.drain(cursor..next);

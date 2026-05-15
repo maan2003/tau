@@ -677,6 +677,14 @@ mod prompt_action_parse {
             PromptShellAction::parse("prompt-previous"),
             Some(PromptShellAction::PromptPrevious)
         ));
+        assert!(matches!(
+            PromptShellAction::parse("prompt-undo"),
+            Some(PromptShellAction::PromptUndo)
+        ));
+        assert!(matches!(
+            PromptShellAction::parse("prompt-redo"),
+            Some(PromptShellAction::PromptRedo)
+        ));
     }
 
     #[test]

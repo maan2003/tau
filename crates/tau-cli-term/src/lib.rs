@@ -195,6 +195,13 @@ impl HighTerm {
                     return Ok(Event::Resize { width, height });
                 }
 
+                RawEvent::Notice(message) => {
+                    self.sync_menu_block();
+                    self.print_local(&message);
+                    self.handle.redraw_sync();
+                    return Ok(Event::BufferChanged);
+                }
+
                 RawEvent::ExternalEditor => {
                     self.sync_menu_block();
                     self.run_prompt_action(PromptShellAction::Edit(PromptShellCommand {
@@ -281,6 +288,12 @@ impl HighTerm {
             Ok(Some(PromptShellResult::History(delta))) => {
                 self.term.trigger_history_step(delta);
             }
+            Ok(Some(PromptShellResult::Undo)) => {
+                self.term.trigger_undo();
+            }
+            Ok(Some(PromptShellResult::Redo)) => {
+                self.term.trigger_redo();
+            }
             Ok(None) => {} // shell exited non-zero or no output applies.
             Err(msg) => self.print_local(&format!("prompt action: {msg}")),
         }
@@ -319,6 +332,8 @@ enum PromptShellAction {
     RoleCycle,
     PromptNext,
     PromptPrevious,
+    PromptUndo,
+    PromptRedo,
 }
 
 #[derive(Clone, Default)]
@@ -334,15 +349,21 @@ enum PromptShellResult {
     FastToggle,
     RoleCycle,
     History(isize),
+    Undo,
+    Redo,
 }
 
 impl PromptShellAction {
+    // Keep this action list, built-in.cli-bindings.json5, and
+    // docs/cli-keybindings.md in sync.
     fn parse(action: &str) -> Option<Self> {
         match action {
             "fast-toggle" => return Some(Self::FastToggle),
             "role-cycle" => return Some(Self::RoleCycle),
             "prompt-next" => return Some(Self::PromptNext),
             "prompt-previous" => return Some(Self::PromptPrevious),
+            "prompt-undo" => return Some(Self::PromptUndo),
+            "prompt-redo" => return Some(Self::PromptRedo),
             _ => {}
         }
         let mut parts = action.splitn(3, ':');
@@ -371,6 +392,8 @@ fn run_prompt_shell_action(
     let shell = match &action {
         PromptShellAction::PromptNext => return Ok(Some(PromptShellResult::History(1))),
         PromptShellAction::PromptPrevious => return Ok(Some(PromptShellResult::History(-1))),
+        PromptShellAction::PromptUndo => return Ok(Some(PromptShellResult::Undo)),
+        PromptShellAction::PromptRedo => return Ok(Some(PromptShellResult::Redo)),
         PromptShellAction::FastToggle => return Ok(Some(PromptShellResult::FastToggle)),
         PromptShellAction::RoleCycle => return Ok(Some(PromptShellResult::RoleCycle)),
         PromptShellAction::Insert(shell) | PromptShellAction::Edit(shell) => shell,
@@ -388,7 +411,9 @@ fn run_prompt_shell_action(
         PromptShellAction::FastToggle
         | PromptShellAction::RoleCycle
         | PromptShellAction::PromptNext
-        | PromptShellAction::PromptPrevious => unreachable!(),
+        | PromptShellAction::PromptPrevious
+        | PromptShellAction::PromptUndo
+        | PromptShellAction::PromptRedo => unreachable!(),
     };
     std::fs::write(tmp.path(), file_text.as_bytes())
         .map_err(|e| format!("could not write tempfile: {e}"))?;
@@ -450,7 +475,9 @@ fn run_prompt_shell_action(
         PromptShellAction::FastToggle
         | PromptShellAction::RoleCycle
         | PromptShellAction::PromptNext
-        | PromptShellAction::PromptPrevious => unreachable!(),
+        | PromptShellAction::PromptPrevious
+        | PromptShellAction::PromptUndo
+        | PromptShellAction::PromptRedo => unreachable!(),
     }
 }
 

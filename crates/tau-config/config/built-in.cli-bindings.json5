@@ -1,5 +1,6 @@
 // Built-in CLI key bindings. Merged underneath user bindings in
 // `cli.json5` so unmentioned keys stay bound to these defaults.
+// Keep docs/cli-keybindings.md in sync when changing defaults/actions.
 //
 // `command` is optional — navigation actions like `prompt-previous`
 // and `prompt-next` don't shell out, so they omit it entirely.
@@ -19,6 +20,8 @@
     "C-Up":   { action: "prompt-previous" },
     "C-j":    { action: "prompt-next" },
     "C-Down": { action: "prompt-next" },
+    "C-z":    { action: "prompt-undo" },
+    "C-y":    { action: "prompt-redo" },
     "C-o": {
         action: "shell-prompt-edit",
         command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"",

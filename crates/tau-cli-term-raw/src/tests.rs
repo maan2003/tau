@@ -920,6 +920,134 @@ fn ctrl_k_steps_history_back_with_column_preserved() {
 }
 
 #[test]
+fn ctrl_c_empty_prompt_prints_notice_not_eof() {
+    let buf = SharedBuffer::new();
+    let (term, _handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("ctrl-c");
+
+    match term.get_next_event().expect("event") {
+        Event::Notice(message) => assert_eq!(message, "Use Ctrl+D to exit"),
+        _ => panic!("expected notice"),
+    }
+}
+
+#[test]
+fn ctrl_c_clear_can_be_undone_and_redone() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    handle.set_buffer("draft".to_owned(), 5);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("ctrl-c");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "");
+
+    assert!(term.trigger_undo());
+    assert_eq!(handle.get_buffer(), "draft");
+    assert_eq!(handle.get_cursor(), 5);
+
+    assert!(term.trigger_redo());
+    assert_eq!(handle.get_buffer(), "");
+    assert_eq!(handle.get_cursor(), 0);
+}
+
+#[test]
+fn undo_state_follows_history_entry() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    for ch in "first".chars() {
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )))
+            .expect("char");
+        let _ = term.get_next_event().expect("event");
+    }
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .expect("enter");
+    let _ = term.get_next_event().expect("event");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "first");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::NONE,
+        )))
+        .expect("end");
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('!'),
+            KeyModifiers::NONE,
+        )))
+        .expect("bang");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "first!");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up again");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "first!");
+
+    assert!(term.trigger_undo());
+    assert_eq!(handle.get_buffer(), "first");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down after undo");
+    let _ = term.get_next_event().expect("event");
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up after undo");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "first");
+}
+
+#[test]
 fn vertical_motion_uses_visual_column_in_wrapped_line() {
     let buf = SharedBuffer::new();
     let (term, handle, input_tx) = Term::new_virtual(10, 5, "> ", Box::new(buf), CursorShape::Bar);
