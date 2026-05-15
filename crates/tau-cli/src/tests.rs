@@ -5,9 +5,10 @@ use tau_cli_term::TermHandle;
 use tau_cli_term_raw::{Color, Term};
 use tau_proto::{
     AgentResponseFinished, AgentResponseUpdated, CborValue, Event, ExtAgentsMdAvailable,
-    ExtensionReady, HarnessContextUsageChanged, HarnessModelSelected, HarnessVerbosityChanged,
-    SessionPromptCreated, SessionPromptQueued, SessionStartReason, SessionStarted, ToolResult,
-    UiPromptSubmitted, Verbosity,
+    ExtensionReady, HarnessContextUsageChanged, HarnessEffortChanged, HarnessModelSelected,
+    HarnessRoleInfo, HarnessRolesAvailable, HarnessVerbosityChanged, SessionPromptCreated,
+    SessionPromptQueued, SessionStartReason, SessionStarted, ToolResult, UiPromptSubmitted,
+    Verbosity,
 };
 
 use super::chat::{DraftSlot, is_local_slash_command, should_send_draft_snapshot};
@@ -271,7 +272,7 @@ fn new_session_preserves_model_status() {
         role: None,
     }));
     sync(&handle);
-    assert!(vt.screen_contains(80, "test/model"));
+    assert!(vt.screen_contains(80, "=test/model"));
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
@@ -279,13 +280,13 @@ fn new_session_preserves_model_status() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "test/model"));
-    assert!(!vt.screen_contains(80, " s2"));
+    assert!(vt.screen_contains(80, "=test/model"));
+    assert!(vt.screen_contains(80, "@s2"));
     assert!(!vt.screen_contains(80, "no model selected"));
 }
 
 #[test]
-fn model_status_shows_only_role_or_model_identity() {
+fn model_status_uses_symbol_prefixed_chips() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -301,6 +302,10 @@ fn model_status_shows_only_role_or_model_identity() {
     renderer.handle(&Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
         level: Verbosity::High,
     }));
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "tau-agent-test".into(),
+        reason: SessionStartReason::New,
+    }));
     renderer.handle(&Event::HarnessContextUsageChanged(
         HarnessContextUsageChanged {
             input_tokens: Some(12_000),
@@ -308,17 +313,60 @@ fn model_status_shows_only_role_or_model_identity() {
             percent_used: Some(6),
         },
     ));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "+smart"));
+    assert!(vt.screen_contains(80, "@tau-agent-test"));
+    assert!(vt.screen_contains(80, "#6% 12k/200k"));
+    assert!(vt.screen_contains(80, "~high"));
+    assert!(!vt.screen_contains(80, "=test/model"));
+    assert!(!vt.screen_contains(80, "v=high"));
+    assert!(!vt.screen_contains(80, "ctx:"));
+}
+
+#[test]
+fn role_default_knobs_are_hidden_and_overrides_follow_role() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::HarnessRolesAvailable(HarnessRolesAvailable {
+        roles: vec![HarnessRoleInfo {
+            name: "smart".to_owned(),
+            description: "model=test/model, effort=medium, verbosity=medium, thinking-summary=auto"
+                .to_owned(),
+        }],
+    }));
+    renderer.handle(&Event::HarnessModelSelected(HarnessModelSelected {
+        model: Some("test/model".into()),
+        context_window: Some(200_000),
+        role: Some("smart".into()),
+    }));
+    renderer.handle(&Event::HarnessEffortChanged(HarnessEffortChanged {
+        level: tau_proto::Effort::Medium,
+    }));
+    renderer.handle(&Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
+        level: Verbosity::Medium,
+    }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "tau-agent-test".into(),
+        session_id: "s2".into(),
         reason: SessionStartReason::New,
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "smart"));
-    assert!(!vt.screen_contains(80, "test/model"));
-    assert!(!vt.screen_contains(80, "v=high"));
-    assert!(!vt.screen_contains(80, "ctx:"));
-    assert!(!vt.screen_contains(80, "tau-agent-test"));
+    assert!(vt.screen_contains(80, "+smart @s2"));
+    assert!(!vt.screen_contains(80, "^medium"));
+    assert!(!vt.screen_contains(80, "~medium"));
+
+    renderer.handle(&Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
+        level: Verbosity::High,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "+smart ~high @s2"));
 }
 
 #[test]

@@ -45,12 +45,16 @@ pub const SYSTEM_DISCONNECT: &str = "system.disconnect";
 pub const SYSTEM_PATH: &str = "system.path";
 pub const SYSTEM_STATUS: &str = "system.status";
 
-// -- Model status --
+// -- Status bar --
 pub const MODEL_STATUS: &str = "model.status";
-/// Active agent role chip inside the status bar. Painted in its own
-/// style so themes can make the currently-selected role pop out from
-/// the rest of the (otherwise dim) status line.
-pub const ROLE_STATUS: &str = "role.status";
+pub const STATUS_MODEL: &str = "status.model";
+pub const STATUS_ROLE: &str = "status.role";
+pub const STATUS_SESSION: &str = "status.session";
+pub const STATUS_CONTEXT: &str = "status.context";
+pub const STATUS_EFFORT: &str = "status.effort";
+pub const STATUS_VERBOSITY: &str = "status.verbosity";
+pub const STATUS_SERVICE_TIER: &str = "status.service_tier";
+pub const STATUS_TOOLS: &str = "status.tools";
 pub const REDRAW_COUNTER: &str = "redraw.counter";
 
 // -- Token stats --

@@ -195,7 +195,7 @@ pub(crate) fn build_osc1337_set_user_var(name: &str, value: &str, in_tmux: bool)
     }
 }
 
-fn format_token_count(tokens: u64) -> String {
+pub(crate) fn format_token_count(tokens: u64) -> String {
     if tokens < 1_000 {
         return tokens.to_string();
     }
@@ -242,6 +242,8 @@ pub(crate) enum ToolStatus {
     Progress,
     DiffAdded,
     DiffRemoved,
+    Context,
+    Tools,
 }
 
 /// Status variants for session compaction lifecycle lines. Kept
@@ -463,7 +465,7 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
         suffixes.push(info_suffix(stats_chip));
     }
     for counter in &display.progress_counters {
-        suffixes.push(info_suffix(format_progress_counter(counter)));
+        suffixes.push(format_progress_counter(counter));
     }
     for chip in &display.info_chips {
         suffixes.push(info_suffix(chip.clone()));
@@ -490,7 +492,7 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
     }
 }
 
-fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> String {
+fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolSuffixSegment {
     let body = match counter.unit {
         tau_proto::ProgressUnit::Count => match (counter.current, counter.total) {
             (Some(c), Some(t)) => format!("{c}/{t}"),
@@ -505,9 +507,11 @@ fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> String {
             (None, None) => "?%".to_owned(),
         },
     };
-    match &counter.label {
-        Some(label) => format!("{label}: {body}"),
-        None => body,
+    match counter.label.as_deref() {
+        Some("ctx") => tool_suffix(format!("#{body}"), ToolStatus::Context),
+        Some("tools") => tool_suffix(format!("%{body}"), ToolStatus::Tools),
+        Some(label) => info_suffix(format!("{label}: {body}")),
+        None => info_suffix(body),
     }
 }
 
@@ -698,6 +702,8 @@ pub(crate) fn render_tool_block(
             ToolStatus::Progress => names::PROGRESS_INDICATOR,
             ToolStatus::DiffAdded => names::DIFF_ADDED,
             ToolStatus::DiffRemoved => names::DIFF_REMOVED,
+            ToolStatus::Context => names::STATUS_CONTEXT,
+            ToolStatus::Tools => names::STATUS_TOOLS,
         };
         let status = themed.add_style(status_name);
         if !suffix.no_leading_space && !suffix.text.starts_with(':') {

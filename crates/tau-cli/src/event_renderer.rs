@@ -11,10 +11,10 @@ use crate::build_banner;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
     build_osc1337_set_user_var, build_tool_summary_display, extension_status_block, extract_diff,
-    format_tool_call, render_compaction_block, render_diff_tool_block, render_harness_info,
-    render_shell_block, render_token_stats_block, render_tool_block, render_tool_display,
-    session_status_block, streaming_block, synthesize_fallback_display, system_loaded_block,
-    system_status_block, ui_dir_block,
+    format_token_count, format_tool_call, render_compaction_block, render_diff_tool_block,
+    render_harness_info, render_shell_block, render_token_stats_block, render_tool_block,
+    render_tool_display, session_status_block, streaming_block, synthesize_fallback_display,
+    system_loaded_block, system_status_block, ui_dir_block,
 };
 
 pub(crate) struct EventRenderer {
@@ -89,6 +89,9 @@ pub(crate) struct EventRenderer {
     /// directly (no role), or no model is selected. The status bar
     /// shows this in place of the model id when present.
     current_role: Option<String>,
+    /// Default model params advertised for each role, used to hide
+    /// status chips that merely repeat the selected role defaults.
+    role_defaults: HashMap<String, RoleCompletionDetails>,
     /// Current per-prompt model knobs. Mirrored into `effort_state` /
     /// `verbosity_state` / `thinking_summary_state` so the input
     /// thread can read individual fields for cycling helpers.
@@ -345,7 +348,7 @@ struct ToolCallState {
     /// announcement.
     summary_block_id: Option<tau_cli_term::BlockId>,
     /// Most recent `DelegateProgress` snapshot. On `ToolResult` we
-    /// render the completion line with the final `ctx: …` / `tools: …`
+    /// render the completion line with the final `#…` / `%…`
     /// chips so the user sees the delegation cost alongside the
     /// response stats.
     delegate_last_progress: Option<tau_proto::DelegateProgress>,
@@ -377,6 +380,19 @@ fn originator_of(event: &Event) -> tau_proto::PromptOriginator {
         Event::AgentResponseFinished(f) => f.originator.clone(),
         _ => tau_proto::PromptOriginator::User,
     }
+}
+
+fn push_status_chip(
+    themed: &mut tau_themes::ThemedText,
+    style: tau_themes::StyleIdx,
+    needs_space: &mut bool,
+    text: impl Into<String>,
+) {
+    if *needs_space {
+        themed.push_default(" ");
+    }
+    themed.push(style, text.into());
+    *needs_space = true;
 }
 
 impl EventRenderer {
@@ -439,6 +455,7 @@ impl EventRenderer {
             current_model: None,
             current_role: None,
             current_params: tau_proto::ModelParams::default(),
+            role_defaults: HashMap::new(),
             current_context_percent: None,
             current_context_input_tokens: None,
             current_context_window: None,
@@ -929,25 +946,92 @@ impl EventRenderer {
 
         let mut themed = ThemedText::new();
         let status_style = themed.add_style(names::MODEL_STATUS);
-        let role_style = themed.add_style(names::ROLE_STATUS);
+        let model_style = themed.add_style(names::STATUS_MODEL);
+        let role_style = themed.add_style(names::STATUS_ROLE);
+        let session_style = themed.add_style(names::STATUS_SESSION);
+        let context_style = themed.add_style(names::STATUS_CONTEXT);
+        let effort_style = themed.add_style(names::STATUS_EFFORT);
+        let verbosity_style = themed.add_style(names::STATUS_VERBOSITY);
+        let service_tier_style = themed.add_style(names::STATUS_SERVICE_TIER);
         let redraw_style = themed.add_style(names::REDRAW_COUNTER);
+        let mut needs_space = false;
 
         match self.current_model.as_ref() {
-            None => {
-                themed.push(status_style, "no model selected");
-            }
+            None => push_status_chip(
+                &mut themed,
+                status_style,
+                &mut needs_space,
+                "no model selected".to_owned(),
+            ),
             Some(model) => {
-                // Prefer the role label when present; otherwise fall
-                // back to the model id so the bar still identifies
-                // *something* when the user picked a model directly.
-                let identity = self
-                    .current_role
-                    .as_deref()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| model.to_string());
-                themed.push(role_style, identity);
+                if let Some(role) = self.current_role.as_deref() {
+                    push_status_chip(
+                        &mut themed,
+                        role_style,
+                        &mut needs_space,
+                        format!("+{role}"),
+                    );
+                } else {
+                    push_status_chip(
+                        &mut themed,
+                        model_style,
+                        &mut needs_space,
+                        format!("={model}"),
+                    );
+                }
             }
         }
+        let show_effort = self
+            .role_default_effort()
+            .map_or(!self.current_params.effort.is_default(), |default| {
+                self.current_params.effort != default
+            });
+        if show_effort {
+            push_status_chip(
+                &mut themed,
+                effort_style,
+                &mut needs_space,
+                format!("^{}", self.current_params.effort.as_str()),
+            );
+        }
+        let show_verbosity = self
+            .role_default_verbosity()
+            .map_or(!self.current_params.verbosity.is_default(), |default| {
+                self.current_params.verbosity != default
+            });
+        if show_verbosity {
+            push_status_chip(
+                &mut themed,
+                verbosity_style,
+                &mut needs_space,
+                format!("~{}", self.current_params.verbosity.as_str()),
+            );
+        }
+        if let Some(service_tier) = self.current_params.service_tier {
+            push_status_chip(
+                &mut themed,
+                service_tier_style,
+                &mut needs_space,
+                format!("!{}", service_tier.as_str()),
+            );
+        }
+        if let Some(session_id) = self.current_session_id.as_ref() {
+            push_status_chip(
+                &mut themed,
+                session_style,
+                &mut needs_space,
+                format!("@{session_id}"),
+            );
+        }
+        if let Some(context) = self.context_status_chip() {
+            push_status_chip(
+                &mut themed,
+                context_style,
+                &mut needs_space,
+                format!("#{context}"),
+            );
+        }
+
         let full_render_count = self.handle.full_render_count();
         if self.last_full_render_count < full_render_count {
             self.last_full_render_count = full_render_count;
@@ -958,7 +1042,12 @@ impl EventRenderer {
                 .last_full_render_at
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(5 * 60));
         if show_redraw_counter {
-            themed.push(redraw_style, format!(" {full_render_count}"));
+            push_status_chip(
+                &mut themed,
+                redraw_style,
+                &mut needs_space,
+                full_render_count.to_string(),
+            );
         }
 
         let bg = self
@@ -980,6 +1069,52 @@ impl EventRenderer {
             }
         }
         self.handle.redraw();
+    }
+
+    fn role_default_effort(&self) -> Option<tau_proto::Effort> {
+        let role = self.current_role.as_deref()?;
+        self.role_defaults
+            .get(role)?
+            .effort
+            .as_deref()?
+            .parse()
+            .ok()
+    }
+
+    fn role_default_verbosity(&self) -> Option<tau_proto::Verbosity> {
+        let role = self.current_role.as_deref()?;
+        self.role_defaults
+            .get(role)?
+            .verbosity
+            .as_deref()?
+            .parse()
+            .ok()
+    }
+
+    fn context_status_chip(&self) -> Option<String> {
+        match (
+            self.current_context_percent,
+            self.current_context_input_tokens,
+            self.current_context_window,
+        ) {
+            (Some(percent), Some(input), Some(window)) => Some(format!(
+                "{percent}% {}/{}",
+                format_token_count(input),
+                format_token_count(window)
+            )),
+            (Some(percent), _, Some(window)) => {
+                Some(format!("{percent}%/{}", format_token_count(window)))
+            }
+            (Some(percent), _, None) => Some(format!("{percent}%")),
+            (None, Some(input), Some(window)) => Some(format!(
+                "{}/{}",
+                format_token_count(input),
+                format_token_count(window)
+            )),
+            (None, Some(input), None) => Some(format_token_count(input)),
+            (None, None, Some(window)) => Some(format!("?/{}", format_token_count(window))),
+            (None, None, None) => None,
+        }
     }
 
     fn submitted_prompt_prefix(&self) -> String {
@@ -1633,19 +1768,36 @@ impl EventRenderer {
                     .iter()
                     .map(|r| tau_cli_term::CompletionItem::new(&r.name, &r.description))
                     .collect();
-                let role_items: Vec<(tau_cli_term::CompletionItem, RoleCompletionDetails)> = roles
+                let role_defaults: HashMap<String, RoleCompletionDetails> = roles
                     .roles
                     .iter()
                     .map(|r| {
-                        let details = RoleCompletionDetails::from_description(&r.description);
                         (
-                            tau_cli_term::CompletionItem::new(&r.name, details.short_description()),
-                            details,
+                            r.name.clone(),
+                            RoleCompletionDetails::from_description(&r.description),
                         )
+                    })
+                    .collect();
+                let role_items: Vec<(tau_cli_term::CompletionItem, RoleCompletionDetails)> = roles
+                    .roles
+                    .iter()
+                    .filter_map(|role| {
+                        let details = role_defaults.get(&role.name)?.clone();
+                        Some((
+                            tau_cli_term::CompletionItem::new(
+                                &role.name,
+                                details.short_description(),
+                            ),
+                            details,
+                        ))
                     })
                     .collect();
                 if let Ok(mut available) = self.roles_available.lock() {
                     *available = roles.roles.iter().map(|r| r.name.clone()).collect();
+                }
+                self.role_defaults = role_defaults;
+                if self.current_role.is_some() && self.model_status_block.is_some() {
+                    self.render_model_status();
                 }
                 self.completion_data
                     .set_arg_completions(tau_cli_term::CommandName::new("/model"), model_items);

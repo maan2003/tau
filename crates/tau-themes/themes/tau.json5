@@ -41,9 +41,16 @@
     "system.path":          { fg: "blue" },
     "system.status":        { },
 
-    // -- Model status --
+    // -- Status bar --
     "model.status":         { fg: "dark_grey" },
-    "role.status":          { fg: "dark_yellow" },
+    "status.model":         { fg: "dark_grey" },
+    "status.role":          { fg: "dark_yellow" },
+    "status.session":       { fg: "cyan" },
+    "status.context":       { fg: "blue" },
+    "status.effort":        { fg: "yellow" },
+    "status.verbosity":     { fg: "magenta" },
+    "status.service_tier":  { fg: "green" },
+    "status.tools":         { fg: "dark_yellow" },
     "redraw.counter":       { fg: "red" },
 
     // -- Token stats --

@@ -2521,7 +2521,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
 /// Sub-agent state changes (tool start, response usage, tool finish)
 /// must surface to the user as `DelegateProgress` events keyed on the
 /// parent's `delegate` tool call_id. The CLI uses these to repaint
-/// the running tool block as `delegate [task] ctx: …% tools: a/b …`.
+/// the running tool block as `delegate [task] #… %a/b …`.
 #[test]
 fn delegate_emits_progress_as_sub_agent_makes_progress() {
     let td = TempDir::new().expect("tempdir");

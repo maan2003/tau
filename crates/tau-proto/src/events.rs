@@ -1282,7 +1282,7 @@ pub struct ToolDisplay {
     pub stats: ToolDisplayStats,
     /// Labelled counter chips (current / optional total) rendered
     /// between stats and `info_chips`. Used for tools that surface
-    /// progress data: `ctx: 6%/200k`, `tools: 3`, `bytes: 12/200`,
+    /// progress data: `#6%/200k`, `%3`, `bytes: 12/200`,
     /// etc. The unit hint picks the rendering shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub progress_counters: Vec<ProgressCounter>,

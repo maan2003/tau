@@ -2936,7 +2936,7 @@ impl Harness {
         conv.chain_anchor = initial_chain_anchor;
         self.conversations.insert(cid.clone(), conv);
 
-        // Emit the initial progress snapshot (`tools: 0/0`, no ctx
+        // Emit the initial progress snapshot (`%0/0`, no ctx
         // info yet) so the parent's tool block flips from `…` to the
         // structured form as soon as the side conversation exists,
         // without waiting for the sub-agent's first event.
