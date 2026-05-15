@@ -44,10 +44,10 @@ use crate::harness::interception::{
     ConversationHeadSync, DeferredPublish, InterceptorRegistry, PendingIntercept,
 };
 use crate::model::{
-    clamp_effort, clamp_thinking_summary, clamp_verbosity, context_percent_used, efforts_for_model,
-    load_model_list, model_context_window, model_for_role, role_infos, save_harness_state,
-    save_role_overrides, selected_params_for_model, selected_params_for_role,
-    thinking_summaries_for_model, verbosities_for_model,
+    clamp_effort, clamp_thinking_summary, clamp_verbosity, configured_default_params_for_selection,
+    context_percent_used, efforts_for_model, load_model_list, model_context_window, model_for_role,
+    role_infos, save_harness_state, save_role_overrides, selected_params_for_model,
+    selected_params_for_role, thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::prompt::{
     assemble_conversation_from, assemble_prompt_context_from, build_system_prompt, cbor_map_bool,
@@ -1864,6 +1864,12 @@ impl Harness {
                     self.publish_event(
                         None,
                         Event::HarnessModelSelected(HarnessModelSelected {
+                            default_params: Some(configured_default_params_for_selection(
+                                &live_settings,
+                                &self.model_registry,
+                                None,
+                                &model,
+                            )),
                             model: Some(model),
                             context_window,
                             role: None,
@@ -1987,9 +1993,16 @@ impl Harness {
                 let effort_levels = efforts_for_model(&self.model_registry, &model);
                 let verbosity_levels = verbosities_for_model(&self.model_registry, &model);
                 let thinking_levels = thinking_summaries_for_model(&self.model_registry, &model);
+                let (live_settings, _) = load_harness_settings_or_warn(&self.dirs);
                 self.publish_event(
                     None,
                     Event::HarnessModelSelected(HarnessModelSelected {
+                        default_params: Some(configured_default_params_for_selection(
+                            &live_settings,
+                            &self.model_registry,
+                            self.selected_role.as_deref(),
+                            &model,
+                        )),
                         model: Some(model),
                         context_window,
                         role: self.selected_role.clone(),

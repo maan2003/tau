@@ -19,8 +19,8 @@ use tau_proto::{
 
 use crate::harness::{Harness, selector_matches_event};
 use crate::model::{
-    efforts_for_model, model_context_window, role_infos, thinking_summaries_for_model,
-    verbosities_for_model,
+    configured_default_params_for_selection, efforts_for_model, model_context_window, role_infos,
+    thinking_summaries_for_model, verbosities_for_model,
 };
 
 impl Harness {
@@ -93,7 +93,16 @@ impl Harness {
         if selector_matches_event(selectors, &roles_event) {
             let _ = self.bus.send_to(client_id, None, Frame::Event(roles_event));
         }
+        let (harness_settings, _) = crate::settings::load_harness_settings_or_warn(&self.dirs);
         let selected_event = Event::HarnessModelSelected(HarnessModelSelected {
+            default_params: self.selected_model.as_ref().map(|model| {
+                configured_default_params_for_selection(
+                    &harness_settings,
+                    &self.model_registry,
+                    self.selected_role.as_deref(),
+                    model,
+                )
+            }),
             model: self.selected_model.clone(),
             context_window: self
                 .selected_model

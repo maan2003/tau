@@ -270,6 +270,7 @@ fn new_session_preserves_model_status() {
         model: Some("test/model".into()),
         context_window: Some(100_000),
         role: None,
+        default_params: None,
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "=test/model"));
@@ -298,6 +299,7 @@ fn model_status_uses_symbol_prefixed_chips() {
         model: Some("test/model".into()),
         context_window: Some(200_000),
         role: Some("smart".into()),
+        default_params: None,
     }));
     renderer.handle(&Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
         level: Verbosity::High,
@@ -347,6 +349,12 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
         model: Some("test/model".into()),
         context_window: Some(200_000),
         role: Some("smart".into()),
+        default_params: Some(tau_proto::ModelParams {
+            effort: tau_proto::Effort::Medium,
+            verbosity: Verbosity::Medium,
+            thinking_summary: tau_proto::ThinkingSummary::Auto,
+            service_tier: None,
+        }),
     }));
     renderer.handle(&Event::HarnessEffortChanged(HarnessEffortChanged {
         level: tau_proto::Effort::Medium,
@@ -370,6 +378,54 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     sync(&handle);
 
     assert!(vt.screen_contains(80, "+smart ~high @s2"));
+}
+
+#[test]
+fn role_state_overrides_are_compared_to_config_defaults() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    // HarnessRolesAvailable describes the current role including
+    // persisted state overrides. The status bar must use the
+    // config-only default_params from HarnessModelSelected instead.
+    renderer.handle(&Event::HarnessRolesAvailable(HarnessRolesAvailable {
+        roles: vec![HarnessRoleInfo {
+            name: "smart".to_owned(),
+            description: "model=test/model, effort=low, verbosity=high, thinking-summary=auto"
+                .to_owned(),
+        }],
+    }));
+    renderer.handle(&Event::HarnessModelSelected(HarnessModelSelected {
+        model: Some("test/model".into()),
+        context_window: None,
+        role: Some("smart".into()),
+        default_params: Some(tau_proto::ModelParams {
+            effort: tau_proto::Effort::Medium,
+            verbosity: Verbosity::Medium,
+            thinking_summary: tau_proto::ThinkingSummary::Auto,
+            service_tier: Some(tau_proto::ServiceTier::Fast),
+        }),
+    }));
+    renderer.handle(&Event::HarnessEffortChanged(HarnessEffortChanged {
+        level: tau_proto::Effort::Low,
+    }));
+    renderer.handle(&Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
+        level: Verbosity::High,
+    }));
+    renderer.handle(&Event::HarnessServiceTierChanged(
+        tau_proto::HarnessServiceTierChanged { service_tier: None },
+    ));
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s3".into(),
+        reason: SessionStartReason::New,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "+smart ^low ~high !off @s3"));
 }
 
 #[test]

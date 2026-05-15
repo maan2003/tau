@@ -378,6 +378,53 @@ fn load_last_params(dirs: &tau_config::settings::TauDirs) -> HashMap<ModelId, Mo
     out
 }
 
+/// Resolve the config-only [`ModelParams`] baseline for `model`.
+/// Persisted state is intentionally ignored; the status bar compares
+/// live state against this value so user adjustments stay visible.
+pub(crate) fn configured_default_params_for_model(
+    harness_settings: &tau_config::settings::HarnessSettings,
+    registry: &tau_config::settings::ModelRegistry,
+    model: &ModelId,
+) -> ModelParams {
+    let allowed_effort = efforts_for_model(registry, model);
+    let allowed_verbosity = verbosities_for_model(registry, model);
+    let allowed_thinking = thinking_summaries_for_model(registry, model);
+    let default_entry = harness_settings.default_params.get(model).copied();
+
+    let effort = default_entry
+        .map(|p| p.effort)
+        .unwrap_or_else(|| middle_effort(&allowed_effort));
+    let verbosity = default_entry
+        .map(|p| p.verbosity)
+        .unwrap_or_else(|| default_verbosity(&allowed_verbosity));
+    let thinking_summary = default_entry
+        .map(|p| p.thinking_summary)
+        .unwrap_or_else(|| default_thinking_summary(&allowed_thinking));
+    let service_tier = default_entry.and_then(|p| p.service_tier);
+
+    ModelParams {
+        effort: clamp_effort(effort, &allowed_effort),
+        verbosity: clamp_verbosity(verbosity, &allowed_verbosity),
+        thinking_summary: clamp_thinking_summary(thinking_summary, &allowed_thinking),
+        service_tier,
+    }
+}
+
+pub(crate) fn configured_default_params_for_selection(
+    harness_settings: &tau_config::settings::HarnessSettings,
+    registry: &tau_config::settings::ModelRegistry,
+    role: Option<&str>,
+    model: &ModelId,
+) -> ModelParams {
+    if let Some(role) = role
+        && registry.default_roles.contains_key(role)
+    {
+        return selected_params_for_role(registry, &registry.default_roles, role, model);
+    }
+
+    configured_default_params_for_model(harness_settings, registry, model)
+}
+
 /// Resolve the [`ModelParams`] to use for `model` on startup or after
 /// a model switch.
 ///

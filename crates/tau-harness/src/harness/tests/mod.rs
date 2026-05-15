@@ -38,8 +38,9 @@ use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::model::{
-    clamp_effort, efforts_for_model, load_model_list, selected_params_for_model,
-    selected_params_for_role, thinking_summaries_for_model, verbosities_for_model,
+    clamp_effort, configured_default_params_for_model, configured_default_params_for_selection,
+    efforts_for_model, load_model_list, selected_params_for_model, selected_params_for_role,
+    thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::prompt::build_system_prompt;
 use crate::turn::{PromptSubmission, TurnState};

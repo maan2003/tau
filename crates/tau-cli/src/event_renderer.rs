@@ -89,9 +89,14 @@ pub(crate) struct EventRenderer {
     /// directly (no role), or no model is selected. The status bar
     /// shows this in place of the model id when present.
     current_role: Option<String>,
-    /// Default model params advertised for each role, used to hide
-    /// status chips that merely repeat the selected role defaults.
+    /// Current role details advertised for completion menus. Status
+    /// chips compare against `default_params` instead, because these
+    /// role details include persisted state overrides.
     role_defaults: HashMap<String, RoleCompletionDetails>,
+    /// Config-only default model knobs for the current selection.
+    /// Persisted state is intentionally excluded by the harness so the
+    /// status bar can surface state adjustments from config defaults.
+    default_params: Option<tau_proto::ModelParams>,
     /// Current per-prompt model knobs. Mirrored into `effort_state` /
     /// `verbosity_state` / `thinking_summary_state` so the input
     /// thread can read individual fields for cycling helpers.
@@ -456,6 +461,7 @@ impl EventRenderer {
             current_role: None,
             current_params: tau_proto::ModelParams::default(),
             role_defaults: HashMap::new(),
+            default_params: None,
             current_context_percent: None,
             current_context_input_tokens: None,
             current_context_window: None,
@@ -983,11 +989,15 @@ impl EventRenderer {
                 }
             }
         }
-        let show_effort = self
-            .role_default_effort()
-            .map_or(!self.current_params.effort.is_default(), |default| {
-                self.current_params.effort != default
-            });
+        let show_effort = self.default_params.map_or_else(
+            || {
+                self.role_default_effort()
+                    .map_or(!self.current_params.effort.is_default(), |default| {
+                        self.current_params.effort != default
+                    })
+            },
+            |default| self.current_params.effort != default.effort,
+        );
         if show_effort {
             push_status_chip(
                 &mut themed,
@@ -996,11 +1006,15 @@ impl EventRenderer {
                 format!("^{}", self.current_params.effort.as_str()),
             );
         }
-        let show_verbosity = self
-            .role_default_verbosity()
-            .map_or(!self.current_params.verbosity.is_default(), |default| {
-                self.current_params.verbosity != default
-            });
+        let show_verbosity = self.default_params.map_or_else(
+            || {
+                self.role_default_verbosity()
+                    .map_or(!self.current_params.verbosity.is_default(), |default| {
+                        self.current_params.verbosity != default
+                    })
+            },
+            |default| self.current_params.verbosity != default.verbosity,
+        );
         if show_verbosity {
             push_status_chip(
                 &mut themed,
@@ -1009,12 +1023,22 @@ impl EventRenderer {
                 format!("~{}", self.current_params.verbosity.as_str()),
             );
         }
-        if let Some(service_tier) = self.current_params.service_tier {
+        let show_service_tier = self
+            .default_params
+            .map_or(self.current_params.service_tier.is_some(), |default| {
+                self.current_params.service_tier != default.service_tier
+            });
+        if show_service_tier {
+            let service_tier = self
+                .current_params
+                .service_tier
+                .map(|tier| tier.as_str())
+                .unwrap_or("off");
             push_status_chip(
                 &mut themed,
                 service_tier_style,
                 &mut needs_space,
-                format!("!{}", service_tier.as_str()),
+                format!("!{service_tier}"),
             );
         }
         if let Some(session_id) = self.current_session_id.as_ref() {
@@ -1879,6 +1903,7 @@ impl EventRenderer {
             Event::HarnessModelSelected(selected) => {
                 self.current_model = selected.model.clone();
                 self.current_role = selected.role.clone();
+                self.default_params = selected.default_params;
                 if let Ok(mut role) = self.current_role_state.lock() {
                     *role = selected.role.clone();
                 }

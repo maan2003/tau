@@ -518,6 +518,11 @@ pub struct HarnessModelSelected {
     /// selected a model directly, or when no role/model is selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Effective model parameters from config only, ignoring persisted
+    /// state. The UI compares the live parameters against this baseline
+    /// so state overrides stay visible in the status bar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_params: Option<ModelParams>,
 }
 
 /// Current context usage for the selected model.

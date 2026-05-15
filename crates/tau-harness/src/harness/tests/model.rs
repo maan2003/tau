@@ -97,6 +97,113 @@ fn selected_params_effort_is_model_specific_and_clamped() {
     );
 }
 
+/// The config-only baseline ignores state persisted by `/effort`,
+/// `/verbosity`, and `/service-tier`, even though selected params use
+/// that state when no `default_params` entry exists.
+#[test]
+fn configured_default_params_ignore_persisted_last_params() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    std::fs::write(
+        config_dir.join("models.json5"),
+        r#"{
+            providers: {
+                openai: {
+                    compat: { supportsReasoningEffort: true, supportsVerbosity: true },
+                    models: [{ id: "gpt-4.1" }],
+                },
+            },
+        }"#,
+    )
+    .expect("write models");
+    std::fs::write(
+        state_dir.join("harness.json5"),
+        r#"{
+            "last_params": {
+                "openai/gpt-4.1": { "effort": "high", "verbosity": "high", "service_tier": "fast" }
+            }
+        }"#,
+    )
+    .expect("write state");
+
+    let harness_settings =
+        tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
+    let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
+    let model = "openai/gpt-4.1".into();
+
+    let selected = selected_params_for_model(&dirs, &harness_settings, &model_registry, &model);
+    assert_eq!(selected.effort, tau_proto::Effort::High);
+    assert_eq!(selected.verbosity, tau_proto::Verbosity::High);
+    assert_eq!(selected.service_tier, Some(tau_proto::ServiceTier::Fast));
+
+    let configured =
+        configured_default_params_for_model(&harness_settings, &model_registry, &model);
+    assert_eq!(configured.effort, tau_proto::Effort::Low);
+    assert_eq!(configured.verbosity, tau_proto::Verbosity::Low);
+    assert_eq!(configured.service_tier, None);
+}
+
+#[test]
+fn configured_role_defaults_ignore_persisted_role_overrides() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    std::fs::write(
+        config_dir.join("models.json5"),
+        r#"{
+            defaultRoles: {
+                smart: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
+            },
+            providers: {
+                openai: {
+                    compat: { supportsReasoningEffort: true, supportsVerbosity: true },
+                    models: [{ id: "gpt-4.1" }],
+                },
+            },
+        }"#,
+    )
+    .expect("write models");
+    std::fs::write(
+        state_dir.join("harness.json5"),
+        r#"{
+            "role_overrides": {
+                "smart": { "model": "openai/gpt-4.1", "effort": "low", "verbosity": "high" }
+            }
+        }"#,
+    )
+    .expect("write state");
+
+    let loaded = load_model_list(&dirs);
+    let model = loaded.selected.as_ref().expect("selected model");
+    let selected = selected_params_for_role(&loaded.model_registry, &loaded.roles, "smart", model);
+    assert_eq!(selected.effort, tau_proto::Effort::Low);
+    assert_eq!(selected.verbosity, tau_proto::Verbosity::High);
+
+    let configured = configured_default_params_for_selection(
+        &loaded.harness_settings,
+        &loaded.model_registry,
+        Some("smart"),
+        model,
+    );
+    assert_eq!(configured.effort, tau_proto::Effort::High);
+    assert_eq!(configured.verbosity, tau_proto::Verbosity::Medium);
+}
+
 /// First-time users (no per-model entry in `default_params`, no
 /// persisted `last_params`) get the middle of the available
 /// reasoning levels, not the lowest. For the standard
