@@ -94,8 +94,9 @@ const SKILL_FILENAME: &str = "SKILL.md";
 /// Parse YAML frontmatter delimited by `---` lines.
 ///
 /// Returns a map of key→value pairs and the body (content after the closing
-/// `---`). If no frontmatter is present, or if the YAML inside the fence
-/// fails to parse, returns an empty map and the full content as body.
+/// `---`). If no frontmatter is present, returns an empty map and the full
+/// content as body. If the YAML inside a closed fence fails to parse, returns
+/// an empty map and the post-fence body.
 ///
 /// Top-level scalars are stringified; non-scalar values (lists, mappings)
 /// and `null` are dropped silently — see the module-level docs.

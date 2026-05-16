@@ -661,6 +661,37 @@ fn skill_tool_registered_in_tool_list() {
 }
 
 #[test]
+fn duplicate_extension_skill_keeps_first_source_but_allows_refresh() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let skill_event = |description: &str, file_path: &str| {
+        Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+            name: tau_proto::SkillName::from("same-skill"),
+            description: description.to_owned(),
+            file_path: PathBuf::from(file_path),
+            add_to_prompt: true,
+        })
+    };
+
+    h.handle_extension_event_inner("source-a", skill_event("first", "/skills/a/SKILL.md"))
+        .expect("first skill");
+    h.handle_extension_event_inner("source-a", skill_event("refreshed", "/skills/a2/SKILL.md"))
+        .expect("same-source refresh");
+    h.handle_extension_event_inner("source-b", skill_event("second", "/skills/b/SKILL.md"))
+        .expect("duplicate skill");
+
+    let stored = h
+        .discovered_skills
+        .get(&tau_proto::SkillName::from("same-skill"))
+        .expect("stored skill");
+    assert_eq!(stored.source_id, "source-a");
+    assert_eq!(stored.description, "refreshed");
+    assert_eq!(stored.file_path, PathBuf::from("/skills/a2/SKILL.md"));
+}
+
+#[test]
 fn gather_tool_definitions_respects_role_tools_profile() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
@@ -714,7 +745,7 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
             toolsProfiles: {
                 specialized: {
                     shell: false,
-                    gpt_shell: true,
+                    test_gpt_shell: true,
                 },
             },
         }"#,
@@ -735,11 +766,11 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
         state_dir: Some(state_dir.clone()),
     };
     let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("start");
-    let tool_events = connect_test_tool(&mut h, "conn-gpt-shell");
+    let tool_events = connect_test_tool(&mut h, "conn-test-gpt-shell");
     h.registry.register(
-        "conn-gpt-shell",
+        "conn-test-gpt-shell",
         ToolSpec {
-            name: ToolName::new("gpt_shell"),
+            name: ToolName::new("test_gpt_shell"),
             model_visible_name: Some(ToolName::new("shell")),
             description: Some("specialized shell".to_owned()),
             tool_type: tau_proto::ToolType::Function,
@@ -753,7 +784,7 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
     let defs = h.gather_tool_definitions();
     assert!(
         defs.iter().any(|d| {
-            d.name == "gpt_shell"
+            d.name == "test_gpt_shell"
                 && d.model_visible_name
                     .as_ref()
                     .is_some_and(|name| name == "shell")
@@ -780,7 +811,7 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
         routed.iter().any(|frame| matches!(
             &frame.frame,
             Frame::Event(Event::ToolInvoke(invoke))
-                if invoke.call_id.as_str() == "call-alias" && invoke.tool_name == "gpt_shell"
+                if invoke.call_id.as_str() == "call-alias" && invoke.tool_name == "test_gpt_shell"
         )),
         "expected internal tool invoke; got: {routed:?}"
     );

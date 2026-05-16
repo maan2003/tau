@@ -1723,15 +1723,7 @@ impl Harness {
                 }
             }
             Event::ExtSkillAvailable(ref skill) => {
-                self.discovered_skills.insert(
-                    skill.name.clone(),
-                    DiscoveredSkill {
-                        source_id: source_id.into(),
-                        description: skill.description.clone(),
-                        file_path: std::path::PathBuf::from(&skill.file_path),
-                        add_to_prompt: skill.add_to_prompt,
-                    },
-                );
+                self.record_discovered_skill(source_id, skill);
                 self.publish_event(Some(source_id), event);
             }
             Event::ExtAgentsMdAvailable(ref agents) => {
@@ -2831,6 +2823,35 @@ impl Harness {
             .retain(|_, skill| skill.source_id != source_id);
         self.discovered_agents_files
             .retain(|file| file.source_id != source_id);
+    }
+
+    fn record_discovered_skill(&mut self, source_id: &str, skill: &tau_proto::ExtSkillAvailable) {
+        let collision = self
+            .discovered_skills
+            .get(&skill.name)
+            .filter(|existing| existing.source_id != source_id)
+            .map(|existing| (existing.source_id.clone(), existing.file_path.clone()));
+
+        if let Some((existing_source, existing_path)) = collision {
+            self.emit_info_important(&format!(
+                "skill collision: {} from {} ignored; keeping {} from {}",
+                skill.name,
+                skill.file_path.display(),
+                existing_path.display(),
+                existing_source,
+            ));
+            return;
+        }
+
+        self.discovered_skills.insert(
+            skill.name.clone(),
+            DiscoveredSkill {
+                source_id: source_id.into(),
+                description: skill.description.clone(),
+                file_path: std::path::PathBuf::from(&skill.file_path),
+                add_to_prompt: skill.add_to_prompt,
+            },
+        );
     }
 
     fn session_init_provider_ids(&self) -> std::collections::HashSet<tau_proto::ConnectionId> {
