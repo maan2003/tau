@@ -9,7 +9,8 @@
 //!   [`Screen`]
 //! - **Scrolling render** — on overflow, diffs full content and renders in
 //!   order; `\r\n` at the bottom pushes content into scrollback
-//! - **Full render** — on resize, clears screen and re-renders everything
+//! - **Full render** — on resize/invalidation, clears screen + scrollback and
+//!   replays logical content without rubber
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -627,8 +628,9 @@ impl TermHandle {
 
     /// Forces the next redraw to take the full-render path: clear
     /// the visible screen + scrollback (`\x1b[2J\x1b[H\x1b[3J`)
-    /// and re-emit every line from `all_lines`. Overflow scrolls
-    /// naturally into the (now-empty) scrollback.
+    /// and re-emit logical content from scratch. Overflow naturally
+    /// rebuilds terminal scrollback, but full-redraw plans intentionally
+    /// omit rubber.
     ///
     /// Use this when a mutation affects rows that may already be in
     /// terminal scrollback — e.g. toggling visibility of a block from
@@ -2130,8 +2132,7 @@ fn redraw_loop(
                 // visible. Rows that should re-enter the screen may currently
                 // exist only in terminal scrollback, which cannot be pulled
                 // back incrementally. Since we are repainting from scratch,
-                // discard any rubber and let past scrollback rows re-enter the
-                // viewport.
+                // discard any rubber and paint the new viewport directly.
                 plan = TerminalModel::full_redraw_plan(&layout, height);
                 let visible_start = plan.viewport_start;
                 mark_full_render(
@@ -2151,11 +2152,10 @@ fn redraw_loop(
                     tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
                 }
             } else if hidden_prefix_changed {
-                // The terminal scrollback contains rows whose logical content
-                // changed. Rebuild it from logical content instead of trying to
-                // patch it incrementally. Since we are repainting from scratch,
-                // discard any rubber and let past scrollback rows re-enter the
-                // viewport.
+                // The terminal scrollback may contain rows whose logical
+                // content changed. Clear it instead of trying to patch it
+                // incrementally. Since we are repainting from scratch, discard
+                // any rubber and paint the new viewport directly.
                 plan = TerminalModel::full_redraw_plan(&layout, height);
                 let visible_start = plan.viewport_start;
                 let changed_line = terminal_model.changed_hidden_line(&layout);
@@ -2223,11 +2223,11 @@ fn redraw_loop(
     }
 }
 
-/// Full re-render: clear screen + scrollback, output all lines,
-/// position cursor. Used on resize and when content grows beyond
-/// the viewport. Callers should pass a no-rubber plan so a full
-/// repaint can pull scrollback rows back into the viewport. After
-/// rendering, Screen tracks the visible viewport for subsequent
+/// Full re-render: clear screen + scrollback, output all logical lines, and
+/// position cursor. Used on resize and after invalidation. Callers should pass
+/// a no-rubber plan so a full repaint drops rubber instead of preserving
+/// temporary blank space. Overflow rebuilds terminal scrollback naturally.
+/// After rendering, Screen tracks the visible viewport for subsequent
 /// differential updates.
 fn changed_line_in_range(
     prev_all_lines: &[Vec<Cell>],
@@ -2341,12 +2341,15 @@ fn full_render(
     let total = all_lines.len();
 
     stdout.queue(terminal::BeginSynchronizedUpdate)?;
-    // Clear screen, home cursor, and clear scrollback. The
-    // scrollback is rebuilt by the overflow lines below.
-    stdout.queue(Print("\x1b[2J\x1b[H\x1b[3J"))?;
+    // Clear screen, home cursor, and clear scrollback. The scrollback is
+    // rebuilt by replaying no-rubber logical content below. Disable autowrap
+    // while replaying so exact-width rows don't create phantom blank rows
+    // before the explicit CRLF between logical rows.
+    stdout.queue(Print("\x1b[2J\x1b[H\x1b[3J\x1b[?7l"))?;
 
-    // Output all lines starting at the top. Overflow scrolls into
-    // scrollback naturally.
+    // Output all logical lines starting at the top. Overflow scrolls into
+    // scrollback naturally. Short content stays at the top, so the prompt sits
+    // directly under content instead of being bottom-pinned by rubber.
     for (i, line) in all_lines.iter().enumerate() {
         if i > 0 {
             stdout.queue(Print("\r\n"))?;
@@ -2354,14 +2357,14 @@ fn full_render(
         emit_styled_cells(stdout, line)?;
     }
 
+    stdout.queue(Print("\x1b[?7h"))?;
     stdout.queue(terminal::EndSynchronizedUpdate)?;
     stdout.flush()?;
 
-    // After outputting, the cursor is at the last content line.
-    // When total >= height, overflow scrolled and the cursor is at
-    // screen row (height - 1). When total < height, the cursor is
-    // at screen row (total - 1).
-    let current_screen_row = if total >= height {
+    // After outputting, the cursor is at the last content line. When content
+    // overflowed, that line is at the terminal bottom; otherwise it is at its
+    // natural row below the transcript.
+    let current_screen_row = if height <= total {
         height - 1
     } else {
         total.saturating_sub(1)

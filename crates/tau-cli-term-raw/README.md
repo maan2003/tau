@@ -55,15 +55,16 @@ managing scrollback internally.
 
 ### Path 3 — Full render (resize)
 
-On terminal resize, `full_render()` clears the screen **and scrollback**
-(`\x1b[2J\x1b[H\x1b[3J`), then outputs all lines from the top. Lines that
-overflow the viewport scroll into scrollback naturally via `\r\n`, rebuilding
-the scrollback with correctly reflowed content. The `Screen` diff state is
-then rebuilt from the visible slice for subsequent Path 1/2 updates.
+On terminal resize or invalidation, `full_render()` clears the screen **and
+scrollback** (`\x1b[2J\x1b[H\x1b[3J`), then outputs all no-rubber logical
+lines from the top. Lines that overflow the viewport scroll into native
+scrollback naturally, rebuilding history with the current width. Temporary
+rubber is dropped, so if the transcript fits, the prompt sits directly under
+content instead of being bottom-pinned by blank rows.
 
 Scrollback is cleared on resize because the old scrollback contains lines
-wrapped at the old terminal width. Re-rendering everything produces correctly
-reflowed content for the new width.
+wrapped at the old terminal width. Replaying logical content produces correctly
+reflowed scrollback for the new width.
 
 ## When mutations need a full redraw
 
@@ -107,7 +108,7 @@ the diff renderer can update them in place.
 
 `invalidate_screen()` sets a flag that forces the next redraw through
 `full_render` — clear screen + clear scrollback (`\x1b[2J\x1b[H\x1b[3J`),
-then re-emit every line from `all_lines`. Use it for:
+then re-emit no-rubber `all_lines`. Use it for:
 
 - **`set_block` on a block that may have scrolled out of the viewport.**
   Anything in `history`, including the most recent finalized block once
@@ -135,9 +136,10 @@ edits within a long live block, those updates would also need
 
 ## Known limitations
 
-- **Resize clears scrollback history.** Any terminal output from *before* tau
-  started (shell commands, etc.) is lost on the first resize. Tau's own
-  history is rebuilt by the full re-render, but the pre-tau scrollback cannot
+- **Resize clears pre-tau scrollback history.** Any terminal output from
+  *before* tau started (shell commands, etc.) is lost on the first resize.
+  Tau's own logical history is rebuilt by the full re-render, but the pre-tau
+  scrollback cannot
   be recovered. This is an inherent trade-off of rendering to the normal
   terminal buffer without an alternate screen.
 

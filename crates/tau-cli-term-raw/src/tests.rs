@@ -2098,7 +2098,7 @@ fn removing_visible_block_that_moves_viewport_up_uses_rubber_without_full_redraw
 }
 
 #[test]
-fn full_redraw_after_rubber_discards_rubber_and_pulls_scrollback_into_view() {
+fn full_redraw_after_rubber_discards_rubber_and_repaints_viewport() {
     let buf = SharedBuffer::new();
     let mut parser = vt100::Parser::new(5, 40, 50);
     let (_term, handle, _input_tx) =
@@ -2130,6 +2130,144 @@ fn full_redraw_after_rubber_discards_rubber_and_pulls_scrollback_into_view() {
         40,
         5,
         &["line 2", "line 3", "line 4", "line 5", "> "],
+    );
+}
+
+#[test]
+fn resize_full_redraw_discards_rubber_gap() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(5, 40, 50);
+    let (term, handle, input_tx) =
+        Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    flush_redraws(&handle, &buf, &mut parser);
+
+    for i in 0..6 {
+        handle.print_output("test", plain_block(format!("line {i}")));
+    }
+    let active = handle.new_block("test", plain_block("temporary active"));
+    handle.push_above_active(active);
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_no_full_redraw_after(&handle, &buf, &mut parser, || {
+        handle.remove_block(active);
+    });
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        5,
+        &["line 3", "line 4", "line 5", "", "> "],
+    );
+
+    parser.screen_mut().set_size(8, 40);
+    input_tx
+        .send(RawEvent::Resize(40, 8))
+        .expect("send resize event");
+    assert!(matches!(
+        term.get_next_event().expect("resize event"),
+        Event::Resize {
+            width: 40,
+            height: 8
+        }
+    ));
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        8,
+        &[
+            "line 0", "line 1", "line 2", "line 3", "line 4", "line 5", "> ",
+        ],
+    );
+}
+
+#[test]
+fn resize_full_redraw_rebuilds_scrollback_for_exact_width_lines() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(10, 12, 50);
+    let (term, handle, input_tx) =
+        Term::new_virtual(12, 10, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    flush_redraws(&handle, &buf, &mut parser);
+
+    for i in 0..7 {
+        handle.print_output(
+            "test",
+            plain_block(format!("{i}{i}{i}{i}{i}{i}{i}{i}{i}{i}")),
+        );
+    }
+    flush_redraws(&handle, &buf, &mut parser);
+
+    parser.screen_mut().set_size(6, 10);
+    input_tx
+        .send(RawEvent::Resize(10, 6))
+        .expect("send resize event");
+    assert!(matches!(
+        term.get_next_event().expect("resize event"),
+        Event::Resize {
+            width: 10,
+            height: 6
+        }
+    ));
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_terminal_rows_match(
+        &mut parser,
+        10,
+        6,
+        &[
+            "0000000000",
+            "1111111111",
+            "2222222222",
+            "3333333333",
+            "4444444444",
+            "5555555555",
+            "6666666666",
+            "> ",
+        ],
+    );
+}
+
+#[test]
+fn resize_full_redraw_rebuilds_scrollback_without_gap() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(10, 40, 50);
+    let (term, handle, input_tx) =
+        Term::new_virtual(40, 10, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    flush_redraws(&handle, &buf, &mut parser);
+
+    for i in 0..6 {
+        handle.print_output("test", plain_block(format!("line {i}")));
+    }
+    flush_redraws(&handle, &buf, &mut parser);
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        10,
+        &[
+            "line 0", "line 1", "line 2", "line 3", "line 4", "line 5", "> ",
+        ],
+    );
+
+    parser.screen_mut().set_size(6, 40);
+    input_tx
+        .send(RawEvent::Resize(40, 6))
+        .expect("send resize event");
+    assert!(matches!(
+        term.get_next_event().expect("resize event"),
+        Event::Resize {
+            width: 40,
+            height: 6
+        }
+    ));
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        6,
+        &[
+            "line 0", "line 1", "line 2", "line 3", "line 4", "line 5", "> ",
+        ],
     );
 }
 
