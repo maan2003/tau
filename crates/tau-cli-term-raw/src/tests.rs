@@ -3040,18 +3040,23 @@ fn trailing_newline_buffer_grows_prompt_height() {
 }
 
 #[test]
-fn prompt_grows_when_cursor_wraps_at_exact_width() {
+fn exact_width_prompt_end_does_not_add_phantom_row() {
     let buf = SharedBuffer::new();
-    let mut parser = vt100::Parser::new(5, 5, 20);
+    let mut parser = vt100::Parser::new(5, 10, 20);
 
     let (_term, handle, _input_tx) =
-        Term::new_virtual(5, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+        Term::new_virtual(10, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    let below = handle.new_block("below", plain_block("below"));
+    handle.push_below(below);
 
-    handle.set_buffer("abc".to_owned(), "abc".len());
+    handle.set_buffer("abc\nabcdefghij".to_owned(), "abc\nabcdefghij".len());
     flush_redraws(&handle, &buf, &mut parser);
 
-    assert_eq!(vt100_rows(&parser, 5), vec!["> abc", "", "", "", ""]);
-    assert_eq!(parser.screen().cursor_position(), (1, 0));
+    assert_eq!(
+        vt100_rows(&parser, 10),
+        vec!["> abc", "abcdefghij", "below     ", "", ""]
+    );
+    assert_eq!(parser.screen().cursor_position(), (1, 10));
 }
 
 #[test]
