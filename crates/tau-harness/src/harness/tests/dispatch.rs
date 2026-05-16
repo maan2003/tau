@@ -18,6 +18,25 @@ fn assert_delegate_tools_counter(
     assert_eq!(counter.total, total);
 }
 
+fn assert_delegate_ctx_counter(
+    progress: &tau_proto::DelegateProgress,
+    complete: Option<u64>,
+    total: Option<u64>,
+) {
+    let display = progress
+        .display
+        .as_ref()
+        .expect("delegate progress display");
+    let counter = display
+        .progress_counters
+        .iter()
+        .find(|counter| counter.label.as_deref() == Some("ctx"))
+        .expect("ctx progress counter");
+    assert_eq!(counter.unit, tau_proto::ProgressUnit::Tokens);
+    assert_eq!(counter.complete, complete);
+    assert_eq!(counter.total, total);
+}
+
 #[test]
 fn cross_session_prompt_is_rejected() {
     // The harness owns one session at a time. A UserMessage with
@@ -2729,6 +2748,8 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     assert_eq!(latest.tools_total, 1, "websearch counts toward total");
     assert_delegate_tools_counter(&latest, Some(0), Some(1));
     assert_eq!(latest.ctx_input_tokens, Some(1234));
+    assert_delegate_ctx_counter(&latest, Some(1234), None);
+    assert_eq!(h.current_session_state.context_input_tokens, None);
 
     // Complete the sub-agent's tool — counters should drop and a
     // fresh progress event should show 0 in flight, 1 total.

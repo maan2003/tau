@@ -1800,6 +1800,28 @@ fn render_tool_display_assembles_chips_in_order() {
 }
 
 #[test]
+fn render_tool_display_token_progress_formats_context_like_status_bar() {
+    use tau_proto::{ProgressCounter, ProgressUnit, ToolDisplay, ToolDisplayStatus};
+
+    let display = ToolDisplay {
+        args: "[research]".into(),
+        progress_counters: vec![ProgressCounter {
+            label: Some("ctx".into()),
+            unit: ProgressUnit::Tokens,
+            complete: Some(133_400),
+            total: Some(200_000),
+        }],
+        status: ToolDisplayStatus::InProgress,
+        status_text: "…".into(),
+        ..Default::default()
+    };
+
+    let rendered = render_tool_display("delegate", &display);
+    let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(texts, vec!["#133.4k/200k", "…"]);
+}
+
+#[test]
 fn render_tool_display_text_payload_is_preserved_for_block_rendering() {
     use tau_proto::{ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
 

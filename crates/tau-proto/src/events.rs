@@ -1287,7 +1287,7 @@ pub struct ToolDisplay {
     pub stats: ToolDisplayStats,
     /// Labelled counter chips (current / optional total) rendered
     /// between stats and `info_chips`. Used for tools that surface
-    /// progress data: `#6%/200k`, `%3`, `bytes: 12/200`,
+    /// progress data: `#12.3k/200k`, `%3`, `bytes: 12/200`,
     /// etc. The unit hint picks the rendering shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub progress_counters: Vec<ProgressCounter>,
@@ -1311,6 +1311,7 @@ pub struct ToolDisplay {
 /// - `Count`: `N` (complete only) or `N/M` (both).
 /// - `Percent`: `N%` (complete only) or `N%/M` (both — `M` is e.g. a context
 ///   window size, formatted by [`format_token_count`]).
+/// - `Tokens`: `N` or `N/M` rendered with token-count suffixes.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ProgressCounter {
     /// Human-readable prefix shown before the value (e.g. `"ctx"`,
@@ -1339,6 +1340,9 @@ pub enum ProgressUnit {
     /// `complete` is a percent 0..=100. Renders as `N%` or
     /// `N%/format_token_count(total)`.
     Percent,
+    /// `complete` and `total` are token counts, each formatted with
+    /// token-count suffixes.
+    Tokens,
 }
 
 /// Volume metrics. Each is optional because a given tool typically

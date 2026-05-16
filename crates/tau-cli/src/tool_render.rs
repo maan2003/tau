@@ -524,6 +524,12 @@ fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolSuffixSe
             (None, Some(t)) => format!("?%/{}", format_token_count(t)),
             (None, None) => "?%".to_owned(),
         },
+        tau_proto::ProgressUnit::Tokens => match (counter.complete, counter.total) {
+            (Some(c), Some(t)) => format!("{}/{}", format_token_count(c), format_token_count(t)),
+            (Some(c), None) => format_token_count(c),
+            (None, Some(t)) => format!("?/{}", format_token_count(t)),
+            (None, None) => "?".to_owned(),
+        },
     };
     match counter.label.as_deref() {
         Some("ctx") => tool_suffix(format!("#{body}"), ToolStatus::Context),

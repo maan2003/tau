@@ -3078,6 +3078,7 @@ impl Harness {
             .and_then(|m| model_context_window(&self.model_registry, m));
         let display = build_delegate_progress_display(
             &task_name,
+            conv.context_input_tokens,
             conv.context_percent_used,
             ctx_window,
             conv.tools_in_flight,
@@ -4241,7 +4242,9 @@ impl Harness {
         target_conv.context_percent_used = None;
         target_conv.result_dedup = crate::dedup::ResultDedupMap::new();
 
-        self.update_context_usage(None, None);
+        if pending.target_cid == self.default_conversation_id {
+            self.update_context_usage(None, None);
+        }
 
         let (outcome, message) = if !response.tool_calls.is_empty() {
             (
@@ -4308,21 +4311,24 @@ impl Harness {
                 .remove(&response.session_prompt_id);
             return Ok(());
         }
-        if response.input_tokens.is_some() || response.cached_tokens.is_some() {
+        let response_cid = self.conversation_for_prompt(&response.session_prompt_id);
+        if (response.input_tokens.is_some() || response.cached_tokens.is_some())
+            && response_cid.as_ref() == Some(&self.default_conversation_id)
+        {
             self.update_context_usage(response.input_tokens, response.cached_tokens);
         }
         // Per-conversation usage: separate from the global tracker
         // because side conversations shouldn't clobber the user's
         // status bar, but the harness still needs their context %
         // to surface via `DelegateProgress`.
-        if let Some(cid) = self.conversation_for_prompt(&response.session_prompt_id) {
+        if let Some(cid) = response_cid.as_ref() {
             let previous_input_tokens = self
                 .conversations
-                .get(&cid)
+                .get(cid)
                 .and_then(|conv| conv.context_input_tokens);
             self.maybe_emit_cache_miss_diagnostic(&response, previous_input_tokens);
-            self.update_conversation_context_usage(&cid, response.input_tokens);
-            self.emit_delegate_progress(&cid);
+            self.update_conversation_context_usage(cid, response.input_tokens);
+            self.emit_delegate_progress(cid);
         }
         // Dedupe: under at-least-once delivery the agent may resend a
         // finished-response after a reconnect. The first delivery
@@ -4330,7 +4336,7 @@ impl Harness {
         // must be ignored rather than fall through to the "default"
         // session fallback, which would silently misroute the
         // duplicate.
-        let Some(cid) = self.conversation_for_prompt(&response.session_prompt_id) else {
+        let Some(cid) = response_cid else {
             self.emit_info(&format!(
                 "discarding duplicate agent response for session_prompt_id={}",
                 response.session_prompt_id
@@ -5443,6 +5449,7 @@ fn shell_command_payload(command: &str) -> Option<tau_proto::ToolDisplayPayload>
 /// running indicator.
 fn build_delegate_progress_display(
     task_name: &str,
+    ctx_input_tokens: Option<u64>,
     ctx_percent: Option<u8>,
     ctx_window: Option<u64>,
     tools_in_flight: u32,
@@ -5451,12 +5458,19 @@ fn build_delegate_progress_display(
     use tau_proto::{ProgressCounter, ProgressUnit, ToolDisplayStatus};
 
     let mut counters: Vec<ProgressCounter> = Vec::new();
-    if ctx_percent.is_some() || ctx_window.is_some() {
+    if ctx_input_tokens.is_some() || ctx_window.is_some() {
+        counters.push(ProgressCounter {
+            label: Some("ctx".to_owned()),
+            unit: ProgressUnit::Tokens,
+            complete: ctx_input_tokens,
+            total: ctx_window,
+        });
+    } else if ctx_percent.is_some() {
         counters.push(ProgressCounter {
             label: Some("ctx".to_owned()),
             unit: ProgressUnit::Percent,
             complete: ctx_percent.map(u64::from),
-            total: ctx_window,
+            total: None,
         });
     }
     let tools_completed = tools_total.saturating_sub(tools_in_flight);
