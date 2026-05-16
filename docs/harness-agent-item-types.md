@@ -1,0 +1,295 @@
+# Harness/Agent Item Types
+
+This document is a Rust-shaped companion to
+[`harness-agent-item-architecture.md`](harness-agent-item-architecture.md).
+
+It is intentionally illustrative rather than exact compile-ready code. The
+goal is to show the core shapes and relationships in a more code-native way.
+
+## Core Transcript Items
+
+```rust
+enum ContextItem {
+    Message(MessageItem),
+    ToolCall(ToolCallItem),
+    ToolResult(ToolResultItem),
+    Reasoning(OpaqueProviderItem),
+    Compaction(OpaqueProviderItem),
+    UnknownProviderItem(OpaqueProviderItem),
+}
+
+struct MessageItem {
+    role: ContextRole,
+    content: Vec<ContentPart>,
+    phase: Option<MessagePhase>,
+}
+
+enum ContextRole {
+    System,
+    Developer,
+    User,
+    Assistant,
+}
+
+struct ToolCallItem {
+    call_id: ToolCallId,
+    name: ToolNameMaybe,
+    tool_type: ToolType,
+    arguments: CborValue,
+}
+
+struct ToolResultItem {
+    call_id: ToolCallId,
+    tool_type: ToolType,
+    status: ToolResultStatus,
+    output: CborValue,
+}
+
+enum ToolResultStatus {
+    Success,
+    Error { message: String },
+    Cancelled { reason: String },
+}
+
+struct OpaqueProviderItem(CborValue);
+```
+
+Notes:
+
+- `ContextItem` is the provider-ish item timeline Tau reasons about.
+- `Reasoning`, `Compaction`, and `UnknownProviderItem` are opaque payloads.
+- Embedded `ContextItem::Compaction` is preserved as output, but is not a
+  transcript boundary.
+
+## Transcript Nodes
+
+```rust
+enum TranscriptNode {
+    UserInput(UserInputNode),
+    AssistantResponse(AssistantResponseNode),
+    ToolResults(ToolResultsNode),
+    Compaction(CompactionNode),
+}
+
+struct UserInputNode {
+    items: Vec<ContextItem>,
+}
+
+struct AssistantResponseNode {
+    provider_response_id: Option<String>,
+    backend: Option<AgentBackendRef>,
+    output_items: Vec<ContextItem>,
+    usage: Option<TokenUsage>,
+}
+
+struct ToolResultsNode {
+    items: Vec<ToolResultItem>,
+}
+
+struct CompactionNode {
+    replacement_window: Vec<ContextItem>,
+}
+```
+
+Structural invariants:
+
+- `AssistantResponseNode.output_items` preserves exact assistant output order.
+- `ToolResultsNode` is the direct child of the `AssistantResponseNode` whose
+  tool calls it completes.
+- No separate `responds_to` field is needed on `ToolResultsNode`.
+
+## Durable Turn-Shaped Prompt
+
+`SessionPromptCreated` remains an operational prompt-delivery event rather than
+durable transcript truth, but its shape is still central to the model.
+
+```rust
+struct SessionPromptCreated {
+    session_prompt_id: SessionPromptId,
+    session_id: SessionId,
+    instructions: String,
+    context_items: Vec<ContextItem>,
+    context_item_prefix: Option<PromptItemPrefix>,
+    tools: Vec<ToolDefinition>,
+    tools_ref: Option<PromptToolsRef>,
+    model: Option<ModelId>,
+    model_params: ModelParams,
+    tool_choice: ToolChoice,
+    originator: PromptOriginator,
+    previous_response_candidate: Option<PreviousResponseCandidate>,
+}
+
+struct PromptItemPrefix {
+    base_session_prompt_id: SessionPromptId,
+    item_count: usize,
+}
+
+struct PreviousResponseCandidate {
+    provider_response_id: String,
+    next_item_index: usize,
+    backend: AgentBackendRef,
+}
+```
+
+Rules:
+
+- `context_items` must be sufficient even when the candidate is ignored.
+- The candidate is only an optimization hint.
+- Prefix compression is item-based, not message-based.
+- Runtime validity of `previous_response_id` remains agent-side state rather
+  than part of the shared prompt type model.
+
+## Durable Transcript Facts
+
+These are the durable transcript inputs:
+
+```rust
+enum PersistedTranscriptFact {
+    UiPromptSubmitted(UiPromptSubmitted),
+    SessionUserMessageInjected(SessionUserMessageInjected),
+    SessionPromptSteered(SessionPromptSteered),
+    AgentResponseFinished(AgentResponseFinished),
+    ToolResult(ToolResultFact),
+    SessionCompacted(SessionCompacted),
+}
+
+struct AgentResponseFinished {
+    session_prompt_id: SessionPromptId,
+    originator: PromptOriginator,
+    backend: Option<AgentBackendRef>,
+    provider_response_id: Option<String>,
+    output_items: Vec<ContextItem>,
+    usage: Option<TokenUsage>,
+}
+
+struct ToolResultFact {
+    call_id: ToolCallId,
+    tool_type: ToolType,
+    status: ToolResultStatus,
+    output: CborValue,
+}
+
+struct SessionCompacted {
+    session_id: SessionId,
+    replacement_window: Vec<ContextItem>,
+}
+```
+
+Operational-only events such as `ToolRequest`, `SessionPromptQueued`, and
+progress events stay out of the durable transcript model.
+
+## Fold State
+
+Replay and incremental updates need explicit state in addition to the already
+emitted nodes.
+
+```rust
+struct ProjectionState {
+    conversations: HashMap<ConversationKey, ConversationProjectionState>,
+}
+
+struct ConversationProjectionState {
+    open_tool_round: Option<PendingToolRound>,
+}
+
+struct PendingToolRound {
+    assistant_node_id: NodeId,
+    call_order: Vec<ToolCallId>,
+    terminal_results: HashMap<ToolCallId, ToolResultItem>,
+}
+```
+
+Notes:
+
+- This is fold-time state, not durable wire state.
+- It is acceptable to rely on explicit buffering here.
+- `call_id` must be globally unique for tool calls.
+- If a durable `ToolResultFact` cannot be matched to the currently open call
+  set, replay should fail for that session.
+
+## Runtime-Only Conversation State
+
+The harness still needs live routing and scheduling state that is not part of
+the durable transcript model.
+
+```rust
+struct ConversationRuntimeState {
+    head: Option<NodeId>,
+    turn_state: ConversationTurnState,
+    pending_prompts: VecDeque<String>,
+    chain_anchor: Option<ChainAnchor>,
+}
+
+enum ConversationTurnState {
+    Idle,
+    AgentThinking {
+        session_prompt_id: SessionPromptId,
+    },
+    ToolsRunning {
+        remaining_calls: Vec<ToolCallId>,
+    },
+    Compacting,
+}
+```
+
+Rules:
+
+- A single conversation may have at most one unresolved tool round at a time.
+- A queued prompt may later become a durable `SessionPromptSteered`.
+- Queued prompts remain runtime-only until that moment.
+- Queued prompts may be discarded on cancellation or restart.
+
+## Validation Rules
+
+```rust
+enum AgentOutputValidation {
+    Valid,
+    ValidButToolRejected,
+    StructurallyMalformed,
+}
+```
+
+Intent:
+
+- valid assistant tool calls to unavailable or denied tools still commit and
+  later receive terminal error results
+- malformed provider output does not commit as a successful assistant response
+
+## Compaction Rules
+
+```rust
+struct CompactionBoundary {
+    replacement_window: Vec<ContextItem>,
+}
+```
+
+Only standalone compaction creates a boundary.
+
+- `SessionCompacted -> CompactionNode { replacement_window }`
+- request assembly stops walking older history at that node
+- embedded `ContextItem::Compaction` remains plain opaque output
+
+## Minimal Mental Model
+
+If the whole design is reduced to a few Rust ideas, it is this:
+
+```rust
+// assistant output becomes one node immediately
+AssistantResponseNode {
+    output_items: vec![
+        ContextItem::ToolCall(call_a),
+        ContextItem::ToolCall(call_b),
+    ],
+}
+
+// tool results arrive one-by-one as durable facts
+ToolResultFact { call_id: "a", status: Success, ... }
+ToolResultFact { call_id: "b", status: Error { .. }, ... }
+
+// the fold buffers them and later emits one grouped node
+ToolResultsNode {
+    items: vec![result_a, result_b],
+}
+```
+
+That is the core shape the rest of the architecture is built around.
