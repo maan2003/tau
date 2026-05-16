@@ -5,14 +5,13 @@ Tau discovers Markdown skills at session start, advertises only the small set th
 
 ## Discovery
 
-Tau scans, in priority order:
+Tau scans skills in priority order:
 
-1. `<cwd>/.agents/skills`
-2. `<cwd>/.agents.local/skills`
-3. `~/.agents/skills`
-4. `~/.agents.local/skills`
-5. `~/.config/agents/skills`
-6. `~/.config/agents.local/skills`
+1. Existing project `.agents/skills` and `.agents.local/skills` directories from the working directory's ancestors, broadest ancestor first and current directory last.
+2. `~/.agents/skills`
+3. `~/.agents.local/skills`
+4. `~/.config/agents/skills`
+5. `~/.config/agents.local/skills`
 
 The first skill with a given name wins. Later duplicates are ignored and reported as collisions.
 
@@ -25,7 +24,7 @@ Preferred layout:
 The frontmatter fields Tau reads are:
 
 - `name`: Optional. Defaults to the parent directory name for `SKILL.md`, or to the file stem for a root-level Markdown skill. Must be lowercase ASCII letters, digits, and hyphens only.
-- `description`: Required. Used in prompt advertisements and search results.
+- `description`: Required. Used in prompt advertisements, search results, and loaded skill results.
 - `advertise`: Optional. `true`, `True`, `TRUE`, and `1` force prompt advertisement. Any other explicit value keeps the skill hidden from the initial prompt.
 
 Project-scoped skills default to advertised. User-scoped skills default to hidden until searched. `advertise:` overrides the scope default.
@@ -40,17 +39,26 @@ This keeps normal session context small while still surfacing project-local inst
 
 ## The `skill` tool
 
-The agent calls `skill` with a `query` string. Whitespace separates terms:
+The agent calls `skill` with a `query` string:
 
 ```json
 { "query": "rust style" }
 ```
 
-Tau trims, lowercases, and deduplicates query terms, then matches them against skill names and descriptions. Hits are merged and sorted by `hit_count` descending then by name. By default, Tau does not read skill bodies during search; `search_content: true` also searches body text with frontmatter stripped.
+Tau lowercases and deduplicates query terms. Punctuation separates terms, except hyphens inside skill names are preserved.
 
-If the query is unambiguous, Tau returns the full skill body with frontmatter stripped:
+Search uses OR semantics: a skill matches if any query term matches its name or description. Hits are sorted by `matched_terms` descending, then by name. `matched_terms` is the number of distinct query terms that matched, not an occurrence count.
+
+By default, Tau does not read skill bodies during search. `search_content: true` also searches the first 64 KiB of the skill file after stripping frontmatter from that prefix.
+
+If the query is unambiguous, Tau returns `name`, `description`, full available `content` with frontmatter stripped, and truncation metadata:
 
 - exactly one matching skill was found; or
 - the query has one term and one match has exactly that skill name, even if other skills also matched.
 
-Otherwise Tau returns matching skill names, descriptions, and hit counts. This supports large, inter-connected skill libraries: agents can cheaply search broad terms, follow names mentioned by other skills, and load full bodies only when needed instead of spending context on every possible instruction up front.
+Otherwise Tau returns matching skill names, descriptions, `matched_terms`, `matched_fields`, and guidance. For ambiguous results, the agent should usually call `skill` again with only the exact skill name. If searching again, use a more distinctive term; adding generic terms may not narrow results because search uses OR semantics.
+
+
+## Size limits
+
+Skill loading and content search read a bounded 64 KiB prefix of each skill file. If loading truncates after frontmatter was closed, Tau returns the available body prefix and marks the result as truncated. If truncation happens before the frontmatter closing fence, Tau errors instead of treating YAML frontmatter as skill body.

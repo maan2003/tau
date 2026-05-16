@@ -118,6 +118,11 @@ fn skill_tool_reads_file_content() {
         )),
         "expected skill tool result in durable session event log"
     );
+    let result = latest_tool_result(&h, "s1", "call-skill");
+    assert_eq!(
+        cbor_text_field(&result, "description").as_deref(),
+        Some("A test skill")
+    );
 }
 
 #[test]
@@ -151,6 +156,39 @@ fn skill_tool_returns_error_for_missing_query() {
         })
         .expect("tool error");
     assert!(err.message.contains("missing required argument: query"));
+}
+
+#[test]
+fn skill_tool_rejects_malformed_search_content() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+    seed_tools_running(&mut h, &cid, vec!["call-bad-bool".into()]);
+    h.handle_skill_tool_call(
+        &cid,
+        &AgentToolCall {
+            id: "call-bad-bool".into(),
+            name: "skill".into(),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("query".to_owned()),
+                    CborValue::Text("anything".to_owned()),
+                ),
+                (
+                    CborValue::Text("search_content".to_owned()),
+                    CborValue::Text("true".to_owned()),
+                ),
+            ]),
+            display: None,
+        },
+    )
+    .expect("skill call");
+
+    let err = latest_tool_error(&h, "s1", "call-bad-bool");
+    assert!(err.message.contains("search_content must be a boolean"));
 }
 
 #[test]
@@ -358,10 +396,16 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
     h.handle_skill_tool_call(&cid, &call_search(" ZQX-ALPHA ", false, "call-5"))
         .expect("search 5");
     assert_eq!(read_loaded_name(&h, "call-5"), "zqx-alpha");
+
+    // Trailing punctuation is ignored while the hyphenated name is preserved.
+    seed_tools_running(&mut h, &cid, vec!["call-6".into()]);
+    h.handle_skill_tool_call(&cid, &call_search(" ZQX-ALPHA. ", false, "call-6"))
+        .expect("search 6");
+    assert_eq!(read_loaded_name(&h, "call-6"), "zqx-alpha");
 }
 
 #[test]
-fn skill_tool_search_accepts_multiple_terms_and_ranks_by_hit_count() {
+fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
     // Multi-term search: the agent fires several plausible terms at
     // once, the harness scores each skill by how many terms matched
     // it, and returns hits sorted by score descending. Ties break on
@@ -467,20 +511,20 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_hit_count() {
                     panic!("match must be a map")
                 };
                 let mut name = None;
-                let mut hits: Option<u64> = None;
+                let mut matched_terms: Option<u64> = None;
                 for (k, v) in entries {
                     match (&k, &v) {
                         (CborValue::Text(k), CborValue::Text(v)) if k == "name" => {
                             name = Some(v.clone());
                         }
-                        (CborValue::Text(k), CborValue::Integer(i)) if k == "hit_count" => {
+                        (CborValue::Text(k), CborValue::Integer(i)) if k == "matched_terms" => {
                             let n: i128 = (*i).into();
-                            hits = Some(n as u64);
+                            matched_terms = Some(n as u64);
                         }
                         _ => {}
                     }
                 }
-                (name.expect("name"), hits.expect("hit_count"))
+                (name.expect("name"), matched_terms.expect("matched_terms"))
             })
             .collect()
     };
@@ -502,7 +546,7 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_hit_count() {
     assert_eq!(
         read_match_records(&h, "call-dedup"),
         vec![("zqx-alpha".to_owned(), 1), ("zqx-beta".to_owned(), 1),],
-        "duplicate terms should not inflate hit_count",
+        "duplicate terms should not inflate matched_terms",
     );
 
     // A single matching skill is loaded directly.
@@ -589,6 +633,46 @@ fn skill_tool_load_truncates_large_skill_content() {
     let content = cbor_text_field(&result, "content").expect("content");
     assert!(content.contains("skill content truncated"));
     assert_eq!(cbor_bool_field(&result, "truncated"), Some(true));
+}
+
+#[test]
+fn skill_tool_errors_when_frontmatter_exceeds_read_limit() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let skill_dir = td.path().join("zqx-frontmatter");
+    std::fs::create_dir_all(&skill_dir).expect("mkdir");
+    let skill_file = skill_dir.join("SKILL.md");
+    let huge_frontmatter_value = "a".repeat(70 * 1024);
+    std::fs::write(
+        &skill_file,
+        format!(
+            "---\nname: zqx-frontmatter\ndescription: large frontmatter\nnotes: {huge_frontmatter_value}\n---\nbody"
+        ),
+    )
+    .expect("write skill");
+
+    let mut h = echo_harness(&sp).expect("start");
+    h.discovered_skills.clear();
+    h.discovered_skills.insert(
+        tau_proto::SkillName::from("zqx-frontmatter"),
+        DiscoveredSkill {
+            source_id: "skills".into(),
+            description: "large frontmatter".to_owned(),
+            file_path: skill_file,
+            add_to_prompt: false,
+        },
+    );
+
+    let cid = h.default_conversation_id.clone();
+    seed_tools_running(&mut h, &cid, vec!["call-frontmatter".into()]);
+    h.handle_skill_tool_call(
+        &cid,
+        &skill_call("zqx-frontmatter", false, "call-frontmatter"),
+    )
+    .expect("skill call");
+
+    let err = latest_tool_error(&h, "s1", "call-frontmatter");
+    assert!(err.message.contains("frontmatter closing fence"));
 }
 
 #[test]
@@ -696,13 +780,63 @@ fn skill_tool_loads_exact_single_term_match_even_with_other_hits() {
 }
 
 #[test]
+fn skill_tool_search_result_includes_guidance_and_matched_fields() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.discovered_skills.clear();
+
+    for name in ["zqx-guide-a", "zqx-guide-b"] {
+        h.discovered_skills.insert(
+            tau_proto::SkillName::from(name),
+            DiscoveredSkill {
+                source_id: "skills".into(),
+                description: "mentions zqxguidance".to_owned(),
+                file_path: PathBuf::from(format!("/skills/{name}/SKILL.md")),
+                add_to_prompt: false,
+            },
+        );
+    }
+
+    let cid = h.default_conversation_id.clone();
+    seed_tools_running(&mut h, &cid, vec!["call-guidance".into()]);
+    h.handle_skill_tool_call(&cid, &skill_call("zqxguidance", false, "call-guidance"))
+        .expect("skill call");
+
+    let result = latest_tool_result(&h, "s1", "call-guidance");
+    let guidance = cbor_text_field(&result, "guidance").expect("guidance");
+    assert!(guidance.contains("exact `name`"));
+    assert!(guidance.contains("more distinctive term"));
+    assert!(guidance.contains("OR semantics"));
+    assert!(guidance.contains("not auto-loaded"));
+
+    let matches = cbor_array_field(&result, "matches").expect("matches");
+    let Some(CborValue::Map(first)) = matches.first() else {
+        panic!("first match must be a map")
+    };
+    let matched_fields = first
+        .iter()
+        .find_map(|(k, v)| match (k, v) {
+            (CborValue::Text(k), CborValue::Array(fields)) if k == "matched_fields" => {
+                Some(fields.clone())
+            }
+            _ => None,
+        })
+        .expect("matched_fields");
+    assert_eq!(
+        matched_fields,
+        vec![CborValue::Text("description".to_owned())]
+    );
+}
+
+#[test]
 fn skill_tool_default_display_formats_query() {
     let display = super::super::build_tool_args_display(
         "skill",
         &CborValue::Map(vec![
             (
                 CborValue::Text("query".to_owned()),
-                CborValue::Text(" git  commit git ".to_owned()),
+                CborValue::Text(" git,  commit. git ".to_owned()),
             ),
             (
                 CborValue::Text("search_content".to_owned()),
@@ -839,6 +973,19 @@ fn latest_tool_result(h: &Harness, session_id: &str, call_id: &str) -> CborValue
             _ => None,
         })
         .expect("tool result")
+}
+
+fn latest_tool_error(h: &Harness, session_id: &str, call_id: &str) -> tau_proto::ToolError {
+    h.store
+        .session_events(session_id)
+        .expect("events")
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.event {
+            Event::ToolError(e) if e.call_id.as_str() == call_id => Some(e.clone()),
+            _ => None,
+        })
+        .expect("tool error")
 }
 
 fn cbor_text_field(map: &CborValue, field: &str) -> Option<String> {

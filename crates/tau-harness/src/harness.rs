@@ -5379,19 +5379,9 @@ fn cbor_query_label(arguments: &tau_proto::CborValue, key: &str) -> String {
         return String::new();
     };
     match value {
-        tau_proto::CborValue::Text(s) => normalized_query_label(s),
+        tau_proto::CborValue::Text(s) => skill_tool::normalized_skill_query_terms(s).join(" "),
         _ => String::new(),
     }
-}
-
-fn normalized_query_label(query: &str) -> String {
-    let mut terms = Vec::new();
-    for term in query.split_whitespace().map(str::to_lowercase) {
-        if !terms.iter().any(|existing| existing == &term) {
-            terms.push(term);
-        }
-    }
-    terms.join(" ")
 }
 
 fn shell_command_args(command: &str) -> String {

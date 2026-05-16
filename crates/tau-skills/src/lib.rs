@@ -111,6 +111,22 @@ pub fn strip_frontmatter(content: &str) -> &str {
     parse_frontmatter(content).1
 }
 
+/// Returns true when `content` starts with a frontmatter opening fence
+/// but does not include the closing fence.
+pub fn has_unclosed_frontmatter(content: &str) -> bool {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let Some(rest) = content.strip_prefix("---") else {
+        return false;
+    };
+    let Some(rest) = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))
+    else {
+        return false;
+    };
+    find_closing_fence(rest).is_none()
+}
+
 /// Locate the closing `---` fence. Returns `(yaml_end, body_start)` as
 /// byte offsets into `s`, where `yaml_end` is the start of the closing
 /// fence line and `body_start` is the first byte after that line's

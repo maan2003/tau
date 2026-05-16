@@ -606,3 +606,12 @@ fn strip_frontmatter_no_frontmatter() {
     let content = "Just content.";
     assert_eq!(strip_frontmatter(content), "Just content.");
 }
+
+#[test]
+fn has_unclosed_frontmatter_detects_missing_closing_fence() {
+    assert!(has_unclosed_frontmatter("---\nname: x\n"));
+    assert!(has_unclosed_frontmatter("\u{feff}---\r\nname: x\r\n"));
+    assert!(!has_unclosed_frontmatter("---\nname: x\n---\nBody"));
+    assert!(!has_unclosed_frontmatter("--- not a fence\n"));
+    assert!(!has_unclosed_frontmatter("Body only"));
+}
