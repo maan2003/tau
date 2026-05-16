@@ -423,6 +423,24 @@ fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
     stats_suffix(None, text)
 }
 
+fn abbreviate_inline_text(text: &str) -> String {
+    const EDGE_CHARS: usize = 20;
+
+    let one_line = text.lines().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = one_line.chars().collect();
+    if chars.len() <= EDGE_CHARS * 2 {
+        return one_line;
+    }
+
+    let head: String = chars.iter().take(EDGE_CHARS).copied().collect();
+    let tail: String = chars
+        .iter()
+        .skip(chars.len() - EDGE_CHARS)
+        .copied()
+        .collect();
+    format!("{head}┄{tail}")
+}
+
 fn stats_suffix(prefix: Option<String>, text: &str) -> ToolSuffixSegment {
     let mut parts = Vec::new();
     if let Some(prefix) = prefix {
@@ -688,7 +706,10 @@ pub(crate) fn render_tool_block(
     if !display.args.is_empty() {
         children.push(SpanTree::span(
             args,
-            vec![SpanTree::text(" "), SpanTree::text(display.args.clone())],
+            vec![
+                SpanTree::text(" "),
+                SpanTree::text(abbreviate_inline_text(&display.args)),
+            ],
         ));
     }
     for suffix in &display.suffixes {
@@ -711,7 +732,7 @@ pub(crate) fn render_tool_block(
         }
         children.push(SpanTree::span(
             status,
-            vec![SpanTree::text(suffix.text.clone())],
+            vec![SpanTree::text(abbreviate_inline_text(&suffix.text))],
         ));
     }
     if let Some(ToolDisplayPayload::Text { text }) = &display.payload {
@@ -845,11 +866,11 @@ pub(crate) fn render_shell_block(
     let mut spans = vec![
         Span::new("shell", name_style),
         Span::new(" ", args_style),
-        Span::new(command.to_owned(), args_style),
+        Span::new(abbreviate_inline_text(command), args_style),
     ];
     if let Some(suffix) = status_suffix {
         spans.push(Span::new(" ", args_style));
-        spans.push(Span::new(suffix.to_owned(), status_style));
+        spans.push(Span::new(abbreviate_inline_text(suffix), status_style));
     }
     if !output.is_empty() {
         spans.push(Span::new("\n", args_style));

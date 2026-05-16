@@ -15,7 +15,8 @@ use super::chat::{DraftSlot, is_local_slash_command, should_send_draft_snapshot}
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
     ToolStatus, build_osc1337_set_user_var, cache_hit_percent, format_token_stats_line,
-    render_token_stats_block, render_tool_display, streaming_block, synthesize_fallback_display,
+    render_shell_block, render_token_stats_block, render_tool_block, render_tool_display,
+    streaming_block, synthesize_fallback_display,
 };
 
 #[test]
@@ -1868,6 +1869,55 @@ fn render_tool_display_error_status_picks_error_severity() {
     assert_eq!(rendered.suffixes.len(), 1);
     assert_eq!(rendered.suffixes[0].text, "err: permission denied");
     assert!(matches!(rendered.suffixes[0].status, ToolStatus::Error));
+}
+
+#[test]
+fn render_tool_block_abbreviates_inline_args_and_error_but_preserves_payload() {
+    use tau_proto::{ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
+
+    let payload = "full payload line one\nfull payload line two".to_owned();
+    let display = ToolDisplay {
+        args: "LOG_MODULE_WALLETV2|LOG_CLIENT_MODULE_WALLETV2 in modules/fedimint-walletv2-server/src modules/fedimint-walletv2-client/src".into(),
+        status: ToolDisplayStatus::Error,
+        status_text: "err: ripgrep error: rg: modules/fedimint-walletv2-server/src modules/fedimint-walletv2-client/src: IO error for operation".into(),
+        payload: Some(ToolDisplayPayload::Text {
+            text: payload.clone(),
+        }),
+        ..Default::default()
+    };
+    let rendered = render_tool_display("grep", &display);
+    let block = render_tool_block(&tau_themes::Theme::builtin(), &rendered);
+    let text: String = block
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect();
+
+    assert!(text.contains("LOG_MODULE_WALLETV2|┄-walletv2-client/src"));
+    assert!(text.contains("err: ripgrep error: ┄ error for operation"));
+    assert!(!text.contains(&display.args));
+    assert!(!text.contains(&display.status_text));
+    assert!(text.contains(&payload));
+}
+
+#[test]
+fn render_shell_block_abbreviates_inline_command_and_status_but_preserves_output() {
+    let command = "printf 1234567890123456789012345678901234567890";
+    let status = "err: command failed after printing a very long diagnostic";
+    let output = "full output line one\nfull output line two";
+    let block = render_shell_block(&tau_themes::Theme::builtin(), command, output, Some(status));
+    let text: String = block
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect();
+
+    assert!(text.contains("printf 1234567890123┄12345678901234567890"));
+    assert!(text.contains("err: command failed ┄very long diagnostic"));
+    assert!(!text.contains(status));
+    assert!(text.contains(output));
 }
 
 #[test]
