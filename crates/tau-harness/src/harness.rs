@@ -2826,6 +2826,29 @@ impl Harness {
     }
 
     fn record_discovered_skill(&mut self, source_id: &str, skill: &tau_proto::ExtSkillAvailable) {
+        if let Some(message) = tau_skills::skill_name_validation_message(skill.name.as_str()) {
+            self.emit_info_important(&format!(
+                "skill skipped: {} from {} has invalid name: {}",
+                skill.name,
+                skill.file_path.display(),
+                message,
+            ));
+            return;
+        }
+
+        let description = if tau_skills::MAX_DESCRIPTION_LENGTH < skill.description.len() {
+            self.emit_info_important(&format!(
+                "skill warning: {} from {} description exceeds {} bytes ({}); truncating",
+                skill.name,
+                skill.file_path.display(),
+                tau_skills::MAX_DESCRIPTION_LENGTH,
+                skill.description.len(),
+            ));
+            tau_skills::truncate_description(&skill.description).into_owned()
+        } else {
+            skill.description.clone()
+        };
+
         let collision = self
             .discovered_skills
             .get(&skill.name)
@@ -2847,7 +2870,7 @@ impl Harness {
             skill.name.clone(),
             DiscoveredSkill {
                 source_id: source_id.into(),
-                description: skill.description.clone(),
+                description,
                 file_path: std::path::PathBuf::from(&skill.file_path),
                 add_to_prompt: skill.add_to_prompt,
             },

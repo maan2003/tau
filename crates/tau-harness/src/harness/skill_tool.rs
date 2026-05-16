@@ -6,13 +6,17 @@
 //! harness already discovered at startup (`Harness::discovered_skills`),
 //! so search and load don't touch the filesystem walker again.
 
+use std::io::Read;
+
 use tau_proto::{
     AgentToolCall, CborValue, Event, ToolCallId, ToolDisplay, ToolDisplayStats, ToolDisplayStatus,
     ToolName, ToolRequest,
 };
 
+const MAX_SKILL_CONTENT_BYTES: usize = 64 * 1024;
+const MAX_SKILL_SEARCH_MATCHES: usize = 50;
+
 use crate::conversation::ConversationId;
-use crate::discovery::DiscoveredSkill;
 use crate::error::HarnessError;
 use crate::harness::{HARNESS_CONNECTION_ID, Harness};
 use crate::prompt::cbor_map_bool;
@@ -107,7 +111,12 @@ impl Harness {
         Ok(())
     }
 
-    fn read_skill_by_name(&self, call_id: &ToolCallId, tool_name: &ToolName, name: &str) -> Event {
+    fn read_skill_by_name(
+        &mut self,
+        call_id: &ToolCallId,
+        tool_name: &ToolName,
+        name: &str,
+    ) -> Event {
         let Some(skill) = self.discovered_skills.get(name) else {
             let message = format!("unknown skill: {name}");
             return Event::ToolError(tau_proto::ToolError {
@@ -119,11 +128,23 @@ impl Harness {
                 originator: tau_proto::PromptOriginator::User,
             });
         };
-        match std::fs::read_to_string(&skill.file_path) {
-            Ok(content) => {
-                let body = tau_skills::strip_frontmatter(&content);
+        let file_path = skill.file_path.clone();
+        match read_text_file_prefix(&file_path, MAX_SKILL_CONTENT_BYTES) {
+            Ok(read) => {
+                let mut body = tau_skills::strip_frontmatter(&read.text).to_owned();
+                if read.truncated {
+                    self.emit_info_important(&format!(
+                        "skill too long: {} truncated to {MAX_SKILL_CONTENT_BYTES} bytes while loading {}",
+                        file_path.display(),
+                        name,
+                    ));
+                    body.push_str(&format!(
+                        "\n\n[skill content truncated at {MAX_SKILL_CONTENT_BYTES} bytes; file has {} bytes]",
+                        read.total_bytes
+                    ));
+                }
                 let mut display = skill_ok_display(name);
-                display.stats = text_stats_for_skill(body);
+                display.stats = text_stats_for_skill(&body);
                 Event::ToolResult(tau_proto::ToolResult {
                     call_id: call_id.clone(),
                     tool_name: tool_name.clone(),
@@ -132,9 +153,14 @@ impl Harness {
                             CborValue::Text("name".to_owned()),
                             CborValue::Text(name.to_owned()),
                         ),
+                        (CborValue::Text("content".to_owned()), CborValue::Text(body)),
                         (
-                            CborValue::Text("content".to_owned()),
-                            CborValue::Text(body.to_owned()),
+                            CborValue::Text("truncated".to_owned()),
+                            CborValue::Bool(read.truncated),
+                        ),
+                        (
+                            CborValue::Text("total_bytes".to_owned()),
+                            CborValue::Integer(read.total_bytes.into()),
                         ),
                     ]),
                     display: Some(display),
@@ -156,7 +182,7 @@ impl Harness {
     }
 
     fn handle_skill_query(
-        &self,
+        &mut self,
         call_id: &ToolCallId,
         tool_name: &ToolName,
         arguments: &CborValue,
@@ -175,30 +201,16 @@ impl Harness {
             }
         };
         let search_content = cbor_map_bool(arguments, "search_content").unwrap_or(false);
-        let hits = self.search_discovered_skills(&needles, search_content);
+        let outcome = self.search_discovered_skills(&needles, search_content);
+        for warning in &outcome.warnings {
+            self.emit_info_important(warning);
+        }
 
-        if let Some(name) = self.skill_name_to_auto_load(&needles, &hits) {
+        if let Some(name) = outcome.auto_load_name.clone() {
             return self.read_skill_by_name(call_id, tool_name, &name);
         }
 
-        self.skill_search_result(call_id, tool_name, &needles, search_content, hits)
-    }
-
-    fn skill_name_to_auto_load(
-        &self,
-        needles: &[String],
-        hits: &[(usize, String, String)],
-    ) -> Option<String> {
-        if hits.len() == 1 {
-            return Some(hits[0].1.clone());
-        }
-        if needles.len() == 1 {
-            let needle = &needles[0];
-            if let Some((_, name, _)) = hits.iter().find(|(_, name, _)| name == needle) {
-                return Some(name.clone());
-            }
-        }
-        None
+        self.skill_search_result(call_id, tool_name, &needles, search_content, outcome)
     }
 
     fn skill_search_result(
@@ -207,30 +219,43 @@ impl Harness {
         tool_name: &ToolName,
         needles: &[String],
         search_content: bool,
-        hits: Vec<(usize, String, String)>,
+        outcome: SkillSearchOutcome,
     ) -> Event {
         let scope_label = if search_content { " [content]" } else { "" };
         let queries_label = needles.join(" ");
         let display_args = format!("{queries_label}{scope_label}");
 
         let mut display = skill_ok_display(&display_args);
-        display.stats = skill_search_stats(&hits);
-        if hits.is_empty() {
+        display.stats = skill_search_stats(&outcome.hits);
+        if outcome.total_matches == 0 {
             display.status_text = "ok: no matches".to_owned();
+        } else if outcome.truncated {
+            display.status_text = format!(
+                "ok: showing {} of {} matches",
+                outcome.hits.len(),
+                outcome.total_matches
+            );
         }
 
+        let total_matches = outcome.total_matches;
+        let truncated = outcome.truncated;
         let matches = CborValue::Array(
-            hits.into_iter()
-                .map(|(hit_count, name, description)| {
+            outcome
+                .hits
+                .into_iter()
+                .map(|hit| {
                     CborValue::Map(vec![
-                        (CborValue::Text("name".to_owned()), CborValue::Text(name)),
+                        (
+                            CborValue::Text("name".to_owned()),
+                            CborValue::Text(hit.name),
+                        ),
                         (
                             CborValue::Text("description".to_owned()),
-                            CborValue::Text(description),
+                            CborValue::Text(hit.description),
                         ),
                         (
                             CborValue::Text("hit_count".to_owned()),
-                            CborValue::Integer((hit_count as u64).into()),
+                            CborValue::Integer((hit.hit_count as u64).into()),
                         ),
                     ])
                 })
@@ -248,6 +273,14 @@ impl Harness {
                     CborValue::Bool(search_content),
                 ),
                 (CborValue::Text("matches".to_owned()), matches),
+                (
+                    CborValue::Text("total_matches".to_owned()),
+                    CborValue::Integer((total_matches as u64).into()),
+                ),
+                (
+                    CborValue::Text("truncated".to_owned()),
+                    CborValue::Bool(truncated),
+                ),
             ]),
             display: Some(display),
             originator: tau_proto::PromptOriginator::User,
@@ -267,60 +300,149 @@ impl Harness {
         &self,
         needles: &[String],
         search_content: bool,
-    ) -> Vec<(usize, String, String)> {
-        let mut hits: Vec<(usize, &tau_proto::SkillName, &DiscoveredSkill)> = self
-            .discovered_skills
-            .iter()
-            .filter_map(|(name, skill)| {
-                let lower_name = name.as_str().to_lowercase();
-                let lower_desc = skill.description.to_lowercase();
-                // Read the body at most once across all needles, and
-                // only when at least one needle didn't match in the
-                // name or description and the caller opted in.
-                let mut body: Option<String> = None;
-                let hit_count = needles
-                    .iter()
-                    .filter(|needle| {
-                        if lower_name.contains(needle.as_str())
-                            || lower_desc.contains(needle.as_str())
-                        {
-                            return true;
-                        }
-                        if !search_content {
-                            return false;
-                        }
-                        let body = body.get_or_insert_with(|| {
-                            std::fs::read_to_string(&skill.file_path)
-                                .map(|s| tau_skills::strip_frontmatter(&s).to_lowercase())
-                                .unwrap_or_else(|err| {
-                                    tracing::warn!(
-                                        skill = %name.as_str(),
-                                        path = %skill.file_path.display(),
-                                        error = %err,
-                                        "skill body unreadable; treating as empty for content search",
+    ) -> SkillSearchOutcome {
+        let mut warnings = Vec::new();
+        let mut hits = Vec::new();
+        let mut total_matches = 0;
+        let mut only_hit_name = None;
+        let mut exact_hit_name = None;
+
+        for (name, skill) in &self.discovered_skills {
+            let lower_name = name.as_str().to_lowercase();
+            let lower_desc = skill.description.to_lowercase();
+            // Read the body at most once across all needles, and
+            // only when at least one needle didn't match in the
+            // name or description and the caller opted in.
+            let mut body: Option<String> = None;
+            let hit_count = needles
+                .iter()
+                .filter(|needle| {
+                    if lower_name.contains(needle.as_str()) || lower_desc.contains(needle.as_str())
+                    {
+                        return true;
+                    }
+                    if !search_content {
+                        return false;
+                    }
+                    let body = body.get_or_insert_with(|| {
+                        match read_text_file_prefix(&skill.file_path, MAX_SKILL_CONTENT_BYTES) {
+                            Ok(read) => {
+                                if read.truncated {
+                                    let warning = format!(
+                                        "skill too long: {} truncated to {MAX_SKILL_CONTENT_BYTES} bytes while content-searching {}",
+                                        skill.file_path.display(),
+                                        name.as_str(),
                                     );
-                                    String::new()
-                                })
-                        });
-                        body.contains(needle.as_str())
-                    })
-                    .count();
-                (hit_count > 0).then_some((hit_count, name, skill))
-            })
-            .collect();
-        hits.sort_by(|(ac, an, _), (bc, bn, _)| {
-            bc.cmp(ac).then_with(|| an.as_str().cmp(bn.as_str()))
-        });
-        hits.into_iter()
-            .map(|(hit_count, name, skill)| {
-                (
-                    hit_count,
-                    name.as_str().to_owned(),
-                    skill.description.clone(),
-                )
-            })
-            .collect()
+                                    tracing::warn!(%warning);
+                                    warnings.push(warning);
+                                }
+                                tau_skills::strip_frontmatter(&read.text).to_lowercase()
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    skill = %name.as_str(),
+                                    path = %skill.file_path.display(),
+                                    error = %err,
+                                    "skill body unreadable; treating as empty for content search",
+                                );
+                                String::new()
+                            }
+                        }
+                    });
+                    body.contains(needle.as_str())
+                })
+                .count();
+
+            if hit_count == 0 {
+                continue;
+            }
+
+            total_matches += 1;
+            only_hit_name = if total_matches == 1 {
+                Some(name.as_str().to_owned())
+            } else {
+                None
+            };
+            if needles.len() == 1 && name.as_str() == needles[0] {
+                exact_hit_name = Some(name.as_str().to_owned());
+            }
+
+            hits.push(SkillSearchHit {
+                hit_count,
+                name: name.as_str().to_owned(),
+                description: tau_skills::truncate_description(&skill.description).into_owned(),
+            });
+            sort_skill_hits(&mut hits);
+            if MAX_SKILL_SEARCH_MATCHES < hits.len() {
+                hits.truncate(MAX_SKILL_SEARCH_MATCHES);
+            }
+        }
+
+        let auto_load_name = if total_matches == 1 {
+            only_hit_name
+        } else {
+            exact_hit_name
+        };
+        let truncated = MAX_SKILL_SEARCH_MATCHES < total_matches;
+
+        SkillSearchOutcome {
+            hits,
+            total_matches,
+            truncated,
+            auto_load_name,
+            warnings,
+        }
     }
+}
+
+struct SkillSearchHit {
+    hit_count: usize,
+    name: String,
+    description: String,
+}
+
+fn sort_skill_hits(hits: &mut [SkillSearchHit]) {
+    hits.sort_by(|a, b| {
+        b.hit_count
+            .cmp(&a.hit_count)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+}
+
+struct SkillSearchOutcome {
+    hits: Vec<SkillSearchHit>,
+    total_matches: usize,
+    truncated: bool,
+    auto_load_name: Option<String>,
+    warnings: Vec<String>,
+}
+
+struct LimitedTextRead {
+    text: String,
+    truncated: bool,
+    total_bytes: u64,
+}
+
+fn read_text_file_prefix(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> std::io::Result<LimitedTextRead> {
+    let mut file = std::fs::File::open(path)?;
+    let total_bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)?;
+    let truncated = max_bytes < bytes.len();
+    if truncated {
+        bytes.truncate(max_bytes);
+    }
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(LimitedTextRead {
+        text,
+        truncated,
+        total_bytes,
+    })
 }
 
 fn skill_ok_display(args: &str) -> ToolDisplay {
@@ -353,10 +475,10 @@ fn text_stats_for_skill(text: &str) -> ToolDisplayStats {
     }
 }
 
-fn skill_search_stats(matches: &[(usize, String, String)]) -> ToolDisplayStats {
+fn skill_search_stats(matches: &[SkillSearchHit]) -> ToolDisplayStats {
     let output = matches
         .iter()
-        .map(|(_, name, description)| format!("{name}: {description}"))
+        .map(|hit| format!("{}: {}", hit.name, hit.description))
         .collect::<Vec<_>>()
         .join("\n");
     let mut stats = text_stats_for_skill(&output);

@@ -110,6 +110,22 @@ fn load_skill_empty_description() {
 }
 
 #[test]
+fn load_skill_truncates_long_description() {
+    let long = "x".repeat(MAX_DESCRIPTION_LENGTH + 16);
+    let content = format!("---\nname: long-desc\ndescription: {long}\n---\nBody");
+    let path = Path::new("/skills/long-desc/SKILL.md");
+    let (skill, diags) = load_skill_from_content(&content, path);
+    let skill = skill.expect("should load");
+    assert_eq!(skill.description.len(), MAX_DESCRIPTION_LENGTH);
+    assert!(skill.description.ends_with('…'));
+    assert!(
+        diags
+            .iter()
+            .any(|d| { d.kind == DiagnosticKind::Warning && d.message.contains("truncating") })
+    );
+}
+
+#[test]
 fn load_skill_advertise_false_or_missing_keeps_default() {
     let content = "---\nname: hidden\ndescription: A hidden skill\nadvertise: false\n---\n";
     let path = Path::new("/skills/hidden/SKILL.md");
@@ -248,6 +264,17 @@ fn parse_frontmatter_multiline_block_scalar() {
 }
 
 #[test]
+fn parse_frontmatter_ignores_indented_fence_in_block_scalar() {
+    let content = "---\nname: ml\ndescription: |\n  before\n  ---\n  after\n---\nBody";
+    let (fm, body) = parse_frontmatter(content);
+    assert_eq!(
+        fm.get("description").map(String::as_str),
+        Some("before\n---\nafter\n")
+    );
+    assert_eq!(body, "Body");
+}
+
+#[test]
 fn parse_frontmatter_drops_non_scalar_values() {
     // Lists / mappings / null don't fit the BTreeMap<String, String>
     // contract; the parser silently drops them.
@@ -267,6 +294,17 @@ fn parse_frontmatter_invalid_yaml_treats_as_no_frontmatter() {
     let (fm, body) = parse_frontmatter(content);
     assert!(fm.is_empty());
     assert_eq!(body, "Body");
+}
+
+#[test]
+fn load_skill_invalid_yaml_is_skipped_with_parse_diagnostic() {
+    let content = "---\nname: x\n  bad: indent : here\n---\nBody";
+    let path = Path::new("/skills/broken/SKILL.md");
+    let (skill, diags) = load_skill_from_content(content, path);
+    assert!(skill.is_none());
+    assert!(diags.iter().any(|d| {
+        d.kind == DiagnosticKind::Skipped && d.message.contains("YAML failed to parse")
+    }));
 }
 
 #[test]

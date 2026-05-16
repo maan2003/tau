@@ -555,6 +555,75 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_hit_count() {
 }
 
 #[test]
+fn skill_tool_load_truncates_large_skill_content() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let skill_dir = td.path().join("zqx-large");
+    std::fs::create_dir_all(&skill_dir).expect("mkdir");
+    let skill_file = skill_dir.join("SKILL.md");
+    let body = "a".repeat(70 * 1024);
+    std::fs::write(
+        &skill_file,
+        format!("---\nname: zqx-large\ndescription: large skill\n---\n{body}"),
+    )
+    .expect("write skill");
+
+    let mut h = echo_harness(&sp).expect("start");
+    h.discovered_skills.clear();
+    h.discovered_skills.insert(
+        tau_proto::SkillName::from("zqx-large"),
+        DiscoveredSkill {
+            source_id: "skills".into(),
+            description: "large skill".to_owned(),
+            file_path: skill_file,
+            add_to_prompt: false,
+        },
+    );
+
+    let cid = h.default_conversation_id.clone();
+    seed_tools_running(&mut h, &cid, vec!["call-large".into()]);
+    h.handle_skill_tool_call(&cid, &skill_call("zqx-large", false, "call-large"))
+        .expect("skill call");
+
+    let result = latest_tool_result(&h, "s1", "call-large");
+    let content = cbor_text_field(&result, "content").expect("content");
+    assert!(content.contains("skill content truncated"));
+    assert_eq!(cbor_bool_field(&result, "truncated"), Some(true));
+}
+
+#[test]
+fn skill_tool_search_caps_match_output() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.discovered_skills.clear();
+
+    for i in 0..55 {
+        let name = format!("zqx-limit-{i}");
+        h.discovered_skills.insert(
+            tau_proto::SkillName::from(name.clone()),
+            DiscoveredSkill {
+                source_id: "skills".into(),
+                description: "matches zqxlimit token".to_owned(),
+                file_path: PathBuf::from(format!("/skills/{name}/SKILL.md")),
+                add_to_prompt: false,
+            },
+        );
+    }
+
+    let cid = h.default_conversation_id.clone();
+    seed_tools_running(&mut h, &cid, vec!["call-limit".into()]);
+    h.handle_skill_tool_call(&cid, &skill_call("zqxlimit", false, "call-limit"))
+        .expect("skill call");
+
+    let result = latest_tool_result(&h, "s1", "call-limit");
+    let matches = cbor_array_field(&result, "matches").expect("matches");
+    assert_eq!(matches.len(), 50);
+    assert_eq!(cbor_bool_field(&result, "truncated"), Some(true));
+    assert_eq!(cbor_u64_field(&result, "total_matches"), Some(55));
+}
+
+#[test]
 fn skill_tool_loads_exact_single_term_match_even_with_other_hits() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -661,6 +730,55 @@ fn skill_tool_registered_in_tool_list() {
 }
 
 #[test]
+fn extension_skill_invalid_name_is_skipped() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.handle_extension_event_inner(
+        "source-a",
+        Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+            name: tau_proto::SkillName::from("Bad_Name"),
+            description: "bad".to_owned(),
+            file_path: PathBuf::from("/skills/bad/SKILL.md"),
+            add_to_prompt: true,
+        }),
+    )
+    .expect("event");
+
+    assert!(
+        !h.discovered_skills
+            .contains_key(&tau_proto::SkillName::from("Bad_Name"))
+    );
+}
+
+#[test]
+fn extension_skill_long_description_is_truncated() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let description = "x".repeat(tau_skills::MAX_DESCRIPTION_LENGTH + 16);
+
+    h.handle_extension_event_inner(
+        "source-a",
+        Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+            name: tau_proto::SkillName::from("long-desc"),
+            description,
+            file_path: PathBuf::from("/skills/long-desc/SKILL.md"),
+            add_to_prompt: true,
+        }),
+    )
+    .expect("event");
+
+    let stored = h
+        .discovered_skills
+        .get(&tau_proto::SkillName::from("long-desc"))
+        .expect("stored");
+    assert_eq!(stored.description.len(), tau_skills::MAX_DESCRIPTION_LENGTH);
+    assert!(stored.description.ends_with('…'));
+}
+
+#[test]
 fn duplicate_extension_skill_keeps_first_source_but_allows_refresh() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -689,6 +807,81 @@ fn duplicate_extension_skill_keeps_first_source_but_allows_refresh() {
     assert_eq!(stored.source_id, "source-a");
     assert_eq!(stored.description, "refreshed");
     assert_eq!(stored.file_path, PathBuf::from("/skills/a2/SKILL.md"));
+}
+
+fn skill_call(query: &str, search_content: bool, id: &str) -> AgentToolCall {
+    AgentToolCall {
+        id: id.into(),
+        name: "skill".into(),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("query".to_owned()),
+                CborValue::Text(query.to_owned()),
+            ),
+            (
+                CborValue::Text("search_content".to_owned()),
+                CborValue::Bool(search_content),
+            ),
+        ]),
+        display: None,
+    }
+}
+
+fn latest_tool_result(h: &Harness, session_id: &str, call_id: &str) -> CborValue {
+    h.store
+        .session_events(session_id)
+        .expect("events")
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.event {
+            Event::ToolResult(r) if r.call_id.as_str() == call_id => Some(r.result.clone()),
+            _ => None,
+        })
+        .expect("tool result")
+}
+
+fn cbor_text_field(map: &CborValue, field: &str) -> Option<String> {
+    let CborValue::Map(entries) = map else {
+        return None;
+    };
+    entries.iter().find_map(|(k, v)| match (k, v) {
+        (CborValue::Text(k), CborValue::Text(v)) if k == field => Some(v.clone()),
+        _ => None,
+    })
+}
+
+fn cbor_bool_field(map: &CborValue, field: &str) -> Option<bool> {
+    let CborValue::Map(entries) = map else {
+        return None;
+    };
+    entries.iter().find_map(|(k, v)| match (k, v) {
+        (CborValue::Text(k), CborValue::Bool(v)) if k == field => Some(*v),
+        _ => None,
+    })
+}
+
+fn cbor_u64_field(map: &CborValue, field: &str) -> Option<u64> {
+    let CborValue::Map(entries) = map else {
+        return None;
+    };
+    entries.iter().find_map(|(k, v)| match (k, v) {
+        (CborValue::Text(k), CborValue::Integer(v)) if k == field => {
+            let n: i128 = (*v).into();
+            u64::try_from(n).ok()
+        }
+        _ => None,
+    })
+}
+
+fn cbor_array_field(map: &CborValue, field: &str) -> Option<Vec<CborValue>> {
+    let CborValue::Map(entries) = map else {
+        return None;
+    };
+    entries.iter().find_map(|(k, v)| match (k, v) {
+        (CborValue::Text(k), CborValue::Array(v)) if k == field => Some(v.clone()),
+        _ => None,
+    })
 }
 
 #[test]

@@ -49,11 +49,12 @@ pub(crate) fn build_system_prompt(
              <available_skills>\n",
         );
         for (name, skill) in &prompt_skills {
+            let description = tau_skills::truncate_description(&skill.description);
             prompt.push_str(&format!(
                 "  <skill>\n    <name>{}</name>\n    \
                  <description>{}</description>\n  </skill>\n",
                 xml_escape(name.as_str()),
-                xml_escape(&skill.description),
+                xml_escape(description.as_ref()),
             ));
         }
         prompt.push_str("</available_skills>\n");

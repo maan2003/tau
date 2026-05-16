@@ -9,6 +9,7 @@
 //!   mappings and `null` are dropped silently.
 //! - All scalars are stringified before being returned. `BTreeMap<String,
 //!   String>` is the contract callers see.
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -84,7 +85,7 @@ pub struct LoadSkillsResult {
 // ---------------------------------------------------------------------------
 
 const MAX_NAME_LENGTH: usize = 64;
-const MAX_DESCRIPTION_LENGTH: usize = 1024;
+pub const MAX_DESCRIPTION_LENGTH: usize = 1024;
 const SKILL_FILENAME: &str = "SKILL.md";
 
 // ---------------------------------------------------------------------------
@@ -101,39 +102,8 @@ const SKILL_FILENAME: &str = "SKILL.md";
 /// Top-level scalars are stringified; non-scalar values (lists, mappings)
 /// and `null` are dropped silently — see the module-level docs.
 pub fn parse_frontmatter(content: &str) -> (BTreeMap<String, String>, &str) {
-    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-
-    let Some(rest) = content.strip_prefix("---") else {
-        return (BTreeMap::new(), content);
-    };
-    let Some(rest) = rest
-        .strip_prefix('\n')
-        .or_else(|| rest.strip_prefix("\r\n"))
-    else {
-        return (BTreeMap::new(), content);
-    };
-
-    let Some((yaml_end, body_start)) = find_closing_fence(rest) else {
-        return (BTreeMap::new(), content);
-    };
-
-    let yaml_block = &rest[..yaml_end];
-    let body = &rest[body_start..];
-
-    let map = match serde_yaml_ng::from_str::<YamlValue>(yaml_block) {
-        Ok(YamlValue::Mapping(m)) => m
-            .into_iter()
-            .filter_map(|(k, v)| {
-                let YamlValue::String(key) = k else {
-                    return None;
-                };
-                Some((key, scalar_to_string(&v)?))
-            })
-            .collect(),
-        _ => BTreeMap::new(),
-    };
-
-    (map, body)
+    let parsed = parse_frontmatter_inner(content);
+    (parsed.fields, parsed.body)
 }
 
 /// Strip frontmatter and return only the body.
@@ -149,12 +119,77 @@ fn find_closing_fence(s: &str) -> Option<(usize, usize)> {
     let mut pos = 0;
     for line in s.split_inclusive('\n') {
         let stripped = line.trim_end_matches('\n').trim_end_matches('\r');
-        if stripped.trim() == "---" {
+        if stripped.trim_end() == "---" {
             return Some((pos, pos + line.len()));
         }
         pos += line.len();
     }
     None
+}
+
+struct ParsedFrontmatter<'a> {
+    fields: BTreeMap<String, String>,
+    body: &'a str,
+    yaml_error: Option<String>,
+}
+
+fn parse_frontmatter_inner(content: &str) -> ParsedFrontmatter<'_> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+
+    let Some(rest) = content.strip_prefix("---") else {
+        return ParsedFrontmatter {
+            fields: BTreeMap::new(),
+            body: content,
+            yaml_error: None,
+        };
+    };
+    let Some(rest) = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))
+    else {
+        return ParsedFrontmatter {
+            fields: BTreeMap::new(),
+            body: content,
+            yaml_error: None,
+        };
+    };
+
+    let Some((yaml_end, body_start)) = find_closing_fence(rest) else {
+        return ParsedFrontmatter {
+            fields: BTreeMap::new(),
+            body: content,
+            yaml_error: None,
+        };
+    };
+
+    let yaml_block = &rest[..yaml_end];
+    let body = &rest[body_start..];
+
+    match serde_yaml_ng::from_str::<YamlValue>(yaml_block) {
+        Ok(YamlValue::Mapping(m)) => ParsedFrontmatter {
+            fields: m
+                .into_iter()
+                .filter_map(|(k, v)| {
+                    let YamlValue::String(key) = k else {
+                        return None;
+                    };
+                    Some((key, scalar_to_string(&v)?))
+                })
+                .collect(),
+            body,
+            yaml_error: None,
+        },
+        Ok(_) => ParsedFrontmatter {
+            fields: BTreeMap::new(),
+            body,
+            yaml_error: None,
+        },
+        Err(err) => ParsedFrontmatter {
+            fields: BTreeMap::new(),
+            body,
+            yaml_error: Some(err.to_string()),
+        },
+    }
 }
 
 /// Stringify a YAML scalar. Non-scalar values (lists, maps, null,
@@ -254,17 +289,64 @@ fn validate_name(name: &str, parent_dir_name: Option<&str>, path: &Path) -> Name
 
 fn validate_description(description: &str, path: &Path) -> Vec<SkillDiagnostic> {
     let mut diagnostics = Vec::new();
-    if description.len() > MAX_DESCRIPTION_LENGTH {
+    if MAX_DESCRIPTION_LENGTH < description.len() {
         diagnostics.push(SkillDiagnostic {
             path: path.to_owned(),
             kind: DiagnosticKind::Warning,
             message: format!(
-                "description exceeds {MAX_DESCRIPTION_LENGTH} characters ({})",
+                "description exceeds {MAX_DESCRIPTION_LENGTH} bytes ({}); truncating",
                 description.len()
             ),
         });
     }
     diagnostics
+}
+
+pub fn truncate_description(description: &str) -> Cow<'_, str> {
+    if description.len() <= MAX_DESCRIPTION_LENGTH {
+        return Cow::Borrowed(description);
+    }
+
+    let suffix = "…";
+    let mut end = MAX_DESCRIPTION_LENGTH.saturating_sub(suffix.len());
+    while !description.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = String::from(&description[..end]);
+    truncated.push_str(suffix);
+    Cow::Owned(truncated)
+}
+
+pub fn skill_name_validation_message(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("name is empty".to_owned());
+    }
+    if MAX_NAME_LENGTH < name.len() {
+        return Some(format!(
+            "name exceeds {MAX_NAME_LENGTH} characters ({})",
+            name.len()
+        ));
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Some(
+            "name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"
+                .to_owned(),
+        );
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        return Some("name must not start or end with a hyphen".to_owned());
+    }
+    if name.contains("--") {
+        return Some("name must not contain consecutive hyphens".to_owned());
+    }
+    None
+}
+
+pub fn is_valid_skill_name(name: &str) -> bool {
+    skill_name_validation_message(name).is_none()
 }
 
 // ---------------------------------------------------------------------------
@@ -284,7 +366,16 @@ pub fn load_skill_from_content(
     // file on demand via `Skill::file_path` so edits to a skill's
     // instructions are picked up without a daemon restart; caching the
     // body on `Skill` would freeze the contents at discovery time.
-    let (fm, _body) = parse_frontmatter(content);
+    let parsed = parse_frontmatter_inner(content);
+    if let Some(err) = parsed.yaml_error {
+        diagnostics.push(SkillDiagnostic {
+            path: file_path.to_owned(),
+            kind: DiagnosticKind::Skipped,
+            message: format!("frontmatter YAML failed to parse: {err}"),
+        });
+        return (None, diagnostics);
+    }
+    let fm = parsed.fields;
 
     let skill_dir = file_path.parent().unwrap_or(file_path);
     let parent_dir_name = skill_dir
@@ -322,7 +413,7 @@ pub fn load_skill_from_content(
     let description = match description {
         Some(d) if !d.is_empty() => {
             diagnostics.extend(validate_description(&d, file_path));
-            d
+            truncate_description(&d).into_owned()
         }
         _ => {
             diagnostics.push(SkillDiagnostic {
