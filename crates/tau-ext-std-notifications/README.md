@@ -22,7 +22,7 @@ Three classes of event are emitted via the
 | Trigger | User-var | Value |
 |---|---|---|
 | `ui.prompt_submitted` (originator: User) | `user-notification` | `protoss-probe-ack` |
-| Final `agent.response_finished` (no pending tool calls, originator: User) | `user-notification` | `protoss-upgrade-complete` |
+| Final `provider.response_finished` (no pending tool calls, originator: User) | `user-notification` | `protoss-upgrade-complete` |
 | Idle window elapses after a final response | `user-text-notification` | JSON payload (see below) |
 
 The "final response" filter only treats responses with `tool_calls`
@@ -59,7 +59,7 @@ The idle deadline resets on:
 
 - `ui.prompt_submitted` (originator: User) — the user just sent a
   prompt;
-- `agent.prompt_submitted` (originator: User) — the agent is
+- `provider.prompt_submitted` (originator: User) — the provider is
   starting a real turn;
 - `ui.prompt_draft` — trailing-edge debounced typing pings from
   the UI; the deadline jumps back by `idle_seconds` so the

@@ -1,6 +1,4 @@
-//! Types shared between the agent's LLM backends (Chat Completions
-//! and Responses). Lives outside `mod openai` so neither backend
-//! depends on the other.
+//! Types shared by provider-openai's Responses transports.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -171,7 +169,6 @@ pub enum OutputItemAccumulator {
     Message(MessageAccumulator),
     ToolCall(ToolCallAccumulator),
     Reasoning(OpaqueProviderItem),
-    UnknownProviderItem(OpaqueProviderItem),
 }
 
 /// Accumulates one assistant message item across text deltas.
@@ -210,11 +207,7 @@ pub struct StreamState {
     /// A stale `previous_response_id` was rejected and this successful stream
     /// came from the full-replay retry.
     pub stale_chain_fallback: bool,
-    /// Chat Completions streams tool-call indexes separately from the
-    /// assistant message content. This maps each chat `tool_calls[N]`
-    /// index to the synthesized item slot that owns it.
-    chat_tool_item_indices: Vec<Option<usize>>,
-    /// Synthesized item slot for Chat Completions text content.
+    /// Synthesized item slot for plain assistant text content.
     chat_message_item_index: Option<usize>,
 }
 
@@ -278,7 +271,6 @@ impl StreamState {
             compacted_input_items: Vec::new(),
             provider_terminal_event: None,
             stale_chain_fallback: false,
-            chat_tool_item_indices: Vec::new(),
             chat_message_item_index: None,
         }
     }
@@ -358,29 +350,6 @@ impl StreamState {
         call
     }
 
-    pub fn chat_tool_call_at_mut(
-        &mut self,
-        tool_call_index: usize,
-        tool_type: tau_proto::ToolType,
-    ) -> &mut ToolCallAccumulator {
-        while self.chat_tool_item_indices.len() <= tool_call_index {
-            self.chat_tool_item_indices.push(None);
-        }
-        let output_index = match self.chat_tool_item_indices[tool_call_index] {
-            Some(output_index) => output_index,
-            None => {
-                let output_index = self.output_items.len();
-                self.output_items
-                    .push(OutputItemAccumulator::ToolCall(ToolCallAccumulator::new(
-                        tool_type,
-                    )));
-                self.chat_tool_item_indices[tool_call_index] = Some(output_index);
-                output_index
-            }
-        };
-        self.tool_call_at_mut(output_index, tool_type)
-    }
-
     pub fn set_reasoning_item_json_at(&mut self, output_index: usize, item: &str) {
         if let Some(item) = opaque_item_from_json(item) {
             self.ensure_output_len(output_index);
@@ -422,9 +391,6 @@ impl StreamState {
                     }
                 }
                 OutputItemAccumulator::Reasoning(item) => items.push(ContextItem::Reasoning(item)),
-                OutputItemAccumulator::UnknownProviderItem(item) => {
-                    items.push(ContextItem::UnknownProviderItem(item));
-                }
             }
         }
 
@@ -520,7 +486,7 @@ pub fn prompt_cache_key_for(base_url: &str, session_id: &SessionId) -> String {
 /// session's successive turns keep landing on the same cache machine.
 /// Extension-originated turns (e.g. `core-delegate` sub-agents) get a
 /// distinct key derived from the extension's *name* so:
-///   - sub-agent traffic doesn't pile onto the user agent's routing bucket —
+///   - sub-agent traffic doesn't pile onto the user's provider routing bucket —
 ///     OpenAI's deployment checklist warns that >15 RPM per `(prefix,
 ///     prompt_cache_key)` overflows to additional machines and degrades cache
 ///     effectiveness, and a parallel-delegate turn easily blows past that on a

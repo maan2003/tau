@@ -82,23 +82,22 @@ pub(crate) struct EventRenderer {
     /// Where to persist `show_diff` / `show_thinking` /
     /// `show_token_stats` / `show_tools` toggles.
     state_dirs: tau_config::settings::TauDirs,
-    /// Current model id (cached so we can re-render the status bar
-    /// when the effort changes, and vice versa). `None` until the
-    /// first `HarnessModelSelected`, or when no model is selected.
+    /// Model currently resolved for the selected role. `None` until the first
+    /// `HarnessRoleSelected`, or while the selected role has no available
+    /// provider-published model.
     current_model: Option<tau_proto::ModelId>,
-    /// Currently active agent role, as last announced by
-    /// `HarnessModelSelected`. `None` when the model was picked
-    /// directly (no role), or no model is selected. The status bar
-    /// shows this in place of the model id when present.
+    /// Currently selected agent role, as last announced by
+    /// `HarnessRoleSelected`. `None` only before the first selection event.
+    /// The status bar shows this instead of the derived model id.
     current_role: Option<String>,
     /// Current role details advertised for completion menus. Status
-    /// chips compare against `default_params` instead, because these
+    /// chips compare against `baseline_params` instead, because these
     /// role details include persisted state overrides.
     role_defaults: HashMap<String, RoleCompletionDetails>,
-    /// Config-only default model knobs for the current selection.
+    /// Role/provider baseline knobs for the current selection.
     /// Persisted state is intentionally excluded by the harness so the
-    /// status bar can surface state adjustments from config defaults.
-    default_params: Option<tau_proto::ModelParams>,
+    /// status bar can surface state adjustments from that baseline.
+    baseline_params: Option<tau_proto::ModelParams>,
     /// Current per-prompt model knobs. Mirrored into `effort_state` /
     /// `verbosity_state` / `thinking_summary_state` so the input
     /// thread can read individual fields for cycling helpers.
@@ -288,6 +287,7 @@ impl RoleCompletionDetails {
 
 fn role_value_completion(setting: &str, value: &str) -> tau_cli_term::CompletionItem {
     let description = match (setting, value) {
+        (_, "reset") => "clear this role setting",
         ("effort", "off") => "disable reasoning effort",
         ("effort", "minimal") => "minimum reasoning effort",
         ("effort", "low") => "light reasoning effort",
@@ -303,7 +303,6 @@ fn role_value_completion(setting: &str, value: &str) -> tau_cli_term::Completion
         ("thinking-summary", "detailed") => "detailed thinking summaries",
         ("service-tier", "fast") => "use fast service tier",
         ("service-tier", "flex") => "use flex service tier",
-        ("service-tier", "none") => "use default service tier",
         _ => "",
     };
     tau_cli_term::CompletionItem::new(value, description)
@@ -545,7 +544,7 @@ impl EventRenderer {
             current_role: None,
             current_params: tau_proto::ModelParams::default(),
             role_defaults: HashMap::new(),
-            default_params: None,
+            baseline_params: None,
             current_context_percent: None,
             current_context_input_tokens: None,
             current_context_window: None,
@@ -1015,7 +1014,7 @@ impl EventRenderer {
         self.prompt_tool_summary = None;
         // Model selection and effort are harness-global, not
         // session-scoped. `/new` only causes a SessionStarted event;
-        // the harness does not re-emit HarnessModelSelected for the
+        // the harness does not re-emit HarnessRoleSelected for the
         // unchanged model. Keep the cached selection so the status bar
         // can be recreated after clearing the terminal output.
         self.current_context_percent = None;
@@ -1023,7 +1022,7 @@ impl EventRenderer {
         self.cumulative_agent_latency = Duration::ZERO;
         self.handle.clear_output();
         self.render_session_preamble();
-        if self.current_model.is_some() {
+        if self.current_model.is_some() || self.current_role.is_some() {
             self.render_model_status();
         }
     }
@@ -1062,32 +1061,27 @@ impl EventRenderer {
         let mut needs_space = false;
         let mut right_needs_space = false;
 
-        match self.current_model.as_ref() {
-            None => push_status_chip(
+        match (self.current_role.as_deref(), self.current_model.as_ref()) {
+            (Some(role), _) => push_status_chip(
+                &mut themed,
+                role_style,
+                &mut needs_space,
+                format!("+{role}"),
+            ),
+            (None, Some(model)) => push_status_chip(
+                &mut themed,
+                model_style,
+                &mut needs_space,
+                format!("={model}"),
+            ),
+            (None, None) => push_status_chip(
                 &mut themed,
                 status_style,
                 &mut needs_space,
-                "no model selected".to_owned(),
+                "no role selected".to_owned(),
             ),
-            Some(model) => {
-                if let Some(role) = self.current_role.as_deref() {
-                    push_status_chip(
-                        &mut themed,
-                        role_style,
-                        &mut needs_space,
-                        format!("+{role}"),
-                    );
-                } else {
-                    push_status_chip(
-                        &mut themed,
-                        model_style,
-                        &mut needs_space,
-                        format!("={model}"),
-                    );
-                }
-            }
         }
-        let show_effort = self.default_params.map_or_else(
+        let show_effort = self.baseline_params.map_or_else(
             || {
                 self.role_default_effort()
                     .map_or(!self.current_params.effort.is_default(), |default| {
@@ -1104,7 +1098,7 @@ impl EventRenderer {
                 format!("^{}", self.current_params.effort.as_str()),
             );
         }
-        let show_verbosity = self.default_params.map_or_else(
+        let show_verbosity = self.baseline_params.map_or_else(
             || {
                 self.role_default_verbosity()
                     .map_or(!self.current_params.verbosity.is_default(), |default| {
@@ -1122,7 +1116,7 @@ impl EventRenderer {
             );
         }
         let show_service_tier = self
-            .default_params
+            .baseline_params
             .map_or(self.current_params.service_tier.is_some(), |default| {
                 self.current_params.service_tier != default.service_tier
             });
@@ -1298,7 +1292,10 @@ impl EventRenderer {
             }
             Event::SessionStarted(started) => {
                 self.current_session_id = Some(started.session_id.clone());
-                if self.model_status_block.is_some() || self.current_model.is_some() {
+                if self.model_status_block.is_some()
+                    || self.current_model.is_some()
+                    || self.current_role.is_some()
+                {
                     self.render_model_status();
                 }
             }
@@ -1972,7 +1969,7 @@ impl EventRenderer {
                                     tools_profile: None,
                                 });
                             [
-                                ("delete", "delete this in-memory/persisted role".to_owned()),
+                                ("delete", "delete this runtime role/override".to_owned()),
                                 ("model", details.current_description("model")),
                                 ("effort", details.current_description("effort")),
                                 ("verbosity", details.current_description("verbosity")),
@@ -1992,22 +1989,29 @@ impl EventRenderer {
                             .collect()
                         }
                         3 => match args[1] {
-                            "effort" => ["off", "minimal", "low", "medium", "high", "xhigh"]
+                            "model" | "tools-profile" => ["reset"]
                                 .into_iter()
                                 .filter(|value| matches(value, args[2]))
                                 .map(|value| role_value_completion(args[1], value))
                                 .collect(),
-                            "verbosity" => ["low", "medium", "high"]
+                            "effort" => {
+                                ["reset", "off", "minimal", "low", "medium", "high", "xhigh"]
+                                    .into_iter()
+                                    .filter(|value| matches(value, args[2]))
+                                    .map(|value| role_value_completion(args[1], value))
+                                    .collect()
+                            }
+                            "verbosity" => ["reset", "low", "medium", "high"]
                                 .into_iter()
                                 .filter(|value| matches(value, args[2]))
                                 .map(|value| role_value_completion(args[1], value))
                                 .collect(),
-                            "thinking-summary" => ["off", "auto", "concise", "detailed"]
+                            "thinking-summary" => ["reset", "off", "auto", "concise", "detailed"]
                                 .into_iter()
                                 .filter(|value| matches(value, args[2]))
                                 .map(|value| role_value_completion(args[1], value))
                                 .collect(),
-                            "service-tier" => ["fast", "flex", "none"]
+                            "service-tier" => ["reset", "fast", "flex"]
                                 .into_iter()
                                 .filter(|value| matches(value, args[2]))
                                 .map(|value| role_value_completion(args[1], value))
@@ -2020,12 +2024,12 @@ impl EventRenderer {
                 self.completion_data
                     .set_arg_completer(tau_cli_term::CommandName::new("/role"), completer);
             }
-            Event::HarnessModelSelected(selected) => {
+            Event::HarnessRoleSelected(selected) => {
                 self.current_model = selected.model.clone();
-                self.current_role = selected.role.clone();
-                self.default_params = selected.default_params;
+                self.current_role = Some(selected.role.clone());
+                self.baseline_params = selected.baseline_params;
                 if let Ok(mut role) = self.current_role_state.lock() {
-                    *role = selected.role.clone();
+                    *role = Some(selected.role.clone());
                 }
                 self.current_context_window = selected.context_window;
                 self.render_model_status();
@@ -2067,11 +2071,16 @@ impl EventRenderer {
                 self.handle.print_terminal_escape(seq);
             }
             Event::HarnessEffortsAvailable(avail) => {
-                let items: Vec<tau_cli_term::CompletionItem> = avail
-                    .levels
-                    .iter()
-                    .map(|l| tau_cli_term::CompletionItem::plain(l.as_str()))
-                    .collect();
+                let mut items = vec![tau_cli_term::CompletionItem::new(
+                    "reset",
+                    "use the model default effort",
+                )];
+                items.extend(
+                    avail
+                        .levels
+                        .iter()
+                        .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
+                );
                 self.completion_data
                     .set_arg_completions(tau_cli_term::CommandName::new("/effort"), items);
                 if let Ok(mut set) = self.efforts_available.lock() {
@@ -2080,11 +2089,16 @@ impl EventRenderer {
                 }
             }
             Event::HarnessVerbositiesAvailable(avail) => {
-                let items: Vec<tau_cli_term::CompletionItem> = avail
-                    .levels
-                    .iter()
-                    .map(|l| tau_cli_term::CompletionItem::plain(l.as_str()))
-                    .collect();
+                let mut items = vec![tau_cli_term::CompletionItem::new(
+                    "reset",
+                    "use the model default verbosity",
+                )];
+                items.extend(
+                    avail
+                        .levels
+                        .iter()
+                        .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
+                );
                 self.completion_data
                     .set_arg_completions(tau_cli_term::CommandName::new("/verbosity"), items);
                 if let Ok(mut set) = self.verbosities_available.lock() {
@@ -2093,11 +2107,16 @@ impl EventRenderer {
                 }
             }
             Event::HarnessThinkingSummariesAvailable(avail) => {
-                let items: Vec<tau_cli_term::CompletionItem> = avail
-                    .levels
-                    .iter()
-                    .map(|l| tau_cli_term::CompletionItem::plain(l.as_str()))
-                    .collect();
+                let mut items = vec![tau_cli_term::CompletionItem::new(
+                    "reset",
+                    "use the model default thinking summary",
+                )];
+                items.extend(
+                    avail
+                        .levels
+                        .iter()
+                        .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
+                );
                 self.completion_data.set_arg_completions(
                     tau_cli_term::CommandName::new("/thinking-summary"),
                     items,

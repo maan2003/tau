@@ -2,7 +2,6 @@
 default-members = ["crates/tau"]
 members = [
   "crates/tau",
-  "crates/tau-agent",
   "crates/tau-blocking-notify-channel",
   "crates/tau-cli",
   "crates/tau-cli-picker",
@@ -11,6 +10,7 @@ members = [
   "crates/tau-config",
   "crates/tau-core",
   "crates/tau-ext-core-delegate",
+  "crates/tau-ext-provider-openai",
   "crates/tau-ext-shell",
   "crates/tau-ext-std-notifications",
   "crates/tau-ext-test-dummy",
@@ -53,7 +53,6 @@ unwrap_used = "deny"
 
 [workspace.dependencies]
 # Internal crates
-tau-agent = { path = "crates/tau-agent" }
 tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel" }
 tau-cli = { path = "crates/tau-cli" }
 tau-cli-picker = { path = "crates/tau-cli-picker" }
@@ -62,6 +61,7 @@ tau-cli-term-raw = { path = "crates/tau-cli-term-raw" }
 tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
 tau-ext-core-delegate = { path = "crates/tau-ext-core-delegate" }
+tau-ext-provider-openai = { path = "crates/tau-ext-provider-openai" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
 tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }
 tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }

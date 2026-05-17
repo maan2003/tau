@@ -31,19 +31,21 @@ fn embedded_mode_returns_agent_response_and_persists_history() {
         .collect();
     let from_connection_finished = parsed
         .iter()
-        .filter(|e| e["type"] == "from_connection" && e["event_name"] == "agent.response_finished")
+        .filter(|e| {
+            e["type"] == "from_connection" && e["event_name"] == "provider.response_finished"
+        })
         .count();
     let published_finished = parsed
         .iter()
-        .filter(|e| e["type"] == "published" && e["event_name"] == "agent.response_finished")
+        .filter(|e| e["type"] == "published" && e["event_name"] == "provider.response_finished")
         .count();
     assert!(
         from_connection_finished >= 1,
-        "expected ≥1 inbound agent.response_finished line, got {from_connection_finished}",
+        "expected ≥1 inbound provider.response_finished line, got {from_connection_finished}",
     );
     assert!(
         published_finished >= 1,
-        "expected ≥1 published agent.response_finished line, got {published_finished}",
+        "expected ≥1 published provider.response_finished line, got {published_finished}",
     );
 }
 

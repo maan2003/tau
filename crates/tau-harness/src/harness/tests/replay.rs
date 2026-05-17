@@ -58,7 +58,7 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         Frame::Message(Message::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Prefix("ui.".to_owned()),
-                EventSelector::Prefix("agent.".to_owned()),
+                EventSelector::Prefix("provider.".to_owned()),
             ],
         })),
     )
@@ -190,7 +190,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
         Frame::Message(Message::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Prefix("session.".to_owned()),
-                EventSelector::Prefix("agent.".to_owned()),
+                EventSelector::Prefix("provider.".to_owned()),
             ],
         })),
     )
@@ -205,12 +205,12 @@ fn late_joining_ui_client_replays_only_final_session_events() {
         }
     }
 
-    assert!(replayed.contains(&tau_proto::EventName::AGENT_RESPONSE_FINISHED));
+    assert!(replayed.contains(&tau_proto::EventName::PROVIDER_RESPONSE_FINISHED));
     assert!(replayed.contains(&tau_proto::EventName::SESSION_COMPACTED));
     assert!(!replayed.contains(&tau_proto::EventName::SESSION_COMPACTION_STARTED));
     assert!(!replayed.contains(&tau_proto::EventName::SESSION_PROMPT_QUEUED));
     assert!(!replayed.contains(&tau_proto::EventName::SESSION_PROMPT_CREATED));
-    assert!(!replayed.contains(&tau_proto::EventName::AGENT_RESPONSE_UPDATED));
+    assert!(!replayed.contains(&tau_proto::EventName::PROVIDER_RESPONSE_UPDATED));
 
     h.shutdown().expect("shutdown");
 }

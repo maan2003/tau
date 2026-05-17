@@ -71,22 +71,22 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
             session_id: session_id.into(),
         }));
     }
-    if let Some(arg) = text.strip_prefix("/effort ")
-        && let Ok(level) = arg.trim().parse::<tau_proto::Effort>()
+    if text == "/effort"
+        || text.starts_with("/effort ")
+        || text == "/fast"
+        || text.starts_with("/fast ")
+        || text == "/verbosity"
+        || text.starts_with("/verbosity ")
+        || text == "/thinking-summary"
+        || text.starts_with("/thinking-summary ")
     {
-        return Some(Event::UiSetEffort(tau_proto::UiSetEffort { level }));
+        return None;
     }
-    if let Some(arg) = text.strip_prefix("/verbosity ")
-        && let Ok(level) = arg.trim().parse::<tau_proto::Verbosity>()
-    {
-        return Some(Event::UiSetVerbosity(tau_proto::UiSetVerbosity { level }));
+    if text == "/role" {
+        return None;
     }
-    if let Some(arg) = text.strip_prefix("/thinking-summary ")
-        && let Ok(level) = arg.trim().parse::<tau_proto::ThinkingSummary>()
-    {
-        return Some(Event::UiSetThinkingSummary(
-            tau_proto::UiSetThinkingSummary { level },
-        ));
+    if let Some(rest) = text.strip_prefix("/role ") {
+        return role_event_for_command(rest.trim());
     }
     if let Some(role) = text.strip_prefix("/model ") {
         let role = role.trim();
@@ -118,6 +118,40 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }))
+}
+
+fn role_event_for_command(rest: &str) -> Option<Event> {
+    let mut parts = rest.split_whitespace();
+    let role = parts.next()?;
+    let command = parts.next();
+    let value = parts.next();
+    let extra = parts.next();
+
+    match command {
+        None => Some(Event::UiRoleSelect(tau_proto::UiRoleSelect {
+            role: role.to_owned(),
+        })),
+        Some("delete") => {
+            if value.is_some() {
+                return None;
+            }
+            Some(Event::UiRoleUpdate(tau_proto::UiRoleUpdate {
+                role: role.to_owned(),
+                action: tau_proto::UiRoleUpdateAction::Delete,
+            }))
+        }
+        Some(setting) => {
+            let value = value?;
+            if extra.is_some() {
+                return None;
+            }
+            let action = crate::chat::parse_role_setting_update(setting, value).ok()?;
+            Some(Event::UiRoleUpdate(tau_proto::UiRoleUpdate {
+                role: role.to_owned(),
+                action,
+            }))
+        }
+    }
 }
 
 fn shell_command(session_id: &str, command: &str, include_in_context: bool) -> Event {

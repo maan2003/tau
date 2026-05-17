@@ -1072,19 +1072,12 @@ fn gather_tool_definitions_respects_role_tools_profile() {
                     skill: false,
                 },
             },
-        }"#,
-    )
-    .expect("write harness");
-    std::fs::write(
-        config_dir.join("models.json5"),
-        r#"{
             roles: {
                 smart: { toolsProfile: "read_only" },
             },
         }"#,
     )
-    .expect("write models");
-
+    .expect("write harness");
     let dirs = tau_config::settings::TauDirs {
         config_dir: Some(config_dir),
         state_dir: Some(state_dir.clone()),
@@ -1113,19 +1106,12 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
                     test_gpt_shell: true,
                 },
             },
-        }"#,
-    )
-    .expect("write harness");
-    std::fs::write(
-        config_dir.join("models.json5"),
-        r#"{
             roles: {
                 smart: { toolsProfile: "specialized" },
             },
         }"#,
     )
-    .expect("write models");
-
+    .expect("write harness");
     let dirs = tau_config::settings::TauDirs {
         config_dir: Some(config_dir),
         state_dir: Some(state_dir.clone()),

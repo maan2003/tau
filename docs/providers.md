@@ -1,7 +1,7 @@
 # Providers
 
 A provider is a normal Tau extension that exposes models and executes prompts.
-The harness does not own provider-specific LLM execution, and `tau-agent` should not remain as a central executor in the final architecture.
+The harness does not own provider-specific LLM execution; provider extensions are the model executors.
 
 ## Core meaning
 
@@ -22,13 +22,13 @@ Provider extensions own provider-specific work:
 The harness owns orchestration:
 
 - sessions and prompt assembly
-- model and role selection
+- role selection and resolving the selected role to a provider model
 - mapping `ModelId` to the provider extension that published it
 - direct prompt routing
 - Tau tool routing and the tool-call follow-up loop
-- harness/UI state such as selected model and available roles
+- harness/UI state such as selected role, resolved model, and available roles
 
-The UI should stay dumb: it consumes harness/provider events and asks the harness to change model or role state.
+The UI should stay dumb: it consumes harness/provider events and asks the harness to change role state.
 
 ## Model publication and routing
 
@@ -42,7 +42,7 @@ extension -> models
 Example:
 
 ```rust
-ModelId::new("openai", "gpt-5.5")
+ModelId::new("chatgpt", "gpt-5.5")
 ModelId::new("chatgpt", "gpt-5.3-codex")
 ```
 
@@ -64,9 +64,9 @@ struct ProviderModelInfo {
 Publishing a model means it is available; no separate `enabled` flag is needed initially.
 
 The harness records which extension sent the snapshot and uses that as routing state.
-It also uses the metadata for model UI state: context window, effort choices, verbosity choices, thinking-summary choices, and role descriptions.
+It also re-emits current provider snapshots to provider-event subscribers and translates the metadata into harness model/role/selection state for the UI: context window, effort choices, verbosity choices, thinking-summary choices, and role descriptions.
 
-Prompt execution should be directed to the extension that owns the selected `ModelId`; it should not be broadcast to every provider.
+Prompt execution for provider-published models is directed to the extension that owns the selected `ModelId`; it is not broadcast to every provider or agent.
 This mirrors Tau's tool routing model.
 
 ## Execution events
@@ -104,7 +104,7 @@ The UI displays and edits resolved harness state; it should not do provider reso
 ## State
 
 Provider-specific config and runtime state should live with the provider extension / provider storage.
-There should be no global `models.json5` that describes every provider runtime.
+There should be no global model-registry config file that describes every provider runtime.
 
 A provider owns its own:
 
@@ -114,28 +114,30 @@ A provider owns its own:
 - transport caches or pools
 - internal metadata
 
-For the first OpenAI Responses provider, auth presence is enough to enable a provider namespace:
+For the first OpenAI Responses provider, auth presence is enough to enable the provider namespace:
 
-- `openai/*` is available when OpenAI API-key state exists
 - `chatgpt/*` is available when ChatGPT OAuth state exists
 
 No separate enable flag is needed initially.
 
 ## Initial first-party provider
 
-The first provider extension should cover only the Responses backend:
+The first provider extension covers only the ChatGPT/Codex Responses backend:
 
-- `openai/*` for the public OpenAI Responses API
 - `chatgpt/*` for the ChatGPT / Codex Responses backend
 
-Initial model lists and metadata should be hardcoded, including required context windows.
-Do not add upstream model discovery, compat matrices, custom base URLs, or chat-completions support in the first cut.
+It lives in `crates/tau-ext-provider-openai` and is spawned as the built-in `provider-openai` extension.
+It publishes hardcoded model metadata, including required context windows, before `Ready` during extension startup.
+It owns Responses execution for that namespace and preserves the existing provider execution event semantics for streaming, tool calls, usage, and retries.
+It publishes `chatgpt/*` only from auth named `chatgpt`; there is no `openai-codex` compatibility alias.
+
+Do not add public OpenAI API-key support, upstream model discovery, compat matrices, custom base URLs, or chat-completions support in the first cut.
 
 ## Summary
 
 - providers are normal Tau extensions
 - provider extensions publish models and execute prompts
-- the harness routes prompts directly to the selected model owner
+- the harness routes prompts directly to the selected role's resolved model owner
 - execution events should be `provider.*`, not `agent.*`
 - the harness owns roles, selection, sessions, and tool routing
 - provider state belongs to providers

@@ -11,13 +11,13 @@ A role can set:
 - `serviceTier`: `fast` or `flex`
 - `toolsProfile`: name of a tool-availability profile from `harness.json5`
 
-Roles live in `models.json5` under `roles`:
+Roles live in `harness.json5` under `roles`:
 
 ```json5
 {
   roles: {
     smart: {
-      model: "openai/gpt-5.3-codex",
+      model: "chatgpt/gpt-5.3-codex",
       effort: "medium",
       toolsProfile: "full",
     },
@@ -64,16 +64,16 @@ tool's extension-provided `enabled_by_default` setting. Tau includes a built-in
 `gpt` profile that enables `apply_patch` and disables direct file/search tools
 (`edit`, `write`, `read`, `grep`, `find`, and `ls`).
 
-Missing fields use Tau's hardcoded defaults for the selected model.
+Missing fields use provider-published fallback knobs for the role's resolved model.
 
 Tau ships built-in `smart`, `deep`, and `rush` roles. `smart` is the startup fallback role; `deep` asks for higher reasoning with detailed thinking summaries; `rush` asks for lower reasoning.
 
 
 ## Selecting a role
 
-Use `/model <role>`.
+Use `/model <role>` or `/role <role>`.
 
-`/model` completion lists roles, not raw models. Each completion description shows the currently resolved model and role settings.
+`/model` and `/role` completion list roles, not raw models. Each completion description shows the currently resolved model and role settings.
 
 
 ## Editing roles
@@ -87,13 +87,17 @@ Use:
 Examples:
 
 ```text
-/role smart model openai/gpt-5.3-codex
+/role smart model chatgpt/gpt-5.3-codex
 /role deep effort xhigh
 /role rush service-tier fast
 /role smart tools-profile read_only
 /role temporary model anthropic/claude-sonnet-4-20250514
 /role temporary delete
 ```
+
+Use `reset` as the value to clear a field and return to model/provider fallback behavior (`off` is still the explicit off value for `effort` and `thinking-summary`).
+
+The convenience commands `/effort`, `/verbosity`, `/thinking-summary`, and `/fast` mutate the currently selected role using the same role-update path.
 
 The `<role>` argument completes existing roles, but any new name can be used to create a role for the current run. Add it to `roles` if it should be available after restart.
 

@@ -108,7 +108,7 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // Agent response: dropping this would wedge `c.head` /
     // `prompt_conversations` bookkeeping and the conversation
     // would never advance.
-    EventName::AGENT_RESPONSE_FINISHED,
+    EventName::PROVIDER_RESPONSE_FINISHED,
     // Tool round-trip closure: a missing `tool.result`/`tool.error`
     // for a tool that was actually invoked leaves the agent waiting
     // forever.

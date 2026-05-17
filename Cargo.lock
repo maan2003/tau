@@ -1611,31 +1611,11 @@ version = "0.1.0"
 dependencies = [
  "tau-cli",
  "tau-ext-core-delegate",
+ "tau-ext-provider-openai",
  "tau-ext-shell",
  "tau-ext-std-notifications",
  "tau-ext-test-dummy",
  "tau-ext-websearch-exa",
-]
-
-[[package]]
-name = "tau-agent"
-version = "0.1.0"
-dependencies = [
- "backon",
- "base64",
- "blake3",
- "futures-util",
- "serde",
- "serde_json",
- "tau-config",
- "tau-extension",
- "tau-proto",
- "tau-provider",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tungstenite",
- "ureq",
 ]
 
 [[package]]
@@ -1655,7 +1635,6 @@ dependencies = [
  "libc",
  "rand 0.8.6",
  "serde",
- "tau-agent",
  "tau-cli-picker",
  "tau-cli-term",
  "tau-cli-term-raw",
@@ -1743,6 +1722,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tau-ext-provider-openai"
+version = "0.1.0"
+dependencies = [
+ "backon",
+ "base64",
+ "blake3",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tau-config",
+ "tau-extension",
+ "tau-proto",
+ "tau-provider",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tungstenite",
+ "ureq",
+]
+
+[[package]]
 name = "tau-ext-shell"
 version = "0.1.0"
 dependencies = [
@@ -1821,7 +1821,6 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
- "tau-agent",
  "tau-config",
  "tau-core",
  "tau-ext-shell",
@@ -1923,9 +1922,9 @@ dependencies = [
 name = "tau-test-support"
 version = "0.1.0"
 dependencies = [
- "tau-agent",
  "tau-config",
  "tau-core",
+ "tau-ext-provider-openai",
  "tau-ext-shell",
  "tau-harness",
  "tau-proto",

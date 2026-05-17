@@ -1,5 +1,5 @@
 [package]
-name = "tau-agent"
+name = "tau-ext-provider-openai"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -13,12 +13,6 @@ license.workspace = true
 
 [lints]
 workspace = true
-
-[features]
-# Exposes `run_echo`, an in-process echo agent used by the test suites
-# of downstream crates. Disabled by default so the production binary
-# doesn't carry the fixture and the public API surface stays narrow.
-echo-agent = []
 
 [dependencies]
 backon.workspace = true
@@ -37,7 +31,4 @@ tracing.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
-# Sync `tungstenite` is only used by pool/server-side test fixtures
-# that spin up a fake Codex acceptor in a background thread.
-# Production code talks to the upstream via `tokio-tungstenite`.
 tungstenite.workspace = true

@@ -74,21 +74,13 @@ that the harness stamps onto every `SessionPromptCreated` and that
 backends thread through to the provider request:
 
 - **`effort`** — reasoning effort. Six levels (`off`, `minimal`, `low`,
-  `medium`, `high`, `xhigh`); maps to OpenAI `reasoning.effort` /
-  `reasoning_effort`. The `xhigh` rung is gated per model: a curated
-  whitelist covers known OpenAI models (`gpt-5.5`, `gpt-5.4`/
-  `gpt-5.4-pro`, `gpt-5.3-codex`, `gpt-5.2`, `gpt-5.1-codex-max`,
-  excluding `mini`/`nano` variants), and individual model entries can
-  opt in or out explicitly with `supportsXhigh: true|false`. For
-  asymmetric models like `gpt-5.4-pro` (medium/high/xhigh only — no
-  `off`/`low`) a `reasoningEfforts` list on the model entry pins the
-  exact accepted levels.
+  `medium`, `high`, `xhigh`); maps to provider-specific reasoning controls.
+  Provider extensions publish the exact effort levels each model accepts, and
+  the harness clamps role/default selections to that published list.
 - **`verbosity`** — output verbosity (`low`, `medium`, `high`).
-  Sent to providers that advertise `supportsVerbosity` as
-  top-level `verbosity` (Chat Completions) or `text.verbosity`
-  (Responses). Default `low` to keep model replies concise. Per-model
-  `supportsVerbosity` and `verbosities` overrides mirror the effort
-  escape hatches.
+  Sent to providers that advertise support (for ChatGPT/Codex Responses this is
+  `text.verbosity`). Default `low` to keep model replies concise. Provider
+  extensions publish the accepted verbosity levels per model.
 - **`thinking_summary`** — reasoning-summary mode (`off`, `auto`,
   `concise`, `detailed`). Sent as `reasoning.summary` on providers
   that set `supportsReasoningSummary`; ignored otherwise.
@@ -96,25 +88,11 @@ backends thread through to the provider request:
   toggles Codex's `fast` tier. Backends serialize Codex's exact
   OpenAI wire values: `priority` for Fast and `flex` for Flex.
 
-Per-model escape hatches in `models.json5`:
-
-```json5
-providers: {
-  openai: {
-    compat: { supportsVerbosity: true },
-    models: [
-      { id: "gpt-5.4-pro", reasoningEfforts: ["medium", "high", "xhigh"] },
-      { id: "gpt-5-locked", supportsVerbosity: false },
-    ],
-  },
-},
-```
-
-Defaults are normally selected through agent roles in `models.json5`:
+Defaults are normally selected through agent roles in `harness.json5`:
 
 ```json5
 roles: {
-  smart: { model: "openai/gpt-5.5", effort: "medium", toolsProfile: "full" },
+  smart: { model: "chatgpt/gpt-5.5", effort: "medium", toolsProfile: "full" },
   deep: { effort: "xhigh", thinkingSummary: "detailed" },
   rush: { effort: "low", serviceTier: "fast" },
 },
@@ -172,9 +150,9 @@ startup as a `LifecycleConfigure` message.
 
 ```json5
 extensions: {
-  "core-shell":         { enable: false },               // disable
-  "core-agent":         { prefix: ["ssh", "user@host"] },// run remotely
-  "std-notifications": { config: { idle_seconds: 30 } },// reconfigure
+  "core-shell":         { enable: false },                       // disable
+  "provider-openai":    { prefix: ["ssh", "user@host"] },        // run remotely
+  "std-notifications": { config: { idle_seconds: 30 } },         // reconfigure
 },
 ```
 
@@ -215,34 +193,29 @@ working directory, plus `$HOME/.agents*/skills` and
 machine- or user-specific instructions and skills that should usually be added
 to `.gitignore` instead of checked in.
 
-### `core-agent` — LLM backend
+### `provider-openai` — OpenAI Responses backend
 
-The conversation driver: assembles prompts, streams provider responses, drives
-tool invocations, emits reasoning blocks, and respects the effort knob. Talks
-to OpenAI-compatible Responses-API and Chat-Completions-API providers; manage
-credentials with `tau provider add` / `tau provider login`.
+Publishes hardcoded `chatgpt/*` model metadata from provider-owned ChatGPT OAuth
+state and owns model execution for that namespace. The harness assembles prompts,
+then routes the selected provider's `session.prompt_created` event directly to
+this extension; there is no built-in `core-agent` process.
 
-On Responses-API backends (OpenAI Codex / ChatGPT subscription), conversations
-chain via `previous_response_id` after the first turn: each follow-up request
-sends only the messages added since the prior `response.id` and lets the
-upstream API carry reasoning state forward server-side. The chain is dropped
-automatically on model switches, branch edits (`UiNavigateTree`), and turns
-that didn't return a `response_id`; if the upstream rejects the stored id
-(server-side expiry), the agent falls back to a full-replay retry once before
-surfacing the error.
+Responses conversations chain via `previous_response_id` after the first turn:
+each follow-up request sends only the messages added since the prior
+`response.id` and lets the upstream API carry reasoning state forward
+server-side. The chain is dropped automatically when the selected role resolves
+to a different model, on branch edits
+(`UiNavigateTree`), and turns that didn't return a `response_id`; if the
+upstream rejects the stored id (server-side expiry), the provider falls back to
+a full-replay retry once before surfacing the error.
 
-The Codex backend additionally routes turns over a persistent **WebSocket**
-connection (auto-enabled for `chatgpt.com/backend-api`; toggle for custom
-endpoints via the `supportsWebsocket` provider compat flag). One connection
-per `(account, session)` lives in a small LRU pool inside the agent process,
-so the server-side connection-local response cache stays warm across turns of
-the same conversation — including when the agent context-switches between
-sessions (sub-agent delegations interleaved with the parent). Connections
-age out before the upstream's 60-minute hard cap, and refreshed OAuth tokens
-invalidate stale sockets on next use. Per-session sticky fallback to HTTP+SSE
-kicks in if the WS upgrade gets `426 Upgrade Required` or the server signals
-`websocket_connection_limit_reached`, so a misbehaving upstream never breaks
-a prompt outright.
+The ChatGPT/Codex surface additionally routes turns over a persistent
+**WebSocket** connection. One connection per `(account, session)` lives in a
+small LRU pool inside `provider-openai`, so the server-side connection-local
+response cache stays warm across turns of the same conversation — including
+when Tau context-switches between sessions (sub-agent delegations interleaved
+with the parent). Connections age out before the upstream's 60-minute hard cap,
+and refreshed OAuth tokens invalidate stale sockets on next use.
 
 ### `std-notifications` — idle and turn notifications
 

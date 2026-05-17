@@ -39,15 +39,15 @@ use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::model::{
-    clamp_effort, configured_default_params_for_model, configured_default_params_for_selection,
-    efforts_for_model, load_model_list, selected_params_for_model, selected_params_for_role,
-    thinking_summaries_for_model, verbosities_for_model,
+    baseline_params_for_selection, clamp_effort, efforts_for_model, load_roles,
+    select_model_for_available, selected_params_for_role, thinking_summaries_for_model,
+    verbosities_for_model,
 };
 use crate::prompt::build_system_prompt;
 use crate::turn::{PromptSubmission, TurnState};
 
 fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
-    tau_agent::run_echo(r, w).map_err(|e| e.to_string())
+    crate::harness::run_echo_agent(r, w).map_err(|e| e.to_string())
 }
 
 /// Test-only helper that pushes a `UiPromptSubmitted` through the
@@ -114,13 +114,17 @@ impl ConnectionSink for TestSink {
     }
 }
 
-fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
+fn connect_test_client(
+    h: &mut Harness,
+    name: &str,
+    kind: tau_proto::ClientKind,
+) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let events = Arc::new(Mutex::new(Vec::new()));
     h.bus.connect(Connection::new(
         ConnectionMetadata {
             id: name.into(),
             name: name.to_owned(),
-            kind: tau_proto::ClientKind::Tool,
+            kind,
             origin: ConnectionOrigin::InMemory,
         },
         Box::new(TestSink {
@@ -128,6 +132,10 @@ fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<RoutedFrame>>
         }),
     ));
     events
+}
+
+fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
+    connect_test_client(h, name, tau_proto::ClientKind::Tool)
 }
 
 /// Pre-seed the per-conversation `AgentThinking` state for tests that

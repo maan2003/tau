@@ -2,14 +2,14 @@
 //!
 //! See `TODO-codex-websocket.md` §2 for the design rationale. Recap:
 //!
-//! - The agent's `run()` loop is single-threaded and processes prompts
+//! - The provider's `run()` loop is single-threaded and processes prompts
 //!   serially, but it *alternates* between conversations (different sessions,
 //!   sub-agent delegations interleaved with the parent). The OpenAI WS endpoint
 //!   only caches the *most recent* `previous_response_id` per socket, so
 //!   routing A → B → A on one shared socket would flush each chain's warmth on
 //!   every switch. Keep one connection per `(account, session)` so warmth
 //!   survives context-switches.
-//! - Single owner = the agent loop. No `Mutex`/`Arc`/`DashMap`. Take the
+//! - Single owner = the provider loop. No `Mutex`/`Arc`/`DashMap`. Take the
 //!   connection *out* of the map for the duration of one turn
 //!   (`HashMap::remove`), put it back on success. Connection-in-flight
 //!   exclusivity is enforced by ownership.
@@ -19,8 +19,6 @@
 //!   fail mid-turn from the server slamming the door.
 //! - Bearer-mismatch on checkout means OAuth refreshed; drop the stale socket
 //!   and open a new one.
-
-#![allow(dead_code)] // wired up by the agent's `run()` loop in a later step
 
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
@@ -96,7 +94,7 @@ pub(crate) struct WsPool {
 }
 
 /// Lifetime counters for the WS pool. Bumped on each interesting
-/// path so an operator can grep `tau_agent` tracing output and see
+/// path so an operator can grep provider tracing output and see
 /// how often the silent-reconnect machinery kicked in (or, more
 /// importantly, *kept* kicking in for a session — a runaway count
 /// is the signature of an upstream regression).
@@ -181,15 +179,8 @@ impl WsPool {
         self.conns.insert(key, conn);
     }
 
-    /// Drop every cached connection. Cheap full reset — used when
-    /// the resolver issues a token refresh and we want to invalidate
-    /// every socket in one shot (alternative: per-entry bearer check
-    /// on checkout, which is what [`Self::checkout`] does today).
-    pub fn flush(&mut self) {
-        self.conns.clear();
-        self.lru.clear();
-    }
-
+    /// Number of cached connections currently retained by the pool.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.conns.len()
     }
@@ -232,7 +223,7 @@ impl WsTurnError {
 }
 
 /// Convenience wrapper that wires `checkout` → `WsConn::run_turn` →
-/// `release` together with reopen-on-miss semantics. The agent's
+/// `release` together with reopen-on-miss semantics. The provider's
 /// `run()` loop calls this; tests can call it directly with a fake
 /// `WsConn::connect` impl by exercising the lower-level methods.
 ///
@@ -434,6 +425,7 @@ mod tests {
 
     use super::*;
     use crate::common::PromptPayload;
+    use crate::responses::ResponsesSurface;
 
     #[test]
     fn keys_distinguish_sessions_under_same_account() {
@@ -1118,6 +1110,7 @@ mod tests {
 
     fn make_config(base_url: &str, account_id: Option<&str>) -> ResponsesConfig {
         ResponsesConfig {
+            surface: ResponsesSurface::ChatGpt,
             base_url: base_url.into(),
             api_key: "test".into(),
             model_id: "gpt-5-codex".into(),
@@ -1129,7 +1122,6 @@ mod tests {
             supports_websocket: true,
             supports_compaction: false,
             supports_prompt_cache_key: false,
-            prompt_cache_retention: None,
             supports_encrypted_reasoning: false,
         }
     }

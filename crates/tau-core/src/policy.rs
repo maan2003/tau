@@ -193,6 +193,7 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
                 match category {
                     C::Tool
                     | C::Extension
+                    | C::Provider
                     | C::Agent
                     | C::Session
                     | C::Ui

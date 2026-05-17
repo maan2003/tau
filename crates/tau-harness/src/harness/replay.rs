@@ -13,13 +13,13 @@
 //!   same banners and indicators as one that was here from the start.
 
 use tau_proto::{
-    Event, EventSelector, Frame, HarnessContextUsageChanged, HarnessModelSelected,
-    HarnessModelsAvailable, HarnessRolesAvailable, Message,
+    Event, EventSelector, Frame, HarnessContextUsageChanged, HarnessModelsAvailable,
+    HarnessRoleSelected, HarnessRolesAvailable, Message,
 };
 
 use crate::harness::{Harness, selector_matches_event};
 use crate::model::{
-    configured_default_params_for_selection, efforts_for_model, model_context_window, role_infos,
+    baseline_params_for_selection, context_window_for_model, efforts_for_model, role_infos,
     thinking_summaries_for_model, verbosities_for_model,
 };
 
@@ -73,6 +73,24 @@ impl Harness {
             }
         }
 
+        let mut provider_sources: Vec<_> =
+            self.provider_models_by_extension.keys().cloned().collect();
+        provider_sources.sort();
+        for source_id in provider_sources {
+            let Some(models) = self.provider_models_by_extension.get(&source_id).cloned() else {
+                continue;
+            };
+            let provider_event =
+                Event::ProviderModelsUpdated(tau_proto::ProviderModelsUpdated { models });
+            if selector_matches_event(selectors, &provider_event) {
+                let _ = self.bus.send_to(
+                    client_id,
+                    Some(source_id.as_str()),
+                    Frame::Event(provider_event),
+                );
+            }
+        }
+
         // Send current model state to the new client.
         let models_event = Event::HarnessModelsAvailable(HarnessModelsAvailable {
             models: self.available_models.clone(),
@@ -84,7 +102,7 @@ impl Harness {
         }
         let roles_event = Event::HarnessRolesAvailable(HarnessRolesAvailable {
             roles: role_infos(
-                &self.model_registry,
+                &self.provider_model_info,
                 &self.available_roles,
                 &self.tools_profiles,
                 &self.available_models,
@@ -94,12 +112,12 @@ impl Harness {
             let _ = self.bus.send_to(client_id, None, Frame::Event(roles_event));
         }
         let (harness_settings, _) = crate::settings::load_harness_settings_or_warn(&self.dirs);
-        let selected_event = Event::HarnessModelSelected(HarnessModelSelected {
-            default_params: self.selected_model.as_ref().map(|model| {
-                configured_default_params_for_selection(
+        let selected_event = Event::HarnessRoleSelected(HarnessRoleSelected {
+            baseline_params: self.selected_model.as_ref().map(|model| {
+                baseline_params_for_selection(
                     &harness_settings,
-                    &self.model_registry,
-                    self.selected_role.as_deref(),
+                    &self.provider_model_info,
+                    &self.selected_role,
                     model,
                 )
             }),
@@ -107,7 +125,7 @@ impl Harness {
             context_window: self
                 .selected_model
                 .as_ref()
-                .and_then(|m| model_context_window(&self.model_registry, m)),
+                .and_then(|m| context_window_for_model(&self.provider_model_info, m)),
             role: self.selected_role.clone(),
         });
         if selector_matches_event(selectors, &selected_event) {
@@ -136,7 +154,7 @@ impl Harness {
         let effort_levels = self
             .selected_model
             .as_ref()
-            .map(|m| efforts_for_model(&self.model_registry, m))
+            .map(|m| efforts_for_model(&self.provider_model_info, m))
             .unwrap_or_default();
         let effort_levels_event =
             Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
@@ -158,7 +176,7 @@ impl Harness {
         let verbosity_levels = self
             .selected_model
             .as_ref()
-            .map(|m| verbosities_for_model(&self.model_registry, m))
+            .map(|m| verbosities_for_model(&self.provider_model_info, m))
             .unwrap_or_default();
         let verbosity_levels_event =
             Event::HarnessVerbositiesAvailable(tau_proto::HarnessVerbositiesAvailable {
@@ -181,7 +199,7 @@ impl Harness {
         let thinking_levels = self
             .selected_model
             .as_ref()
-            .map(|m| thinking_summaries_for_model(&self.model_registry, m))
+            .map(|m| thinking_summaries_for_model(&self.provider_model_info, m))
             .unwrap_or_default();
         let thinking_levels_event = Event::HarnessThinkingSummariesAvailable(
             tau_proto::HarnessThinkingSummariesAvailable {

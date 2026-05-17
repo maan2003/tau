@@ -49,8 +49,8 @@ fn assert_delegate_ctx_counter(
 
 fn text_part(item: &ContextItem) -> Option<&str> {
     match item {
-        ContextItem::Message(message) => message.content.iter().find_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
+        ContextItem::Message(message) => message.content.first().map(|part| match part {
+            ContentPart::Text { text } => text.as_str(),
         }),
         ContextItem::ToolResult(result) => match &result.output {
             CborValue::Text(text) => Some(text.as_str()),
@@ -105,6 +105,84 @@ fn cross_session_prompt_is_rejected() {
     assert!(
         h.store.session("chat-1").is_none(),
         "rejected session must not be created"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn provider_model_prompt_routes_directly_to_provider_owner() {
+    // Provider-published models should not wake every agent/provider subscriber.
+    // The committed prompt remains visible to observers, while the owner gets a
+    // direct LogEvent even without subscribing to session.prompt_created.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let provider_frames =
+        connect_test_client(&mut h, "provider-owner", tau_proto::ClientKind::Provider);
+    let agent_frames = connect_test_client(&mut h, "agent-observer", tau_proto::ClientKind::Agent);
+    let ui_frames = connect_test_client(&mut h, "ui-observer", tau_proto::ClientKind::Ui);
+    let prompt_selector = vec![EventSelector::Exact(
+        tau_proto::EventName::SESSION_PROMPT_CREATED,
+    )];
+    h.bus
+        .set_subscriptions("agent-observer", prompt_selector.clone())
+        .expect("agent observer subscription");
+    h.bus
+        .set_subscriptions("ui-observer", prompt_selector)
+        .expect("ui observer subscription");
+
+    let model_id: tau_proto::ModelId = "openai/gpt-5.5".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-owner",
+        Frame::Event(Event::ProviderModelsUpdated(
+            tau_proto::ProviderModelsUpdated {
+                models: vec![tau_proto::ProviderModelInfo {
+                    id: model_id.clone(),
+                    display_name: None,
+                    context_window: 200_000,
+                    efforts: vec![tau_proto::Effort::Medium],
+                    verbosities: vec![tau_proto::Verbosity::Medium],
+                    thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
+                    supports_compaction: false,
+                }],
+            },
+        )),
+    )
+    .expect("provider model snapshot");
+    h.selected_model = Some(model_id);
+
+    append_user_message_via_event(&mut h, "s1", "hello");
+    let spid = h.send_prompt_to_agent("s1");
+
+    let frame_is_prompt = |routed: &RoutedFrame, spid: &SessionPromptId| {
+        let (_, inner) = routed.frame.clone().peel_log();
+        matches!(
+            inner,
+            Frame::Event(Event::SessionPromptCreated(prompt))
+                if prompt.session_prompt_id.as_str() == spid.as_str()
+        )
+    };
+    assert!(
+        provider_frames
+            .lock()
+            .expect("provider frames")
+            .iter()
+            .any(|routed| frame_is_prompt(routed, &spid)),
+        "provider owner should receive the direct prompt request"
+    );
+    assert!(
+        ui_frames
+            .lock()
+            .expect("ui frames")
+            .iter()
+            .any(|routed| frame_is_prompt(routed, &spid)),
+        "UI observer should still see the committed prompt fact"
+    );
+    assert!(
+        agent_frames.lock().expect("agent frames").is_empty(),
+        "agent observers should not receive provider-owned prompt execution"
     );
 
     h.shutdown().expect("shutdown");
@@ -968,7 +1046,7 @@ fn model_switch_invalidates_chain_anchor() {
     })
     .expect("finish first");
 
-    // User switches models.
+    // The selected role resolves to a different model.
     h.selected_model = Some("test/model-b".into());
 
     h.submit_user_prompt("s1".into(), "second".to_owned())
@@ -978,7 +1056,7 @@ fn model_switch_invalidates_chain_anchor() {
 
     assert!(
         prompt2.previous_response_candidate.is_none(),
-        "model switch must clear the previous-response anchor"
+        "resolved model change must clear the previous-response anchor"
     );
 
     h.shutdown().expect("shutdown");
@@ -1776,24 +1854,16 @@ fn manual_compact_forces_compaction_without_followup_turn() {
 
 fn enable_remote_compaction_for_test_model(h: &mut Harness) {
     h.selected_model = Some("test/model".into());
-    h.model_registry.providers.insert(
-        tau_proto::ProviderName::new("test"),
-        tau_config::settings::ProviderConfig {
-            models: vec![tau_config::settings::ModelConfig {
-                id: tau_proto::ModelName::new("model"),
-                name: None,
-                max_output_tokens: None,
-                context_window: Some(1_000),
-                supports_xhigh: None,
-                reasoning_efforts: None,
-                supports_verbosity: None,
-                verbosities: None,
-            }],
-            compat: tau_config::settings::ProviderCompat {
-                supports_compaction: true,
-                ..tau_config::settings::ProviderCompat::default()
-            },
-            ..tau_config::settings::ProviderConfig::default()
+    h.provider_model_info.insert(
+        "test/model".into(),
+        tau_proto::ProviderModelInfo {
+            id: "test/model".into(),
+            display_name: None,
+            context_window: 1_000,
+            efforts: vec![tau_proto::Effort::Medium],
+            verbosities: vec![tau_proto::Verbosity::Medium],
+            thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
+            supports_compaction: true,
         },
     );
 }
@@ -3910,7 +3980,7 @@ fn tool_call_response_preserves_assistant_text_items() {
         .set_subscriptions(
             "agent-finished-sink",
             vec![tau_proto::EventSelector::Exact(
-                tau_proto::EventName::AGENT_RESPONSE_FINISHED,
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
             )],
         )
         .expect("subscribe");

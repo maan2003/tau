@@ -1,4 +1,7 @@
-use tau_proto::HarnessInfoLevel;
+use tau_proto::{
+    Effort, HarnessInfoLevel, ModelId, ProviderModelInfo, ProviderModelsUpdated, ThinkingSummary,
+    Verbosity,
+};
 
 use super::*;
 
@@ -21,8 +24,243 @@ fn find_important_info(h: &Harness, needle: &str) -> Option<String> {
     None
 }
 
+fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
+    ProviderModelInfo {
+        id,
+        display_name: None,
+        context_window,
+        efforts: vec![Effort::Off, Effort::High],
+        verbosities: vec![Verbosity::Low, Verbosity::High],
+        thinking_summaries: vec![ThinkingSummary::Off, ThinkingSummary::Auto],
+        supports_compaction: false,
+    }
+}
+
+fn provider_models(
+    models: impl IntoIterator<Item = ProviderModelInfo>,
+) -> std::collections::HashMap<ModelId, ProviderModelInfo> {
+    models
+        .into_iter()
+        .map(|info| (info.id.clone(), info))
+        .collect()
+}
+
+/// Provider snapshots are runtime registry input, not just private extension
+/// chatter: the harness must retain metadata/routes and re-emit refreshed UI
+/// state for clients that are already connected.
 #[test]
-fn selected_params_effort_is_model_specific_and_clamped() {
+fn provider_models_snapshot_updates_available_models() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+
+    let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
+    assert!(!h.available_models.contains(&model_id));
+    h.handle_extension_event(
+        "provider-ext",
+        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![provider_model(model_id.clone(), 128_000)],
+        })),
+    )
+    .expect("handle provider snapshot");
+    assert!(h.available_models.contains(&model_id));
+    assert_eq!(
+        h.provider_model_info
+            .get(&model_id)
+            .map(|info| info.context_window),
+        Some(128_000),
+    );
+    assert_eq!(
+        h.provider_model_routes.get(&model_id).map(|id| id.as_str()),
+        Some("provider-ext"),
+    );
+
+    let mut saw_provider_snapshot = false;
+    let mut saw_harness_models = false;
+    let mut saw_harness_roles = false;
+    let mut seq = 0;
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq + 1;
+        match entry.event {
+            Event::ProviderModelsUpdated(update)
+                if entry.source.as_deref() == Some("provider-ext") =>
+            {
+                saw_provider_snapshot = update.models.iter().any(|info| info.id == model_id);
+            }
+            Event::HarnessModelsAvailable(available) => {
+                saw_harness_models = available.models.contains(&model_id);
+            }
+            Event::HarnessRolesAvailable(_) => {
+                saw_harness_roles = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_provider_snapshot);
+    assert!(saw_harness_models);
+    assert!(saw_harness_roles);
+}
+
+/// Startup no longer selects config-file models. A provider snapshot is the
+/// moment a runtime model exists, so it should also unblock queued prompts by
+/// choosing the first model through the normal harness-owned selection path.
+#[test]
+fn provider_models_snapshot_selects_first_model_and_drains_queue() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    assert!(h.selected_model.is_none());
+
+    assert_eq!(
+        h.submit_user_prompt("s1".into(), "hello".to_owned())
+            .expect("submit prompt"),
+        PromptSubmission::Queued,
+    );
+    assert_eq!(
+        h.conversations[&h.default_conversation_id]
+            .pending_prompts
+            .len(),
+        1,
+    );
+
+    let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-ext",
+        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![provider_model(model_id.clone(), 128_000)],
+        })),
+    )
+    .expect("handle provider snapshot");
+
+    assert_eq!(h.selected_model.as_ref(), Some(&model_id));
+    assert_eq!(h.selected_params.effort, Effort::High);
+    let conv = &h.conversations[&h.default_conversation_id];
+    assert!(conv.pending_prompts.is_empty());
+    assert!(matches!(
+        conv.turn_state,
+        ConversationTurnState::AgentThinking { .. }
+    ));
+}
+
+/// Provider metadata must replace config compat data once a provider-owned
+/// model is selected, otherwise the UI loses context-window and knob choices.
+#[test]
+fn provider_model_metadata_drives_selection_state() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+
+    let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-ext",
+        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![provider_model(model_id.clone(), 123_456)],
+        })),
+    )
+    .expect("handle provider snapshot");
+
+    assert_eq!(h.selected_role, "smart");
+    assert_eq!(h.selected_model.as_ref(), Some(&model_id));
+    assert_eq!(h.selected_params.effort, Effort::High);
+    assert_eq!(h.selected_params.verbosity, Verbosity::Low);
+    assert_eq!(h.selected_params.thinking_summary, ThinkingSummary::Auto);
+
+    let mut seq = 0;
+    let mut selected = None;
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq + 1;
+        if let Event::HarnessRoleSelected(event) = entry.event
+            && event.model.as_ref() == Some(&model_id)
+        {
+            selected = Some(event);
+        }
+    }
+    let selected = selected.expect("model selection event");
+    assert_eq!(selected.context_window, Some(123_456));
+
+    h.handle_extension_event(
+        "provider-ext",
+        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![ProviderModelInfo {
+                id: model_id.clone(),
+                display_name: None,
+                context_window: 654_321,
+                efforts: vec![Effort::Off],
+                verbosities: vec![Verbosity::High],
+                thinking_summaries: vec![ThinkingSummary::Off],
+                supports_compaction: false,
+            }],
+        })),
+    )
+    .expect("refresh provider metadata");
+
+    assert_eq!(h.selected_params.effort, Effort::Off);
+    assert_eq!(h.selected_params.verbosity, Verbosity::High);
+    assert_eq!(h.selected_params.thinking_summary, ThinkingSummary::Off);
+
+    let mut seq = 0;
+    let mut selected = None;
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq + 1;
+        if let Event::HarnessRoleSelected(event) = entry.event
+            && event.model.as_ref() == Some(&model_id)
+        {
+            selected = Some(event);
+        }
+    }
+    let selected = selected.expect("refreshed model selection event");
+    assert_eq!(selected.context_window, Some(654_321));
+}
+
+/// Selected role params come from the role, then clamp against provider-owned
+/// metadata for the resolved model. This keeps runtime selection role-centric
+/// while still respecting each provider's supported knob levels.
+#[test]
+fn selected_role_params_are_clamped_by_provider_metadata() {
+    let openai: ModelId = "openai/gpt-4.1".parse().expect("model id");
+    let local: ModelId = "local/llama".parse().expect("model id");
+    let provider_models = provider_models([
+        ProviderModelInfo {
+            id: openai.clone(),
+            display_name: None,
+            context_window: 128_000,
+            efforts: vec![Effort::Off, Effort::High],
+            verbosities: vec![Verbosity::Medium],
+            thinking_summaries: vec![ThinkingSummary::Off],
+            supports_compaction: false,
+        },
+        ProviderModelInfo {
+            id: local.clone(),
+            display_name: None,
+            context_window: 8_192,
+            efforts: vec![Effort::Off],
+            verbosities: vec![Verbosity::Medium],
+            thinking_summaries: vec![ThinkingSummary::Off],
+            supports_compaction: false,
+        },
+    ]);
+
+    let mut roles = std::collections::HashMap::new();
+    let mut openai_role = tau_config::settings::AgentRole {
+        model: Some(openai.clone()),
+        effort: Some(Effort::High),
+        ..Default::default()
+    };
+    roles.insert("openai".to_owned(), openai_role.clone());
+    openai_role.model = Some(local.clone());
+    roles.insert("local".to_owned(), openai_role);
+
+    assert_eq!(
+        selected_params_for_role(&provider_models, &roles, "openai", &openai).effort,
+        Effort::High,
+    );
+    assert_eq!(
+        selected_params_for_role(&provider_models, &roles, "local", &local).effort,
+        Effort::Off,
+    );
+}
+
+/// Persisted role overrides are the live selection, but the baseline shown for
+/// "reset to role" must come from `harness.json5`, not from state.
+#[test]
+fn role_baseline_ignores_persisted_role_overrides() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -36,148 +274,12 @@ fn selected_params_effort_is_model_specific_and_clamped() {
     std::fs::write(
         config_dir.join("harness.json5"),
         r#"{
-            default_params: {
-                "openai/gpt-4.1": { effort: "high" },
-                "local/llama": { effort: "high" },
+            roles: {
+                smart: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
             },
         }"#,
     )
     .expect("write harness config");
-    std::fs::write(
-        config_dir.join("models.json5"),
-        r#"{
-            providers: {
-                local: {
-                    compat: { supportsReasoningEffort: false },
-                    models: [{ id: "llama" }],
-                },
-                openai: {
-                    compat: { supportsReasoningEffort: true },
-                    models: [{ id: "gpt-4.1" }],
-                },
-            },
-        }"#,
-    )
-    .expect("write models");
-    std::fs::write(
-        state_dir.join("harness.json5"),
-        r#"{
-            "last_selected_model": "openai/gpt-4.1",
-            "last_params": {
-                "openai/gpt-4.1": { "effort": "minimal" },
-                "local/llama": { "effort": "high" }
-            }
-        }"#,
-    )
-    .expect("write state");
-
-    let harness_settings =
-        tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
-    let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
-
-    assert_eq!(
-        selected_params_for_model(
-            &dirs,
-            &harness_settings,
-            &model_registry,
-            &"openai/gpt-4.1".into()
-        )
-        .effort,
-        tau_proto::Effort::High
-    );
-    assert_eq!(
-        selected_params_for_model(
-            &dirs,
-            &harness_settings,
-            &model_registry,
-            &"local/llama".into()
-        )
-        .effort,
-        tau_proto::Effort::Off
-    );
-}
-
-/// The config-only baseline ignores state persisted by `/effort`,
-/// `/verbosity`, and `/service-tier`, even though selected params use
-/// that state when no `default_params` entry exists.
-#[test]
-fn configured_default_params_ignore_persisted_last_params() {
-    let td = TempDir::new().expect("tempdir");
-    let config_dir = td.path().join("config");
-    let state_dir = td.path().join("state");
-    std::fs::create_dir_all(&config_dir).expect("mkdir config");
-    std::fs::create_dir_all(&state_dir).expect("mkdir state");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(config_dir.clone()),
-        state_dir: Some(state_dir.clone()),
-    };
-
-    std::fs::write(
-        config_dir.join("models.json5"),
-        r#"{
-            providers: {
-                openai: {
-                    compat: { supportsReasoningEffort: true, supportsVerbosity: true },
-                    models: [{ id: "gpt-4.1" }],
-                },
-            },
-        }"#,
-    )
-    .expect("write models");
-    std::fs::write(
-        state_dir.join("harness.json5"),
-        r#"{
-            "last_params": {
-                "openai/gpt-4.1": { "effort": "high", "verbosity": "high", "service_tier": "fast" }
-            }
-        }"#,
-    )
-    .expect("write state");
-
-    let harness_settings =
-        tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
-    let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
-    let model = "openai/gpt-4.1".into();
-
-    let selected = selected_params_for_model(&dirs, &harness_settings, &model_registry, &model);
-    assert_eq!(selected.effort, tau_proto::Effort::High);
-    assert_eq!(selected.verbosity, tau_proto::Verbosity::High);
-    assert_eq!(selected.service_tier, Some(tau_proto::ServiceTier::Fast));
-
-    let configured =
-        configured_default_params_for_model(&harness_settings, &model_registry, &model);
-    assert_eq!(configured.effort, tau_proto::Effort::Low);
-    assert_eq!(configured.verbosity, tau_proto::Verbosity::Low);
-    assert_eq!(configured.service_tier, None);
-}
-
-#[test]
-fn configured_role_defaults_ignore_persisted_role_overrides() {
-    let td = TempDir::new().expect("tempdir");
-    let config_dir = td.path().join("config");
-    let state_dir = td.path().join("state");
-    std::fs::create_dir_all(&config_dir).expect("mkdir config");
-    std::fs::create_dir_all(&state_dir).expect("mkdir state");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(config_dir.clone()),
-        state_dir: Some(state_dir.clone()),
-    };
-
-    std::fs::write(
-        config_dir.join("models.json5"),
-        r#"{
-            roles: {
-                smart: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
-            },
-            providers: {
-                openai: {
-                    compat: { supportsReasoningEffort: true, supportsVerbosity: true },
-                    models: [{ id: "gpt-4.1" }],
-                },
-            },
-        }"#,
-    )
-    .expect("write models");
     std::fs::write(
         state_dir.join("harness.json5"),
         r#"{
@@ -188,88 +290,84 @@ fn configured_role_defaults_ignore_persisted_role_overrides() {
     )
     .expect("write state");
 
-    let loaded = load_model_list(&dirs);
-    let model = loaded.selected.as_ref().expect("selected model");
-    let selected = selected_params_for_role(&loaded.model_registry, &loaded.roles, "smart", model);
-    assert_eq!(selected.effort, tau_proto::Effort::Low);
-    assert_eq!(selected.verbosity, tau_proto::Verbosity::High);
-
-    let configured = configured_default_params_for_selection(
-        &loaded.harness_settings,
-        &loaded.model_registry,
-        Some("smart"),
-        model,
-    );
-    assert_eq!(configured.effort, tau_proto::Effort::High);
-    assert_eq!(configured.verbosity, tau_proto::Verbosity::Medium);
-}
-
-/// First-time users (no per-model entry in `default_params`, no
-/// persisted `last_params`) get the middle of the available
-/// reasoning levels, not the lowest. For the standard
-/// reasoning-supporting list (`[Off, Minimal, Low, Medium, High]`)
-/// that's `Low`. Non-reasoning providers stay at `Off`.
-#[test]
-fn fresh_install_picks_middle_effort_when_no_history() {
-    let td = TempDir::new().expect("tempdir");
-    let config_dir = td.path().join("config");
-    let state_dir = td.path().join("state");
-    std::fs::create_dir_all(&config_dir).expect("mkdir config");
-    std::fs::create_dir_all(&state_dir).expect("mkdir state");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(config_dir.clone()),
-        state_dir: Some(state_dir.clone()),
-    };
-
-    // No harness.json5: default settings, empty default_params.
-    std::fs::write(
-        config_dir.join("models.json5"),
-        r#"{
-            providers: {
-                local: {
-                    compat: { supportsReasoningEffort: false },
-                    models: [{ id: "llama" }],
-                },
-                openai: {
-                    compat: { supportsReasoningEffort: true },
-                    models: [{ id: "gpt-4.1" }],
-                },
-            },
-        }"#,
-    )
-    .expect("write models");
-    // No harness.json5: fresh install.
-
     let harness_settings =
         tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
-    let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
+    let (roles, _role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
+    let available = vec!["openai/gpt-4.1".parse().expect("model id")];
+    let model =
+        select_model_for_available(&roles, &selected_role, &available).expect("selected model");
+    let provider_models = provider_models([ProviderModelInfo {
+        id: model.clone(),
+        display_name: None,
+        context_window: 128_000,
+        efforts: vec![Effort::Off, Effort::Low, Effort::High],
+        verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
+        thinking_summaries: vec![ThinkingSummary::Off, ThinkingSummary::Auto],
+        supports_compaction: false,
+    }]);
+
+    let selected = selected_params_for_role(&provider_models, &roles, "smart", &model);
+    assert_eq!(selected.effort, Effort::Low);
+    assert_eq!(selected.verbosity, Verbosity::High);
+
+    let baseline =
+        baseline_params_for_selection(&harness_settings, &provider_models, "smart", &model);
+    assert_eq!(baseline.effort, Effort::High);
+    assert_eq!(baseline.verbosity, Verbosity::Medium);
+}
+
+/// Roles without an explicit effort get the middle provider-published
+/// reasoning level. Providers that publish only `Off` stay at `Off`.
+#[test]
+fn role_without_effort_picks_middle_provider_effort() {
+    let openai: ModelId = "openai/gpt-4.1".parse().expect("model id");
+    let local: ModelId = "local/llama".parse().expect("model id");
+    let provider_models = provider_models([
+        ProviderModelInfo {
+            id: openai.clone(),
+            display_name: None,
+            context_window: 128_000,
+            efforts: vec![
+                Effort::Off,
+                Effort::Minimal,
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+            ],
+            verbosities: vec![Verbosity::Medium],
+            thinking_summaries: vec![ThinkingSummary::Off],
+            supports_compaction: false,
+        },
+        ProviderModelInfo {
+            id: local.clone(),
+            display_name: None,
+            context_window: 8_192,
+            efforts: vec![Effort::Off],
+            verbosities: vec![Verbosity::Medium],
+            thinking_summaries: vec![ThinkingSummary::Off],
+            supports_compaction: false,
+        },
+    ]);
+    let roles = std::collections::HashMap::from([(
+        "smart".to_owned(),
+        tau_config::settings::AgentRole::default(),
+    )]);
 
     assert_eq!(
-        selected_params_for_model(
-            &dirs,
-            &harness_settings,
-            &model_registry,
-            &"openai/gpt-4.1".into()
-        )
-        .effort,
-        tau_proto::Effort::Low,
+        selected_params_for_role(&provider_models, &roles, "smart", &openai).effort,
+        Effort::Low,
     );
     assert_eq!(
-        selected_params_for_model(
-            &dirs,
-            &harness_settings,
-            &model_registry,
-            &"local/llama".into()
-        )
-        .effort,
-        tau_proto::Effort::Off,
+        selected_params_for_role(&provider_models, &roles, "smart", &local).effort,
+        Effort::Off,
     );
 }
 
-/// A stale saved `default` role is not migrated. When it is no longer
-/// available, startup falls back to the `smart` role instead.
+/// A stale saved `default` role is not migrated. Runtime models are
+/// provider-owned, so startup keeps the `smart` role and waits for a provider
+/// snapshot before selecting a model.
 #[test]
-fn load_model_list_falls_back_to_smart_role() {
+fn load_roles_falls_back_to_smart_role_while_models_are_provider_owned() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -281,20 +379,15 @@ fn load_model_list_falls_back_to_smart_role() {
     };
 
     std::fs::write(
-        config_dir.join("models.json5"),
+        config_dir.join("harness.json5"),
         r#"{
             roles: {
                 smart: { model: "local/smart" },
                 deep: { model: "local/deep" },
             },
-            providers: {
-                local: {
-                    models: [{ id: "deep" }, { id: "smart" }],
-                },
-            },
         }"#,
     )
-    .expect("write models");
+    .expect("write harness config");
     std::fs::write(
         state_dir.join("harness.json5"),
         r#"{
@@ -306,19 +399,26 @@ fn load_model_list_falls_back_to_smart_role() {
     )
     .expect("write state");
 
-    let loaded = load_model_list(&dirs);
-    assert!(!loaded.role_overrides.contains_key("default"));
-    assert!(!loaded.roles.contains_key("default"));
-    assert_eq!(loaded.selected_role.as_deref(), Some("smart"));
+    let harness_settings =
+        tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
+    let (roles, role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
+    assert!(!role_overrides.contains_key("default"));
+    assert!(!roles.contains_key("default"));
+    assert_eq!(selected_role, "smart");
+
+    let available = vec!["local/deep".into(), "local/smart".into()];
     assert_eq!(
-        loaded.selected.as_ref().map(ToString::to_string).as_deref(),
+        select_model_for_available(&roles, &selected_role, &available)
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
         Some("local/smart")
     );
 }
 
-/// Role settings stand on their own: a non-smart role with no model or
-/// effort uses the first available model and the model-default effort,
-/// not smart's configured model or effort.
+/// Role settings stand on their own: a non-smart role with no model or effort
+/// uses the first available model and the selected model's default effort, not
+/// smart's configured model or effort.
 #[test]
 fn role_missing_fields_use_model_defaults() {
     let td = TempDir::new().expect("tempdir");
@@ -332,20 +432,15 @@ fn role_missing_fields_use_model_defaults() {
     };
 
     std::fs::write(
-        config_dir.join("models.json5"),
+        config_dir.join("harness.json5"),
         r#"{
             roles: {
                 smart: { model: "local/smart", effort: "high" },
                 plain: {},
             },
-            providers: {
-                local: {
-                    models: [{ id: "aaa" }, { id: "smart" }],
-                },
-            },
         }"#,
     )
-    .expect("write models");
+    .expect("write harness config");
     std::fs::write(
         state_dir.join("harness.json5"),
         r#"{
@@ -354,115 +449,73 @@ fn role_missing_fields_use_model_defaults() {
     )
     .expect("write state");
 
-    let loaded = load_model_list(&dirs);
-    let selected = loaded.selected.as_ref().expect("selected model");
-    assert_eq!(loaded.selected_role.as_deref(), Some("plain"));
-    assert_eq!(selected.to_string(), "local/aaa");
-
-    let params = selected_params_for_role(&loaded.model_registry, &loaded.roles, "plain", selected);
-    assert_eq!(params.effort, tau_proto::Effort::Low);
-}
-
-/// First-time users default to low verbosity when the provider supports
-/// the knob, keeping model replies concise unless the user opts into
-/// more detail. Providers without verbosity support stay pinned to the
-/// synthetic medium-only level.
-#[test]
-fn fresh_install_picks_low_verbosity_when_supported() {
-    let td = TempDir::new().expect("tempdir");
-    let config_dir = td.path().join("config");
-    let state_dir = td.path().join("state");
-    std::fs::create_dir_all(&config_dir).expect("mkdir config");
-    std::fs::create_dir_all(&state_dir).expect("mkdir state");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(config_dir.clone()),
-        state_dir: Some(state_dir.clone()),
-    };
-
-    std::fs::write(
-        config_dir.join("models.json5"),
-        r#"{
-            providers: {
-                openai: {
-                    compat: { supportsVerbosity: true },
-                    models: [{ id: "gpt-5" }],
-                },
-                local: {
-                    compat: { supportsVerbosity: false },
-                    models: [{ id: "llama" }],
-                },
-            },
-        }"#,
-    )
-    .expect("write models");
-
     let harness_settings =
         tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
-    let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
+    let (roles, _role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
+    let available = vec!["local/aaa".into(), "local/smart".into()];
+    let selected =
+        select_model_for_available(&roles, &selected_role, &available).expect("selected model");
+    assert_eq!(selected_role, "plain");
+    assert_eq!(selected.to_string(), "local/aaa");
 
-    assert_eq!(
-        selected_params_for_model(
-            &dirs,
-            &harness_settings,
-            &model_registry,
-            &"openai/gpt-5".into(),
-        )
-        .verbosity,
-        tau_proto::Verbosity::Low,
-    );
-    assert_eq!(
-        selected_params_for_model(
-            &dirs,
-            &harness_settings,
-            &model_registry,
-            &"local/llama".into(),
-        )
-        .verbosity,
-        tau_proto::Verbosity::Medium,
-    );
+    let provider_models = provider_models([ProviderModelInfo {
+        id: selected.clone(),
+        display_name: None,
+        context_window: 8_192,
+        efforts: vec![Effort::Off, Effort::Low, Effort::High],
+        verbosities: vec![Verbosity::Medium],
+        thinking_summaries: vec![ThinkingSummary::Off],
+        supports_compaction: false,
+    }]);
+    let params = selected_params_for_role(&provider_models, &roles, "plain", &selected);
+    assert_eq!(params.effort, Effort::Low);
 }
 
-/// A malformed `models.json5` must surface in the UI as an `Important`
-/// `HarnessInfo`, including the raw parser error. Without this, the
-/// only symptom of a borked file is an empty model list with no
-/// indication of why — easy to miss because stderr is hidden once the
-/// TUI takes over.
+/// Roles without an explicit verbosity default to low when the provider
+/// supports the knob, keeping replies concise unless the user opts into more
+/// detail. Providers without verbosity support publish a single fixed level.
 #[test]
-fn borked_models_json5_emits_important_info() {
-    let td = TempDir::new().expect("tempdir");
-    let config_dir = td.path().join("config");
-    let state_dir = td.path().join("state");
-    std::fs::create_dir_all(&config_dir).expect("mkdir config");
-    std::fs::create_dir_all(&state_dir).expect("mkdir state");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(config_dir.clone()),
-        state_dir: Some(state_dir.clone()),
-    };
+fn role_without_verbosity_picks_low_when_supported() {
+    let openai: ModelId = "openai/gpt-5".parse().expect("model id");
+    let local: ModelId = "local/llama".parse().expect("model id");
+    let provider_models = provider_models([
+        ProviderModelInfo {
+            id: openai.clone(),
+            display_name: None,
+            context_window: 128_000,
+            efforts: vec![Effort::Off],
+            verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
+            thinking_summaries: vec![ThinkingSummary::Off],
+            supports_compaction: false,
+        },
+        ProviderModelInfo {
+            id: local.clone(),
+            display_name: None,
+            context_window: 8_192,
+            efforts: vec![Effort::Off],
+            verbosities: vec![Verbosity::Medium],
+            thinking_summaries: vec![ThinkingSummary::Off],
+            supports_compaction: false,
+        },
+    ]);
+    let roles = std::collections::HashMap::from([(
+        "smart".to_owned(),
+        tau_config::settings::AgentRole::default(),
+    )]);
 
-    // Syntactically invalid JSON5 — missing closing brace.
-    std::fs::write(
-        config_dir.join("models.json5"),
-        "{ providers: { local: { models: [ { id: \"llama\" } ] }",
-    )
-    .expect("write borked models");
-
-    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
-    let message = find_important_info(&h, "models.json5")
-        .expect("expected Important HarnessInfo about models.json5");
-    assert!(
-        message.contains("failed to parse"),
-        "message should explain what happened, got: {message}"
+    assert_eq!(
+        selected_params_for_role(&provider_models, &roles, "smart", &openai).verbosity,
+        Verbosity::Low,
     );
-    assert!(
-        message.contains("ignored"),
-        "message should call out that the file is being ignored, got: {message}"
+    assert_eq!(
+        selected_params_for_role(&provider_models, &roles, "smart", &local).verbosity,
+        Verbosity::Medium,
     );
 }
 
-/// A malformed `harness.json5` must surface the same way. This path
-/// already worked but had no test coverage; lock it in alongside the
-/// new models.json5 path so a future refactor that drops one will
-/// drop both, not just the easy one.
+/// A malformed `harness.json5` must surface in the UI as an `Important`
+/// `HarnessInfo`. Without this, the only symptom of a borked file is that
+/// user-configured extensions or roles vanish.
 #[test]
 fn borked_harness_json5_emits_important_info() {
     let td = TempDir::new().expect("tempdir");
@@ -490,168 +543,55 @@ fn borked_harness_json5_emits_important_info() {
     );
 }
 
-/// `efforts_for_model` appends `XHigh` for models that opt in (either
-/// the built-in whitelist of known OpenAI IDs, or an explicit
-/// `supportsXhigh: true` in models.json5), and omits it for the
-/// rest. Pinning the set so a future tweak to the whitelist still
-/// surfaces here.
+/// Provider snapshots are the only source for effort choices. The harness
+/// should expose exactly what the provider published and report no choices for
+/// unknown models rather than reviving config-derived defaults.
 #[test]
-fn efforts_for_model_includes_xhigh_for_supported_models_only() {
+fn efforts_for_model_uses_provider_snapshot_levels() {
     use tau_proto::Effort as L;
 
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("models.json5"),
-        r#"{
-            providers: {
-                openai: {
-                    api: "openai-chat",
-                    auth: "api-key",
-                    apiKey: "test",
-                    compat: { supportsReasoningEffort: true },
-                    models: [
-                        { id: "gpt-5.5" },
-                        { id: "gpt-5.4-mini" },
-                        { id: "weird-custom", supportsXhigh: true },
-                        { id: "gpt-5.5-pinned-off", supportsXhigh: false },
-                    ],
-                },
-                local: {
-                    compat: { supportsReasoningEffort: false },
-                    models: [{ id: "llama" }],
-                },
-            },
-        }"#,
-    )
-    .expect("write models");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(dir.to_path_buf()),
-        state_dir: None,
-    };
-    let registry = tau_config::settings::load_models_in(&dirs).expect("load");
-
-    let with_xhigh = [L::Off, L::Minimal, L::Low, L::Medium, L::High, L::XHigh];
-    let without_xhigh = [L::Off, L::Minimal, L::Low, L::Medium, L::High];
+    let custom: ModelId = "openai/gpt-5.4-pro".parse().expect("model id");
+    let local: ModelId = "local/llama".parse().expect("model id");
+    let provider_models = provider_models([
+        ProviderModelInfo {
+            id: custom.clone(),
+            display_name: None,
+            context_window: 128_000,
+            efforts: vec![L::Medium, L::High, L::XHigh],
+            verbosities: vec![Verbosity::Medium],
+            thinking_summaries: vec![ThinkingSummary::Off],
+            supports_compaction: false,
+        },
+        ProviderModelInfo {
+            id: local.clone(),
+            display_name: None,
+            context_window: 8_192,
+            efforts: vec![L::Off],
+            verbosities: vec![Verbosity::Medium],
+            thinking_summaries: vec![ThinkingSummary::Off],
+            supports_compaction: false,
+        },
+    ]);
 
     assert_eq!(
-        efforts_for_model(&registry, &"openai/gpt-5.5".into()),
-        with_xhigh,
-        "whitelisted OpenAI model gets xhigh",
-    );
-    assert_eq!(
-        efforts_for_model(&registry, &"openai/gpt-5.4-mini".into()),
-        without_xhigh,
-        "mini variant excluded by whitelist",
-    );
-    assert_eq!(
-        efforts_for_model(&registry, &"openai/weird-custom".into()),
-        with_xhigh,
-        "explicit supportsXhigh=true opts in",
-    );
-    assert_eq!(
-        efforts_for_model(&registry, &"openai/gpt-5.5-pinned-off".into()),
-        without_xhigh,
-        "explicit supportsXhigh=false opts out",
-    );
-    assert_eq!(
-        efforts_for_model(&registry, &"local/llama".into()),
-        vec![L::Off],
-        "non-reasoning provider stays at Off-only",
-    );
-    assert!(
-        efforts_for_model(&registry, &"openai/unknown-id".into()).last() == Some(&L::High),
-        "unknown id falls back to the canonical 5-level set",
-    );
-    assert!(
-        efforts_for_model(&registry, &"unknown-provider/whatever".into()).is_empty(),
-        "unknown provider yields no choices",
-    );
-}
-
-/// Per-model `reasoningEfforts` is the explicit escape hatch: it
-/// replaces both the canonical default set and the provider-level
-/// `supportsReasoningEffort` flag, in the order the user wrote it
-/// (de-duplicated). Verifies asymmetric models like `gpt-5.4-pro`
-/// (medium/high/xhigh only) and a "force reasoning on a provider
-/// otherwise marked off" case both work.
-#[test]
-fn efforts_for_model_honours_reasoning_efforts_override() {
-    use tau_proto::Effort as L;
-
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("models.json5"),
-        r#"{
-            providers: {
-                openai: {
-                    api: "openai-chat",
-                    auth: "api-key",
-                    apiKey: "test",
-                    compat: { supportsReasoningEffort: true },
-                    models: [
-                        {
-                            id: "gpt-5.4-pro",
-                            reasoningEfforts: ["medium", "high", "xhigh"],
-                        },
-                        {
-                            // Dedup test — same level listed twice
-                            // collapses to one entry.
-                            id: "weird",
-                            reasoningEfforts: ["off", "high", "high"],
-                        },
-                    ],
-                },
-                pinned: {
-                    // Provider claims no reasoning effort, but the
-                    // per-model override is authoritative.
-                    compat: { supportsReasoningEffort: false },
-                    models: [
-                        {
-                            id: "exotic",
-                            reasoningEfforts: ["low", "high"],
-                        },
-                        { id: "plain" },
-                    ],
-                },
-            },
-        }"#,
-    )
-    .expect("write models");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(dir.to_path_buf()),
-        state_dir: None,
-    };
-    let registry = tau_config::settings::load_models_in(&dirs).expect("load");
-
-    assert_eq!(
-        efforts_for_model(&registry, &"openai/gpt-5.4-pro".into()),
+        efforts_for_model(&provider_models, &custom),
         vec![L::Medium, L::High, L::XHigh],
-        "user-specified list replaces the canonical default set",
     );
-    assert_eq!(
-        efforts_for_model(&registry, &"openai/weird".into()),
-        vec![L::Off, L::High],
-        "duplicates collapse but order is preserved",
-    );
-    assert_eq!(
-        efforts_for_model(&registry, &"pinned/exotic".into()),
-        vec![L::Low, L::High],
-        "per-model override beats provider supportsReasoningEffort=false",
-    );
-    assert_eq!(
-        efforts_for_model(&registry, &"pinned/plain".into()),
-        vec![L::Off],
-        "without override, provider-level flag still wins",
+    assert_eq!(efforts_for_model(&provider_models, &local), vec![L::Off],);
+    assert!(
+        efforts_for_model(
+            &provider_models,
+            &"openai/unknown-id".parse().expect("model id"),
+        )
+        .is_empty(),
+        "unknown model yields no provider-published choices",
     );
 }
 
-/// `clamp_effort` must degrade `XHigh` to `High` (Pi-style) when the
-/// model doesn't expose it, rather than silently dropping all the
-/// way to `Off`. `Off` remains the fallback for other unsupported
-/// levels so users with a no-reasoning provider don't get pinned to
-/// a level the model can't handle.
+/// `clamp_effort` must degrade `XHigh` to `High` (Pi-style) when the model
+/// doesn't expose it, rather than silently dropping all the way to `Off`.
+/// `Off` remains the fallback for other unsupported levels so users with a
+/// no-reasoning provider don't get pinned to a level the model can't handle.
 #[test]
 fn clamp_effort_degrades_xhigh_to_high_when_unsupported() {
     use tau_proto::Effort as L;
@@ -667,116 +607,96 @@ fn clamp_effort_degrades_xhigh_to_high_when_unsupported() {
     assert_eq!(clamp_effort(L::High, &[L::Medium, L::Low]), L::Medium);
 }
 
-/// `verbosities_for_model` returns the full `[Low, Medium, High]` set
-/// only when the provider (or per-model override) opts in. Providers
-/// that don't advertise verbosity pin to `[Medium]` so the status bar
-/// has a single uniform choice to render and the harness clamping
-/// keeps an unsupported user request out of the wire payload.
+/// Verbosity choices come from the provider snapshot. Providers that do not
+/// support the knob publish a single fixed level, and unknown models expose no
+/// levels.
 #[test]
-fn verbosities_for_model_respects_provider_and_per_model_flags() {
+fn verbosities_for_model_uses_provider_snapshot_levels() {
     use tau_proto::Verbosity as V;
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("models.json5"),
-        r#"{
-            providers: {
-                openai: {
-                    compat: { supportsVerbosity: true },
-                    models: [
-                        { id: "gpt-5" },
-                        { id: "gpt-5-locked", supportsVerbosity: false },
-                        { id: "gpt-5-pinned", verbosities: ["medium", "high"] },
-                    ],
-                },
-                local: {
-                    compat: { supportsVerbosity: false },
-                    models: [
-                        { id: "llama" },
-                        { id: "llama-opt-in", supportsVerbosity: true },
-                    ],
-                },
-            },
-        }"#,
-    )
-    .expect("write models");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(dir.to_path_buf()),
-        state_dir: None,
-    };
-    let registry = tau_config::settings::load_models_in(&dirs).expect("load");
+
+    let gpt: ModelId = "openai/gpt-5".parse().expect("model id");
+    let locked: ModelId = "openai/gpt-5-locked".parse().expect("model id");
+    let provider_models = provider_models([
+        ProviderModelInfo {
+            id: gpt.clone(),
+            display_name: None,
+            context_window: 128_000,
+            efforts: vec![Effort::Off],
+            verbosities: vec![V::Low, V::Medium, V::High],
+            thinking_summaries: vec![ThinkingSummary::Off],
+            supports_compaction: false,
+        },
+        ProviderModelInfo {
+            id: locked.clone(),
+            display_name: None,
+            context_window: 128_000,
+            efforts: vec![Effort::Off],
+            verbosities: vec![V::Medium],
+            thinking_summaries: vec![ThinkingSummary::Off],
+            supports_compaction: false,
+        },
+    ]);
 
     assert_eq!(
-        verbosities_for_model(&registry, &"openai/gpt-5".into()),
+        verbosities_for_model(&provider_models, &gpt),
         vec![V::Low, V::Medium, V::High],
     );
     assert_eq!(
-        verbosities_for_model(&registry, &"openai/gpt-5-locked".into()),
-        vec![V::Medium],
-        "per-model override beats provider-level supportsVerbosity",
-    );
-    assert_eq!(
-        verbosities_for_model(&registry, &"openai/gpt-5-pinned".into()),
-        vec![V::Medium, V::High],
-        "explicit verbosities list replaces the canonical set",
-    );
-    assert_eq!(
-        verbosities_for_model(&registry, &"local/llama".into()),
+        verbosities_for_model(&provider_models, &locked),
         vec![V::Medium],
     );
-    assert_eq!(
-        verbosities_for_model(&registry, &"local/llama-opt-in".into()),
-        vec![V::Low, V::Medium, V::High],
-        "per-model override flips an off-by-default provider on",
+    assert!(
+        verbosities_for_model(
+            &provider_models,
+            &"local/missing".parse().expect("model id"),
+        )
+        .is_empty(),
     );
 }
 
-/// `thinking_summaries_for_model` gates on the provider-level
-/// `supportsReasoningSummary` flag. Off providers report only `[Off]`
-/// so the harness never asks the model to emit a summary it can't.
+/// Thinking-summary choices come from the provider snapshot, so the harness no
+/// longer consults provider compatibility flags in config.
 #[test]
-fn thinking_summaries_for_model_gates_on_provider_flag() {
+fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
     use tau_proto::ThinkingSummary as T;
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("models.json5"),
-        r#"{
-            providers: {
-                openai: {
-                    compat: { supportsReasoningSummary: true },
-                    models: [{ id: "gpt-5" }],
-                },
-                local: {
-                    compat: { supportsReasoningSummary: false },
-                    models: [{ id: "llama" }],
-                },
-            },
-        }"#,
-    )
-    .expect("write models");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(dir.to_path_buf()),
-        state_dir: None,
-    };
-    let registry = tau_config::settings::load_models_in(&dirs).expect("load");
+
+    let gpt: ModelId = "openai/gpt-5".parse().expect("model id");
+    let local: ModelId = "local/llama".parse().expect("model id");
+    let provider_models = provider_models([
+        ProviderModelInfo {
+            id: gpt.clone(),
+            display_name: None,
+            context_window: 128_000,
+            efforts: vec![Effort::Off],
+            verbosities: vec![Verbosity::Medium],
+            thinking_summaries: vec![T::Off, T::Auto, T::Concise, T::Detailed],
+            supports_compaction: false,
+        },
+        ProviderModelInfo {
+            id: local.clone(),
+            display_name: None,
+            context_window: 8_192,
+            efforts: vec![Effort::Off],
+            verbosities: vec![Verbosity::Medium],
+            thinking_summaries: vec![T::Off],
+            supports_compaction: false,
+        },
+    ]);
 
     assert_eq!(
-        thinking_summaries_for_model(&registry, &"openai/gpt-5".into()),
+        thinking_summaries_for_model(&provider_models, &gpt),
         vec![T::Off, T::Auto, T::Concise, T::Detailed],
     );
     assert_eq!(
-        thinking_summaries_for_model(&registry, &"local/llama".into()),
+        thinking_summaries_for_model(&provider_models, &local),
         vec![T::Off],
     );
 }
 
-/// `selected_params_for_model` falls back to `last_params` for models
-/// with no entry in `default_params`. Each field is restored from the
-/// persisted JSON, so a `/verbosity high` followed by a restart finds
-/// the same level.
+/// Persisted role overrides are restored as the runtime role definition, then
+/// clamped against provider-owned metadata for the resolved model.
 #[test]
-fn selected_params_restores_each_field_from_last_params() {
+fn selected_params_restore_each_field_from_role_override() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -788,30 +708,23 @@ fn selected_params_restores_each_field_from_last_params() {
     };
 
     std::fs::write(
-        config_dir.join("models.json5"),
+        config_dir.join("harness.json5"),
         r#"{
-            providers: {
-                openai: {
-                    compat: {
-                        supportsReasoningEffort: true,
-                        supportsReasoningSummary: true,
-                        supportsVerbosity: true,
-                    },
-                    models: [{ id: "gpt-5" }],
-                },
+            roles: {
+                smart: { model: "openai/gpt-5" },
             },
         }"#,
     )
-    .expect("write models");
+    .expect("write harness config");
     std::fs::write(
         state_dir.join("harness.json5"),
         r#"{
-            "last_selected_model": "openai/gpt-5",
-            "last_params": {
-                "openai/gpt-5": {
+            "role_overrides": {
+                "smart": {
+                    "model": "openai/gpt-5",
                     "effort": "high",
                     "verbosity": "low",
-                    "thinking_summary": "concise"
+                    "thinkingSummary": "concise"
                 }
             }
         }"#,
@@ -820,15 +733,26 @@ fn selected_params_restores_each_field_from_last_params() {
 
     let harness_settings =
         tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
-    let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
+    let (roles, _role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
+    assert_eq!(selected_role, "smart");
 
-    let params = selected_params_for_model(
-        &dirs,
-        &harness_settings,
-        &model_registry,
-        &"openai/gpt-5".into(),
-    );
-    assert_eq!(params.effort, tau_proto::Effort::High);
-    assert_eq!(params.verbosity, tau_proto::Verbosity::Low);
-    assert_eq!(params.thinking_summary, tau_proto::ThinkingSummary::Concise);
+    let model: ModelId = "openai/gpt-5".parse().expect("model id");
+    let provider_models = provider_models([ProviderModelInfo {
+        id: model.clone(),
+        display_name: None,
+        context_window: 128_000,
+        efforts: vec![Effort::Off, Effort::Low, Effort::High],
+        verbosities: vec![Verbosity::Low, Verbosity::High],
+        thinking_summaries: vec![
+            ThinkingSummary::Off,
+            ThinkingSummary::Auto,
+            ThinkingSummary::Concise,
+        ],
+        supports_compaction: false,
+    }]);
+
+    let params = selected_params_for_role(&provider_models, &roles, &selected_role, &model);
+    assert_eq!(params.effort, Effort::High);
+    assert_eq!(params.verbosity, Verbosity::Low);
+    assert_eq!(params.thinking_summary, ThinkingSummary::Concise);
 }

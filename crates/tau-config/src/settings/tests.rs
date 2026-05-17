@@ -99,29 +99,17 @@ fn harness_settings_user_override_wins_over_built_in() {
     std::fs::write(
         dir.join("harness.json5"),
         r#"{
-                default_model: "anthropic/claude-sonnet-4-20250514",
-                default_params: {
-                    "anthropic/claude-sonnet-4-20250514": {
-                        effort: "high",
-                        verbosity: "low",
-                        thinking_summary: "concise",
-                    },
-                },
+                session_retention_days: 7,
             }"#,
     )
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    let expected: tau_proto::ModelId = "anthropic/claude-sonnet-4-20250514".parse().expect("id");
-    assert_eq!(s.default_model.as_ref(), Some(&expected));
-    let entry = s
-        .default_params
-        .get(&expected)
-        .copied()
-        .expect("entry should be present");
-    assert_eq!(entry.effort, tau_proto::Effort::High);
-    assert_eq!(entry.verbosity, tau_proto::Verbosity::Low);
-    assert_eq!(entry.thinking_summary, tau_proto::ThinkingSummary::Concise);
+    assert_eq!(s.session_retention_days, 7);
+    assert_eq!(
+        s.session_retention(),
+        Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+    );
 }
 
 #[test]
@@ -189,51 +177,13 @@ fn cli_settings_drop_in_layers_on_top_of_base() {
 }
 
 #[test]
-fn models_load_with_providers() {
+fn harness_roles_merge_with_built_ins() {
+    // Roles are harness-owned now. This keeps the old merge behavior while
+    // locking the source of truth to harness.json5 instead of a model registry.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("models.json5"),
-        r#"{
-                providers: {
-                    local: {
-                        baseUrl: "http://localhost:8080/v1",
-                        api: "openai-completions",
-                        apiKey: "test",
-                        promptCacheRetention: "24h",
-                        compat: {
-                            supportsPromptCacheKey: true,
-                            supportsPromptCacheRetention: true,
-                            supportsLlamaCppCache: true,
-                        },
-                        models: [{ id: "llama-3" }]
-                    }
-                }
-            }"#,
-    )
-    .expect("write");
-
-    let m: ModelRegistry = load_json5_layered(dir, "models").expect("load");
-    assert_eq!(m.providers.len(), 1);
-    let local = &m.providers["local"];
-    assert_eq!(local.base_url.as_deref(), Some("http://localhost:8080/v1"));
-    assert_eq!(
-        local.prompt_cache_retention,
-        Some(PromptCacheRetention::Extended24h)
-    );
-    assert!(local.compat.supports_prompt_cache_key);
-    assert!(local.compat.supports_prompt_cache_retention);
-    assert!(local.compat.supports_llama_cpp_cache);
-    assert_eq!(local.models.len(), 1);
-    assert_eq!(local.models[0].id, "llama-3");
-}
-
-#[test]
-fn models_roles_merge_with_built_ins() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("models.json5"),
+        dir.join("harness.json5"),
         r#"{
             roles: {
                 smart: { model: "openai/gpt-5.5", toolsProfile: "full" },
@@ -244,33 +194,27 @@ fn models_roles_merge_with_built_ins() {
     )
     .expect("write");
 
-    let m = load_models_in(&dirs_with_config(dir)).expect("load");
-    assert!(m.default_roles.contains_key("smart"));
-    assert!(m.default_roles.contains_key("deep"));
-    assert!(m.default_roles.contains_key("rush"));
-    assert!(!m.default_roles.contains_key("default"));
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert!(s.roles.contains_key("smart"));
+    assert!(s.roles.contains_key("deep"));
+    assert!(s.roles.contains_key("rush"));
+    assert!(!s.roles.contains_key("default"));
+    assert_eq!(s.roles["custom"].effort, Some(tau_proto::Effort::Medium));
     assert_eq!(
-        m.default_roles["custom"].effort,
-        Some(tau_proto::Effort::Medium)
-    );
-    assert_eq!(
-        m.default_roles["custom"].tools_profile.as_deref(),
+        s.roles["custom"].tools_profile.as_deref(),
         Some("read_only")
     );
     assert_eq!(
-        m.default_roles["smart"]
+        s.roles["smart"]
             .model
             .as_ref()
             .map(ToString::to_string)
             .as_deref(),
         Some("openai/gpt-5.5")
     );
-    assert_eq!(
-        m.default_roles["smart"].tools_profile.as_deref(),
-        Some("full")
-    );
+    assert_eq!(s.roles["smart"].tools_profile.as_deref(), Some("full"));
 
-    let deep = &m.default_roles["deep"];
+    let deep = &s.roles["deep"];
     assert_eq!(
         deep.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/gpt-5.5")
@@ -284,11 +228,13 @@ fn models_roles_merge_with_built_ins() {
 }
 
 #[test]
-fn models_default_roles_alias_still_loads() {
+fn harness_default_roles_alias_still_loads() {
+    // Keep the previous `defaultRoles` spelling as a compatibility alias now
+    // that roles are loaded from harness config.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("models.json5"),
+        dir.join("harness.json5"),
         r#"{
             defaultRoles: {
                 custom: { effort: "medium", toolsProfile: "read_only" },
@@ -297,35 +243,33 @@ fn models_default_roles_alias_still_loads() {
     )
     .expect("write");
 
-    let m = load_models_in(&dirs_with_config(dir)).expect("load");
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(s.roles["custom"].effort, Some(tau_proto::Effort::Medium));
     assert_eq!(
-        m.default_roles["custom"].effort,
-        Some(tau_proto::Effort::Medium)
-    );
-    assert_eq!(
-        m.default_roles["custom"].tools_profile.as_deref(),
+        s.roles["custom"].tools_profile.as_deref(),
         Some("read_only")
     );
 }
 
 #[test]
 fn missing_user_files_load_the_built_in_baseline() {
-    // With no user files present, the loader still returns a fully
-    // populated `CliSettings` / `HarnessSettings` from the embedded
-    // built-in layer, and an empty `ModelRegistry` (no user-shipped
-    // providers).
+    // With no user files present, the loader still returns fully populated
+    // settings from the embedded built-in layer plus harness-owned role/tool
+    // defaults. There is intentionally no model registry baseline anymore.
     let td = TempDir::new().expect("tempdir");
     let _cli = load_cli_settings_in(&dirs_with_config(td.path())).expect("cli");
-    let _harness = load_harness_settings_in(&dirs_with_config(td.path())).expect("harness");
-    let m = load_models_in(&dirs_with_config(td.path())).expect("models");
-    assert!(m.providers.is_empty());
+    let harness = load_harness_settings_in(&dirs_with_config(td.path())).expect("harness");
+    assert!(harness.roles.contains_key("smart"));
+    assert!(harness.roles.contains_key("deep"));
+    assert!(harness.roles.contains_key("rush"));
+    assert!(harness.tools_profiles.contains_key("gpt"));
 }
 
 #[test]
 fn sample_configs_deserialize() {
-    // Sanity-check the sample configs shipped in the workspace root
-    // `config/` directory (used in the README) by feeding them
-    // through the user-config loader.
+    // Sanity-check the sample configs shipped in the workspace root `config/`
+    // directory (used by `tau init`) by feeding them through the user-config
+    // loader.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
 
@@ -339,257 +283,8 @@ fn sample_configs_deserialize() {
         include_str!("../../../../config/harness.json5"),
     )
     .expect("write harness");
-    std::fs::write(
-        dir.join("models.json5"),
-        include_str!("../../../../config/models.json5"),
-    )
-    .expect("write models");
 
     let _cli = load_cli_settings_in(&dirs_with_config(dir)).expect("cli sample should parse");
     let _harness =
         load_harness_settings_in(&dirs_with_config(dir)).expect("harness sample should parse");
-    let _models = load_models_in(&dirs_with_config(dir)).expect("models sample should parse");
-}
-
-#[test]
-fn add_provider_in_writes_typed_entry() {
-    let tmp = TempDir::new().expect("tempdir");
-    let dirs = TauDirs {
-        config_dir: Some(tmp.path().to_path_buf()),
-        state_dir: None,
-    };
-
-    let mut provider = ProviderConfig {
-        api: Some("openai-chat".to_owned()),
-        auth: Some("api-key".to_owned()),
-        ..Default::default()
-    };
-    provider.models.push(ModelConfig {
-        id: tau_proto::ModelName::new("gpt-x"),
-        name: None,
-        max_output_tokens: None,
-        context_window: Some(123_456),
-        supports_xhigh: None,
-        reasoning_efforts: None,
-        supports_verbosity: None,
-        verbosities: None,
-    });
-
-    let openai = tau_proto::ProviderName::new("openai");
-    let path = add_provider_in(&dirs, &openai, &provider).expect("add provider");
-    assert!(path.ends_with("models.json5"));
-
-    let registry = load_models_in(&dirs).expect("reload");
-    let written = registry
-        .providers
-        .get(&openai)
-        .expect("openai entry present");
-    assert_eq!(written.auth.as_deref(), Some("api-key"));
-    assert_eq!(written.api.as_deref(), Some("openai-chat"));
-    assert_eq!(written.models.len(), 1);
-    assert_eq!(written.models[0].id, "gpt-x");
-    assert_eq!(written.models[0].context_window, Some(123_456));
-}
-
-#[test]
-fn add_provider_in_preserves_other_entries_and_unknown_fields() {
-    let tmp = TempDir::new().expect("tempdir");
-    let path = tmp.path().join("models.json5");
-    std::fs::write(
-        &path,
-        r#"{
-            // user comment that WILL be lost (documented behavior)
-            "extraTopLevelField": 42,
-            "providers": {
-                "keep": {
-                    "auth": "none",
-                    "api": "openai-completions",
-                    "models": [],
-                    "extraProviderField": "preserved"
-                }
-            }
-        }"#,
-    )
-    .expect("seed file");
-
-    let dirs = TauDirs {
-        config_dir: Some(tmp.path().to_path_buf()),
-        state_dir: None,
-    };
-    let new_provider = ProviderConfig {
-        auth: Some("api-key".to_owned()),
-        api: Some("openai-chat".to_owned()),
-        ..Default::default()
-    };
-    add_provider_in(&dirs, &tau_proto::ProviderName::new("added"), &new_provider).expect("add");
-
-    let text = std::fs::read_to_string(&path).expect("read");
-    let root: serde_json::Value = json5::from_str(&text).expect("parse");
-
-    assert_eq!(root["extraTopLevelField"], 42);
-    assert_eq!(root["providers"]["keep"]["extraProviderField"], "preserved");
-    assert_eq!(root["providers"]["added"]["auth"], "api-key");
-}
-
-/// The xhigh whitelist drives the default for models that don't set
-/// `supportsXhigh` explicitly. Lock the curated set so a future tweak
-/// can't silently demote (or promote) a model that was working before.
-#[test]
-fn xhigh_whitelist_covers_known_openai_families() {
-    // Full-size GPT-5 frontier models support xhigh.
-    assert!(is_known_xhigh_model_id("gpt-5.5"));
-    assert!(is_known_xhigh_model_id("gpt-5.5-2026-04-15"));
-    assert!(is_known_xhigh_model_id("gpt-5.4"));
-    assert!(is_known_xhigh_model_id("gpt-5.4-pro"));
-    assert!(is_known_xhigh_model_id("gpt-5.3-codex"));
-    assert!(is_known_xhigh_model_id("gpt-5.3-codex-spark"));
-    assert!(is_known_xhigh_model_id("gpt-5.2"));
-    assert!(is_known_xhigh_model_id("gpt-5.1-codex-max"));
-
-    // mini / nano variants top out at `high`.
-    assert!(!is_known_xhigh_model_id("gpt-5.5-mini"));
-    assert!(!is_known_xhigh_model_id("gpt-5.4-mini"));
-    assert!(!is_known_xhigh_model_id("gpt-5.4-nano"));
-    assert!(!is_known_xhigh_model_id("gpt-5.2-mini"));
-
-    // Older / unrelated families.
-    assert!(!is_known_xhigh_model_id("o3-mini"));
-    assert!(!is_known_xhigh_model_id("gpt-4.1"));
-    assert!(!is_known_xhigh_model_id("claude-sonnet-4.6"));
-    assert!(!is_known_xhigh_model_id("llama3.2:latest"));
-    assert!(!is_known_xhigh_model_id(""));
-}
-
-/// Explicit `supportsXhigh` in models.json5 must win over the
-/// built-in whitelist in either direction.
-#[test]
-fn model_supports_xhigh_explicit_override_wins() {
-    let base = ModelConfig {
-        id: tau_proto::ModelName::new("gpt-5.5"),
-        name: None,
-        max_output_tokens: None,
-        context_window: None,
-        supports_xhigh: None,
-        reasoning_efforts: None,
-        supports_verbosity: None,
-        verbosities: None,
-    };
-    assert!(base.supports_xhigh(), "whitelist default for gpt-5.5");
-
-    let forced_off = ModelConfig {
-        supports_xhigh: Some(false),
-        ..base.clone()
-    };
-    assert!(
-        !forced_off.supports_xhigh(),
-        "explicit `false` overrides the whitelist"
-    );
-
-    let forced_on = ModelConfig {
-        id: tau_proto::ModelName::new("exotic-local-model"),
-        supports_xhigh: Some(true),
-        ..base
-    };
-    assert!(
-        forced_on.supports_xhigh(),
-        "explicit `true` overrides the (absent) whitelist entry"
-    );
-}
-
-/// `reasoningEfforts` parses as a list of effort levels using the
-/// canonical snake_case wire form shared with `default_efforts`.
-#[test]
-fn models_json5_reasoning_efforts_override_parses() {
-    use tau_proto::Effort;
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("models.json5"),
-        r#"{
-            providers: {
-                openai: {
-                    api: "openai-chat",
-                    auth: "api-key",
-                    apiKey: "test",
-                    models: [
-                        // gpt-5.4-pro accepts medium/high/xhigh only
-                        // (no `off` or `low`/`minimal`) — the user
-                        // pins exactly what the API will accept.
-                        {
-                            id: "gpt-5.4-pro",
-                            reasoningEfforts: ["medium", "high", "xhigh"],
-                        },
-                        // No override: keep the defaults.
-                        { id: "gpt-5.5" },
-                    ],
-                },
-            },
-        }"#,
-    )
-    .expect("write");
-
-    let m: ModelRegistry = load_json5_layered(dir, "models").expect("load");
-    let models = &m.providers["openai"].models;
-    let pro = models.iter().find(|m| m.id == "gpt-5.4-pro").expect("pro");
-    assert_eq!(
-        pro.reasoning_efforts.as_deref(),
-        Some(&[Effort::Medium, Effort::High, Effort::XHigh][..])
-    );
-    let v5 = models.iter().find(|m| m.id == "gpt-5.5").expect("v5");
-    assert_eq!(v5.reasoning_efforts, None);
-}
-
-/// `supportsXhigh: true` should round-trip through json5.
-#[test]
-fn models_json5_supports_xhigh_field_parses() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("models.json5"),
-        r#"{
-            providers: {
-                openai: {
-                    api: "openai-chat",
-                    auth: "api-key",
-                    apiKey: "test",
-                    models: [
-                        { id: "gpt-5.4" },
-                        { id: "weird-custom", supportsXhigh: true },
-                        { id: "gpt-5.5", supportsXhigh: false },
-                    ],
-                },
-            },
-        }"#,
-    )
-    .expect("write");
-
-    let m: ModelRegistry = load_json5_layered(dir, "models").expect("load");
-    let models = &m.providers["openai"].models;
-    let by_id = |id: &str| models.iter().find(|m| m.id == id).expect(id);
-    assert_eq!(by_id("gpt-5.4").supports_xhigh, None);
-    assert!(by_id("gpt-5.4").supports_xhigh(), "whitelist default");
-    assert_eq!(by_id("weird-custom").supports_xhigh, Some(true));
-    assert!(by_id("weird-custom").supports_xhigh());
-    assert_eq!(by_id("gpt-5.5").supports_xhigh, Some(false));
-    assert!(!by_id("gpt-5.5").supports_xhigh(), "explicit opt-out wins");
-}
-
-#[test]
-fn remove_provider_in_returns_false_when_absent() {
-    let tmp = TempDir::new().expect("tempdir");
-    let dirs = TauDirs {
-        config_dir: Some(tmp.path().to_path_buf()),
-        state_dir: None,
-    };
-    let missing = tau_proto::ProviderName::new("missing");
-    let p1 = tau_proto::ProviderName::new("p1");
-    assert!(!remove_provider_in(&dirs, &missing).expect("ok"));
-
-    let provider = ProviderConfig {
-        auth: Some("none".to_owned()),
-        ..Default::default()
-    };
-    add_provider_in(&dirs, &p1, &provider).expect("add");
-    assert!(remove_provider_in(&dirs, &p1).expect("remove"));
-    assert!(!remove_provider_in(&dirs, &p1).expect("removed twice"));
 }

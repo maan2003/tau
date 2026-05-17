@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use tau_proto::{ConnectionId, EventSelector, Frame, Message};
+use tau_proto::{ClientKind, ConnectionId, EventSelector, Frame, Message};
 
 use crate::connection::{
     Connection, ConnectionMetadata, ConnectionSink, DeliveryFailure, RouteError, RouteReport,
@@ -182,10 +182,25 @@ impl EventBus {
 
     /// Broadcasts one frame from a specific source connection.
     pub fn publish_from(&mut self, source_id: Option<&str>, frame: Frame) -> RouteReport {
+        self.publish_from_excluding_kinds(source_id, frame, &[])
+    }
+
+    /// Broadcasts one frame from a specific source connection while skipping
+    /// subscribers whose connection kind is in `excluded_kinds`.
+    pub fn publish_from_excluding_kinds(
+        &mut self,
+        source_id: Option<&str>,
+        frame: Frame,
+        excluded_kinds: &[ClientKind],
+    ) -> RouteReport {
         let routed = RoutedFrame::new(source_id.map(ConnectionId::from), frame);
         let mut report = RouteReport::default();
 
         for (connection_id, entry) in &mut self.connections {
+            if excluded_kinds.contains(&entry.metadata.kind) {
+                report.skipped_by_subscription.push(connection_id.clone());
+                continue;
+            }
             if !entry.subscriptions.matches(&routed.frame) {
                 report.skipped_by_subscription.push(connection_id.clone());
                 continue;

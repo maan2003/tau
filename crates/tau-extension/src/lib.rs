@@ -2,8 +2,8 @@
 //!
 //! Three independent utilities, each opt-in:
 //!
-//! - [`Handshake`] writes the standard Hello/Subscribe/Intercept/
-//!   ToolRegister/Ready prelude every extension opens its session with.
+//! - [`Handshake`] writes the standard Hello/Subscribe/Intercept/startup-event/
+//!   Ready prelude every extension opens its session with.
 //! - [`init_logging_for`] (or [`init_logging`] when there is no single target
 //!   to scope to) installs a stderr `tracing_subscriber` filtered by the
 //!   `TAU_LOG` env var.

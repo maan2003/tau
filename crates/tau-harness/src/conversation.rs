@@ -237,8 +237,9 @@ pub(crate) struct Conversation {
     /// `response_id` on the previous finished turn; consumed by the
     /// next `send_prompt_to_agent_for` as a hint that the upstream
     /// call can chain off the prior turn instead of replaying the
-    /// full transcript. `None` initially, after model switches, or
-    /// after an edit / error invalidates the chain.
+    /// full transcript. `None` initially, after the selected role
+    /// resolves to a different model, or after an edit / error
+    /// invalidates the chain.
     pub(crate) chain_anchor: Option<ChainAnchor>,
     /// Per-conversation map from tool-result-content hash to the first
     /// `call_id` on this branch that produced that content. Consulted

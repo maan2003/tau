@@ -1,12 +1,12 @@
-//! Bridge agent prompt-start / response-finish events into iTerm2-style
+//! Bridge provider prompt-start / response-finish events into iTerm2-style
 //! OSC 1337 `SetUserVar` notifications, mirroring the dpc-personal
 //! `notification-sounds.ts` and `user-text-notification.sh` Pi
 //! extensions.
 //!
 //! Events emitted (all via `Osc1337SetUserVar`):
 //! - `ui.prompt_submitted` → `user-notification = protoss-probe-ack`
-//! - final `agent.response_finished` (only when `stop_reason` does not request
-//!   tools) → `user-notification = protoss-upgrade-complete`
+//! - final `provider.response_finished` (only when `stop_reason` does not
+//!   request tools) → `user-notification = protoss-upgrade-complete`
 //! - After `idle_seconds` (default 60) of inactivity following a final response
 //!   → `user-text-notification = {"urgency": "normal", "title": "Agent idle:
 //!   <host>:<cwd>", "body": "Waiting for user input", "app_name": "tau"}`. If
@@ -16,8 +16,9 @@
 //!   follows the schema `user-text-notification.sh` emits so downstream
 //!   consumers can use it as the desktop notification's source-app indicator
 //!   instead of us baking it into the title. The idle timer resets on every
-//!   user-originated `ui.prompt_submitted` / `agent.prompt_submitted`. Tunable
-//!   via the extension's `config.idle_seconds` field in `harness.json5`.
+//!   user-originated `ui.prompt_submitted` / `provider.prompt_submitted`.
+//!   Tunable via the extension's `config.idle_seconds` field in
+//!   `harness.json5`.
 //!
 //! The downstream tooling (typically a terminal multiplexer status
 //! line or a `user-notification.sh` consumer wired to a sound file)
@@ -68,7 +69,7 @@ pub const DEFAULT_IDLE_SECONDS: u64 = 60;
 /// How long to wait for the agent to summarize the conversation
 /// before falling back to the static idle text. Once the idle window
 /// has elapsed we want to actually notify the user soon, even if the
-/// agent is wedged or the model is unreachable.
+/// provider is wedged or the model is unreachable.
 pub const SUMMARY_TIMEOUT_SECONDS: u64 = 10;
 
 /// Instruction sent to the agent as a side prompt when the idle
@@ -249,8 +250,8 @@ where
 
     tau_extension::Handshake::tool("tau-ext-std-notifications")
         .subscribe([
-            tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
-            tau_proto::EventName::AGENT_RESPONSE_FINISHED,
+            tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
+            tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
             tau_proto::EventName::UI_PROMPT_SUBMITTED,
             // Trailing-edge debounced typing pings from the UI:
             // bumps the idle deadline so the desktop notification

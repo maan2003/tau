@@ -23,7 +23,13 @@ fn builtin(
 
 fn builtins() -> Vec<BuiltinExtension> {
     vec![
-        builtin("core-agent", "agent", "agent", true, serde_json::json!({})),
+        builtin(
+            "provider-openai",
+            "ext-provider-openai",
+            "provider",
+            true,
+            serde_json::json!({}),
+        ),
         builtin(
             "core-shell",
             "ext-shell",
@@ -53,10 +59,10 @@ fn resolve_extensions_returns_builtins_when_user_config_empty() {
     let s = HarnessSettings::built_in();
     let resolved = resolve_extensions(&s, builtins()).expect("resolve");
     assert_eq!(resolved.len(), 3);
-    assert_eq!(resolved[0].name, "core-agent");
+    assert_eq!(resolved[0].name, "provider-openai");
     assert_eq!(resolved[0].command, "tau");
-    assert_eq!(resolved[0].args, vec!["ext", "agent"]);
-    assert_eq!(resolved[0].role.as_deref(), Some("agent"));
+    assert_eq!(resolved[0].args, vec!["ext", "ext-provider-openai"]);
+    assert_eq!(resolved[0].role.as_deref(), Some("provider"));
     assert_eq!(resolved[1].name, "core-shell");
     assert_eq!(resolved[2].name, "std-notifications");
 }
@@ -80,7 +86,7 @@ fn resolve_extensions_disable_drops_entry() {
     );
     let resolved = resolve_extensions(&s, builtins()).expect("resolve");
     assert_eq!(resolved.len(), 2);
-    assert_eq!(resolved[0].name, "core-agent");
+    assert_eq!(resolved[0].name, "provider-openai");
     assert_eq!(resolved[1].name, "std-notifications");
 }
 
@@ -88,41 +94,44 @@ fn resolve_extensions_disable_drops_entry() {
 fn resolve_extensions_prefix_wraps_builtin_command() {
     let mut s = HarnessSettings::built_in();
     s.extensions.insert(
-        "core-agent".into(),
+        "provider-openai".into(),
         ExtensionEntry {
             prefix: Some(vec!["ssh".into(), "user@host".into()]),
             ..Default::default()
         },
     );
     let resolved = resolve_extensions(&s, builtins()).expect("resolve");
-    let agent = resolved
+    let provider = resolved
         .iter()
-        .find(|e| e.name == "core-agent")
-        .expect("agent");
+        .find(|e| e.name == "provider-openai")
+        .expect("provider");
     // argv[0] is the wrapper; original command moves into args.
-    assert_eq!(agent.command, "ssh");
-    assert_eq!(agent.args, vec!["user@host", "tau", "ext", "agent"]);
+    assert_eq!(provider.command, "ssh");
+    assert_eq!(
+        provider.args,
+        vec!["user@host", "tau", "ext", "ext-provider-openai"]
+    );
 }
 
 #[test]
 fn resolve_extensions_user_command_replaces_builtin_command() {
     let mut s = HarnessSettings::built_in();
     s.extensions.insert(
-        "core-agent".into(),
+        "provider-openai".into(),
         ExtensionEntry {
-            command: Some(vec!["/usr/local/bin/my-agent".into(), "--flag".into()]),
+            command: Some(vec!["/usr/local/bin/my-provider".into(), "--flag".into()]),
             ..Default::default()
         },
     );
     let resolved = resolve_extensions(&s, builtins()).expect("resolve");
-    let agent = resolved
+    let provider = resolved
         .iter()
-        .find(|e| e.name == "core-agent")
-        .expect("agent");
-    assert_eq!(agent.command, "/usr/local/bin/my-agent");
-    assert_eq!(agent.args, vec!["--flag"]);
+        .find(|e| e.name == "provider-openai")
+        .expect("provider");
+    assert_eq!(provider.command, "/usr/local/bin/my-provider");
+    assert_eq!(provider.args, vec!["--flag"]);
     // Role is preserved from the built-in default.
-    assert_eq!(agent.role.as_deref(), Some("agent"));
+    assert_eq!(provider.role.as_deref(), Some("provider"));
 }
 
 #[test]
@@ -184,7 +193,7 @@ fn resolve_extensions_loads_from_json5() {
                 extensions: {
                     "core-shell": { enable: false },
                     "test-dummy": { enable: true },
-                    "core-agent": { prefix: ["ssh", "host"] },
+                    "provider-openai": { prefix: ["ssh", "host"] },
                     mything: { command: ["/bin/foo"] },
                 },
             }"#,
@@ -198,15 +207,23 @@ fn resolve_extensions_loads_from_json5() {
     let s = load_harness_settings_in(&dirs).expect("load");
     let resolved = resolve_extensions(&s, builtins()).expect("resolve");
     let names: Vec<&str> = resolved.iter().map(|e| e.name.as_str()).collect();
-    // core-shell dropped (disable). test-dummy enabled. core-agent
+    // core-shell dropped (disable). test-dummy enabled. provider-openai
     // kept (prefix-wrapped). mything appended.
     assert_eq!(
         names,
-        vec!["core-agent", "test-dummy", "std-notifications", "mything"]
+        vec![
+            "provider-openai",
+            "test-dummy",
+            "std-notifications",
+            "mything"
+        ]
     );
-    let agent = &resolved[0];
-    assert_eq!(agent.command, "ssh");
-    assert_eq!(agent.args, vec!["host", "tau", "ext", "agent"]);
+    let provider = &resolved[0];
+    assert_eq!(provider.command, "ssh");
+    assert_eq!(
+        provider.args,
+        vec!["host", "tau", "ext", "ext-provider-openai"]
+    );
 }
 
 /// Force a parse of `config/built-in.extensions.json5` so a

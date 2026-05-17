@@ -270,19 +270,12 @@ fn role_disabled_tool_is_reported_without_dispatch() {
                     shell: false,
                 },
             },
-        }"#,
-    )
-    .expect("write harness");
-    std::fs::write(
-        config_dir.join("models.json5"),
-        r#"{
             roles: {
                 smart: { toolsProfile: "read_only" },
             },
         }"#,
     )
-    .expect("write models");
-
+    .expect("write harness");
     let dirs = tau_config::settings::TauDirs {
         config_dir: Some(config_dir),
         state_dir: Some(state_dir.clone()),
@@ -290,7 +283,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("start");
 
     h.selected_model = Some("test/model".into());
-    h.selected_role = Some("smart".to_owned());
+    h.selected_role = "smart".to_owned();
     let cid = h.default_conversation_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
     h.prompt_conversations.insert("sp-x".into(), cid.clone());
@@ -404,9 +397,10 @@ fn agents_context_is_injected_at_session_init() {
         })
         .expect("expected injected AGENTS.md user message");
     assert!(injected.contains("# AGENTS.md instructions"));
-    assert!(injected.contains("/repo/pkg/AGENTS.md"));
-    assert!(injected.contains("<AGENTS_FILE path=\"/repo/AGENTS.md\">"));
-    assert!(injected.contains("</AGENTS_FILE>"));
+    assert!(injected.contains("# AGENTS.md instructions for /repo/pkg"));
+    assert!(injected.contains("# AGENTS.md instructions for /repo"));
+    assert!(injected.contains("<INSTRUCTIONS>"));
+    assert!(injected.contains("</INSTRUCTIONS>"));
     let root_pos = injected.find("root rule").expect("root rule");
     let pkg_pos = injected.find("package rule").expect("package rule");
     assert!(

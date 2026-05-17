@@ -67,7 +67,7 @@ Official packaging will come later — request a format or upvote existing reque
 
 Use `tau init` to generate config files.
 
-You can edit `models.json5` to configure local models, and use `tau provider add` to log in to hosted providers.
+Use `tau provider login chatgpt` to enable the built-in ChatGPT/Codex provider; edit `harness.json5` for harness-owned roles, defaults, and extension settings.
 
 By default, `tau` starts the harness daemon and the CLI UI.
 

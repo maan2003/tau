@@ -225,7 +225,6 @@ pub(crate) fn mint_short_id(prefix: &str) -> String {
 
 const SAMPLE_CLI: &str = include_str!("../../../config/cli.json5");
 const SAMPLE_HARNESS: &str = include_str!("../../../config/harness.json5");
-const SAMPLE_MODELS: &str = include_str!("../../../config/models.json5");
 
 fn run_init(force: bool) -> Result<(), CliError> {
     let Some(dir) = tau_config::settings::config_dir() else {
@@ -236,11 +235,7 @@ fn run_init(force: bool) -> Result<(), CliError> {
     };
     std::fs::create_dir_all(&dir)?;
 
-    let files = [
-        ("cli.json5", SAMPLE_CLI),
-        ("harness.json5", SAMPLE_HARNESS),
-        ("models.json5", SAMPLE_MODELS),
-    ];
+    let files = [("cli.json5", SAMPLE_CLI), ("harness.json5", SAMPLE_HARNESS)];
 
     for (name, content) in &files {
         let path = dir.join(name);
@@ -385,18 +380,11 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             },
 
             cli::Command::Ext { name } => {
-                let built_in_components = [
-                    Component {
-                        name: "agent",
-                        runner: tau_agent::run_stdio,
-                        logging: ComponentLogging::RunnerManaged,
-                    },
-                    Component {
-                        name: "harness",
-                        runner: tau_harness::run_component,
-                        logging: ComponentLogging::CliStderr,
-                    },
-                ];
+                let built_in_components = [Component {
+                    name: "harness",
+                    runner: tau_harness::run_component,
+                    logging: ComponentLogging::CliStderr,
+                }];
                 let component = built_in_components
                     .iter()
                     .chain(components)
@@ -414,7 +402,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     })?;
                 match component.logging {
                     ComponentLogging::CliStderr => ui_logging::init_stderr_from_env(
-                        "tau_harness=info,tau_agent=info,tau_cli=info,agent=info",
+                        "tau_harness=info,tau_cli=info,provider-openai=info",
                     ),
                     ComponentLogging::RunnerManaged => {}
                 }

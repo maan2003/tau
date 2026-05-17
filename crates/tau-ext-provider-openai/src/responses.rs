@@ -1,10 +1,11 @@
-//! OpenAI Codex Responses API client (ChatGPT subscriptions).
+//! ChatGPT/Codex Responses API client.
 //!
 //! Endpoint: `POST {base_url}/codex/responses`
+//!
 //! SSE streaming with `response.output_text.delta` events.
 //!
-//! When the resolver advertises `supports_websocket`, the harness's
-//! agent loop routes Responses turns through the [`ws`] module
+//! When the resolved config advertises `supports_websocket`, the provider
+//! loop routes Responses turns through the [`ws`] module
 //! instead — same wire envelope, persistent connection, per-session
 //! pooling. This module's HTTP+SSE path is kept as the universal
 //! fallback (and as the only transport for endpoints that don't
@@ -25,11 +26,42 @@ pub(crate) mod pool;
 pub(crate) mod ws;
 pub(crate) mod ws_runtime;
 
-/// Config for the Codex Responses API.
+/// Which ChatGPT/Codex Responses surface a model is served through.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponsesSurface {
+    /// ChatGPT/Codex OAuth-backed `/codex/responses` endpoint.
+    ChatGpt,
+}
+
+impl ResponsesSurface {
+    fn responses_url(self, base_url: &str) -> String {
+        let _ = self;
+        let base = base_url.trim_end_matches('/');
+        format!("{base}/codex/responses")
+    }
+
+    fn compact_url(self, base_url: &str) -> String {
+        let _ = self;
+        let base = base_url.trim_end_matches('/');
+        format!("{base}/codex/responses/compact")
+    }
+
+    fn store_value(self) -> bool {
+        let _ = self;
+        false
+    }
+}
+
+/// Config for the ChatGPT/Codex Responses API.
 #[derive(Clone, Debug)]
 pub struct ResponsesConfig {
+    /// Responses API surface used for endpoint and request-body differences.
+    pub surface: ResponsesSurface,
+    /// Base URL for the selected surface, without the final Responses path.
     pub base_url: String,
+    /// Bearer credential to send in the `Authorization` header.
     pub api_key: String,
+    /// Upstream model id without the Tau provider namespace.
     pub model_id: String,
     /// `chatgpt-account-id` header extracted from JWT.
     pub account_id: Option<String>,
@@ -71,8 +103,7 @@ pub struct ResponsesConfig {
     /// having to actually re-derive it from the visible transcript.
     pub supports_encrypted_reasoning: bool,
     /// Whether to attempt a persistent WebSocket transport for this
-    /// provider instead of one-shot HTTP+SSE. See
-    /// [`tau_config::settings::ProviderCompat::supports_websocket`].
+    /// provider instead of one-shot HTTP+SSE.
     pub supports_websocket: bool,
     /// Whether this provider exposes a standalone compaction endpoint.
     pub supports_compaction: bool,
@@ -80,8 +111,6 @@ pub struct ResponsesConfig {
     /// The wire key is derived per `(base_url, session_id)`, then
     /// split by extension name for extension-originated turns.
     pub supports_prompt_cache_key: bool,
-    /// Provider-side prompt cache retention policy, when configured.
-    pub prompt_cache_retention: Option<tau_config::settings::PromptCacheRetention>,
 }
 
 /// Write the exact Responses request body Tau is about to send upstream.
@@ -222,10 +251,7 @@ pub fn responses_compact(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
 ) -> Result<Vec<String>, LlmError> {
-    let url = format!(
-        "{}/codex/responses/compact",
-        config.base_url.trim_end_matches('/')
-    );
+    let url = config.surface.compact_url(&config.base_url);
     let body = build_compact_request(config, request);
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
 
@@ -276,7 +302,7 @@ fn responses_stream_once(
     request: &PromptPayload<'_>,
     on_update: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<StreamState, LlmError> {
-    let url = format!("{}/codex/responses", config.base_url.trim_end_matches('/'));
+    let url = config.surface.responses_url(&config.base_url);
 
     maybe_debug_write_provider_request(
         session_prompt_id,
@@ -615,8 +641,6 @@ struct ResponsesRequest {
     include: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_cache_retention: Option<&'static str>,
     /// Optional upstream service tier (`fast` for Fast mode, `flex` for
     /// lower-priority service).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -717,9 +741,6 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         request.originator,
         request.share_user_cache_key,
     );
-    let prompt_cache_retention = config
-        .prompt_cache_retention
-        .map(tau_config::settings::PromptCacheRetention::as_wire);
     let include: Vec<&'static str> = if config.supports_encrypted_reasoning {
         vec!["reasoning.encrypted_content"]
     } else {
@@ -733,24 +754,15 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         // HTTP path always streams; WS path overrides this back to
         // `None` via [`ws_envelope`] before serializing.
         stream: Some(true),
-        // ALWAYS `false` on the ChatGPT Codex backend
-        // (`chatgpt.com/backend-api/codex/responses`) — it rejects
-        // `store: true` with `HTTP 400 {"detail":"Store must be set
-        // to false"}` even when `previous_response_id` is also set.
-        // The Codex endpoint tracks chains internally; only the
-        // public `api.openai.com/v1/responses` endpoint requires
-        // `store: true` to use `previous_response_id`. Tau today
-        // only routes the Responses backend through Codex, so
-        // hardcoding `false` is correct; if/when the public Responses
-        // API becomes reachable this needs to become endpoint-aware.
-        store: Some(false),
+        // ChatGPT/Codex rejects `store: true`, even when chaining with a
+        // `previous_response_id`, so the provider owns this endpoint quirk.
+        store: Some(config.surface.store_value()),
         tools,
         tool_choice,
         reasoning,
         text,
         include,
         prompt_cache_key,
-        prompt_cache_retention,
         service_tier: request
             .params
             .service_tier
@@ -782,7 +794,6 @@ fn build_compact_request(
     body.store = None;
     body.tool_choice = None;
     body.prompt_cache_key = None;
-    body.prompt_cache_retention = None;
     body.service_tier = None;
     body.include.clear();
     body

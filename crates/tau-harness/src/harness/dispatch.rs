@@ -149,8 +149,8 @@ impl Harness {
 
     /// True when a fresh prompt for `cid` should *not* be sent
     /// immediately. Two layers of gating:
-    /// - global: no model selected, harness mid-init, extensions not yet
-    ///   `Ready`;
+    /// - global: selected role has no resolved model, harness mid-init,
+    ///   extensions not yet `Ready`;
     /// - per-conversation: that conversation already has a prompt in flight or
     ///   is waiting on tool results.
     pub(crate) fn dispatch_blocked_for(&self, cid: &ConversationId) -> bool {

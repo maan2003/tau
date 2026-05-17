@@ -108,12 +108,12 @@ mod tests {
 
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let target = temp_dir.path().join("target.json5");
-        let link = temp_dir.path().join("models.json5");
+        let link = temp_dir.path().join("config.json5");
         std::fs::write(&target, b"{}").expect("write target");
         std::os::unix::fs::symlink(&target, &link).expect("symlink");
         std::fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).expect("set perms");
 
-        atomic_write_following_symlink(&link, b"{\"providers\":{}}", None).expect("atomic write");
+        atomic_write_following_symlink(&link, b"{\"updated\":true}", None).expect("atomic write");
 
         assert!(
             fs::symlink_metadata(&link)
@@ -123,7 +123,7 @@ mod tests {
             "the symlink itself must not be replaced"
         );
         let body = std::fs::read_to_string(&target).expect("read");
-        assert!(body.contains("providers"));
+        assert!(body.contains("updated"));
         assert_eq!(
             fs::metadata(&target)
                 .expect("target metadata")

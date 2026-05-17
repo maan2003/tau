@@ -1,4 +1,4 @@
-//! Shared Tokio runtime for the agent's network IO.
+//! Shared Tokio runtime for provider-openai network IO.
 //!
 //! One process-wide multi-thread runtime, lazily started on first
 //! use. The runtime is intentionally narrow in scope today (WS pool
@@ -7,20 +7,17 @@
 //! HTTP+SSE path, for instance) can `handle().spawn(...)` here
 //! without bringing its own runtime.
 //!
-//! Why a dedicated runtime and not async-everything at the agent
-//! boundary: the agent's main loop is sync (blocking mpsc, blocking
+//! Why a dedicated runtime and not async-everything at the provider
+//! boundary: the provider's main loop is sync (blocking mpsc, blocking
 //! frame IO via `tau_extension`). Driving async tasks from sync code
 //! is fine via the `Handle::block_on` / `Sender::send` /
-//! `Receiver::blocking_recv` boundary primitives. Async-ifying the
-//! whole agent process would be a separate, larger refactor — when
-//! it happens, this module's `handle()` becomes the obvious place
-//! to install the runtime.
+//! `Receiver::blocking_recv` boundary primitives.
 
 use std::sync::OnceLock;
 
 use tokio::runtime::{Handle, Runtime};
 
-/// Worker thread count. Two is enough for typical agent operation
+/// Worker thread count. Two is enough for typical provider operation
 /// (one for the reader half of an active WS conn, one for the
 /// writer half + auxiliary tasks). Bumped or made dynamic if a
 /// future workload needs more.
@@ -32,7 +29,7 @@ const WORKER_THREADS: usize = 2;
 ///
 /// Panics only on first call, and only if the OS rejects thread
 /// creation. We let that surface as a panic rather than thread it
-/// through every call site: the agent process is useless without
+/// through every call site: the provider process is useless without
 /// its network runtime, and the panic message is more actionable
 /// than a `Result` that callers would `.expect()` anyway.
 pub(crate) fn handle() -> Handle {
@@ -42,9 +39,9 @@ pub(crate) fn handle() -> Handle {
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(WORKER_THREADS)
                 .enable_all()
-                .thread_name("tau-agent-net")
+                .thread_name("tau-provider-openai-net")
                 .build()
-                .expect("build tokio runtime for tau-agent network IO")
+                .expect("build tokio runtime for provider-openai network IO")
         })
         .handle()
         .clone()

@@ -1,4 +1,3 @@
-use tau_config::settings::PromptCacheRetention;
 use tau_proto::{
     ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem, ToolCallItem,
     ToolResultItem, ToolResultStatus,
@@ -8,8 +7,9 @@ use super::*;
 use crate::common::{LlmError, PreviousResponse};
 
 #[test]
-fn build_request_includes_prompt_cache_fields_when_configured() {
+fn build_request_includes_prompt_cache_key_when_supported() {
     let config = ResponsesConfig {
+        surface: ResponsesSurface::ChatGpt,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
@@ -21,7 +21,6 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         supports_websocket: false,
         supports_compaction: false,
         supports_prompt_cache_key: true,
-        prompt_cache_retention: Some(PromptCacheRetention::InMemory),
         supports_encrypted_reasoning: false,
     };
     let request = PromptPayload {
@@ -40,12 +39,12 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
     let prompt_cache_key = body["prompt_cache_key"].as_str().expect("prompt_cache_key");
 
     assert!(prompt_cache_key.starts_with("tau-"));
-    assert_eq!(body["prompt_cache_retention"], "in_memory");
 }
 
 #[test]
 fn build_request_includes_service_tier_when_configured() {
     let config = ResponsesConfig {
+        surface: ResponsesSurface::ChatGpt,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
@@ -57,7 +56,6 @@ fn build_request_includes_service_tier_when_configured() {
         supports_websocket: false,
         supports_compaction: false,
         supports_prompt_cache_key: false,
-        prompt_cache_retention: None,
         supports_encrypted_reasoning: false,
     };
     let request = PromptPayload {
@@ -81,8 +79,9 @@ fn build_request_includes_service_tier_when_configured() {
 }
 
 #[test]
-fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
+fn build_request_omits_prompt_cache_key_without_seed() {
     let config = ResponsesConfig {
+        surface: ResponsesSurface::ChatGpt,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
@@ -94,7 +93,6 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         supports_websocket: false,
         supports_compaction: false,
         supports_prompt_cache_key: false,
-        prompt_cache_retention: None,
         supports_encrypted_reasoning: false,
     };
     let request = PromptPayload {
@@ -113,7 +111,6 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
     let object = body.as_object().expect("request object");
 
     assert!(!object.contains_key("prompt_cache_key"));
-    assert!(!object.contains_key("prompt_cache_retention"));
 }
 
 /// First turn (no chain established): the request must contain the
@@ -298,6 +295,7 @@ fn stale_chain_error_detection() {
 #[test]
 fn build_request_chain_turn_still_emits_prompt_cache_key() {
     let config = ResponsesConfig {
+        surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
         ..chain_test_config()
     };
@@ -335,6 +333,7 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
 #[test]
 fn build_request_prompt_cache_key_differs_for_extension_originator() {
     let config = ResponsesConfig {
+        surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
         ..chain_test_config()
     };
@@ -382,6 +381,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
 #[test]
 fn build_request_share_user_cache_key_pins_extension_to_user_bucket() {
     let config = ResponsesConfig {
+        surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
         ..chain_test_config()
     };
@@ -407,6 +407,7 @@ fn build_request_share_user_cache_key_pins_extension_to_user_bucket() {
 #[test]
 fn build_request_cache_shared_extension_matches_user_wire_body() {
     let config = ResponsesConfig {
+        surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
         ..chain_test_config()
     };
@@ -503,6 +504,7 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
 
 fn chain_test_config() -> ResponsesConfig {
     ResponsesConfig {
+        surface: ResponsesSurface::ChatGpt,
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
@@ -514,13 +516,13 @@ fn chain_test_config() -> ResponsesConfig {
         supports_websocket: false,
         supports_compaction: false,
         supports_prompt_cache_key: false,
-        prompt_cache_retention: None,
         supports_encrypted_reasoning: false,
     }
 }
 
 fn phase_test_config() -> ResponsesConfig {
     ResponsesConfig {
+        surface: ResponsesSurface::ChatGpt,
         supports_phase: true,
         ..chain_test_config()
     }
@@ -528,6 +530,7 @@ fn phase_test_config() -> ResponsesConfig {
 
 fn encrypted_reasoning_test_config() -> ResponsesConfig {
     ResponsesConfig {
+        surface: ResponsesSurface::ChatGpt,
         supports_encrypted_reasoning: true,
         ..chain_test_config()
     }

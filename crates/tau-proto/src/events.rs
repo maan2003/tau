@@ -35,6 +35,7 @@ fn is_false(b: &bool) -> bool {
 pub enum EventCategory {
     Tool,
     Extension,
+    Provider,
     Harness,
     Ui,
     Shell,
@@ -56,6 +57,7 @@ impl EventCategory {
         match self {
             Self::Tool => "tool",
             Self::Extension => "extension",
+            Self::Provider => "provider",
             Self::Harness => "harness",
             Self::Ui => "ui",
             Self::Shell => "shell",
@@ -73,6 +75,7 @@ impl EventCategory {
         match s {
             "tool" => Self::Tool,
             "extension" => Self::Extension,
+            "provider" => Self::Provider,
             "harness" => Self::Harness,
             "ui" => Self::Ui,
             "shell" => Self::Shell,
@@ -209,6 +212,16 @@ impl EventName {
         Self::from_static(EventCategory::Extension, "agent_query");
     pub const EXTENSION_AGENT_QUERY_RESULT: Self =
         Self::from_static(EventCategory::Extension, "agent_query_result");
+    pub const PROVIDER_MODELS_UPDATED: Self =
+        Self::from_static(EventCategory::Provider, "models_updated");
+    pub const PROVIDER_PROMPT_SUBMITTED: Self =
+        Self::from_static(EventCategory::Provider, "prompt_submitted");
+    pub const PROVIDER_RESPONSE_UPDATED: Self =
+        Self::from_static(EventCategory::Provider, "response_updated");
+    pub const PROVIDER_RESPONSE_FINISHED: Self =
+        Self::from_static(EventCategory::Provider, "response_finished");
+    pub const PROVIDER_CACHE_MISS_DIAGNOSTIC: Self =
+        Self::from_static(EventCategory::Provider, "cache_miss_diagnostic");
 
     pub const HARNESS_INFO: Self = Self::from_static(EventCategory::Harness, "info");
     pub const HARNESS_SESSION_DIR: Self = Self::from_static(EventCategory::Harness, "session_dir");
@@ -217,8 +230,8 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "models_available");
     pub const HARNESS_ROLES_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "roles_available");
-    pub const HARNESS_MODEL_SELECTED: Self =
-        Self::from_static(EventCategory::Harness, "model_selected");
+    pub const HARNESS_ROLE_SELECTED: Self =
+        Self::from_static(EventCategory::Harness, "role_selected");
     pub const HARNESS_CONTEXT_USAGE_CHANGED: Self =
         Self::from_static(EventCategory::Harness, "context_usage_changed");
     pub const HARNESS_EFFORT_CHANGED: Self =
@@ -237,14 +250,8 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "thinking_summaries_available");
 
     pub const UI_PROMPT_SUBMITTED: Self = Self::from_static(EventCategory::Ui, "prompt_submitted");
-    pub const UI_MODEL_SELECT: Self = Self::from_static(EventCategory::Ui, "model_select");
     pub const UI_ROLE_SELECT: Self = Self::from_static(EventCategory::Ui, "role_select");
     pub const UI_ROLE_UPDATE: Self = Self::from_static(EventCategory::Ui, "role_update");
-    pub const UI_SET_EFFORT: Self = Self::from_static(EventCategory::Ui, "set_effort");
-    pub const UI_SET_SERVICE_TIER: Self = Self::from_static(EventCategory::Ui, "set_service_tier");
-    pub const UI_SET_VERBOSITY: Self = Self::from_static(EventCategory::Ui, "set_verbosity");
-    pub const UI_SET_THINKING_SUMMARY: Self =
-        Self::from_static(EventCategory::Ui, "set_thinking_summary");
     pub const UI_DETACH_REQUEST: Self = Self::from_static(EventCategory::Ui, "detach_request");
     pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
     pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
@@ -281,15 +288,6 @@ impl EventName {
         Self::from_static(EventCategory::Session, "prompt_prewarm_requested");
     pub const SESSION_USER_MESSAGE_INJECTED: Self =
         Self::from_static(EventCategory::Session, "user_message_injected");
-
-    pub const AGENT_PROMPT_SUBMITTED: Self =
-        Self::from_static(EventCategory::Agent, "prompt_submitted");
-    pub const AGENT_RESPONSE_UPDATED: Self =
-        Self::from_static(EventCategory::Agent, "response_updated");
-    pub const AGENT_RESPONSE_FINISHED: Self =
-        Self::from_static(EventCategory::Agent, "response_finished");
-    pub const AGENT_CACHE_MISS_DIAGNOSTIC: Self =
-        Self::from_static(EventCategory::Agent, "cache_miss_diagnostic");
 }
 
 impl fmt::Display for EventName {
@@ -366,6 +364,7 @@ impl std::error::Error for ParseEventNameError {}
 #[serde(rename_all = "snake_case")]
 pub enum ClientKind {
     Agent,
+    Provider,
     Tool,
     Ui,
     Core,
@@ -495,34 +494,37 @@ pub struct HarnessModelsAvailable {
 /// The harness announces role names with resolved descriptions.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessRoleInfo {
+    /// Stable role name accepted by `ui.role_select`.
     pub name: String,
+    /// Human-readable summary of the role's resolved model and knobs.
     pub description: String,
 }
 
+/// The harness announces all roles available for selection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessRolesAvailable {
+    /// Role entries sorted by name for deterministic UI menus.
     pub roles: Vec<HarnessRoleInfo>,
 }
 
-/// The harness announces which model is currently selected.
+/// The harness announces the selected role and its currently resolved model.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct HarnessModelSelected {
-    /// Selected model, or `None` when no model is selected.
+pub struct HarnessRoleSelected {
+    /// Selected agent role. Role selection is always the runtime source of
+    /// truth; the model is derived from this role and provider availability.
+    pub role: String,
+    /// Model currently resolved for [`Self::role`], or `None` while the role's
+    /// model is not provider-published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
-    /// Total context window size, in tokens, if known for the model.
+    /// Total context window size, in tokens, if known for the resolved model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
-    /// Currently selected agent role, when the model was reached via a
-    /// role rather than a direct model pick. `None` when the user
-    /// selected a model directly, or when no role/model is selected.
+    /// Effective role/provider baseline parameters, ignoring persisted state.
+    /// The UI compares live parameters against this baseline so state overrides
+    /// stay visible in the status bar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    /// Effective model parameters from config only, ignoring persisted
-    /// state. The UI compares the live parameters against this baseline
-    /// so state overrides stay visible in the status bar.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_params: Option<ModelParams>,
+    pub baseline_params: Option<ModelParams>,
 }
 
 /// Current context usage for the selected model.
@@ -538,8 +540,7 @@ pub struct HarnessContextUsageChanged {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
     /// Percentage of the context window currently used. `None` when
-    /// the model's context window is unknown (no `contextWindow` in
-    /// `models.json5` and the provider didn't expose one), so the UI
+    /// the selected provider model metadata is unavailable, so the UI
     /// can fall back to showing raw token count instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent_used: Option<u8>,
@@ -878,9 +879,10 @@ pub struct HarnessVerbosityChanged {
 }
 
 /// The harness announces which verbosity levels are valid for the
-/// currently-selected model. Updated on startup and on every model
-/// switch. Empty list means no model is selected; a single-element
-/// `[Medium]` list means the provider doesn't support the knob.
+/// selected role's resolved model. Updated on startup and whenever the
+/// resolved model changes. Empty list means the selected role has no
+/// resolved model; a single-element `[Medium]` list means the provider
+/// doesn't support the knob.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessVerbositiesAvailable {
     pub levels: Vec<Verbosity>,
@@ -1032,8 +1034,8 @@ pub struct HarnessThinkingSummaryChanged {
 }
 
 /// The harness announces which thinking-summary modes are valid for
-/// the currently-selected model. Empty list means no model is
-/// selected; `[Off]` means the provider doesn't expose summaries.
+/// the selected role's resolved model. Empty list means the selected role has
+/// no resolved model; `[Off]` means the provider doesn't expose summaries.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessThinkingSummariesAvailable {
     pub levels: Vec<ThinkingSummary>,
@@ -1057,10 +1059,10 @@ pub struct ModelParams {
     pub service_tier: Option<ServiceTier>,
 }
 
-/// The harness announces which efforts are valid for the
-/// currently-selected model. Updated on startup and on every model
-/// switch. Empty list means no effort applies (no model
-/// selected, or the provider doesn't support reasoning).
+/// The harness announces which efforts are valid for the selected role's
+/// resolved model. Updated on startup and whenever the resolved model changes.
+/// Empty list means no effort applies (the selected role has no resolved model,
+/// or the provider doesn't support reasoning).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessEffortsAvailable {
     pub levels: Vec<Effort>,
@@ -1579,6 +1581,39 @@ pub struct ExtAgentQueryResult {
     pub error: Option<String>,
 }
 
+/// Metadata for one model currently served by a provider extension.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderModelInfo {
+    /// Fully-qualified model id. The provider segment is part of user-visible
+    /// selection and harness routing.
+    pub id: ModelId,
+    /// Optional human-friendly label. UIs may fall back to [`Self::id`] when it
+    /// is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Total model context window in tokens. Required so harness/UI state does
+    /// not have to fall back to provider-specific config.
+    pub context_window: u64,
+    /// Reasoning-effort levels accepted by this model, in UI cycling order.
+    pub efforts: Vec<Effort>,
+    /// Output-verbosity levels accepted by this model, in UI cycling order.
+    pub verbosities: Vec<Verbosity>,
+    /// Thinking-summary modes accepted by this model, in UI cycling order.
+    pub thinking_summaries: Vec<ThinkingSummary>,
+    /// Whether this model can use the provider's standalone compaction
+    /// endpoint.
+    #[serde(default)]
+    pub supports_compaction: bool,
+}
+
+/// Provider extension snapshot of its currently available models.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderModelsUpdated {
+    /// Complete replacement snapshot for the sending extension. Publishing an
+    /// empty list means the extension currently serves no models.
+    pub models: Vec<ProviderModelInfo>,
+}
+
 /// Extension-defined event payload.
 ///
 /// `name` is the dotted event name used for routing and subscription
@@ -1643,13 +1678,6 @@ pub struct UiPromptDraft {
     pub text: String,
 }
 
-/// The user requests switching to a different model.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiModelSelect {
-    /// `"provider_name/model_id"`.
-    pub model: ModelId,
-}
-
 /// The UI is detaching and wants the daemon to stay alive after it
 /// leaves, so a later `tau --attach` can pick up the same
 /// session. The harness flips its `exit_on_disconnect` flag to
@@ -1660,46 +1688,64 @@ pub struct UiDetachRequest {}
 /// The user requests switching to an agent role.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiRoleSelect {
+    /// Role name to make the runtime source of truth for model resolution.
     pub role: String,
 }
 
 /// The user changes or deletes an agent role.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiRoleUpdate {
+    /// Role name whose runtime override should change.
     pub role: String,
+    /// Typed mutation to apply to the role override.
     pub action: UiRoleUpdateAction,
 }
 
+/// Typed role mutation requested by a UI. `None` fields clear the explicit
+/// role value so normal model-specific fallback resolution applies.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum UiRoleUpdateAction {
+    /// Remove this role's runtime override, or delete the runtime-only role.
     Delete,
-    Set { setting: String, value: String },
-}
-
-/// The user requests a effort change.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiSetEffort {
-    pub level: Effort,
-}
-
-/// The user requests a service-tier change.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiSetServiceTier {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<ServiceTier>,
-}
-
-/// The user requests a verbosity change.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiSetVerbosity {
-    pub level: Verbosity,
-}
-
-/// The user requests a thinking-summary mode change.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiSetThinkingSummary {
-    pub level: ThinkingSummary,
+    /// Set or clear the role's preferred model.
+    SetModel {
+        /// Model to pin this role to, or `None` to use the first available
+        /// model.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<ModelId>,
+    },
+    /// Set or clear the role's reasoning effort.
+    SetEffort {
+        /// Reasoning effort to store, or `None` to use the model fallback.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<Effort>,
+    },
+    /// Set or clear the role's output verbosity.
+    SetVerbosity {
+        /// Output verbosity to store, or `None` to use the model fallback.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verbosity: Option<Verbosity>,
+    },
+    /// Set or clear the role's thinking-summary mode.
+    SetThinkingSummary {
+        /// Thinking-summary mode to store, or `None` to use the model fallback.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_summary: Option<ThinkingSummary>,
+    },
+    /// Set or clear the role's provider service tier.
+    SetServiceTier {
+        /// Service tier to store, or `None` to use the provider default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service_tier: Option<ServiceTier>,
+    },
+    /// Set or clear the role's tools profile.
+    SetToolsProfile {
+        /// Tools profile name to store, or `None` to use default tool
+        /// enablement.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools_profile: Option<String>,
+    },
 }
 
 /// The user requests switching to a different session within the same
@@ -2133,10 +2179,10 @@ pub struct PreviousResponseCandidate {
 }
 
 // ---------------------------------------------------------------------------
-// Agent events — facts from the agent backend
+// Provider execution events — facts from the provider backend
 // ---------------------------------------------------------------------------
 
-/// The agent accepted a prompt and began processing it.
+/// The provider accepted a prompt and began processing it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptSubmitted {
     pub session_prompt_id: SessionPromptId,
@@ -2148,7 +2194,7 @@ pub struct AgentPromptSubmitted {
     pub originator: PromptOriginator,
 }
 
-/// The agent has new accumulated response text for a prompt.
+/// The provider has new accumulated response text for a prompt.
 /// Each update carries the full text so far (replace, not delta).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentResponseUpdated {
@@ -2167,7 +2213,7 @@ pub struct AgentResponseUpdated {
     pub originator: PromptOriginator,
 }
 
-/// The agent finished processing a prompt.
+/// The provider finished processing a prompt.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStopReason {
@@ -2560,6 +2606,8 @@ pub enum Event {
     ExtAgentQueryResult(ExtAgentQueryResult),
     #[serde(rename = "extension.event")]
     ExtensionEvent(CustomEvent),
+    #[serde(rename = "provider.models_updated")]
+    ProviderModelsUpdated(ProviderModelsUpdated),
 
     // Harness info
     #[serde(rename = "harness.info")]
@@ -2572,8 +2620,8 @@ pub enum Event {
     HarnessModelsAvailable(HarnessModelsAvailable),
     #[serde(rename = "harness.roles_available")]
     HarnessRolesAvailable(HarnessRolesAvailable),
-    #[serde(rename = "harness.model_selected")]
-    HarnessModelSelected(HarnessModelSelected),
+    #[serde(rename = "harness.role_selected")]
+    HarnessRoleSelected(HarnessRoleSelected),
     #[serde(rename = "harness.context_usage_changed")]
     HarnessContextUsageChanged(HarnessContextUsageChanged),
     #[serde(rename = "harness.effort_changed")]
@@ -2596,20 +2644,10 @@ pub enum Event {
     UiPromptSubmitted(UiPromptSubmitted),
     #[serde(rename = "ui.prompt_draft")]
     UiPromptDraft(UiPromptDraft),
-    #[serde(rename = "ui.model_select")]
-    UiModelSelect(UiModelSelect),
     #[serde(rename = "ui.role_select")]
     UiRoleSelect(UiRoleSelect),
     #[serde(rename = "ui.role_update")]
     UiRoleUpdate(UiRoleUpdate),
-    #[serde(rename = "ui.set_effort")]
-    UiSetEffort(UiSetEffort),
-    #[serde(rename = "ui.set_service_tier")]
-    UiSetServiceTier(UiSetServiceTier),
-    #[serde(rename = "ui.set_verbosity")]
-    UiSetVerbosity(UiSetVerbosity),
-    #[serde(rename = "ui.set_thinking_summary")]
-    UiSetThinkingSummary(UiSetThinkingSummary),
     #[serde(rename = "ui.detach_request")]
     UiDetachRequest(UiDetachRequest),
     #[serde(rename = "ui.shell_command")]
@@ -2659,14 +2697,14 @@ pub enum Event {
     #[serde(rename = "session.user_message_injected")]
     SessionUserMessageInjected(SessionUserMessageInjected),
 
-    // Agent
-    #[serde(rename = "agent.prompt_submitted")]
+    // Provider execution
+    #[serde(rename = "provider.prompt_submitted")]
     AgentPromptSubmitted(AgentPromptSubmitted),
-    #[serde(rename = "agent.response_updated")]
+    #[serde(rename = "provider.response_updated")]
     AgentResponseUpdated(AgentResponseUpdated),
-    #[serde(rename = "agent.response_finished")]
+    #[serde(rename = "provider.response_finished")]
     AgentResponseFinished(AgentResponseFinished),
-    #[serde(rename = "agent.cache_miss_diagnostic")]
+    #[serde(rename = "provider.cache_miss_diagnostic")]
     AgentCacheMissDiagnostic(AgentCacheMissDiagnostic),
 }
 
@@ -2695,12 +2733,13 @@ impl Event {
             Self::ExtAgentQuery(_) => EventName::EXTENSION_AGENT_QUERY,
             Self::ExtAgentQueryResult(_) => EventName::EXTENSION_AGENT_QUERY_RESULT,
             Self::ExtensionEvent(event) => event.name.clone(),
+            Self::ProviderModelsUpdated(_) => EventName::PROVIDER_MODELS_UPDATED,
             Self::HarnessInfo(_) => EventName::HARNESS_INFO,
             Self::HarnessSessionDir(_) => EventName::HARNESS_SESSION_DIR,
             Self::HarnessUiDir(_) => EventName::HARNESS_UI_DIR,
             Self::HarnessModelsAvailable(_) => EventName::HARNESS_MODELS_AVAILABLE,
             Self::HarnessRolesAvailable(_) => EventName::HARNESS_ROLES_AVAILABLE,
-            Self::HarnessModelSelected(_) => EventName::HARNESS_MODEL_SELECTED,
+            Self::HarnessRoleSelected(_) => EventName::HARNESS_ROLE_SELECTED,
             Self::HarnessContextUsageChanged(_) => EventName::HARNESS_CONTEXT_USAGE_CHANGED,
             Self::HarnessEffortChanged(_) => EventName::HARNESS_EFFORT_CHANGED,
             Self::HarnessServiceTierChanged(_) => EventName::HARNESS_SERVICE_TIER_CHANGED,
@@ -2713,13 +2752,8 @@ impl Event {
             }
             Self::UiPromptSubmitted(_) => EventName::UI_PROMPT_SUBMITTED,
             Self::UiPromptDraft(_) => EventName::UI_PROMPT_DRAFT,
-            Self::UiModelSelect(_) => EventName::UI_MODEL_SELECT,
             Self::UiRoleSelect(_) => EventName::UI_ROLE_SELECT,
             Self::UiRoleUpdate(_) => EventName::UI_ROLE_UPDATE,
-            Self::UiSetEffort(_) => EventName::UI_SET_EFFORT,
-            Self::UiSetServiceTier(_) => EventName::UI_SET_SERVICE_TIER,
-            Self::UiSetVerbosity(_) => EventName::UI_SET_VERBOSITY,
-            Self::UiSetThinkingSummary(_) => EventName::UI_SET_THINKING_SUMMARY,
             Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
@@ -2741,10 +2775,10 @@ impl Event {
             Self::SessionPromptCreated(_) => EventName::SESSION_PROMPT_CREATED,
             Self::SessionPromptPrewarmRequested(_) => EventName::SESSION_PROMPT_PREWARM_REQUESTED,
             Self::SessionUserMessageInjected(_) => EventName::SESSION_USER_MESSAGE_INJECTED,
-            Self::AgentPromptSubmitted(_) => EventName::AGENT_PROMPT_SUBMITTED,
-            Self::AgentResponseUpdated(_) => EventName::AGENT_RESPONSE_UPDATED,
-            Self::AgentResponseFinished(_) => EventName::AGENT_RESPONSE_FINISHED,
-            Self::AgentCacheMissDiagnostic(_) => EventName::AGENT_CACHE_MISS_DIAGNOSTIC,
+            Self::AgentPromptSubmitted(_) => EventName::PROVIDER_PROMPT_SUBMITTED,
+            Self::AgentResponseUpdated(_) => EventName::PROVIDER_RESPONSE_UPDATED,
+            Self::AgentResponseFinished(_) => EventName::PROVIDER_RESPONSE_FINISHED,
+            Self::AgentCacheMissDiagnostic(_) => EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC,
         }
     }
 

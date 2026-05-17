@@ -1,9 +1,8 @@
 //! User settings loaded from `~/.config/tau/` with `.d/` directory
-//! overrides. Three config files:
+//! overrides. Primary config files:
 //!
 //! - `cli.json5` — CLI display preferences
-//! - `harness.json5` — harness/agent settings (default model, etc.)
-//! - `models.json5` — LLM provider and model registry
+//! - `harness.json5` — harness settings, extensions, and roles
 //!
 //! Uses the `config` crate for layered JSON5 loading.
 
@@ -13,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{ModelId, ModelName, ProviderName, ToolName};
+use tau_proto::{ModelId, ToolName};
 
 // ---------------------------------------------------------------------------
 // Built-in configs
@@ -315,21 +314,11 @@ fn merge_default_tools_profiles(profiles: &mut ToolsProfiles) {
 /// populated value in a test or fallback.
 #[derive(Clone, Debug, Deserialize)]
 pub struct HarnessSettings {
-    /// Default model to use (e.g.
-    /// `"anthropic/claude-sonnet-4-20250514"`).
-    pub default_model: Option<ModelId>,
-
-    /// Default per-prompt model parameters (effort, verbosity,
-    /// thinking-summary), keyed by model id. Each entry's fields are
-    /// independently optional — fields omitted from a per-model entry
-    /// fall back to the harness's per-param middle/auto default.
-    pub default_params: HashMap<ModelId, tau_proto::ModelParams>,
-
     /// Number of days to keep inactive session state directories.
     /// Set to `0` to disable session cleanup.
     pub session_retention_days: u64,
 
-    /// Extension table, keyed by name. Built-in entries (`core-agent`,
+    /// Extension table, keyed by name. Built-in entries (`provider-openai`,
     /// `core-shell`) come pre-baked at the harness level; anything the
     /// user writes here overrides those per-field, or adds a new
     /// extension.
@@ -340,14 +329,24 @@ pub struct HarnessSettings {
     ///   extensions: {
     ///     // disable the built-in shell extension
     ///     "core-shell": { enable: false },
-    ///     // run the agent through ssh on a remote box
-    ///     "core-agent": { prefix: ["ssh", "user@host"] },
+    ///     // run the OpenAI provider through ssh on a remote box
+    ///     "provider-openai": { prefix: ["ssh", "user@host"] },
     ///     // a third-party extension
     ///     mything: { command: ["/usr/local/bin/my-tau-ext"] },
     ///   },
     /// }
     /// ```
     pub extensions: HashMap<String, ExtensionEntry>,
+
+    /// Harness-owned role defaults. Each role is a partial set of model
+    /// settings; missing fields use hardcoded fallbacks for the selected
+    /// provider-published model.
+    #[serde(
+        rename = "roles",
+        alias = "defaultRoles",
+        default = "default_agent_roles"
+    )]
+    pub roles: HashMap<String, AgentRole>,
 
     /// Named per-tool enablement overlays keyed by tool name. Each
     /// role may opt into one profile via `toolsProfile`; profile
@@ -361,6 +360,7 @@ impl HarnessSettings {
     /// the embedded `built-in.harness.json5`.
     pub fn built_in() -> Self {
         let mut s: Self = parse_built_in("built-in.harness.json5", BUILT_IN_HARNESS_JSON5);
+        merge_default_agent_roles(&mut s.roles);
         merge_default_tools_profiles(&mut s.tools_profiles);
         s
     }
@@ -401,8 +401,8 @@ pub struct ExtensionEntry {
 
     /// argv suffix appended after `command`. Symmetric to `prefix`.
     /// Built-in extensions use this to spell their subcommand (e.g.
-    /// `["ext", "agent"]`) so the `command` slot stays as the tau
-    /// binary path.
+    /// `["ext", "ext-provider-openai"]`) so the `command` slot stays
+    /// as the tau binary path.
     pub suffix: Option<Vec<String>>,
 
     /// Whether to run this extension. Defaults to the built-in's
@@ -410,9 +410,8 @@ pub struct ExtensionEntry {
     /// to keep the entry in config but skip spawning.
     pub enable: Option<bool>,
 
-    /// Role tag. Exactly one extension must have `role: "agent"`.
-    /// Built-in `agent` defaults to that; everything else is treated
-    /// as a tool extension.
+    /// Role tag. Built-in providers use `role: "provider"`; entries
+    /// without that role are treated as tool extensions.
     pub role: Option<String>,
 
     /// Free-form configuration object handed to the extension at
@@ -424,26 +423,10 @@ pub struct ExtensionEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Model registry
+// Harness roles
 // ---------------------------------------------------------------------------
 
 const BASE_AGENT_ROLE: &str = "smart";
-
-/// Top-level model configuration (mirrors Pi's models.json).
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
-pub struct ModelRegistry {
-    /// Named providers, keyed by [`ProviderName`].
-    pub providers: HashMap<ProviderName, ProviderConfig>,
-    /// Named agent roles. Each role is a partial set of model settings;
-    /// missing fields use hardcoded fallbacks for the selected model.
-    #[serde(
-        rename = "roles",
-        alias = "defaultRoles",
-        default = "default_agent_roles"
-    )]
-    pub default_roles: HashMap<String, AgentRole>,
-}
 
 fn default_agent_roles() -> HashMap<String, AgentRole> {
     let mut default_roles = HashMap::new();
@@ -467,15 +450,6 @@ fn default_agent_roles() -> HashMap<String, AgentRole> {
     default_roles
 }
 
-impl Default for ModelRegistry {
-    fn default() -> Self {
-        Self {
-            providers: HashMap::new(),
-            default_roles: default_agent_roles(),
-        }
-    }
-}
-
 fn merge_default_agent_roles(roles: &mut HashMap<String, AgentRole>) {
     for (name, built_in_role) in default_agent_roles() {
         roles
@@ -485,21 +459,27 @@ fn merge_default_agent_roles(roles: &mut HashMap<String, AgentRole>) {
     }
 }
 
-/// Partial agent-role settings loaded from `models.json5` and persisted
+/// Partial harness role settings loaded from `harness.json5` and persisted
 /// to state. `None` means "use the selected model's fallback" for every field.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AgentRole {
+    /// Model id preferred by this role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
+    /// Reasoning effort preferred by this role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<tau_proto::Effort>,
+    /// Output verbosity preferred by this role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verbosity: Option<tau_proto::Verbosity>,
+    /// Thinking-summary mode preferred by this role.
     #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingSummary")]
     pub thinking_summary: Option<tau_proto::ThinkingSummary>,
+    /// Provider service tier preferred by this role.
     #[serde(skip_serializing_if = "Option::is_none", rename = "serviceTier")]
     pub service_tier: Option<tau_proto::ServiceTier>,
+    /// Name of the harness tools profile applied when this role is active.
     #[serde(skip_serializing_if = "Option::is_none", rename = "toolsProfile")]
     pub tools_profile: Option<String>,
 }
@@ -518,323 +498,11 @@ impl AgentRole {
     }
 }
 
-/// One LLM provider configuration.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct ProviderConfig {
-    /// Base URL for the API endpoint.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    /// API protocol: "anthropic", "openai-completions", etc.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api: Option<String>,
-    /// Authentication method: "api-key" (default when `apiKey` is set),
-    /// "openai-codex", "github-copilot", or "none". Kept as a raw
-    /// `Option<String>` so that the typed view from
-    /// [`ProviderConfig::auth_type`] can localize unknown values to the
-    /// offending provider entry rather than failing whole-file load.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth: Option<String>,
-    /// API key or environment variable name. Prefix with `!` for
-    /// shell command execution (Pi convention).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// Extra HTTP headers (key → value or env var name).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub headers: Option<HashMap<String, String>>,
-    /// Optional provider-side prompt cache retention policy.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_cache_retention: Option<PromptCacheRetention>,
-    /// Compatibility flags for non-standard providers.
-    #[serde(skip_serializing_if = "ProviderCompat::is_default")]
-    pub compat: ProviderCompat,
-    /// Models available from this provider.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<ModelConfig>,
-}
-
-/// Authentication method for a [`ProviderConfig`]. Single source of truth
-/// for the `auth` taxonomy — exhaustive `match`es against this enum should
-/// replace string comparisons against the raw `auth` field.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AuthType {
-    /// No authentication needed (local Ollama / llama.cpp).
-    None,
-    /// Direct API-key authentication.
-    ApiKey,
-    /// OpenAI Codex / ChatGPT subscription (auth-code + PKCE OAuth).
-    OpenaiCodex,
-    /// GitHub Copilot subscription (device-code OAuth).
-    GithubCopilot,
-}
-
-impl AuthType {
-    /// Wire-format string matching the `auth` field in `models.json5`.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::ApiKey => "api-key",
-            Self::OpenaiCodex => "openai-codex",
-            Self::GithubCopilot => "github-copilot",
-        }
-    }
-
-    /// Returns true if this auth type requires an OAuth login flow.
-    pub fn is_oauth(&self) -> bool {
-        matches!(self, Self::OpenaiCodex | Self::GithubCopilot)
-    }
-}
-
-impl std::fmt::Display for AuthType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl ProviderConfig {
-    /// Resolve the typed [`AuthType`] for this provider.
-    ///
-    /// `auth` takes precedence; if absent, infers `ApiKey` when an
-    /// `apiKey` is configured and `None` otherwise. Unknown `auth`
-    /// strings are returned as `Err(s)` so the caller can surface
-    /// per-provider config errors without aborting the whole file.
-    pub fn auth_type(&self) -> Result<AuthType, &str> {
-        match self.auth.as_deref() {
-            None if self.api_key.is_some() => Ok(AuthType::ApiKey),
-            None => Ok(AuthType::None),
-            Some("none") => Ok(AuthType::None),
-            Some("api-key") => Ok(AuthType::ApiKey),
-            Some("openai-codex") => Ok(AuthType::OpenaiCodex),
-            Some("github-copilot") => Ok(AuthType::GithubCopilot),
-            Some(other) => Err(other),
-        }
-    }
-
-    /// Whether Tau should treat this provider as supporting the
-    /// standalone Responses compaction endpoint.
-    ///
-    /// Explicit provider compat opt-in wins. The built-in OpenAI Codex
-    /// auth flow also implies support because it always resolves to the
-    /// ChatGPT Codex Responses endpoint.
-    #[must_use]
-    pub fn supports_remote_compaction(&self) -> bool {
-        self.compat.supports_compaction || self.auth_type().ok() == Some(AuthType::OpenaiCodex)
-    }
-}
-
-/// Compatibility flags for providers that don't support all features.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, rename_all = "camelCase")]
-pub struct ProviderCompat {
-    pub supports_developer_role: bool,
-    pub supports_reasoning_effort: bool,
-    pub supports_prefill: bool,
-    pub supports_prompt_cache_key: bool,
-    pub supports_prompt_cache_retention: bool,
-    /// llama.cpp-compatible Chat Completions extension: accepts
-    /// `cache_prompt` requests and returns `tokens_cached` /
-    /// `tokens_evaluated` response stats.
-    pub supports_llama_cpp_cache: bool,
-    /// Provider's API accepts `reasoning.summary` and streams
-    /// `response.reasoning_summary_text.*` events. Currently only
-    /// the OpenAI Responses API surface.
-    pub supports_reasoning_summary: bool,
-    /// Provider's API accepts an output-verbosity hint (`verbosity`
-    /// on Chat Completions, `text.verbosity` on the Responses API).
-    /// Currently OpenAI's GPT-5 family. Off by default so we don't
-    /// emit the field to providers that reject unknown arguments.
-    pub supports_verbosity: bool,
-    /// Provider's API accepts the `phase` field on assistant
-    /// `message` items in the Responses API input (`commentary` /
-    /// `final_answer`). Currently OpenAI Codex on `gpt-5.3-codex`
-    /// and later. Off by default — emitting the field to a provider
-    /// that rejects unknown arguments breaks the call. The Codex
-    /// Responses endpoint auto-enables this at resolver time, so
-    /// users don't need to flip it on for the built-in OAuth flow.
-    pub supports_phase: bool,
-    /// Provider's endpoint accepts `include:
-    /// ["reasoning.encrypted_content"]` on the request and fills in
-    /// the `encrypted_content` blob on each `reasoning` output item
-    /// the model emits. Off by default — emitting the opt-in to a
-    /// provider that rejects unknown arguments breaks the call. The
-    /// built-in Codex Responses endpoint auto-enables this for every
-    /// model at resolver time, so OAuth users never need to flip it
-    /// on; flip it on here for self-hosted or proxy backends that
-    /// expose the same surface.
-    ///
-    /// No per-model gate: this is a server capability, not a model
-    /// capability — models that don't emit reasoning simply omit
-    /// `encrypted_content`, and the agent skips capturing items
-    /// without the blob (so a non-reasoning model on a Codex-shaped
-    /// endpoint costs nothing). Companion to
-    /// [`Self::supports_phase`], but resolved independently because
-    /// `phase` *is* model-gated (older Codex generations reject the
-    /// field).
-    pub supports_encrypted_reasoning: bool,
-    /// Provider exposes the Responses API over a persistent
-    /// WebSocket transport instead of (or in addition to) HTTP+SSE.
-    /// When on, the agent caches per-conversation WS connections
-    /// across prompts so the connection-local `previous_response_id`
-    /// cache stays warm — the change buys ~40% on tool-heavy
-    /// turns. Off by default — custom OpenAI-compatible endpoints
-    /// generally do not implement WS mode. Auto-enabled for the
-    /// built-in OpenAI Codex endpoint at resolver time, so users
-    /// don't need to flip it on for the OAuth flow.
-    pub supports_websocket: bool,
-    /// Provider exposes a standalone Responses compaction endpoint.
-    /// When on, Tau can replace a long transcript with the provider's
-    /// opaque compacted window instead of synthesizing a local text
-    /// summary.
-    pub supports_compaction: bool,
-}
-
-impl Default for ProviderCompat {
-    fn default() -> Self {
-        Self {
-            supports_developer_role: true,
-            supports_reasoning_effort: true,
-            supports_prefill: true,
-            supports_prompt_cache_key: false,
-            supports_prompt_cache_retention: false,
-            supports_llama_cpp_cache: false,
-            supports_reasoning_summary: false,
-            supports_verbosity: false,
-            supports_phase: false,
-            supports_encrypted_reasoning: false,
-            supports_websocket: false,
-            supports_compaction: false,
-        }
-    }
-}
-
-impl ProviderCompat {
-    fn is_default(&self) -> bool {
-        self == &Self::default()
-    }
-}
-
-/// Provider-side prompt cache retention policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub enum PromptCacheRetention {
-    #[serde(rename = "in_memory")]
-    InMemory,
-    #[serde(rename = "24h")]
-    Extended24h,
-}
-
-impl PromptCacheRetention {
-    #[must_use]
-    pub const fn as_wire(self) -> &'static str {
-        match self {
-            Self::InMemory => "in_memory",
-            Self::Extended24h => "24h",
-        }
-    }
-}
-
-/// One model available from a provider.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelConfig {
-    /// Model identifier (e.g. `"claude-sonnet-4-20250514"`).
-    pub id: ModelName,
-    /// Optional display name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Max output tokens override.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u64>,
-    /// Total context window size, in tokens.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<u64>,
-    /// Whether this model accepts `reasoning_effort=xhigh`. `None`
-    /// (the default) means "fall back to the built-in whitelist for
-    /// well-known OpenAI model IDs" — see [`is_known_xhigh_model_id`].
-    /// Set explicitly in `models.json5` (`supportsXhigh: true|false`)
-    /// to override. Ignored when `reasoning_efforts` is set.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_xhigh: Option<bool>,
-    /// Full per-model override of the reasoning-effort levels this
-    /// model accepts. When set, this list replaces both the
-    /// canonical default set (`[off, minimal, low, medium, high]`)
-    /// and the `supports_xhigh` flag — use it for escape-hatch cases
-    /// where Tau's built-in detection is wrong or out of date, or
-    /// for asymmetric models like `gpt-5.4-pro` which accept only
-    /// `[medium, high, xhigh]`. The list also takes precedence over
-    /// the provider-level `supportsReasoningEffort` flag.
-    /// `None` keeps the default behaviour.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_efforts: Option<Vec<tau_proto::Effort>>,
-    /// Per-model override of the provider-level `supportsVerbosity`
-    /// flag. `None` (the default) defers to the provider flag.
-    /// Ignored when `verbosities` is set.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supports_verbosity: Option<bool>,
-    /// Full per-model override of the verbosity levels this model
-    /// accepts. When set, this list replaces both the canonical
-    /// `[low, medium, high]` set and the `supports_verbosity` /
-    /// `supportsVerbosity` flags. `None` keeps the default behaviour.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verbosities: Option<Vec<tau_proto::Verbosity>>,
-}
-
-impl ModelConfig {
-    /// Effective xhigh support: explicit `supports_xhigh` wins,
-    /// otherwise consult the built-in whitelist of known OpenAI
-    /// model IDs. Not consulted when `reasoning_efforts` is set —
-    /// that field is an authoritative override.
-    #[must_use]
-    pub fn supports_xhigh(&self) -> bool {
-        self.supports_xhigh
-            .unwrap_or_else(|| is_known_xhigh_model_id(&self.id))
-    }
-}
-
-/// Returns `true` for OpenAI model IDs known to accept
-/// `prompt_cache_retention="24h"` on the public API. Per OpenAI's
-/// prompt-caching guide, extended retention is offered only on
-/// gpt-5.5 and forward; sending the param to older models is
-/// rejected as an unknown argument, so we whitelist conservatively
-/// and let unknown models fall back to the default in-memory cache.
-#[must_use]
-pub fn is_known_24h_prompt_cache_model_id(id: &str) -> bool {
-    const PREFIXES: &[&str] = &["gpt-5.5"];
-    PREFIXES.iter().any(|p| id.starts_with(p))
-}
-
-/// Returns `true` for OpenAI model IDs known to accept
-/// `reasoning_effort=xhigh` on the public API as of 2026-05.
-///
-/// Curated from OpenAI's model documentation:
-/// - `gpt-5.5` family (excluding mini/nano)
-/// - `gpt-5.4` and `gpt-5.4-pro` (excluding mini/nano)
-/// - `gpt-5.3-codex` family
-/// - `gpt-5.2` (excluding mini/nano) — introduced xhigh
-/// - `gpt-5.1-codex-max`
-///
-/// Matches by prefix so dated/aliased variants (e.g.
-/// `gpt-5.5-2026-04-15`) pick up the same setting as their base ID.
-/// `mini` and `nano` variants are excluded — they top out at `high`.
-#[must_use]
-pub fn is_known_xhigh_model_id(id: &str) -> bool {
-    if id.contains("mini") || id.contains("nano") {
-        return false;
-    }
-    const PREFIXES: &[&str] = &[
-        "gpt-5.5",
-        "gpt-5.4",
-        "gpt-5.3-codex",
-        "gpt-5.2",
-        "gpt-5.1-codex-max",
-    ];
-    PREFIXES.iter().any(|p| id.starts_with(p))
-}
-
 // ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------
 
-/// Errors from settings/model loading.
+/// Errors from settings loading.
 #[derive(Debug)]
 pub enum SettingsError {
     Config(config::ConfigError),
@@ -898,7 +566,7 @@ pub fn sessions_dir() -> Option<PathBuf> {
 /// installations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TauDirs {
-    /// Where to look for `cli.json5`, `harness.json5`, `models.json5`, etc.
+    /// Where to look for `cli.json5`, `harness.json5`, etc.
     pub config_dir: Option<PathBuf>,
     /// Where to read/write runtime state like `harness.json5`.
     pub state_dir: Option<PathBuf>,
@@ -947,30 +615,14 @@ pub fn load_harness_settings_in(dirs: &TauDirs) -> Result<HarnessSettings, Setti
         dirs.config_dir.as_deref(),
         "harness",
     )?;
+    merge_default_agent_roles(&mut settings.roles);
     merge_default_tools_profiles(&mut settings.tools_profiles);
     Ok(settings)
 }
 
-/// Loads the model registry from `models.json5` with `models.d/*.json5`
-/// overrides.
-pub fn load_models() -> Result<ModelRegistry, SettingsError> {
-    load_models_in(&TauDirs::default())
-}
-
-/// Like [`load_models`] but reads from an explicit directory layout.
-pub fn load_models_in(dirs: &TauDirs) -> Result<ModelRegistry, SettingsError> {
-    let Some(ref dir) = dirs.config_dir else {
-        return Ok(ModelRegistry::default());
-    };
-    let mut registry: ModelRegistry = load_json5_layered(dir, "models")?;
-    merge_default_agent_roles(&mut registry.default_roles);
-    Ok(registry)
-}
-
-/// Like [`load_json5_layered`] but also stacks an embedded built-in
-/// json5 string underneath the user's files. `T` therefore doesn't
-/// need a `Default` impl — the built-in layer always supplies every
-/// required field.
+/// Stacks an embedded built-in JSON5 string underneath the user's files.
+/// `T` therefore doesn't need a `Default` impl — the built-in layer always
+/// supplies every required field.
 fn load_json5_layered_with_builtin<T: for<'de> Deserialize<'de>>(
     built_in_text: &'static str,
     dir: Option<&Path>,
@@ -1013,149 +665,6 @@ fn load_json5_layered_with_builtin<T: for<'de> Deserialize<'de>>(
         .build()?
         .try_deserialize()
         .map_err(SettingsError::from)
-}
-
-/// Generic layered JSON5 loader: reads `{name}.json5` then all
-/// `{name}.d/*.json5` files sorted alphabetically, merging each
-/// layer on top.
-fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
-    dir: &Path,
-    name: &str,
-) -> Result<T, SettingsError> {
-    let base_path = dir.join(format!("{name}.json5"));
-    let drop_dir = dir.join(format!("{name}.d"));
-
-    let mut builder = config::Config::builder();
-    let mut any_source = false;
-
-    // Base file is optional, but parse errors must surface.
-    // We guard on exists() and use required(true) so a missing file
-    // is fine but a malformed one is an error.
-    if base_path.exists() {
-        builder = builder.add_source(
-            config::File::from(base_path)
-                .format(config::FileFormat::Json5)
-                .required(true),
-        );
-        any_source = true;
-    }
-
-    // Drop-in files: same — optional to have, but must parse.
-    if drop_dir.is_dir() {
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(&drop_dir)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "json5"))
-            .collect();
-        paths.sort();
-        for path in paths {
-            builder = builder.add_source(
-                config::File::from(path)
-                    .format(config::FileFormat::Json5)
-                    .required(true),
-            );
-            any_source = true;
-        }
-    }
-
-    if !any_source {
-        return Ok(T::default());
-    }
-
-    let config = builder.build()?;
-    config.try_deserialize().map_err(SettingsError::from)
-}
-
-// ---------------------------------------------------------------------------
-// Typed writes against `models.json5`
-// ---------------------------------------------------------------------------
-
-/// Add or update a provider entry in `~/.config/tau/models.json5`.
-///
-/// Reads the existing file (preserving unknown top-level keys and other
-/// provider entries), inserts or replaces `providers[name]` with the
-/// serialized `provider`, and writes atomically. Comments and trailing
-/// commas in the source file are NOT preserved across the round-trip;
-/// the caller is responsible for warning the user.
-///
-/// Returns the path of the file that was written.
-pub fn add_provider(name: &ProviderName, provider: &ProviderConfig) -> std::io::Result<PathBuf> {
-    add_provider_in(&TauDirs::default(), name, provider)
-}
-
-/// Like [`add_provider`] but writes against an explicit directory layout.
-pub fn add_provider_in(
-    dirs: &TauDirs,
-    name: &ProviderName,
-    provider: &ProviderConfig,
-) -> std::io::Result<PathBuf> {
-    let dir = dirs.config_dir.as_ref().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no config directory available",
-        )
-    })?;
-    let path = dir.join("models.json5");
-    let mut root = read_models_root(&path)?;
-    let entry = serde_json::to_value(provider).map_err(invalid_data)?;
-
-    root.as_object_mut()
-        .ok_or_else(|| invalid_data("models.json5 root is not an object"))?
-        .entry("providers")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| invalid_data("providers is not an object"))?
-        .insert(name.as_str().to_owned(), entry);
-
-    let json = serde_json::to_string_pretty(&root).map_err(invalid_data)?;
-    crate::atomic::atomic_write_following_symlink(&path, json.as_bytes(), None)?;
-    Ok(path)
-}
-
-/// Remove a provider entry from `~/.config/tau/models.json5`.
-///
-/// Returns `Ok(true)` if the provider was present and removed, `Ok(false)`
-/// if the file or the named entry does not exist.
-pub fn remove_provider(name: &ProviderName) -> std::io::Result<bool> {
-    remove_provider_in(&TauDirs::default(), name)
-}
-
-/// Like [`remove_provider`] but operates against an explicit directory layout.
-pub fn remove_provider_in(dirs: &TauDirs, name: &ProviderName) -> std::io::Result<bool> {
-    let dir = dirs.config_dir.as_ref().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no config directory available",
-        )
-    })?;
-    let path = dir.join("models.json5");
-    if !path.exists() {
-        return Ok(false);
-    }
-    let mut root = read_models_root(&path)?;
-    let removed = root
-        .as_object_mut()
-        .and_then(|o| o.get_mut("providers"))
-        .and_then(|p| p.as_object_mut())
-        .is_some_and(|providers| providers.remove(name.as_str()).is_some());
-    if removed {
-        let json = serde_json::to_string_pretty(&root).map_err(invalid_data)?;
-        crate::atomic::atomic_write_following_symlink(&path, json.as_bytes(), None)?;
-    }
-    Ok(removed)
-}
-
-fn read_models_root(path: &Path) -> std::io::Result<serde_json::Value> {
-    if !path.exists() {
-        return Ok(serde_json::json!({ "providers": {} }));
-    }
-    let text = std::fs::read_to_string(path)?;
-    json5::from_str(&text).map_err(invalid_data)
-}
-
-fn invalid_data<E: std::fmt::Display>(error: E) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
 }
 
 #[cfg(test)]

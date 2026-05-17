@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 tau-cli.workspace = true
 tau-ext-core-delegate.workspace = true
+tau-ext-provider-openai.workspace = true
 tau-ext-shell.workspace = true
 tau-ext-std-notifications.workspace = true
 tau-ext-test-dummy.workspace = true

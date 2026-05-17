@@ -44,6 +44,114 @@ fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
     send_frame(writer, &Frame::Event(event.clone()))
 }
 
+fn current_role_name(
+    current_role_state: &Arc<Mutex<Option<String>>>,
+    print_local: &impl Fn(&str),
+) -> Option<String> {
+    match current_role_state.lock().ok().and_then(|role| role.clone()) {
+        Some(role) => Some(role),
+        None => {
+            print_local("no selected role yet");
+            None
+        }
+    }
+}
+
+fn send_current_role_update(
+    writer: &WriterHandle,
+    current_role_state: &Arc<Mutex<Option<String>>>,
+    action: tau_proto::UiRoleUpdateAction,
+    print_local: &impl Fn(&str),
+) {
+    let Some(role) = current_role_name(current_role_state, print_local) else {
+        return;
+    };
+    let _ = send_event(
+        writer,
+        &Event::UiRoleUpdate(tau_proto::UiRoleUpdate { role, action }),
+    );
+}
+
+fn is_reset_value(value: &str) -> bool {
+    value == "reset"
+}
+
+fn parse_service_tier_update(value: &str) -> Result<Option<tau_proto::ServiceTier>, String> {
+    match value {
+        "fast" => Ok(Some(tau_proto::ServiceTier::Fast)),
+        "flex" => Ok(Some(tau_proto::ServiceTier::Flex)),
+        "reset" => Ok(None),
+        other => Err(format!(
+            "unknown service tier `{other}`; expected fast/flex/reset"
+        )),
+    }
+}
+
+/// Parse one `/role <role> <setting> <value>` update into the typed protocol
+/// mutation shared by interactive chat and headless `tau send`.
+pub(crate) fn parse_role_setting_update(
+    setting: &str,
+    value: &str,
+) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    match setting {
+        "model" => Ok(tau_proto::UiRoleUpdateAction::SetModel {
+            model: if is_reset_value(value) {
+                None
+            } else {
+                Some(
+                    value
+                        .parse::<tau_proto::ModelId>()
+                        .map_err(|err| err.to_string())?,
+                )
+            },
+        }),
+        "effort" => Ok(tau_proto::UiRoleUpdateAction::SetEffort {
+            effort: if is_reset_value(value) {
+                None
+            } else {
+                Some(
+                    value
+                        .parse::<tau_proto::Effort>()
+                        .map_err(|err| err.to_string())?,
+                )
+            },
+        }),
+        "verbosity" => Ok(tau_proto::UiRoleUpdateAction::SetVerbosity {
+            verbosity: if is_reset_value(value) {
+                None
+            } else {
+                Some(
+                    value
+                        .parse::<tau_proto::Verbosity>()
+                        .map_err(|err| err.to_string())?,
+                )
+            },
+        }),
+        "thinking-summary" => Ok(tau_proto::UiRoleUpdateAction::SetThinkingSummary {
+            thinking_summary: if is_reset_value(value) {
+                None
+            } else {
+                Some(
+                    value
+                        .parse::<tau_proto::ThinkingSummary>()
+                        .map_err(|err| err.to_string())?,
+                )
+            },
+        }),
+        "service-tier" => Ok(tau_proto::UiRoleUpdateAction::SetServiceTier {
+            service_tier: parse_service_tier_update(value)?,
+        }),
+        "tools-profile" => Ok(tau_proto::UiRoleUpdateAction::SetToolsProfile {
+            tools_profile: if is_reset_value(value) {
+                None
+            } else {
+                Some(value.to_owned())
+            },
+        }),
+        _ => Err("unknown setting".to_owned()),
+    }
+}
+
 /// Debounce period for `UiPromptDraft` emission while the user is
 /// typing. Kept generous on purpose: the only consumer today
 /// (std-notifications) only cares about second-or-better resolution
@@ -213,7 +321,7 @@ pub(crate) fn run_chat(
             selectors: vec![
                 EventSelector::Prefix("ui.".to_owned()),
                 EventSelector::Prefix("session.".to_owned()),
-                EventSelector::Prefix("agent.".to_owned()),
+                EventSelector::Prefix("provider.".to_owned()),
                 EventSelector::Prefix("tool.".to_owned()),
                 EventSelector::Prefix("extension.".to_owned()),
                 EventSelector::Prefix("harness.".to_owned()),
@@ -644,19 +752,21 @@ fn terminal_input_loop(
                     continue;
                 }
                 if let Some(arg) = text.strip_prefix("/effort ") {
-                    match arg.trim().parse::<tau_proto::Effort>() {
-                        Ok(level) => {
-                            let _ = send_event(
-                                writer,
-                                &Event::UiSetEffort(tau_proto::UiSetEffort { level }),
-                            );
-                        }
+                    match parse_role_setting_update("effort", arg.trim()) {
+                        Ok(action) => send_current_role_update(
+                            writer,
+                            &ctx.current_role_state,
+                            action,
+                            &print_local,
+                        ),
                         Err(msg) => print_local(&format!("/effort: {msg}")),
                     }
                     continue;
                 }
                 if text == "/effort" {
-                    print_local("/effort <level> — one of: off, minimal, low, medium, high, xhigh");
+                    print_local(
+                        "/effort <level> — one of: reset, off, minimal, low, medium, high, xhigh",
+                    );
                     continue;
                 }
                 if text == "/fast" {
@@ -668,9 +778,11 @@ fn terminal_input_loop(
                     } else {
                         Some(tau_proto::ServiceTier::Fast)
                     };
-                    let _ = send_event(
+                    send_current_role_update(
                         writer,
-                        &Event::UiSetServiceTier(tau_proto::UiSetServiceTier { service_tier }),
+                        &ctx.current_role_state,
+                        tau_proto::UiRoleUpdateAction::SetServiceTier { service_tier },
+                        &print_local,
                     );
                     continue;
                 }
@@ -679,37 +791,37 @@ fn terminal_input_loop(
                     continue;
                 }
                 if let Some(arg) = text.strip_prefix("/verbosity ") {
-                    match arg.trim().parse::<tau_proto::Verbosity>() {
-                        Ok(level) => {
-                            let _ = send_event(
-                                writer,
-                                &Event::UiSetVerbosity(tau_proto::UiSetVerbosity { level }),
-                            );
-                        }
+                    match parse_role_setting_update("verbosity", arg.trim()) {
+                        Ok(action) => send_current_role_update(
+                            writer,
+                            &ctx.current_role_state,
+                            action,
+                            &print_local,
+                        ),
                         Err(error) => print_local(&format!("/verbosity: {error}")),
                     }
                     continue;
                 }
                 if text == "/verbosity" {
-                    print_local("/verbosity <level> — one of: low, medium, high");
+                    print_local("/verbosity <level> — one of: reset, low, medium, high");
                     continue;
                 }
                 if let Some(arg) = text.strip_prefix("/thinking-summary ") {
-                    match arg.trim().parse::<tau_proto::ThinkingSummary>() {
-                        Ok(level) => {
-                            let _ = send_event(
-                                writer,
-                                &Event::UiSetThinkingSummary(tau_proto::UiSetThinkingSummary {
-                                    level,
-                                }),
-                            );
-                        }
+                    match parse_role_setting_update("thinking-summary", arg.trim()) {
+                        Ok(action) => send_current_role_update(
+                            writer,
+                            &ctx.current_role_state,
+                            action,
+                            &print_local,
+                        ),
                         Err(error) => print_local(&format!("/thinking-summary: {error}")),
                     }
                     continue;
                 }
                 if text == "/thinking-summary" {
-                    print_local("/thinking-summary <mode> — one of: off, auto, concise, detailed");
+                    print_local(
+                        "/thinking-summary <mode> — one of: reset, off, auto, concise, detailed",
+                    );
                     continue;
                 }
                 if let Some(provider) = text.strip_prefix("/provider-auth ") {
@@ -829,9 +941,11 @@ fn terminal_input_loop(
                 } else {
                     Some(tau_proto::ServiceTier::Fast)
                 };
-                let _ = send_event(
+                send_current_role_update(
                     writer,
-                    &Event::UiSetServiceTier(tau_proto::UiSetServiceTier { service_tier }),
+                    &ctx.current_role_state,
+                    tau_proto::UiRoleUpdateAction::SetServiceTier { service_tier },
+                    &print_local,
                 );
             }
             TermEvent::RoleCycle => {
@@ -866,8 +980,8 @@ fn terminal_input_loop(
                 // with `HarnessEffortChanged`, advance through the
                 // currently-allowed set (mirrored from
                 // `HarnessEffortsAvailable`), send the request. The
-                // harness echoes back and the renderer updates the
-                // status block. Skipping unavailable levels avoids
+                // role update echoes back as harness state and the renderer
+                // updates the status block. Skipping unavailable levels avoids
                 // a stuck cycle when the model lacks `xhigh`.
                 let current = tau_proto::Effort::from_u8(
                     ctx.effort_state.load(std::sync::atomic::Ordering::Relaxed),
@@ -887,9 +1001,11 @@ fn terminal_input_loop(
                 if next == current {
                     continue;
                 }
-                let _ = send_event(
+                send_current_role_update(
                     writer,
-                    &Event::UiSetEffort(tau_proto::UiSetEffort { level: next }),
+                    &ctx.current_role_state,
+                    tau_proto::UiRoleUpdateAction::SetEffort { effort: Some(next) },
+                    &print_local,
                 );
             }
         }
@@ -1064,26 +1180,18 @@ fn handle_role_command(text: &str, writer: &WriterHandle, print_local: &impl Fn(
         print_local("/role: too many arguments");
         return;
     }
-    let allowed = [
-        "model",
-        "effort",
-        "verbosity",
-        "thinking-summary",
-        "service-tier",
-        "tools-profile",
-    ];
-    if !allowed.contains(&command) {
-        print_local("/role: unknown setting");
-        return;
-    }
+    let action = match parse_role_setting_update(command, value) {
+        Ok(action) => action,
+        Err(error) => {
+            print_local(&format!("/role: {error}"));
+            return;
+        }
+    };
     let _ = send_event(
         writer,
         &Event::UiRoleUpdate(tau_proto::UiRoleUpdate {
             role: role.to_owned(),
-            action: tau_proto::UiRoleUpdateAction::Set {
-                setting: command.to_owned(),
-                value: value.to_owned(),
-            },
+            action,
         }),
     );
 }

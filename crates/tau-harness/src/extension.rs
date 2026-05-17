@@ -59,6 +59,7 @@ pub(crate) struct ExtensionEntry {
     pub(crate) last_acked: tau_proto::LogEventId,
 }
 
+#[cfg_attr(not(any(test, feature = "echo-agent")), allow(dead_code))]
 pub(crate) fn spawn_in_process<F>(
     name: &str,
     kind: ClientKind,

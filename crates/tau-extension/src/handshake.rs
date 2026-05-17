@@ -2,12 +2,12 @@
 //!
 //! Every extension process opens its session with the same prelude:
 //! `Hello` → optional `Subscribe` → optional `Intercept` → zero or
-//! more `ToolRegister` events → `Ready`, then flushes. The exact mix
-//! varies (some extensions register no tools, some intercept, some
-//! subscribe to several events) but the order and the surrounding
-//! frame-shaping is fixed. Copy-pasting that sequence into every
-//! crate is mechanical and drifts out of sync; this helper writes it
-//! once and lets each extension declare only what differs.
+//! more startup `Event`s → `Ready`, then flushes. The exact mix varies
+//! (some extensions register tools, some intercept, some subscribe to
+//! several events, some announce model state) but the order and the
+//! surrounding frame-shaping is fixed. Copy-pasting that sequence into
+//! every crate is mechanical and drifts out of sync; this helper writes
+//! it once and lets each extension declare only what differs.
 //!
 //! ```ignore
 //! tau_extension::Handshake::tool("tau-ext-core-delegate")
@@ -39,6 +39,7 @@ pub struct Handshake {
     selectors: Vec<EventSelector>,
     intercepts: Vec<Intercept>,
     tools: Vec<ToolSpec>,
+    events: Vec<Event>,
     ready_message: Option<String>,
 }
 
@@ -58,6 +59,7 @@ impl Handshake {
             selectors: Vec::new(),
             intercepts: Vec::new(),
             tools: Vec::new(),
+            events: Vec::new(),
             ready_message: None,
         }
     }
@@ -98,6 +100,23 @@ impl Handshake {
         self
     }
 
+    /// Announce one startup event before the terminal `Ready` frame.
+    ///
+    /// Use this for extension-owned state that the harness should see during
+    /// startup, such as `provider.models_updated`. Tool registrations should
+    /// continue to use [`Handshake::register_tool`] so their intent stays
+    /// clear.
+    pub fn announce_event(mut self, event: Event) -> Self {
+        self.events.push(event);
+        self
+    }
+
+    /// Announce multiple startup events before the terminal `Ready` frame.
+    pub fn announce_events(mut self, events: impl IntoIterator<Item = Event>) -> Self {
+        self.events.extend(events);
+        self
+    }
+
     /// Attach a human-readable message to the terminal `Ready` frame.
     pub fn ready_message(mut self, message: impl Into<String>) -> Self {
         self.ready_message = Some(message.into());
@@ -105,7 +124,7 @@ impl Handshake {
     }
 
     /// Write the full sequence (`Hello`, optional `Subscribe`,
-    /// `Intercept`s, `ToolRegister`s, `Ready`) and flush. Subscribe
+    /// `Intercept`s, startup `Event`s, `Ready`) and flush. Subscribe
     /// is omitted when no selectors have been added — sending an
     /// empty subscription would still be valid but adds noise on the
     /// wire.
@@ -125,6 +144,9 @@ impl Handshake {
         }
         for tool in self.tools {
             writer.write_frame(&Frame::Event(Event::ToolRegister(ToolRegister { tool })))?;
+        }
+        for event in self.events {
+            writer.write_frame(&Frame::Event(event))?;
         }
         writer.write_frame(&Frame::Message(Message::Ready(Ready {
             message: self.ready_message,

@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use tau_config::settings::TauDirs;
 use tau_core::{PolicyStore, SessionStore};
 use tau_harness::{
-    EmbeddedOptions, HarnessError, ServeOptions, run_daemon_with_echo,
-    run_embedded_message_with_options, send_daemon_message,
+    HarnessError, ServeOptions, run_daemon_with_echo, run_embedded_message_with_echo,
+    send_daemon_message,
 };
 use tau_session_inspect::{InspectError, open_policy_store, open_session_store};
 use tempfile::TempDir;
@@ -29,21 +29,15 @@ pub struct TestRuntime {
 impl TestRuntime {
     /// Creates isolated temporary paths for one test runtime.
     ///
-    /// Seeds the isolated config dir with a minimal `models.json5` so the
-    /// harness picks a non-empty `selected_model` and dispatches prompts
-    /// immediately. The agent can't resolve this fake provider, so it replies
-    /// with a short "cannot resolve model config" message — which is exactly
-    /// what tests asserting "response is non-empty" want.
+    /// The echo harness bypasses provider-owned model publication and answers
+    /// through the in-process echo tool, which is enough for tests asserting
+    /// "response is non-empty".
     pub fn new() -> Result<Self, std::io::Error> {
         let tempdir = TempDir::new()?;
         let config_dir = tempdir.path().join("config");
         let state_dir = tempdir.path().join("state");
         std::fs::create_dir_all(&config_dir)?;
         std::fs::create_dir_all(&state_dir)?;
-        std::fs::write(
-            config_dir.join("models.json5"),
-            r#"{ providers: { "test": { auth: "none", models: [{ id: "echo" }] } } }"#,
-        )?;
         Ok(Self {
             socket_path: tempdir.path().join("daemon.sock"),
             state_dir: state_dir.clone(),
@@ -57,13 +51,7 @@ impl TestRuntime {
 
     /// Runs one embedded interaction and returns the agent response.
     pub fn run_embedded(&self, session_id: &str, message: &str) -> Result<String, HarnessError> {
-        Ok(run_embedded_message_with_options(
-            &self.state_dir,
-            session_id,
-            message,
-            EmbeddedOptions::builder().dirs(self.dirs.clone()).build(),
-        )?
-        .response)
+        Ok(run_embedded_message_with_echo(&self.state_dir, session_id, message)?.response)
     }
 
     /// Starts a foreground daemon in a background thread, eager-initing

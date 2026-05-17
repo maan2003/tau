@@ -1,9 +1,6 @@
-// Built-in HarnessSettings defaults. Read once into a private mirror
-// struct by `HarnessSettings::default()` to avoid `#[serde(default)]`
-// recursion on the public type.
+// Built-in HarnessSettings defaults. Harness-owned roles and tool profiles are
+// merged in code so user partial overrides keep the built-in names.
 {
-    default_model: null,
-    default_params: {},
     session_retention_days: 60,
     extensions: {},
 }

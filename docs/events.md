@@ -21,20 +21,20 @@ for control of the emit/intercept pipeline.
 - **`harness.info`** — A free-form informational message from the
   harness for the user, with a severity (`normal` / `important`). Used
   for things like `/tree` rendering and ad-hoc notices.
-- **`harness.models_available`** — The full list of configured models
-  as `provider/model_id` strings. Re-emitted when configuration changes.
-- **`harness.model_selected`** — Which model is currently selected, plus
-  its context-window size if known.
+- **`harness.models_available`** — The full provider-published model list
+  as `provider/model_id` strings. Re-emitted when provider snapshots change.
+- **`harness.role_selected`** — Which role is currently selected, plus
+  the model it resolves to and that model's context-window size if known.
 - **`harness.context_usage_changed`** — Updated input/cached token counts
-  and percent-of-context-window for the selected model, after each agent
-  response that reports usage.
+  and percent-of-context-window for the selected role's resolved model,
+  after each agent response that reports usage.
 - **`harness.effort_changed`** — The current reasoning-effort level
   (`off` / `minimal` / `low` / `medium` / `high` / `xhigh`).
 - **`harness.service_tier_changed`** — The current service tier (`fast`,
   `flex`, or absent to use provider default).
 - **`harness.efforts_available`** — Which effort levels are valid for the
-  currently selected model. Empty when no model is selected or the
-  provider doesn't support reasoning.
+  selected role's resolved model. Empty when the selected role has no
+  resolved model or the provider doesn't support reasoning.
 
 ## Session (harness session tracker)
 
@@ -59,7 +59,7 @@ tree and the prompt lifecycle.
   assigned it an id; payload carries `system_prompt`, assembled
   `context_items`, available tools, model, effort,
   thinking-summary setting, and originator. This is the input handed
-  to the agent. `context_items` is fully materialized history for the
+  to the selected provider. `context_items` is fully materialized history for the
   turn. This event is transient operational delivery state, not durable
   transcript truth. `tools_ref`, when present, means
   `tools` is empty; copy full tool definitions from the referenced
@@ -69,16 +69,16 @@ tree and the prompt lifecycle.
   inserted by the harness (e.g. `!`-shell command output, AGENTS.md
   preamble). Folds into the session tree like a real user prompt.
 
-## Agent
+## Provider execution
 
-Emitted by the agent backend (tau-agent, or any drop-in replacement).
+Emitted by the provider backend that owns the selected model.
 
-- **`agent.prompt_submitted`** — The agent accepted a `session.prompt_created`
+- **`provider.prompt_submitted`** — The provider accepted a `session.prompt_created`
   and started processing it. Echoes the originator. Transient.
-- **`agent.response_updated`** — Streaming update with the full text so
+- **`provider.response_updated`** — Streaming update with the full text so
   far (replace, not delta) and accumulated reasoning summary if any.
   Transient by default.
-- **`agent.response_finished`** — Final assistant output in original
+- **`provider.response_finished`** — Final assistant output in original
   item order via `output_items`, plus optional usage, provider
   response id, backend metadata, and echoed originator. Routed by the
   harness based on the originator.
@@ -93,7 +93,7 @@ the agent requests calls, and the harness orchestrates dispatch.
   side-effect class).
 - **`tool.unregister`** *(extension)* — A previously registered tool is
   withdrawn.
-- **`tool.request`** *(agent)* — The agent asks for a tool call by id,
+- **`tool.request`** *(provider)* — The provider asks for a tool call by id,
   model-produced name, and CBOR arguments. Goes through the harness's
   dispatch queue. Operational only; transient rather than durable
   transcript truth.
@@ -173,9 +173,13 @@ intent.
 - **`ui.prompt_draft`** — Trailing-edge debounced (≤1/s) snapshot of the
   current draft buffer. Transient — used for "user is alive" signals
   (e.g. notification idle reset), not persisted.
-- **`ui.model_select`** — User requests a model switch.
-- **`ui.set_effort`** — User requests a reasoning-effort change.
-- **`ui.set_service_tier`** — User requests a service-tier change (`fast` for Fast mode, or `null` to clear it).
+- **`ui.role_select`** — User requests a role switch. The harness resolves
+  the role to a provider-published model at runtime.
+- **`ui.role_update`** — User changes or deletes a role. Updates are typed
+  field mutations (`model`, `effort`, `verbosity`, `thinking-summary`,
+  `service-tier`, `tools-profile`) and are persisted as runtime role
+  overrides; omitted/null fields clear the role value back to
+  model/provider fallback behavior.
 - **`ui.detach_request`** — UI is detaching but wants the daemon to keep
   running so a later `tau --attach` can reconnect.
 - **`ui.shell_command`** — User submitted a `!` (in-context) or `!!`

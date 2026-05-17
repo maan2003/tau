@@ -105,8 +105,8 @@ pub enum Command {
     /// harness to spawn extensions from the unified binary).
     #[command(hide = true, alias = "component")]
     Ext {
-        /// Extension name (agent, ext-shell, ext-test-dummy,
-        /// ext-std-notifications, harness)
+        /// Extension name (harness, ext-provider-openai, ext-shell,
+        /// ext-test-dummy, ext-std-notifications)
         name: String,
     },
 }

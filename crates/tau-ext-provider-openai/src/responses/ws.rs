@@ -1,6 +1,6 @@
 //! Persistent-WebSocket transport for the Codex Responses API.
 //!
-//! The agent owns a small pool of these connections, keyed by
+//! The provider owns a small pool of these connections, keyed by
 //! `(base_url, account_id, session_id)`, so the connection-local
 //! `previous_response_id` cache stays warm across turns of the same
 //! conversation. The pool itself lives in [`super::pool`]; this
@@ -26,7 +26,7 @@
 //! (default 25 s; the live Codex server reaps with a 1011
 //! "keepalive ping timeout" close when no client pong has been seen
 //! recently). The sync [`WsConn`] type holds the channel handles —
-//! `run_turn` is sync, owned by the agent's main loop, and just
+//! `run_turn` is sync, owned by the provider's main loop, and just
 //! marshals envelopes to the writer task and pulls events back from
 //! the reader.
 
@@ -102,7 +102,7 @@ enum InboundEvent {
 }
 
 /// One live WS connection to a Responses endpoint, as seen from the
-/// agent's sync main loop.
+/// provider's sync main loop.
 ///
 /// The actual socket and `tungstenite` state machine live in two
 /// tokio tasks (reader + writer) spawned at [`Self::connect`] time.
@@ -220,7 +220,7 @@ impl WsConn {
     ///
     /// Mid-stream WS close or IO error surfaces as a retryable
     /// `LlmError` (code 0, body prefixed with `"stream error:"`) so
-    /// the agent's outer retry loop reopens on the next attempt.
+    /// the provider's outer retry loop reopens on the next attempt.
     pub fn run_turn(
         &mut self,
         config: &ResponsesConfig,

@@ -154,8 +154,8 @@ pub fn resolve_extensions(
                     // Setting `command` replaces the built-in's full argv tail.
                     // `suffix` is cleared so users overriding only `command`
                     // don't accidentally inherit the built-in's subcommand
-                    // tokens (e.g. `["ext", "agent"]`). Users who want to
-                    // keep them must set `suffix` explicitly below.
+                    // tokens (e.g. `["ext", "ext-provider-openai"]`). Users
+                    // who want to keep them must set `suffix` explicitly below.
                     existing.suffix = Vec::new();
                 }
                 if let Some(suffix) = user.suffix.as_ref() {
@@ -263,31 +263,12 @@ pub(crate) fn load_harness_settings_or_warn(
     }
 }
 
-/// Load `models.json5`, falling back to an empty registry on parse
-/// error and writing a warning to stderr. Returns the parse error too
-/// so the harness can surface it in the UI alongside the stderr line
-/// (which is hidden once the TUI takes over).
-pub(crate) fn load_models_or_warn(
-    dirs: &tau_config::settings::TauDirs,
-) -> (
-    tau_config::settings::ModelRegistry,
-    Option<tau_config::settings::SettingsError>,
-) {
-    match tau_config::settings::load_models_in(dirs) {
-        Ok(registry) => (registry, None),
-        Err(error) => {
-            eprintln!("tau: models.json5 failed to parse — ignored.\n{error}");
-            (tau_config::settings::ModelRegistry::default(), Some(error))
-        }
-    }
-}
-
 /// The set of extensions the harness ships with by default.
 ///
 /// Each entry's `command` is `[<current-exe>]` and `suffix` is
 /// `["ext", <name>]`, so a fresh `tau` install with no
-/// `harness.json5` runs the in-binary core-agent and core-shell
-/// extensions out of the box. Users can override individual fields
+/// `harness.json5` runs the in-binary provider and tool extensions out
+/// of the box. Users can override individual fields
 /// (or set `enable: false`) per entry in `harness.json5` under
 /// `extensions: { name: { … } }`.
 ///
@@ -376,7 +357,7 @@ pub(crate) fn resolve_config(
     _explicit_path: Option<&std::path::Path>,
 ) -> Result<Config, Box<dyn std::error::Error>> {
     // Extensions live in `harness.json5` under `extensions: { ... }`.
-    // We start from the built-in core-agent + tools defaults and apply the
+    // We start from the built-in provider + tools defaults and apply the
     // user's overrides on top; a malformed harness.json5 falls back
     // to defaults rather than failing the whole startup, but we warn
     // on stderr so the user can see why their config is being

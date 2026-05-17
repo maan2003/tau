@@ -1,7 +1,25 @@
 {
-  // Model choice and model behavior defaults live in `models.json5` under
-  // `roles`. Use `/model <role>` to switch and `/role ...` to edit
-  // persisted role overrides.
+  // Provider extensions publish the live model list and model metadata at
+  // runtime. Harness config owns role defaults and extension settings.
+  // Use `/model <role>` to switch and `/role ...` to edit persisted role
+  // overrides.
+
+  // Optional role defaults. Built-in roles are merged underneath this map:
+  // smart = neutral defaults, deep = xhigh/detailed, rush = low/off.
+  // roles: {
+  //   smart: {
+  //     // model: "chatgpt/gpt-5.5",
+  //     // toolsProfile: "read_only",
+  //   },
+  //   deep: {
+  //     // effort: "xhigh",
+  //     // thinkingSummary: "detailed",
+  //   },
+  //   rush: {
+  //     // effort: "low",
+  //     // thinkingSummary: "off",
+  //   },
+  // },
 
   // Optional named per-role tool overlays. Each entry maps tool name to
   // enabled/disabled and overrides that tool's `enabled_by_default` hint.
@@ -26,7 +44,7 @@
   // Optional built-in extension overrides.
   // extensions: {
   //   "core-shell": { enable: false },
-  //   "core-agent": { enable: false },
+  //   "provider-openai": { enable: false },
   //   "test-dummy": { enable: true },
   // },
 }

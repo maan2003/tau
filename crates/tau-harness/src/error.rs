@@ -22,7 +22,6 @@ pub enum HarnessError {
     ResponseTimeout,
     ThreadJoin(String),
     Participant(String),
-    NoAgentConfigured,
 }
 
 impl fmt::Display for HarnessError {
@@ -39,9 +38,6 @@ impl fmt::Display for HarnessError {
             Self::ResponseTimeout => f.write_str("timed out waiting for agent response"),
             Self::ThreadJoin(name) => write!(f, "failed to join {name} thread cleanly"),
             Self::Participant(message) => write!(f, "participant error: {message}"),
-            Self::NoAgentConfigured => {
-                f.write_str("no extension with role \"agent\" in configuration")
-            }
         }
     }
 }

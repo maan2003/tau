@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(lines.len(), 1);
         let line = &lines[0];
         assert_eq!(line["type"], "published");
-        assert_eq!(line["event_name"], "agent.response_finished");
+        assert_eq!(line["event_name"], "provider.response_finished");
         assert_eq!(line["source"], "conn-1");
         let usage = &line["event"]["payload"]["usage"];
         assert_eq!(usage["prompt_sent_tokens"], 1000);

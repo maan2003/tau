@@ -184,6 +184,17 @@ fn representative_events() -> Vec<Event> {
             session_id: Some("s1".into()),
             payload: CborValue::Text("working".to_owned()),
         }),
+        Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![ProviderModelInfo {
+                id: "openai/gpt-4.1".parse().expect("model id"),
+                display_name: Some("GPT-4.1".to_owned()),
+                context_window: 128_000,
+                efforts: vec![Effort::Off, Effort::Low, Effort::Medium, Effort::High],
+                verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
+                thinking_summaries: vec![ThinkingSummary::Off],
+                supports_compaction: false,
+            }],
+        }),
         Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
             level: Verbosity::Low,
         }),
@@ -201,11 +212,17 @@ fn representative_events() -> Vec<Event> {
                 ThinkingSummary::Detailed,
             ],
         }),
-        Event::UiSetVerbosity(UiSetVerbosity {
-            level: Verbosity::High,
+        Event::UiRoleUpdate(UiRoleUpdate {
+            role: "smart".to_owned(),
+            action: UiRoleUpdateAction::SetVerbosity {
+                verbosity: Some(Verbosity::High),
+            },
         }),
-        Event::UiSetThinkingSummary(UiSetThinkingSummary {
-            level: ThinkingSummary::Auto,
+        Event::UiRoleUpdate(UiRoleUpdate {
+            role: "smart".to_owned(),
+            action: UiRoleUpdateAction::SetThinkingSummary {
+                thinking_summary: Some(ThinkingSummary::Auto),
+            },
         }),
     ]
 }
@@ -345,6 +362,78 @@ fn event_wire_form_uses_dotted_event_tag() {
     let json = serde_json::to_value(&event).expect("serialize");
     assert_eq!(json["event"], "tool.invoke");
     assert!(json.get("payload").is_some());
+}
+
+#[test]
+fn provider_models_updated_name_matches_wire_family() {
+    // `provider.models_updated` is routed by event name, so `Event::name()` must
+    // match the serde tag exactly. A past implementation accidentally reported
+    // this as `extension.provider_models_updated`, which made prefix selectors
+    // and debug output disagree with the wire protocol.
+    let event = Event::ProviderModelsUpdated(ProviderModelsUpdated { models: Vec::new() });
+
+    assert_eq!(event.name().to_string(), "provider.models_updated");
+    let json = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(json["event"], "provider.models_updated");
+}
+
+#[test]
+fn execution_events_use_provider_wire_family() {
+    // Provider extensions own execution in the new architecture. Keep the old
+    // payload structs during the transition, but hard-switch the public event
+    // names so subscribers stop depending on the legacy `agent.*` family.
+    let cases = [
+        (
+            Event::AgentPromptSubmitted(AgentPromptSubmitted {
+                session_prompt_id: "sp-1".into(),
+                originator: PromptOriginator::User,
+            }),
+            "provider.prompt_submitted",
+        ),
+        (
+            Event::AgentResponseUpdated(AgentResponseUpdated {
+                session_prompt_id: "sp-1".into(),
+                text: "hello".to_owned(),
+                thinking: None,
+                originator: PromptOriginator::User,
+            }),
+            "provider.response_updated",
+        ),
+        (
+            Event::AgentResponseFinished(AgentResponseFinished {
+                session_prompt_id: "sp-1".into(),
+                stop_reason: AgentStopReason::EndTurn,
+                originator: PromptOriginator::User,
+                ..AgentResponseFinished::default()
+            }),
+            "provider.response_finished",
+        ),
+    ];
+
+    for (event, expected) in cases {
+        assert_eq!(event.name().to_string(), expected);
+        let json = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(json["event"], expected);
+    }
+}
+
+#[test]
+fn provider_model_info_requires_context_window() {
+    // The harness uses provider snapshots as the only source of model UI
+    // metadata, so context windows must be present instead of defaulted.
+    let value = serde_json::json!({
+        "id": "openai/gpt-4.1",
+        "efforts": ["off"],
+        "verbosities": ["medium"],
+        "thinking_summaries": ["off"]
+    });
+
+    let error = serde_json::from_value::<ProviderModelInfo>(value)
+        .expect_err("context_window should be required");
+    assert!(
+        error.to_string().contains("context_window"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -539,7 +628,7 @@ fn verbosity_next_in_skips_disallowed_levels_and_wraps() {
 }
 
 /// `ThinkingSummary` parses from / displays through the canonical
-/// wire forms the slash command and `models.json5` rely on.
+/// wire forms used by slash commands and harness role config.
 #[test]
 fn thinking_summary_round_trips_through_display_and_from_str() {
     use ThinkingSummary::*;

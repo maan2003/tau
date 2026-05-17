@@ -11,8 +11,7 @@ Tau follows the XDG directories:
 
 - Config: `~/.config/tau/`
   - `cli.json5`, `cli.d/*.json5` — CLI display and key-binding config.
-  - `harness.json5`, `harness.d/*.json5` — harness, agent, extension, and session-retention config.
-  - `models.json5`, `models.d/*.json5` — provider and model registry config.
+  - `harness.json5`, `harness.d/*.json5` — harness, agent roles/defaults, extension, and session-retention config.
 - State: `~/.local/state/tau/` on Linux.
   - If no XDG state dir is available, inspection defaults may fall back to `.tau/state`.
   - `cli.json` — persisted CLI runtime toggles such as show-diff, show-thinking, show-tools, token stats.
@@ -24,7 +23,7 @@ Tau follows the XDG directories:
   - `meta.json` — session metadata such as cwd, creation time, and last-touched time.
   - `lock` — flock used while the daemon has the session loaded for writing.
   - `events.jsonl` — debug event log for the session.
-  - `debug/provider-requests/*-{request,response}.json` — exact upstream Responses request bodies plus parsed/provider-terminal response captures written by `tau-agent`, keyed by timestamp, `session_prompt_id`, and transport. These include full prompt content, tool results, and model outputs, but not auth headers/API keys.
+  - `debug/provider-requests/*-{request,response}.json` — exact upstream Responses request bodies plus parsed/provider-terminal response captures written by provider extensions, keyed by timestamp, `session_prompt_id`, and transport. These include full prompt content, tool results, and model outputs, but not auth headers/API keys.
   - `logs/tau-harness.log` — harness daemon stderr/tracing for the session.
   - `logs/<extension>.log` — stderr for each spawned extension.
 - Runtime: `${XDG_RUNTIME_DIR}/tau/<pid>/` or `/tmp/tau-$USER/<pid>/`
@@ -93,7 +92,7 @@ jq '.response_id, .cached_tokens, .provider_terminal_event.response.usage, .agen
 
 ## Token/cache efficiency analysis
 
-When asked to analyze cache hit or token usage efficiency for a session, inspect `events.jsonl` and count `agent.response_finished` events. These events often appear twice: once with `type: "from_connection"` and once with `type: "published"`. Filter to one type, preferably `from_connection`, or dedupe by `(response_id, session_prompt_id)` to avoid exactly doubling token totals.
+When asked to analyze cache hit or token usage efficiency for a session, inspect `events.jsonl` and count `provider.response_finished` events. These events often appear twice: once with `type: "from_connection"` and once with `type: "published"`. Filter to one type, preferably `from_connection`, or dedupe by `(response_id, session_prompt_id)` to avoid exactly doubling token totals.
 
 Useful one-shot summary:
 
@@ -106,7 +105,7 @@ rows = []
 for ln, line in enumerate(p.open(), 1):
     j = json.loads(line)
     ev = j.get('event', {})
-    if ev.get('event') == 'agent.response_finished' and j.get('type') == 'from_connection':
+    if ev.get('event') == 'provider.response_finished' and j.get('type') == 'from_connection':
         pl = ev.get('payload', {})
         sp = pl.get('session_prompt_id') or '?'
         inp = pl.get('input_tokens') or 0
@@ -130,11 +129,11 @@ PY
 
 Red flags found in past sessions:
 
-- Internal extension prompts, especially `std-notifications` idle summaries, can create normal `ui.prompt_submitted` / `session.prompt_created` / `agent.prompt_submitted` sequences with originator `{kind: "extension"}`. If they resend full history, cache continuity may collapse and waste many uncached tokens for tiny outputs. Check lines around `extension.agent_query`, `ui.prompt_submitted`, and the following `agent.response_finished`.
-- `harness.context_usage_changed` currently follows all `agent.response_finished` events, including extension-originated prompts. Treat context/token stats carefully if side-channel prompts are present.
+- Internal extension prompts, especially `std-notifications` idle summaries, can create normal `ui.prompt_submitted` / `session.prompt_created` / `provider.prompt_submitted` sequences with originator `{kind: "extension"}`. If they resend full history, cache continuity may collapse and waste many uncached tokens for tiny outputs. Check lines around `extension.agent_query`, `ui.prompt_submitted`, and the following `provider.response_finished`.
+- `harness.context_usage_changed` currently follows all `provider.response_finished` events, including extension-originated prompts. Treat context/token stats carefully if side-channel prompts are present.
 - Large tool outputs in `session.prompt_created` messages can dominate context: repeated large `read` slices, cargo/check output, clippy output, or colorized `jj diff`. Grep for `┄total <n>┄` markers in `events.jsonl` to find compacted large payloads.
-- For exact, uncompacted provider payloads, check `debug/provider-requests/*-{request,response}.json`. Request files are especially useful for cache misses involving `previous_response_id`, multi-tool-call suffixes, tool-use/tool-result ordering, or mismatches between `session.prompt_created` and the serialized upstream `body.input`; response files show Tau's parsed `agent.response_finished` shape plus the raw terminal provider event (`response.completed` / `response.done`) when available.
-- Repeated `agent.response_updated` streaming events are numerous and not useful for aggregate token accounting. Prefer `agent.response_finished`.
+- For exact, uncompacted provider payloads, check `debug/provider-requests/*-{request,response}.json`. Request files are especially useful for cache misses involving `previous_response_id`, multi-tool-call suffixes, tool-use/tool-result ordering, or mismatches between `session.prompt_created` and the serialized upstream `body.input`; response files show Tau's parsed `provider.response_finished` shape plus the raw terminal provider event (`response.completed` / `response.done`) when available.
+- Repeated `provider.response_updated` streaming events are numerous and not useful for aggregate token accounting. Prefer `provider.response_finished`.
 
 Quick checks for side-channel waste:
 

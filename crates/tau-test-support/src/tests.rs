@@ -99,31 +99,31 @@ fn assistant_text_from_output_items(output_items: &[ContextItem]) -> String {
         .collect()
 }
 
-/// End-to-end vertical slice: real `tau-agent` and `tau-ext-shell`
+/// End-to-end vertical slice: real OpenAI provider and `tau-ext-shell`
 /// processes wired through a `tau-core` bus, asserting the protocol
-/// handshake and a no-model agent response. Lives here (rather than
-/// inside `tau-core`'s tests) because the agent + extension layers
+/// handshake and a no-model provider response. Lives here (rather than
+/// inside `tau-core`'s tests) because the provider + extension layers
 /// sit downstream of `tau-core`; keeping the test here avoids
-/// declaring `tau-agent` and `tau-ext-shell` as dev-dependencies of
-/// the very crate they depend on.
+/// declaring them as dev-dependencies of the very crate they depend on.
 #[test]
-fn deterministic_agent_and_tool_complete_one_vertical_slice() {
+fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let store_path = tempdir.path().join("state");
     let _store = SessionStore::open(&store_path).expect("store should open");
     let mut bus = EventBus::new();
     let mut registry = ToolRegistry::new();
 
-    let (agent_runtime_stream, agent_harness_stream) =
-        UnixStream::pair().expect("agent stream pair should open");
+    let (provider_runtime_stream, provider_harness_stream) =
+        UnixStream::pair().expect("provider stream pair should open");
     let (tool_runtime_stream, tool_harness_stream) =
         UnixStream::pair().expect("tool stream pair should open");
 
-    let agent_thread = thread::spawn(move || {
-        let agent_reader = agent_runtime_stream
+    let provider_thread = thread::spawn(move || {
+        let provider_reader = provider_runtime_stream
             .try_clone()
-            .expect("agent reader clone should succeed");
-        tau_agent::run(agent_reader, agent_runtime_stream).expect("agent should run successfully");
+            .expect("provider reader clone should succeed");
+        tau_ext_provider_openai::run(provider_reader, provider_runtime_stream)
+            .expect("provider should run successfully");
     });
     let tool_thread = thread::spawn(move || {
         let tool_reader = tool_runtime_stream
@@ -133,51 +133,50 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
             .expect("tool extension should run successfully");
     });
 
-    let (agent_connection, mut agent_reader) =
-        stream_connection("agent", ClientKind::Agent, agent_harness_stream);
+    let (provider_connection, mut provider_reader) = stream_connection(
+        "provider-openai",
+        ClientKind::Provider,
+        provider_harness_stream,
+    );
     let (tool_connection, mut tool_reader) =
         stream_connection("tool", ClientKind::Tool, tool_harness_stream);
-    let agent_id = bus.connect(agent_connection);
+    let provider_id = bus.connect(provider_connection);
     let tool_id = bus.connect(tool_connection);
 
     let (ui_connection, _ui_inbox) = memory_connection("ui", ClientKind::Ui);
     let ui_id = bus.connect(ui_connection);
     bus.set_subscriptions(
         &ui_id,
-        vec![EventSelector::Exact(EventName::AGENT_RESPONSE_FINISHED)],
+        vec![EventSelector::Exact(EventName::PROVIDER_RESPONSE_FINISHED)],
     )
     .expect("ui subscription should be stored");
 
-    // Read and process the agent's startup frames (hello, subscribe, ready).
-    // Subscribe is now a `Message`, not an `Event`, so we install
-    // subscriptions directly via `set_subscriptions` rather than
-    // republishing the message.
-    let agent_hello = agent_reader
+    // Read and process the provider's startup frames (hello, subscribe,
+    // optional model publication, ready). Subscribe is a `Message`, not an
+    // `Event`, so we install subscriptions directly via `set_subscriptions`.
+    let provider_hello = provider_reader
         .read_frame()
         .expect("read")
-        .expect("agent hello should arrive");
+        .expect("provider hello should arrive");
     assert!(matches!(
-        agent_hello,
+        provider_hello,
         Frame::Message(tau_proto::Message::Hello(_))
     ));
-    let agent_subscribe = agent_reader
-        .read_frame()
-        .expect("read")
-        .expect("agent subscribe should arrive");
-    if let Frame::Message(tau_proto::Message::Subscribe(sub)) = agent_subscribe {
-        bus.set_subscriptions(&agent_id, sub.selectors)
-            .expect("agent subscriptions should be stored");
-    } else {
-        panic!("expected agent subscribe message");
+    loop {
+        let frame = provider_reader
+            .read_frame()
+            .expect("read")
+            .expect("provider startup frame should arrive");
+        match frame {
+            Frame::Message(tau_proto::Message::Subscribe(sub)) => {
+                bus.set_subscriptions(&provider_id, sub.selectors)
+                    .expect("provider subscriptions should be stored");
+            }
+            Frame::Event(Event::ProviderModelsUpdated(_)) => {}
+            Frame::Message(tau_proto::Message::Ready(_)) => break,
+            _ => panic!("unexpected provider startup frame"),
+        }
     }
-    let agent_ready = agent_reader
-        .read_frame()
-        .expect("read")
-        .expect("agent ready should arrive");
-    assert!(matches!(
-        agent_ready,
-        Frame::Message(tau_proto::Message::Ready(_))
-    ));
 
     let tool_hello = tool_reader
         .read_frame()
@@ -216,7 +215,7 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
     assert!(registered_tool_names.iter().any(|name| name == "echo"));
     assert!(registered_tool_names.iter().any(|name| name == "read"));
 
-    // Send a SessionPromptCreated to the agent.
+    // Send a SessionPromptCreated directly to the provider.
     use tau_proto::ToolDefinition;
 
     let prompt = SessionPromptCreated {
@@ -248,17 +247,17 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
         share_user_cache_key: false,
     };
     let _ = bus.send_to(
-        &agent_id,
+        &provider_id,
         None,
         Frame::Event(Event::SessionPromptCreated(prompt)),
     );
 
-    // Without a model, the agent should report an error.
+    // Without a model, the provider should close the turn without network I/O.
     let response = loop {
-        let frame = agent_reader
+        let frame = provider_reader
             .read_frame()
             .expect("read")
-            .expect("agent event should arrive");
+            .expect("provider event should arrive");
         if let Frame::Event(Event::AgentResponseFinished(r)) = frame {
             break r;
         }
@@ -272,13 +271,13 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
     );
 
     bus.send_to(
-        &agent_id,
+        &provider_id,
         Some(&ui_id),
         Frame::Message(tau_proto::Message::Disconnect(tau_proto::Disconnect {
             reason: Some("test complete".to_owned()),
         })),
     )
-    .expect("agent disconnect should route");
+    .expect("provider disconnect should route");
     bus.send_to(
         &tool_id,
         Some(&ui_id),
@@ -288,6 +287,8 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
     )
     .expect("tool disconnect should route");
 
-    agent_thread.join().expect("agent thread should finish");
+    provider_thread
+        .join()
+        .expect("provider thread should finish");
     tool_thread.join().expect("tool thread should finish");
 }

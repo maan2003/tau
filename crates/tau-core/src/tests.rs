@@ -163,6 +163,47 @@ fn subscribed_clients_only_receive_matching_events() {
 }
 
 #[test]
+fn broadcast_can_skip_execution_client_kinds_for_direct_prompt_routing() {
+    // Provider-owned prompts are logged for observers but sent directly to the
+    // owning provider. The bus helper must keep UI/tool subscribers informed
+    // without waking every execution client that happens to subscribe.
+    let mut bus = EventBus::new();
+
+    let (agent_connection, agent_inbox) = memory_connection("agent", ClientKind::Agent);
+    let (provider_connection, provider_inbox) = memory_connection("provider", ClientKind::Provider);
+    let (ui_connection, ui_inbox) = memory_connection("ui", ClientKind::Ui);
+    let agent_id = bus.connect(agent_connection);
+    let provider_id = bus.connect(provider_connection);
+    let ui_id = bus.connect(ui_connection);
+
+    for id in [&agent_id, &provider_id, &ui_id] {
+        bus.set_subscriptions(
+            id,
+            vec![EventSelector::Exact(EventName::UI_PROMPT_SUBMITTED)],
+        )
+        .expect("subscriptions should be stored");
+    }
+
+    let report = bus.publish_from_excluding_kinds(
+        None,
+        Frame::Event(Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hello".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        })),
+        &[ClientKind::Agent, ClientKind::Provider],
+    );
+
+    assert_eq!(report.delivered_to, vec![ui_id.clone()]);
+    assert!(report.skipped_by_subscription.contains(&agent_id));
+    assert!(report.skipped_by_subscription.contains(&provider_id));
+    assert!(agent_inbox.snapshot().is_empty());
+    assert!(provider_inbox.snapshot().is_empty());
+    assert_eq!(ui_inbox.snapshot().len(), 1);
+}
+
+#[test]
 fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
     let mut bus = EventBus::new();
 
@@ -219,8 +260,11 @@ fn connection_abstraction_is_transport_independent_for_in_memory_clients() {
     let agent_id = bus.connect(agent_connection);
     let tool_id = bus.connect(tool_connection);
 
-    bus.set_subscriptions(&agent_id, vec![EventSelector::Prefix("agent.".to_owned())])
-        .expect("agent subscriptions should be stored");
+    bus.set_subscriptions(
+        &agent_id,
+        vec![EventSelector::Prefix("provider.".to_owned())],
+    )
+    .expect("agent subscriptions should be stored");
     bus.set_subscriptions(&tool_id, vec![EventSelector::Prefix("tool.".to_owned())])
         .expect("tool subscriptions should be stored");
 

@@ -17,9 +17,7 @@ use tau_socket::SocketPeer;
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::format::{format_extension_event, format_tool_progress};
-use crate::harness::{
-    Harness, assistant_text_from_output_items, default_agent_runner, tool_calls_from_output_items,
-};
+use crate::harness::{Harness, assistant_text_from_output_items, tool_calls_from_output_items};
 use crate::runtime_dir;
 use crate::settings::{Config, resolve_config};
 
@@ -120,14 +118,7 @@ pub fn run_embedded_message_with_trace(
     session_id: &str,
     message: &str,
 ) -> Result<InteractionOutcome, HarnessError> {
-    run_embedded_message_impl(
-        state_dir,
-        session_id,
-        message,
-        default_agent_runner,
-        Vec::new(),
-        EmbeddedOptions::default(),
-    )
+    run_embedded_message_with_options(state_dir, session_id, message, EmbeddedOptions::default())
 }
 
 /// Runs one embedded interaction and returns the final agent response.
@@ -147,14 +138,20 @@ pub fn run_embedded_message_with_options(
     message: &str,
     options: EmbeddedOptions,
 ) -> Result<InteractionOutcome, HarnessError> {
-    run_embedded_message_impl(
-        state_dir,
-        session_id,
-        message,
-        default_agent_runner,
-        Vec::new(),
-        options,
-    )
+    let state_dir = state_dir.into();
+    let dirs = options
+        .dirs
+        .unwrap_or_else(|| tau_config::settings::TauDirs {
+            config_dir: Some(state_dir.join("config")),
+            state_dir: Some(state_dir.join("runtime")),
+        });
+    let config =
+        resolve_config(None).map_err(|error| HarnessError::Participant(error.to_string()))?;
+    let mut harness = Harness::from_config(&config, &state_dir, dirs, session_id)?;
+    let mut outcome = harness.send_user_message(session_id, message, None)?;
+    harness.shutdown()?;
+    outcome.lifecycle_messages = harness.lifecycle_messages.clone();
+    Ok(outcome)
 }
 
 /// Like [`run_embedded_message_with_trace`] but uses the echo agent and
@@ -166,34 +163,15 @@ pub fn run_embedded_message_with_echo(
     message: &str,
 ) -> Result<InteractionOutcome, HarnessError> {
     fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
-        tau_agent::run_echo(r, w).map_err(|e| e.to_string())
+        crate::harness::run_echo_agent(r, w).map_err(|e| e.to_string())
     }
-    run_embedded_message_impl(
-        state_dir.into(),
-        session_id,
-        message,
-        echo_runner,
-        echo_tools(),
-        EmbeddedOptions::default(),
-    )
-}
-
-fn run_embedded_message_impl(
-    state_dir: impl Into<PathBuf>,
-    session_id: &str,
-    message: &str,
-    agent_runner: crate::harness::AgentRunner,
-    tools: Vec<crate::harness::InProcessTool>,
-    options: EmbeddedOptions,
-) -> Result<InteractionOutcome, HarnessError> {
     let state_dir = state_dir.into();
-    let dirs = options
-        .dirs
-        .unwrap_or_else(|| tau_config::settings::TauDirs {
-            config_dir: Some(state_dir.join("config")),
-            state_dir: Some(state_dir.join("runtime")),
-        });
-    let mut harness = Harness::new_with_agent(state_dir, dirs, agent_runner, tools, session_id)?;
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(state_dir.join("config")),
+        state_dir: Some(state_dir.join("runtime")),
+    };
+    let mut harness =
+        Harness::new_with_agent(state_dir, dirs, echo_runner, echo_tools(), session_id)?;
     let mut outcome = harness.send_user_message(session_id, message, None)?;
     harness.shutdown()?;
     outcome.lifecycle_messages = harness.lifecycle_messages.clone();
@@ -235,7 +213,9 @@ pub fn run_daemon(
             config_dir: Some(state_dir.join("config")),
             state_dir: Some(state_dir.join("runtime")),
         });
-    let mut harness = Harness::new(state_dir, dirs, eager_session_id)?;
+    let config =
+        resolve_config(None).map_err(|error| HarnessError::Participant(error.to_string()))?;
+    let mut harness = Harness::from_config(&config, state_dir, dirs, eager_session_id)?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {
@@ -263,7 +243,7 @@ pub fn run_daemon_with_echo(
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
     fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
-        tau_agent::run_echo(r, w).map_err(|e| e.to_string())
+        crate::harness::run_echo_agent(r, w).map_err(|e| e.to_string())
     }
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
@@ -340,7 +320,7 @@ pub fn send_daemon_message_with_trace(
     })))?;
     peer.send(&Frame::Message(Message::Subscribe(Subscribe {
         selectors: vec![
-            EventSelector::Prefix("agent.".to_owned()),
+            EventSelector::Prefix("provider.".to_owned()),
             EventSelector::Prefix("session.".to_owned()),
             EventSelector::Prefix("tool.".to_owned()),
             EventSelector::Prefix("shell.".to_owned()),

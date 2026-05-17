@@ -2,7 +2,7 @@
 //! store, and the live extensions; routes every event between the agent,
 //! tools, and clients.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -15,11 +15,12 @@ use tau_core::{
 use tau_proto::{
     AgentCacheMissDiagnostic, AgentResponseFinished, AgentStopReason, AgentTokenUsage, CborValue,
     ClientKind, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector,
-    ExtensionName, Frame, HarnessContextUsageChanged, HarnessModelSelected, Message, MessageItem,
-    ModelId, PreviousResponseCandidate, PromptOriginator, SessionCompactionRequested, SessionId,
-    SessionPromptCreated, SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued,
-    TokenUsageStats, ToolCallId, ToolCallItem, ToolCancelled, ToolChoice, ToolDefinition,
-    ToolError, ToolName, ToolRegister, ToolRequest, ToolType, UiCancelPrompt,
+    ExtensionName, Frame, HarnessContextUsageChanged, HarnessRoleSelected, Message, MessageItem,
+    ModelId, PreviousResponseCandidate, PromptOriginator, ProviderModelInfo,
+    SessionCompactionRequested, SessionId, SessionPromptCreated, SessionPromptId,
+    SessionPromptPrewarmRequested, SessionPromptQueued, TokenUsageStats, ToolCallId, ToolCallItem,
+    ToolCancelled, ToolChoice, ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest,
+    ToolType, UiCancelPrompt,
 };
 
 use crate::conversation::{Conversation, ConversationId, ConversationTurnState, PendingCancel};
@@ -36,18 +37,20 @@ use crate::event::{
     ChannelSink, HarnessEvent, WriterShutdown, spawn_reader_thread, spawn_writer_thread,
 };
 use crate::event_log::EventLog;
+#[cfg(any(test, feature = "echo-agent"))]
+use crate::extension::spawn_in_process;
 use crate::extension::{
-    ExtensionEntry, ExtensionState, extension_stderr_log_path, spawn_in_process, spawn_supervised,
+    ExtensionEntry, ExtensionState, extension_stderr_log_path, spawn_supervised,
 };
 use crate::format::{format_tool_progress, render_entry_preview};
 use crate::harness::interception::{
     ConversationHeadSync, DeferredPublish, InterceptorRegistry, PendingIntercept,
 };
 use crate::model::{
-    clamp_effort, clamp_thinking_summary, clamp_verbosity, configured_default_params_for_selection,
-    context_percent_used, efforts_for_model, load_model_list, model_context_window, model_for_role,
-    role_infos, save_harness_state, save_role_overrides, selected_params_for_model,
-    selected_params_for_role, thinking_summaries_for_model, verbosities_for_model,
+    baseline_params_for_selection, clamp_effort, clamp_thinking_summary, clamp_verbosity,
+    context_percent_used, context_window_for_model, efforts_for_model, fallback_role, load_roles,
+    role_infos, save_role_overrides, select_model_for_available, selected_params_for_role,
+    thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::prompt::{
     assemble_conversation_from, assemble_prompt_context_from, build_system_prompt, cbor_map_bool,
@@ -258,10 +261,6 @@ pub(crate) struct Harness {
     /// that a `HashMap` alone can't supply, and is updated in place
     /// whenever a supervised extension respawns with a fresh id.
     pub(crate) extension_order: Vec<tau_proto::ConnectionId>,
-    /// Connection id assigned to the agent extension. Other code paths
-    /// branch on this to special-case agent traffic (e.g. tool-call
-    /// emission, session prompt routing).
-    pub(crate) agent_connection_id: tau_proto::ConnectionId,
     /// Monotonic counter used to mint synthetic `sp-N`
     /// `SessionPromptId`s when dispatching prompts to the agent.
     pub(crate) next_session_prompt_id: u64,
@@ -318,6 +317,17 @@ pub(crate) struct Harness {
     pub(crate) pending_user_prompt_dispatches: VecDeque<ConversationId>,
     /// All available models.
     pub(crate) available_models: Vec<ModelId>,
+    /// Model snapshots published by provider extensions, keyed by sender
+    /// connection.
+    pub(crate) provider_models_by_extension: HashMap<String, Vec<ProviderModelInfo>>,
+    /// Flattened provider model metadata keyed by model id. Rebuilt from
+    /// [`Self::provider_models_by_extension`] whenever a provider snapshot
+    /// changes.
+    pub(crate) provider_model_info: HashMap<ModelId, ProviderModelInfo>,
+    /// Provider extension connection for each model id. This is kept alongside
+    /// [`Self::provider_model_info`] so prompt routing can address the provider
+    /// that most recently published the selected model.
+    pub(crate) provider_model_routes: HashMap<ModelId, tau_proto::ConnectionId>,
     /// Available agent roles.
     pub(crate) available_roles: std::collections::HashMap<String, tau_config::settings::AgentRole>,
     /// Named role-selectable tool enablement overlays loaded from
@@ -325,16 +335,16 @@ pub(crate) struct Harness {
     pub(crate) tools_profiles: tau_config::settings::ToolsProfiles,
     /// Persisted role overrides loaded from state and changed at runtime.
     pub(crate) role_overrides: std::collections::HashMap<String, tau_config::settings::AgentRole>,
-    /// Currently selected role, if any.
-    pub(crate) selected_role: Option<String>,
-    /// Currently selected model. `None` means no model is selected
-    /// yet (no providers configured, or the user hasn't picked one).
+    /// Currently selected role. The resolved model is derived from this role
+    /// and provider model availability.
+    pub(crate) selected_role: String,
+    /// Model currently resolved from [`Self::selected_role`] and provider
+    /// availability. `None` means the role has no provider-published model yet.
     pub(crate) selected_model: Option<ModelId>,
-    /// Currently selected per-prompt model knobs. Stamped onto every
-    /// outgoing [`tau_proto::SessionPromptCreated`]; mutated by
-    /// `UiSetEffort` / `UiSetVerbosity` / `UiSetThinkingSummary` and
-    /// reseeded on every `UiModelSelect` from
-    /// [`selected_params_for_model`].
+    /// Effective per-prompt knobs for the selected role/model pair. Stamped
+    /// onto outgoing [`tau_proto::SessionPromptCreated`] events and
+    /// mirrored through knob-change events; reseeded from role settings
+    /// whenever the selected role or its resolved model changes.
     pub(crate) selected_params: tau_proto::ModelParams,
     /// State that belongs to exactly the currently bound session.
     /// Keep session-scoped counters here instead of as top-level
@@ -352,9 +362,6 @@ pub(crate) struct Harness {
     /// [`crate::conversation::compute_chain_fingerprint`].
     pub(crate) prompt_fingerprints:
         std::collections::HashMap<SessionPromptId, crate::conversation::ChainFingerprintDetail>,
-    /// Provider/model registry, kept for runtime lookups (e.g.
-    /// computing available efforts per current model).
-    pub(crate) model_registry: tau_config::settings::ModelRegistry,
     /// Skills discovered by extensions, keyed by name.
     pub(crate) discovered_skills: std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     /// AGENTS.md files discovered by extensions, in delivery order.
@@ -392,19 +399,262 @@ pub(crate) struct Harness {
     pub(crate) dirs: tau_config::settings::TauDirs,
 }
 
+#[cfg(any(test, feature = "echo-agent"))]
 pub(crate) type AgentRunner = fn(UnixStream, UnixStream) -> Result<(), String>;
 
-/// One in-process tool extension to spawn alongside the agent during
-/// [`Harness::new_with_agent`]. Callers (the embedded helper, the echo
-/// test path) supply these explicitly so the harness library doesn't
-/// hard-wire any specific tool implementation.
+/// One in-process tool extension to spawn alongside the echo agent during
+/// tests.
+#[cfg(any(test, feature = "echo-agent"))]
 pub(crate) struct InProcessTool {
     pub(crate) name: &'static str,
     pub(crate) runner: fn(UnixStream, UnixStream) -> Result<(), String>,
 }
 
-pub(crate) fn default_agent_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
-    tau_agent::run(r, w).map_err(|e| e.to_string())
+/// A small echo agent used only by tests and echo-agent helpers.
+#[cfg(any(test, feature = "echo-agent"))]
+pub(crate) fn run_echo_agent<R, W>(reader: R, writer: W) -> Result<(), Box<dyn std::error::Error>>
+where
+    R: std::io::Read,
+    W: std::io::Write,
+{
+    use std::io::{BufReader, BufWriter};
+
+    use tau_proto::{
+        Ack, AgentPromptSubmitted, CborValue, ContentPart, ContextItem, ContextRole, EventName,
+        FrameReader, FrameWriter, Hello, MessageItem, OpaqueProviderItem, PROTOCOL_VERSION, Ready,
+        Subscribe, ToolCallItem, ToolName,
+    };
+
+    fn materialize_prompt(
+        prompt: &tau_proto::SessionPromptCreated,
+    ) -> tau_proto::SessionPromptCreated {
+        let mut materialized = prompt.clone();
+        materialized.tools_ref = None;
+        materialized
+    }
+
+    fn cbor_result_text(value: &CborValue) -> String {
+        match value {
+            CborValue::Text(text) => text.clone(),
+            other => serde_json::to_string(&cbor_to_json(other)).unwrap_or_else(|_| String::new()),
+        }
+    }
+
+    fn cbor_to_json(value: &CborValue) -> serde_json::Value {
+        match value {
+            CborValue::Null => serde_json::Value::Null,
+            CborValue::Bool(value) => serde_json::Value::Bool(*value),
+            CborValue::Integer(value) => {
+                let value = i128::from(*value);
+                match i64::try_from(value) {
+                    Ok(n) => serde_json::json!(n),
+                    Err(_) => serde_json::Value::String(value.to_string()),
+                }
+            }
+            CborValue::Float(value) => serde_json::json!(value),
+            CborValue::Text(value) => serde_json::Value::String(value.clone()),
+            CborValue::Bytes(bytes) => serde_json::Value::Array(
+                bytes
+                    .iter()
+                    .map(|byte| serde_json::Value::Number((*byte).into()))
+                    .collect(),
+            ),
+            CborValue::Array(items) => {
+                serde_json::Value::Array(items.iter().map(cbor_to_json).collect())
+            }
+            CborValue::Map(entries) => {
+                let mut map = serde_json::Map::new();
+                for (key, value) in entries {
+                    let key = match key {
+                        CborValue::Text(text) => text.clone(),
+                        other => serde_json::to_string(&cbor_to_json(other)).unwrap_or_default(),
+                    };
+                    map.insert(key, cbor_to_json(value));
+                }
+                serde_json::Value::Object(map)
+            }
+            CborValue::Tag(_, inner) => cbor_to_json(inner),
+            _ => serde_json::Value::Null,
+        }
+    }
+
+    let mut reader = FrameReader::new(BufReader::new(reader));
+    let mut writer = FrameWriter::new(BufWriter::new(writer));
+
+    writer.write_frame(&Frame::Message(Message::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+        client_name: "tau-echo-agent".into(),
+        client_kind: ClientKind::Agent,
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
+        selectors: vec![
+            EventSelector::Exact(EventName::SESSION_COMPACTION_REQUESTED),
+            EventSelector::Exact(EventName::SESSION_PROMPT_CREATED),
+            EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
+        ],
+    })))?;
+    writer.write_frame(&Frame::Message(Message::Ready(Ready {
+        message: Some("echo agent ready".to_owned()),
+    })))?;
+    writer.flush()?;
+
+    let mut next_call = 1_u64;
+
+    loop {
+        let Some(frame) = reader.read_frame()? else {
+            return Ok(());
+        };
+        let (log_id, inner) = frame.peel_log();
+        match inner {
+            Frame::Event(Event::SessionCompactionRequested(request)) => {
+                let spid = request.prompt.session_prompt_id.clone();
+                let prompt = materialize_prompt(&request.prompt);
+                writer.write_frame(&Frame::Event(Event::AgentPromptSubmitted(
+                    AgentPromptSubmitted {
+                        session_prompt_id: spid.clone(),
+                        originator: prompt.originator.clone(),
+                    },
+                )))?;
+                writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+                    AgentResponseFinished {
+                        session_prompt_id: spid,
+                        output_items: vec![ContextItem::Compaction(OpaqueProviderItem(
+                            CborValue::Map(vec![
+                                (
+                                    CborValue::Text("type".to_owned()),
+                                    CborValue::Text("message".to_owned()),
+                                ),
+                                (
+                                    CborValue::Text("role".to_owned()),
+                                    CborValue::Text("assistant".to_owned()),
+                                ),
+                                (
+                                    CborValue::Text("text".to_owned()),
+                                    CborValue::Text("Conversation compacted.".to_owned()),
+                                ),
+                            ]),
+                        ))],
+                        stop_reason: AgentStopReason::Compaction,
+                        originator: prompt.originator.clone(),
+                        usage: None,
+                        backend: None,
+                        provider_response_id: None,
+                        ws_pool_delta: None,
+                    },
+                )))?;
+                writer.flush()?;
+            }
+            Frame::Event(Event::SessionPromptCreated(prompt)) => {
+                let spid = prompt.session_prompt_id.clone();
+                let prompt = materialize_prompt(&prompt);
+                writer.write_frame(&Frame::Event(Event::AgentPromptSubmitted(
+                    AgentPromptSubmitted {
+                        session_prompt_id: spid.clone(),
+                        originator: prompt.originator.clone(),
+                    },
+                )))?;
+
+                let is_tool_result = prompt
+                    .context_items
+                    .last()
+                    .is_some_and(|item| matches!(item, ContextItem::ToolResult(_)));
+                if is_tool_result {
+                    let text = prompt
+                        .context_items
+                        .last()
+                        .and_then(|item| match item {
+                            ContextItem::ToolResult(result) => {
+                                Some(cbor_result_text(&result.output))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+                        AgentResponseFinished {
+                            session_prompt_id: spid,
+                            output_items: vec![ContextItem::Message(MessageItem {
+                                role: ContextRole::Assistant,
+                                content: vec![ContentPart::Text { text }],
+                                phase: None,
+                            })],
+                            stop_reason: AgentStopReason::EndTurn,
+                            originator: prompt.originator.clone(),
+                            usage: None,
+                            backend: None,
+                            provider_response_id: None,
+                            ws_pool_delta: None,
+                        },
+                    )))?;
+                } else {
+                    let user_text = prompt
+                        .context_items
+                        .iter()
+                        .rev()
+                        .find_map(|item| match item {
+                            ContextItem::Message(message) if message.role == ContextRole::User => {
+                                message.content.first().map(|part| match part {
+                                    ContentPart::Text { text } => text.clone(),
+                                })
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+
+                    let call_id = format!("call-{next_call}");
+                    next_call += 1;
+
+                    let tool_call = if let Some(path) = user_text.strip_prefix("read ") {
+                        ToolCallItem {
+                            call_id: call_id.into(),
+                            name: ToolName::new("read"),
+                            tool_type: tau_proto::ToolType::Function,
+                            arguments: CborValue::Map(vec![(
+                                CborValue::Text("path".to_owned()),
+                                CborValue::Text(path.trim().to_owned()),
+                            )]),
+                        }
+                    } else if let Some(cmd) = user_text.strip_prefix("shell ") {
+                        ToolCallItem {
+                            call_id: call_id.into(),
+                            name: ToolName::new("shell"),
+                            tool_type: tau_proto::ToolType::Function,
+                            arguments: CborValue::Map(vec![(
+                                CborValue::Text("command".to_owned()),
+                                CborValue::Text(cmd.trim().to_owned()),
+                            )]),
+                        }
+                    } else {
+                        ToolCallItem {
+                            call_id: call_id.into(),
+                            name: ToolName::new("echo"),
+                            tool_type: tau_proto::ToolType::Function,
+                            arguments: CborValue::Text(user_text),
+                        }
+                    };
+
+                    writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
+                        AgentResponseFinished {
+                            session_prompt_id: spid,
+                            output_items: vec![ContextItem::ToolCall(tool_call)],
+                            stop_reason: AgentStopReason::ToolCalls,
+                            originator: prompt.originator.clone(),
+                            usage: None,
+                            backend: None,
+                            provider_response_id: None,
+                            ws_pool_delta: None,
+                        },
+                    )))?;
+                }
+                writer.flush()?;
+            }
+            Frame::Message(Message::Disconnect(_)) => return Ok(()),
+            _ => {}
+        }
+        if let Some(id) = log_id {
+            writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
+            writer.flush()?;
+        }
+    }
 }
 
 /// Returns a closure that mints monotonic `ExtensionInstanceId`s starting
@@ -421,25 +671,7 @@ fn instance_id_factory() -> impl FnMut() -> tau_proto::ExtensionInstanceId {
 }
 
 impl Harness {
-    /// Creates a harness with in-process extensions (agent, fs, shell).
-    ///
-    /// `eager_session_id` is the session that pre-warm (AGENTS.md + skill
-    /// discovery) targets, and is also where `events.jsonl` lands. Subsequent
-    /// prompts for *other* session ids lazy-init.
-    pub(crate) fn new(
-        state_dir: impl Into<PathBuf>,
-        dirs: tau_config::settings::TauDirs,
-        eager_session_id: &str,
-    ) -> Result<Self, HarnessError> {
-        Self::new_with_agent(
-            state_dir,
-            dirs,
-            default_agent_runner,
-            Vec::new(),
-            eager_session_id,
-        )
-    }
-
+    #[cfg(any(test, feature = "echo-agent"))]
     pub(crate) fn new_with_agent(
         state_dir: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
@@ -467,7 +699,6 @@ impl Harness {
         // Agent
         let (conn_id, thread) =
             spawn_in_process("agent", ClientKind::Agent, agent_runner, &mut bus, &tx)?;
-        let agent_connection_id = conn_id.clone();
         extensions.push(ExtensionEntry {
             name: "agent".to_owned(),
             instance_id: next_iid(),
@@ -499,35 +730,17 @@ impl Harness {
             });
         }
 
-        let crate::model::LoadedModelList {
-            available: available_models,
-            selected: selected_model,
-            selected_role,
-            roles: available_roles,
-            role_overrides,
-            model_registry,
-            harness_settings,
-            harness_settings_error,
-            models_error,
-        } = load_model_list(&dirs);
+        let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(&dirs);
+        let available_models = Vec::new();
+        let (available_roles, role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
+        let selected_model =
+            select_model_for_available(&available_roles, &selected_role, &available_models);
         crate::session_cleanup::spawn_session_cleanup(
             sessions_dir.clone(),
             harness_settings.session_retention(),
         );
         let tools_profiles = harness_settings.tools_profiles.clone();
-        let selected_params = selected_model
-            .as_ref()
-            .map(|m| {
-                selected_role
-                    .as_deref()
-                    .map(|role| {
-                        selected_params_for_role(&model_registry, &available_roles, role, m)
-                    })
-                    .unwrap_or_else(|| {
-                        selected_params_for_model(&dirs, &harness_settings, &model_registry, m)
-                    })
-            })
-            .unwrap_or_default();
+        let selected_params = tau_proto::ModelParams::default();
 
         let default_conversation_id = ConversationId::new("default");
         let mut store = store;
@@ -566,7 +779,6 @@ impl Harness {
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
-            agent_connection_id,
             extensions,
             extension_order,
             next_session_prompt_id: 0,
@@ -582,6 +794,9 @@ impl Harness {
             deferred_publishes: VecDeque::new(),
             pending_user_prompt_dispatches: VecDeque::new(),
             available_models,
+            provider_models_by_extension: HashMap::new(),
+            provider_model_info: HashMap::new(),
+            provider_model_routes: HashMap::new(),
             available_roles,
             tools_profiles,
             role_overrides,
@@ -591,7 +806,6 @@ impl Harness {
             current_session_state: CurrentSessionState::default(),
             prompt_models: std::collections::HashMap::new(),
             prompt_fingerprints: std::collections::HashMap::new(),
-            model_registry,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
             initialized_sessions: std::collections::HashSet::new(),
@@ -625,7 +839,7 @@ impl Harness {
         harness.wait_for_extensions_ready()?;
         harness.register_harness_tools();
         harness.check_config_exists();
-        harness.emit_startup_settings_errors(harness_settings_error, models_error);
+        harness.emit_startup_settings_errors(harness_settings_error);
 
         // Eager session init for the default session. INTENTIONAL —
         // do NOT "simplify" this to lazy-on-first-prompt.
@@ -682,7 +896,6 @@ impl Harness {
 
         let mut extensions = Vec::new();
         let mut next_iid = instance_id_factory();
-        let mut agent_connection_id = None;
 
         for ext_config in config.extensions.values() {
             tracing::info!(
@@ -694,7 +907,7 @@ impl Harness {
                 "spawning extension",
             );
             let kind = match ext_config.role.as_deref() {
-                Some("agent") => ClientKind::Agent,
+                Some("provider") => ClientKind::Provider,
                 _ => ClientKind::Tool,
             };
 
@@ -710,9 +923,6 @@ impl Harness {
                 "extension spawned",
             );
 
-            if kind == ClientKind::Agent {
-                agent_connection_id = Some(conn_id.clone());
-            }
             extensions.push(ExtensionEntry {
                 name: ext_config.name.clone(),
                 instance_id: next_iid(),
@@ -727,39 +937,19 @@ impl Harness {
             });
         }
 
-        let agent_connection_id = agent_connection_id.ok_or(HarnessError::NoAgentConfigured)?;
-
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "loading model list");
-        let crate::model::LoadedModelList {
-            available: available_models,
-            selected: selected_model,
-            selected_role,
-            roles: available_roles,
-            role_overrides,
-            model_registry,
-            harness_settings,
-            harness_settings_error,
-            models_error,
-        } = load_model_list(&dirs);
-        tracing::debug!(target: "tau_harness::startup", selected_model = ?selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "model list loaded");
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "loading harness settings");
+        let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(&dirs);
+        let available_models = Vec::new();
+        let (available_roles, role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
+        let selected_model =
+            select_model_for_available(&available_roles, &selected_role, &available_models);
+        tracing::debug!(target: "tau_harness::startup", selected_model = ?selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "harness settings loaded");
         crate::session_cleanup::spawn_session_cleanup(
             sessions_dir.clone(),
             harness_settings.session_retention(),
         );
         let tools_profiles = harness_settings.tools_profiles.clone();
-        let selected_params = selected_model
-            .as_ref()
-            .map(|m| {
-                selected_role
-                    .as_deref()
-                    .map(|role| {
-                        selected_params_for_role(&model_registry, &available_roles, role, m)
-                    })
-                    .unwrap_or_else(|| {
-                        selected_params_for_model(&dirs, &harness_settings, &model_registry, m)
-                    })
-            })
-            .unwrap_or_default();
+        let selected_params = tau_proto::ModelParams::default();
 
         let default_conversation_id = ConversationId::new("default");
         let mut store = store;
@@ -798,7 +988,6 @@ impl Harness {
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
-            agent_connection_id,
             extensions,
             extension_order,
             next_session_prompt_id: 0,
@@ -814,6 +1003,9 @@ impl Harness {
             deferred_publishes: VecDeque::new(),
             pending_user_prompt_dispatches: VecDeque::new(),
             available_models,
+            provider_models_by_extension: HashMap::new(),
+            provider_model_info: HashMap::new(),
+            provider_model_routes: HashMap::new(),
             available_roles,
             tools_profiles,
             role_overrides,
@@ -823,7 +1015,6 @@ impl Harness {
             current_session_state: CurrentSessionState::default(),
             prompt_models: std::collections::HashMap::new(),
             prompt_fingerprints: std::collections::HashMap::new(),
-            model_registry,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
             initialized_sessions: std::collections::HashSet::new(),
@@ -858,7 +1049,7 @@ impl Harness {
         harness.register_harness_tools();
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness tools registered");
         harness.check_config_exists();
-        harness.emit_startup_settings_errors(harness_settings_error, models_error);
+        harness.emit_startup_settings_errors(harness_settings_error);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "config checks complete");
 
         harness.start_session_init(
@@ -1148,6 +1339,15 @@ impl Harness {
         }
     }
 
+    fn provider_route_for_prompt_request(&self, event: &Event) -> Option<tau_proto::ConnectionId> {
+        let model = match event {
+            Event::SessionPromptCreated(prompt) => prompt.model.as_ref(),
+            Event::SessionCompactionRequested(request) => request.prompt.model.as_ref(),
+            _ => None,
+        }?;
+        self.provider_model_routes.get(model).cloned()
+    }
+
     /// Final commit: persist (when applicable), append to the event
     /// log, and broadcast on the bus. Does not consult interception
     /// state — the caller is responsible for getting here only when
@@ -1267,7 +1467,43 @@ impl Harness {
             recorded_at,
             event: Box::new(event.clone()),
         }));
-        let _ = self.bus.publish_from(source, log_frame);
+        if let Some(provider_connection_id) = self.provider_route_for_prompt_request(&event) {
+            // Provider-owned prompt execution is point-to-point: observers still
+            // see the durable prompt fact, but execution clients do not all race
+            // to consume it. The owning provider gets the exact same LogEvent
+            // envelope via a directed route so ACK and replay semantics match
+            // the old subscribed-agent path.
+            let execution_kinds = [ClientKind::Agent, ClientKind::Provider];
+            let _ =
+                self.bus
+                    .publish_from_excluding_kinds(source, log_frame.clone(), &execution_kinds);
+            match self
+                .bus
+                .send_to(provider_connection_id.as_str(), source, log_frame)
+            {
+                Ok(report) if !report.delivered_to.is_empty() => {}
+                Ok(report) => {
+                    tracing::warn!(
+                        target: "tau_harness",
+                        event = %event.name(),
+                        provider_connection_id = %provider_connection_id,
+                        ?report,
+                        "provider prompt route did not deliver"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "tau_harness",
+                        event = %event.name(),
+                        provider_connection_id = %provider_connection_id,
+                        %error,
+                        "provider prompt route failed"
+                    );
+                }
+            }
+        } else {
+            let _ = self.bus.publish_from(source, log_frame);
+        }
         self.react_to_committed_event(&event);
     }
 
@@ -1529,7 +1765,10 @@ impl Harness {
                     }
                 }
                 HarnessEvent::Disconnected { connection_id } => {
-                    let is_agent = connection_id == self.agent_connection_id;
+                    let was_agent = self
+                        .extensions
+                        .get(&connection_id)
+                        .is_some_and(|entry| entry.kind == ClientKind::Agent);
                     let was_socket = self
                         .bus
                         .connection(&connection_id)
@@ -1538,7 +1777,7 @@ impl Harness {
                     if was_socket {
                         served_clients += 1;
                     }
-                    if is_agent {
+                    if was_agent {
                         return Err(HarnessError::Participant("agent disconnected".to_owned()));
                     }
                 }
@@ -1839,6 +2078,13 @@ impl Harness {
                 }
                 self.publish_event(Some(source_id), event);
             }
+            Event::ProviderModelsUpdated(updated) => {
+                self.publish_event(
+                    Some(source_id),
+                    Event::ProviderModelsUpdated(updated.clone()),
+                );
+                self.set_provider_models(source_id, updated.models);
+            }
             Event::ExtensionContextReady(ready) => {
                 self.publish_event(Some(source_id), Event::ExtensionContextReady(ready.clone()));
                 self.handle_extension_context_ready(source_id, ready)?;
@@ -1925,119 +2171,6 @@ impl Harness {
         event: Event,
     ) -> Result<bool, HarnessError> {
         match event {
-            Event::UiModelSelect(select) => {
-                if self.available_models.contains(&select.model) {
-                    let was_empty = self.selected_model.is_none();
-                    let model = select.model.clone();
-                    self.selected_model = Some(model.clone());
-                    // Direct model pick supersedes any previously
-                    // chosen role: clear it so subsequent role-driven
-                    // logic (param resolution, replay) sees a coherent
-                    // "no role" state.
-                    self.selected_role = None;
-                    let (live_settings, _) = load_harness_settings_or_warn(&self.dirs);
-                    self.selected_params = selected_params_for_model(
-                        &self.dirs,
-                        &live_settings,
-                        &self.model_registry,
-                        &model,
-                    );
-                    save_harness_state(&self.dirs, Some(&model), self.selected_params);
-                    self.current_session_state.context_input_tokens = None;
-                    self.current_session_state.context_cached_tokens = None;
-                    self.current_session_state.context_percent_used = None;
-                    let context_window = model_context_window(&self.model_registry, &model);
-                    let effort_levels = efforts_for_model(&self.model_registry, &model);
-                    let verbosity_levels = verbosities_for_model(&self.model_registry, &model);
-                    let thinking_levels =
-                        thinking_summaries_for_model(&self.model_registry, &model);
-                    self.publish_event(
-                        None,
-                        Event::HarnessModelSelected(HarnessModelSelected {
-                            default_params: Some(configured_default_params_for_selection(
-                                &live_settings,
-                                &self.model_registry,
-                                None,
-                                &model,
-                            )),
-                            model: Some(model),
-                            context_window,
-                            role: None,
-                        }),
-                    );
-                    self.publish_event(
-                        None,
-                        Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
-                            input_tokens: self.current_session_state.context_input_tokens,
-                            cached_tokens: self.current_session_state.context_cached_tokens,
-                            percent_used: self.current_session_state.context_percent_used,
-                        }),
-                    );
-                    self.publish_event(
-                        None,
-                        Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
-                            level: self.selected_params.effort,
-                        }),
-                    );
-                    self.publish_event(
-                        None,
-                        Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
-                            levels: effort_levels,
-                        }),
-                    );
-                    self.publish_event(
-                        None,
-                        Event::HarnessServiceTierChanged(tau_proto::HarnessServiceTierChanged {
-                            service_tier: self.selected_params.service_tier,
-                        }),
-                    );
-                    self.publish_event(
-                        None,
-                        Event::HarnessVerbosityChanged(tau_proto::HarnessVerbosityChanged {
-                            level: self.selected_params.verbosity,
-                        }),
-                    );
-                    self.publish_event(
-                        None,
-                        Event::HarnessVerbositiesAvailable(
-                            tau_proto::HarnessVerbositiesAvailable {
-                                levels: verbosity_levels,
-                            },
-                        ),
-                    );
-                    self.publish_event(
-                        None,
-                        Event::HarnessThinkingSummaryChanged(
-                            tau_proto::HarnessThinkingSummaryChanged {
-                                level: self.selected_params.thinking_summary,
-                            },
-                        ),
-                    );
-                    self.publish_event(
-                        None,
-                        Event::HarnessThinkingSummariesAvailable(
-                            tau_proto::HarnessThinkingSummariesAvailable {
-                                levels: thinking_levels,
-                            },
-                        ),
-                    );
-                    // If we just went from no-model to having one,
-                    // drain queued prompts.
-                    if was_empty && self.turn_state.is_idle() {
-                        self.try_advance_queue();
-                    }
-                } else {
-                    self.publish_event(
-                        None,
-                        Event::HarnessInfo(tau_proto::HarnessInfo {
-                            message: format!("unknown model: {}", select.model),
-
-                            level: tau_proto::HarnessInfoLevel::Normal,
-                        }),
-                    );
-                }
-                Ok(true)
-            }
             Event::UiRoleSelect(select) => {
                 if !self.available_roles.contains_key(&select.role) {
                     self.publish_event(
@@ -2049,9 +2182,12 @@ impl Harness {
                     );
                     return Ok(true);
                 }
-                let Some(model) =
-                    model_for_role(&self.available_roles, &select.role, &self.available_models)
-                else {
+
+                let was_empty = self.selected_model.is_none();
+                self.selected_role = select.role.clone();
+                self.reconcile_selected_model_with_available();
+                save_role_overrides(&self.dirs, &self.selected_role, &self.role_overrides);
+                if self.selected_model.is_none() {
                     self.publish_event(
                         None,
                         Event::HarnessInfo(tau_proto::HarnessInfo {
@@ -2059,413 +2195,75 @@ impl Harness {
                             level: tau_proto::HarnessInfoLevel::Normal,
                         }),
                     );
-                    return Ok(true);
-                };
-                let was_empty = self.selected_model.is_none();
-                self.selected_role = Some(select.role.clone());
-                self.selected_model = Some(model.clone());
-                self.selected_params = selected_params_for_role(
-                    &self.model_registry,
-                    &self.available_roles,
-                    &select.role,
-                    &model,
-                );
-                save_role_overrides(
-                    &self.dirs,
-                    self.selected_role.as_deref(),
-                    &self.role_overrides,
-                );
-                save_harness_state(&self.dirs, Some(&model), self.selected_params);
-                self.current_session_state.context_input_tokens = None;
-                self.current_session_state.context_cached_tokens = None;
-                self.current_session_state.context_percent_used = None;
-                let context_window = model_context_window(&self.model_registry, &model);
-                let effort_levels = efforts_for_model(&self.model_registry, &model);
-                let verbosity_levels = verbosities_for_model(&self.model_registry, &model);
-                let thinking_levels = thinking_summaries_for_model(&self.model_registry, &model);
-                let (live_settings, _) = load_harness_settings_or_warn(&self.dirs);
-                self.publish_event(
-                    None,
-                    Event::HarnessModelSelected(HarnessModelSelected {
-                        default_params: Some(configured_default_params_for_selection(
-                            &live_settings,
-                            &self.model_registry,
-                            self.selected_role.as_deref(),
-                            &model,
-                        )),
-                        model: Some(model),
-                        context_window,
-                        role: self.selected_role.clone(),
-                    }),
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
-                        input_tokens: self.current_session_state.context_input_tokens,
-                        cached_tokens: self.current_session_state.context_cached_tokens,
-                        percent_used: self.current_session_state.context_percent_used,
-                    }),
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
-                        level: self.selected_params.effort,
-                    }),
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
-                        levels: effort_levels,
-                    }),
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessServiceTierChanged(tau_proto::HarnessServiceTierChanged {
-                        service_tier: self.selected_params.service_tier,
-                    }),
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessVerbosityChanged(tau_proto::HarnessVerbosityChanged {
-                        level: self.selected_params.verbosity,
-                    }),
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessVerbositiesAvailable(tau_proto::HarnessVerbositiesAvailable {
-                        levels: verbosity_levels,
-                    }),
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessThinkingSummaryChanged(
-                        tau_proto::HarnessThinkingSummaryChanged {
-                            level: self.selected_params.thinking_summary,
-                        },
-                    ),
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessThinkingSummariesAvailable(
-                        tau_proto::HarnessThinkingSummariesAvailable {
-                            levels: thinking_levels,
-                        },
-                    ),
-                );
-                if was_empty && self.turn_state.is_idle() {
+                }
+                self.publish_current_model_state();
+                if was_empty && self.selected_model.is_some() && self.turn_state.is_idle() {
                     self.try_advance_queue();
                 }
                 Ok(true)
             }
             Event::UiRoleUpdate(req) => {
+                let mut selected_role_changed = false;
+                let selected_was_empty = self.selected_model.is_none();
                 match req.action {
                     tau_proto::UiRoleUpdateAction::Delete => {
-                        self.available_roles.remove(&req.role);
-                        self.role_overrides.remove(&req.role);
-                        if self.selected_role.as_deref() == Some(req.role.as_str()) {
-                            self.selected_role = None;
+                        let was_selected = self.selected_role == req.role;
+                        let previous_override = self.role_overrides.remove(&req.role);
+                        let configured_role = load_harness_settings_or_warn(&self.dirs)
+                            .0
+                            .roles
+                            .get(&req.role)
+                            .cloned();
+
+                        if let Some(role) = configured_role {
+                            self.available_roles.insert(req.role.clone(), role);
+                            selected_role_changed = was_selected;
+                        } else {
+                            let removed_role = self.available_roles.remove(&req.role);
+                            if self.available_roles.is_empty() {
+                                if let Some(role) = removed_role {
+                                    self.available_roles.insert(req.role.clone(), role);
+                                }
+                                if let Some(role) = previous_override {
+                                    self.role_overrides.insert(req.role.clone(), role);
+                                }
+                                self.emit_info("/role: cannot delete the last role");
+                            } else if was_selected {
+                                self.selected_role = fallback_role(&self.available_roles);
+                                selected_role_changed = true;
+                            }
                         }
                     }
-                    tau_proto::UiRoleUpdateAction::Set { setting, value } => {
-                        let mut next_role = self
-                            .available_roles
-                            .get(&req.role)
-                            .cloned()
-                            .unwrap_or_default();
-                        let mut valid = true;
-                        match setting.as_str() {
-                            "model" => match value.parse::<ModelId>() {
-                                Ok(model) => next_role.model = Some(model),
-                                Err(error) => {
-                                    valid = false;
-                                    self.emit_info(&format!("/role: {error}"));
-                                }
-                            },
-                            "effort" => match value.parse::<tau_proto::Effort>() {
-                                Ok(level) => next_role.effort = Some(level),
-                                Err(error) => {
-                                    valid = false;
-                                    self.emit_info(&format!("/role: {error}"));
-                                }
-                            },
-                            "verbosity" => match value.parse::<tau_proto::Verbosity>() {
-                                Ok(level) => next_role.verbosity = Some(level),
-                                Err(error) => {
-                                    valid = false;
-                                    self.emit_info(&format!("/role: {error}"));
-                                }
-                            },
-                            "thinking-summary" | "thinkingSummary" => {
-                                match value.parse::<tau_proto::ThinkingSummary>() {
-                                    Ok(level) => next_role.thinking_summary = Some(level),
-                                    Err(error) => {
-                                        valid = false;
-                                        self.emit_info(&format!("/role: {error}"));
-                                    }
-                                }
-                            }
-                            "service-tier" | "serviceTier" => match value.as_str() {
-                                "fast" => {
-                                    next_role.service_tier = Some(tau_proto::ServiceTier::Fast);
-                                }
-                                "flex" => {
-                                    next_role.service_tier = Some(tau_proto::ServiceTier::Flex);
-                                }
-                                "default" | "none" | "off" => next_role.service_tier = None,
-                                _ => {
-                                    valid = false;
-                                    self.emit_info(
-                                        "/role: service-tier must be fast, flex, or none",
-                                    );
-                                }
-                            },
-                            "tools-profile" | "toolsProfile" => {
-                                if self.tools_profiles.contains_key(&value) {
-                                    next_role.tools_profile = Some(value.clone());
-                                } else {
-                                    valid = false;
-                                    self.emit_info("/role: unknown tools-profile");
-                                }
-                            }
-                            _ => {
-                                valid = false;
-                                self.emit_info("/role: unknown setting");
-                            }
-                        }
-                        if valid {
+                    action => {
+                        if let Some(next_role) = self.role_after_update(&req.role, action) {
                             self.available_roles
                                 .insert(req.role.clone(), next_role.clone());
                             self.role_overrides.insert(req.role.clone(), next_role);
+                            selected_role_changed = self.selected_role == req.role;
                         }
                     }
                 }
-                if self.selected_role.as_deref() == Some(req.role.as_str())
-                    && let Some(model) =
-                        model_for_role(&self.available_roles, &req.role, &self.available_models)
-                {
-                    self.selected_model = Some(model.clone());
-                    self.selected_params = selected_params_for_role(
-                        &self.model_registry,
-                        &self.available_roles,
-                        &req.role,
-                        &model,
-                    );
-                    save_harness_state(&self.dirs, Some(&model), self.selected_params);
+                if selected_role_changed {
+                    self.reconcile_selected_model_with_available();
+                    self.publish_current_model_state();
+                    if selected_was_empty
+                        && self.selected_model.is_some()
+                        && self.turn_state.is_idle()
+                    {
+                        self.try_advance_queue();
+                    }
                 }
-                save_role_overrides(
-                    &self.dirs,
-                    self.selected_role.as_deref(),
-                    &self.role_overrides,
-                );
+                save_role_overrides(&self.dirs, &self.selected_role, &self.role_overrides);
                 self.publish_event(
                     None,
                     Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
                         roles: role_infos(
-                            &self.model_registry,
+                            &self.provider_model_info,
                             &self.available_roles,
                             &self.tools_profiles,
                             &self.available_models,
                         ),
                     }),
-                );
-                Ok(true)
-            }
-            Event::UiSetEffort(req) => {
-                let levels = self
-                    .selected_model
-                    .as_ref()
-                    .map(|m| efforts_for_model(&self.model_registry, m))
-                    .unwrap_or_default();
-                let clamped = clamp_effort(req.level, &levels);
-                if clamped != req.level {
-                    let model_label = self
-                        .selected_model
-                        .as_ref()
-                        .map(ModelId::to_string)
-                        .unwrap_or_else(|| "(no model)".to_owned());
-                    self.publish_event(
-                        None,
-                        Event::HarnessInfo(tau_proto::HarnessInfo {
-                            message: format!(
-                                "effort `{}` not supported by `{model_label}`; using `{}` instead",
-                                req.level.as_str(),
-                                clamped.as_str(),
-                            ),
-                            level: tau_proto::HarnessInfoLevel::Normal,
-                        }),
-                    );
-                }
-                self.selected_params.effort = clamped;
-                if let Some(role_name) = self.selected_role.clone() {
-                    self.available_roles
-                        .entry(role_name.clone())
-                        .or_default()
-                        .effort = Some(clamped);
-                    self.role_overrides.entry(role_name).or_default().effort = Some(clamped);
-                    save_role_overrides(
-                        &self.dirs,
-                        self.selected_role.as_deref(),
-                        &self.role_overrides,
-                    );
-                }
-                save_harness_state(
-                    &self.dirs,
-                    self.selected_model.as_ref(),
-                    self.selected_params,
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
-                        level: self.selected_params.effort,
-                    }),
-                );
-                Ok(true)
-            }
-            Event::UiSetServiceTier(req) => {
-                self.selected_params.service_tier = req.service_tier;
-                if let Some(role_name) = self.selected_role.clone() {
-                    self.available_roles
-                        .entry(role_name.clone())
-                        .or_default()
-                        .service_tier = req.service_tier;
-                    self.role_overrides
-                        .entry(role_name)
-                        .or_default()
-                        .service_tier = req.service_tier;
-                    save_role_overrides(
-                        &self.dirs,
-                        self.selected_role.as_deref(),
-                        &self.role_overrides,
-                    );
-                }
-                save_harness_state(
-                    &self.dirs,
-                    self.selected_model.as_ref(),
-                    self.selected_params,
-                );
-                let status = match req.service_tier {
-                    Some(tier) => tier.as_str(),
-                    None => "off",
-                };
-                self.publish_event(
-                    None,
-                    Event::HarnessInfo(tau_proto::HarnessInfo {
-                        message: format!("Service tier set to {status}"),
-                        level: tau_proto::HarnessInfoLevel::Normal,
-                    }),
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessServiceTierChanged(tau_proto::HarnessServiceTierChanged {
-                        service_tier: self.selected_params.service_tier,
-                    }),
-                );
-                Ok(true)
-            }
-            Event::UiSetVerbosity(req) => {
-                let levels = self
-                    .selected_model
-                    .as_ref()
-                    .map(|m| verbosities_for_model(&self.model_registry, m))
-                    .unwrap_or_default();
-                let clamped = clamp_verbosity(req.level, &levels);
-                if clamped != req.level {
-                    let model_label = self
-                        .selected_model
-                        .as_ref()
-                        .map(ModelId::to_string)
-                        .unwrap_or_else(|| "(no model)".to_owned());
-                    self.publish_event(
-                        None,
-                        Event::HarnessInfo(tau_proto::HarnessInfo {
-                            message: format!(
-                                "verbosity `{}` not supported by `{model_label}`; using `{}` instead",
-                                req.level.as_str(),
-                                clamped.as_str(),
-                            ),
-                            level: tau_proto::HarnessInfoLevel::Normal,
-                        }),
-                    );
-                }
-                self.selected_params.verbosity = clamped;
-                if let Some(role_name) = self.selected_role.clone() {
-                    self.available_roles
-                        .entry(role_name.clone())
-                        .or_default()
-                        .verbosity = Some(clamped);
-                    self.role_overrides.entry(role_name).or_default().verbosity = Some(clamped);
-                    save_role_overrides(
-                        &self.dirs,
-                        self.selected_role.as_deref(),
-                        &self.role_overrides,
-                    );
-                }
-                save_harness_state(
-                    &self.dirs,
-                    self.selected_model.as_ref(),
-                    self.selected_params,
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessVerbosityChanged(tau_proto::HarnessVerbosityChanged {
-                        level: self.selected_params.verbosity,
-                    }),
-                );
-                Ok(true)
-            }
-            Event::UiSetThinkingSummary(req) => {
-                let levels = self
-                    .selected_model
-                    .as_ref()
-                    .map(|m| thinking_summaries_for_model(&self.model_registry, m))
-                    .unwrap_or_default();
-                let clamped = clamp_thinking_summary(req.level, &levels);
-                if clamped != req.level {
-                    let model_label = self
-                        .selected_model
-                        .as_ref()
-                        .map(ModelId::to_string)
-                        .unwrap_or_else(|| "(no model)".to_owned());
-                    self.publish_event(
-                        None,
-                        Event::HarnessInfo(tau_proto::HarnessInfo {
-                            message: format!(
-                                "thinking summary `{}` not supported by `{model_label}`; using `{}` instead",
-                                req.level.as_str(),
-                                clamped.as_str(),
-                            ),
-                            level: tau_proto::HarnessInfoLevel::Normal,
-                        }),
-                    );
-                }
-                self.selected_params.thinking_summary = clamped;
-                if let Some(role_name) = self.selected_role.clone() {
-                    self.available_roles
-                        .entry(role_name.clone())
-                        .or_default()
-                        .thinking_summary = Some(clamped);
-                    self.role_overrides
-                        .entry(role_name)
-                        .or_default()
-                        .thinking_summary = Some(clamped);
-                    save_role_overrides(
-                        &self.dirs,
-                        self.selected_role.as_deref(),
-                        &self.role_overrides,
-                    );
-                }
-                save_harness_state(
-                    &self.dirs,
-                    self.selected_model.as_ref(),
-                    self.selected_params,
-                );
-                self.publish_event(
-                    None,
-                    Event::HarnessThinkingSummaryChanged(
-                        tau_proto::HarnessThinkingSummaryChanged {
-                            level: self.selected_params.thinking_summary,
-                        },
-                    ),
                 );
                 Ok(true)
             }
@@ -2490,7 +2288,9 @@ impl Harness {
                         }),
                     );
                     if self.selected_model.is_none() {
-                        self.emit_info("no model selected — use /model to pick one");
+                        self.emit_info(
+                            "selected role has no available model — use /model to pick a role or enable a provider",
+                        );
                     }
                 }
                 Ok(true)
@@ -2661,6 +2461,13 @@ impl Harness {
         self.set_extension_state(connection_id, ExtensionState::Disconnected);
         self.client_writers
             .remove(&tau_proto::ConnectionId::from(connection_id));
+        if self
+            .provider_models_by_extension
+            .remove(connection_id)
+            .is_some()
+        {
+            self.refresh_provider_models_and_publish_state();
+        }
         let Some(meta) = self.bus.disconnect(connection_id) else {
             return;
         };
@@ -2925,12 +2732,12 @@ impl Harness {
     /// load as `Important` `HarnessInfo`. The loaders already fell
     /// back to defaults and wrote a short stderr line, but stderr is
     /// hidden once the TUI takes over the terminal — without this the
-    /// user's only symptom is "my extensions vanished" / "my provider
-    /// list is empty" with no clue why.
+    /// user's only symptom is "my extensions vanished" / "my roles changed"
+    /// with no clue why.
     ///
-    /// Taking the errors as parameters (instead of re-parsing each
-    /// file here) keeps startup to a single parse per file and avoids
-    /// a race where the user fixes the file between the two reads.
+    /// Taking the error as a parameter (instead of re-parsing the file
+    /// here) keeps startup to a single parse and avoids a race where the
+    /// user fixes the file between the two reads.
     ///
     /// `cli.json5` is intentionally not handled here: the CLI fails
     /// fast on a malformed `cli.json5` before the harness ever
@@ -2939,15 +2746,11 @@ impl Harness {
     fn emit_startup_settings_errors(
         &mut self,
         harness_settings_error: Option<tau_config::settings::SettingsError>,
-        models_error: Option<tau_config::settings::SettingsError>,
     ) {
         if let Some(error) = harness_settings_error {
             self.emit_info_important(&format!(
                 "harness.json5 failed to parse — ignored.\n{error}"
             ));
-        }
-        if let Some(error) = models_error {
-            self.emit_info_important(&format!("models.json5 failed to parse — ignored.\n{error}"));
         }
     }
 
@@ -3227,7 +3030,7 @@ impl Harness {
         let ctx_window = self
             .selected_model
             .as_ref()
-            .and_then(|m| model_context_window(&self.model_registry, m));
+            .and_then(|m| context_window_for_model(&self.provider_model_info, m));
         let display = build_delegate_progress_display(
             &task_name,
             conv.context_input_tokens,
@@ -3368,10 +3171,253 @@ impl Harness {
         let Some(model) = self.selected_model.as_ref() else {
             return false;
         };
-        self.model_registry
-            .providers
-            .get(&model.provider)
-            .is_some_and(tau_config::settings::ProviderConfig::supports_remote_compaction)
+        self.provider_model_info
+            .get(model)
+            .is_some_and(|info| info.supports_compaction)
+    }
+
+    fn refresh_provider_model_info(&mut self) {
+        let mut provider_model_info = HashMap::new();
+        let mut provider_model_routes = HashMap::new();
+        let mut source_ids: Vec<_> = self.provider_models_by_extension.keys().collect();
+        source_ids.sort();
+        for source_id in source_ids {
+            let Some(models) = self.provider_models_by_extension.get(source_id) else {
+                continue;
+            };
+            let connection_id = tau_proto::ConnectionId::from(source_id.as_str());
+            for model in models {
+                provider_model_info.insert(model.id.clone(), model.clone());
+                provider_model_routes.insert(model.id.clone(), connection_id.clone());
+            }
+        }
+        self.provider_model_info = provider_model_info;
+        self.provider_model_routes = provider_model_routes;
+    }
+
+    fn refresh_available_models(&mut self) {
+        self.refresh_provider_model_info();
+        let mut models: Vec<ModelId> = self.provider_model_info.keys().cloned().collect();
+        models.sort();
+        self.available_models = models;
+    }
+
+    fn role_after_update(
+        &mut self,
+        role_name: &str,
+        action: tau_proto::UiRoleUpdateAction,
+    ) -> Option<tau_config::settings::AgentRole> {
+        let mut next_role = self
+            .available_roles
+            .get(role_name)
+            .cloned()
+            .unwrap_or_default();
+
+        match action {
+            tau_proto::UiRoleUpdateAction::Delete => unreachable!("handled by caller"),
+            tau_proto::UiRoleUpdateAction::SetModel { model } => {
+                next_role.model = model;
+            }
+            tau_proto::UiRoleUpdateAction::SetEffort { effort } => {
+                next_role.effort = effort;
+            }
+            tau_proto::UiRoleUpdateAction::SetVerbosity { verbosity } => {
+                next_role.verbosity = verbosity;
+            }
+            tau_proto::UiRoleUpdateAction::SetThinkingSummary { thinking_summary } => {
+                next_role.thinking_summary = thinking_summary;
+            }
+            tau_proto::UiRoleUpdateAction::SetServiceTier { service_tier } => {
+                next_role.service_tier = service_tier;
+            }
+            tau_proto::UiRoleUpdateAction::SetToolsProfile { tools_profile } => {
+                if let Some(profile) = tools_profile.as_deref()
+                    && !self.tools_profiles.contains_key(profile)
+                {
+                    self.emit_info("/role: unknown tools-profile");
+                    return None;
+                }
+                next_role.tools_profile = tools_profile;
+            }
+        }
+
+        Some(next_role)
+    }
+
+    fn reconcile_selected_model_with_available(&mut self) {
+        let previous_model = self.selected_model.clone();
+        self.selected_model = select_model_for_available(
+            &self.available_roles,
+            &self.selected_role,
+            &self.available_models,
+        );
+        self.selected_params = self
+            .selected_model
+            .as_ref()
+            .map(|model| {
+                selected_params_for_role(
+                    &self.provider_model_info,
+                    &self.available_roles,
+                    &self.selected_role,
+                    model,
+                )
+            })
+            .unwrap_or_default();
+        if previous_model != self.selected_model {
+            self.current_session_state.context_input_tokens = None;
+            self.current_session_state.context_cached_tokens = None;
+            self.current_session_state.context_percent_used = None;
+        }
+    }
+
+    fn refresh_provider_models_and_publish_state(&mut self) {
+        let had_routable_model = self
+            .selected_model
+            .as_ref()
+            .is_some_and(|model| self.provider_model_routes.contains_key(model));
+        self.refresh_available_models();
+        self.reconcile_selected_model_with_available();
+        self.publish_available_model_state();
+        let has_routable_model = self
+            .selected_model
+            .as_ref()
+            .is_some_and(|model| self.provider_model_routes.contains_key(model));
+        if !had_routable_model && has_routable_model && self.turn_state.is_idle() {
+            self.try_advance_queue();
+        }
+    }
+
+    fn publish_available_model_state(&mut self) {
+        self.publish_event(
+            None,
+            Event::HarnessModelsAvailable(tau_proto::HarnessModelsAvailable {
+                models: self.available_models.clone(),
+            }),
+        );
+        self.publish_event(
+            None,
+            Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
+                roles: role_infos(
+                    &self.provider_model_info,
+                    &self.available_roles,
+                    &self.tools_profiles,
+                    &self.available_models,
+                ),
+            }),
+        );
+        self.publish_current_model_state();
+    }
+
+    fn publish_current_model_state(&mut self) {
+        let selected_model = self.selected_model.clone();
+        let (effort_levels, verbosity_levels, thinking_levels) =
+            if let Some(model) = selected_model.as_ref() {
+                (
+                    efforts_for_model(&self.provider_model_info, model),
+                    verbosities_for_model(&self.provider_model_info, model),
+                    thinking_summaries_for_model(&self.provider_model_info, model),
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
+        if selected_model.is_some() {
+            self.selected_params.effort = clamp_effort(self.selected_params.effort, &effort_levels);
+            self.selected_params.verbosity =
+                clamp_verbosity(self.selected_params.verbosity, &verbosity_levels);
+            self.selected_params.thinking_summary =
+                clamp_thinking_summary(self.selected_params.thinking_summary, &thinking_levels);
+        }
+        let context_window = selected_model
+            .as_ref()
+            .and_then(|model| context_window_for_model(&self.provider_model_info, model));
+        self.current_session_state.context_percent_used = match (
+            context_window,
+            self.current_session_state.context_input_tokens,
+        ) {
+            (Some(context_window), Some(input_tokens)) => {
+                Some(context_percent_used(input_tokens, context_window))
+            }
+            _ => None,
+        };
+        let (live_settings, _) = load_harness_settings_or_warn(&self.dirs);
+        self.publish_event(
+            None,
+            Event::HarnessRoleSelected(HarnessRoleSelected {
+                baseline_params: selected_model.as_ref().map(|model| {
+                    baseline_params_for_selection(
+                        &live_settings,
+                        &self.provider_model_info,
+                        &self.selected_role,
+                        model,
+                    )
+                }),
+                model: selected_model,
+                context_window,
+                role: self.selected_role.clone(),
+            }),
+        );
+        self.publish_event(
+            None,
+            Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
+                input_tokens: self.current_session_state.context_input_tokens,
+                cached_tokens: self.current_session_state.context_cached_tokens,
+                percent_used: self.current_session_state.context_percent_used,
+            }),
+        );
+        self.publish_event(
+            None,
+            Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
+                level: self.selected_params.effort,
+            }),
+        );
+        self.publish_event(
+            None,
+            Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
+                levels: effort_levels,
+            }),
+        );
+        self.publish_event(
+            None,
+            Event::HarnessServiceTierChanged(tau_proto::HarnessServiceTierChanged {
+                service_tier: self.selected_params.service_tier,
+            }),
+        );
+        self.publish_event(
+            None,
+            Event::HarnessVerbosityChanged(tau_proto::HarnessVerbosityChanged {
+                level: self.selected_params.verbosity,
+            }),
+        );
+        self.publish_event(
+            None,
+            Event::HarnessVerbositiesAvailable(tau_proto::HarnessVerbositiesAvailable {
+                levels: verbosity_levels,
+            }),
+        );
+        self.publish_event(
+            None,
+            Event::HarnessThinkingSummaryChanged(tau_proto::HarnessThinkingSummaryChanged {
+                level: self.selected_params.thinking_summary,
+            }),
+        );
+        self.publish_event(
+            None,
+            Event::HarnessThinkingSummariesAvailable(
+                tau_proto::HarnessThinkingSummariesAvailable {
+                    levels: thinking_levels,
+                },
+            ),
+        );
+    }
+
+    fn set_provider_models(&mut self, source_id: &str, models: Vec<ProviderModelInfo>) {
+        if models.is_empty() {
+            self.provider_models_by_extension.remove(source_id);
+        } else {
+            self.provider_models_by_extension
+                .insert(source_id.to_owned(), models);
+        }
+        self.refresh_provider_models_and_publish_state();
     }
 
     fn pending_compaction_targeted_at(&self, cid: &ConversationId) -> bool {
@@ -4241,10 +4287,9 @@ impl Harness {
     }
 
     fn current_tools_profile(&self) -> Option<&tau_config::settings::ToolsProfile> {
-        let role_name = self.selected_role.as_deref()?;
         let profile_name = self
             .available_roles
-            .get(role_name)
+            .get(self.selected_role.as_str())
             .and_then(|role| role.tools_profile.as_deref())?;
         self.tools_profiles.get(profile_name)
     }
@@ -4744,7 +4789,7 @@ impl Harness {
         let context_window = self
             .selected_model
             .as_ref()
-            .and_then(|m| model_context_window(&self.model_registry, m));
+            .and_then(|m| context_window_for_model(&self.provider_model_info, m));
         let percent_used = match (context_window, input_tokens) {
             (Some(w), Some(tokens)) => Some(context_percent_used(tokens, w)),
             _ => None,
@@ -4763,7 +4808,7 @@ impl Harness {
         let context_window = self
             .selected_model
             .as_ref()
-            .and_then(|m| model_context_window(&self.model_registry, m));
+            .and_then(|m| context_window_for_model(&self.provider_model_info, m));
         let percent_used = match (context_window, input_tokens) {
             (Some(w), Some(tokens)) => Some(context_percent_used(tokens, w)),
             _ => None,
@@ -5132,7 +5177,7 @@ impl Harness {
 
         match self
             .registry
-            .route_tool_request(&mut self.bus, &self.agent_connection_id, request)
+            .route_tool_request(&mut self.bus, HARNESS_CONNECTION_ID, request)
         {
             Ok(route) => {
                 self.pending_tool_providers
@@ -5172,8 +5217,8 @@ impl Harness {
     ) -> Result<InteractionOutcome, HarnessError> {
         // Synchronous test entrypoint: dispatch directly without going
         // through `submit_user_prompt`'s queue. The embedded test harness
-        // has no model configured (nothing to select from) and no UI to
-        // drain a queued prompt, so the queued-until-model path would
+        // has no provider-published model (nothing to select from) and no UI
+        // to drain a queued prompt, so the queued-until-model path would
         // deadlock. AGENTS.md session init is exercised separately in
         // unit tests via `submit_user_prompt` / manual turn-state setup.
         self.dispatch_user_prompt(session_id.into(), text.to_owned())?;
@@ -5219,9 +5264,12 @@ impl Harness {
                     }
                 }
                 HarnessEvent::Disconnected { connection_id } => {
-                    let is_agent = connection_id == self.agent_connection_id;
+                    let was_agent = self
+                        .extensions
+                        .get(&connection_id)
+                        .is_some_and(|entry| entry.kind == ClientKind::Agent);
                     self.handle_disconnect(&connection_id);
-                    if is_agent {
+                    if was_agent {
                         return Err(HarnessError::Participant("agent disconnected".to_owned()));
                     }
                 }
@@ -5236,11 +5284,11 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let tempdir = tempfile::TempDir::new()?;
         let state_dir = tempdir.path().join("state");
-        let mut harness = Self::new_with_agent(
+        let config = crate::settings::default_config();
+        let mut harness = Self::from_config(
+            &config,
             &state_dir,
             tau_config::settings::TauDirs::default(),
-            default_agent_runner,
-            Vec::new(),
             "s1",
         )?;
         harness.selected_model = Some("test/model".parse().expect("model id"));

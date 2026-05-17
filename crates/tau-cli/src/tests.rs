@@ -5,11 +5,11 @@ use tau_cli_term::TermHandle;
 use tau_cli_term_raw::{Color, Term};
 use tau_proto::{
     AgentResponseFinished, AgentResponseUpdated, AgentStopReason, CborValue, ContentPart,
-    ContextItem, ContextRole, Event, ExtAgentsMdAvailable, ExtensionReady,
-    HarnessContextUsageChanged, HarnessEffortChanged, HarnessModelSelected, HarnessRoleInfo,
-    HarnessRolesAvailable, HarnessVerbosityChanged, MessageItem, SessionPromptCreated,
-    SessionPromptQueued, SessionStartReason, SessionStarted, ToolCallItem, ToolResult,
-    UiPromptSubmitted, Verbosity,
+    ContextItem, ContextRole, Effort, Event, ExtAgentsMdAvailable, ExtensionReady,
+    HarnessContextUsageChanged, HarnessEffortChanged, HarnessRoleInfo, HarnessRoleSelected,
+    HarnessRolesAvailable, HarnessVerbosityChanged, MessageItem, ServiceTier, SessionPromptCreated,
+    SessionPromptQueued, SessionStartReason, SessionStarted, ThinkingSummary, ToolCallItem,
+    ToolResult, UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
 };
 
 use super::chat::{DraftSlot, is_local_slash_command, should_send_draft_snapshot};
@@ -176,6 +176,43 @@ fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
     assert!(!should_send_draft_snapshot(&handle, epoch));
 }
 
+/// Role-update parsing must keep explicit `off` distinct from clearing a field;
+/// otherwise `/effort off` and `/thinking-summary off` would accidentally reset
+/// the selected role instead of storing the user's requested off state. `reset`
+/// is the only textual way to clear a setting.
+#[test]
+fn role_setting_updates_are_typed_and_reset_aware() {
+    use super::chat::parse_role_setting_update;
+
+    assert_eq!(
+        parse_role_setting_update("effort", "off").expect("effort off"),
+        UiRoleUpdateAction::SetEffort {
+            effort: Some(Effort::Off),
+        }
+    );
+    assert_eq!(
+        parse_role_setting_update("effort", "reset").expect("effort reset"),
+        UiRoleUpdateAction::SetEffort { effort: None }
+    );
+    assert_eq!(
+        parse_role_setting_update("thinking-summary", "off").expect("summary off"),
+        UiRoleUpdateAction::SetThinkingSummary {
+            thinking_summary: Some(ThinkingSummary::Off),
+        }
+    );
+    assert!(parse_role_setting_update("service-tier", "off").is_err());
+    assert_eq!(
+        parse_role_setting_update("service-tier", "reset").expect("tier reset"),
+        UiRoleUpdateAction::SetServiceTier { service_tier: None }
+    );
+    assert_eq!(
+        parse_role_setting_update("service-tier", "fast").expect("tier fast"),
+        UiRoleUpdateAction::SetServiceTier {
+            service_tier: Some(ServiceTier::Fast),
+        }
+    );
+}
+
 #[test]
 fn current_draft_snapshot_is_sent_when_epoch_matches() {
     let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
@@ -263,7 +300,7 @@ fn new_session_clears_session_ui_state() {
     assert!(!vt.screen_contains(80, "old prompt"));
     assert!(!vt.screen_contains(80, "old response"));
     assert!(!vt.screen_contains(80, "read src/lib.rs"));
-    assert!(!vt.screen_contains(80, "no model selected"));
+    assert!(!vt.screen_contains(80, "no role selected"));
 }
 
 #[test]
@@ -295,7 +332,7 @@ fn new_session_replays_startup_context_and_kept_extensions() {
 }
 
 #[test]
-fn new_session_preserves_model_status() {
+fn new_session_preserves_role_status() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -303,14 +340,14 @@ fn new_session_preserves_model_status() {
         tau_themes::Theme::builtin(),
     );
 
-    renderer.handle(&Event::HarnessModelSelected(HarnessModelSelected {
+    renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
         model: Some("test/model".into()),
         context_window: Some(100_000),
-        role: None,
-        default_params: None,
+        role: "smart".into(),
+        baseline_params: None,
     }));
     sync(&handle);
-    assert!(vt.screen_contains(80, "=test/model"));
+    assert!(vt.screen_contains(80, "+smart"));
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
@@ -318,9 +355,9 @@ fn new_session_preserves_model_status() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "=test/model"));
+    assert!(vt.screen_contains(80, "+smart"));
     assert!(vt.screen_contains(80, "@s2"));
-    assert!(!vt.screen_contains(80, "no model selected"));
+    assert!(!vt.screen_contains(80, "no role selected"));
 }
 
 #[test]
@@ -332,11 +369,11 @@ fn model_status_uses_symbol_prefixed_chips() {
         tau_themes::Theme::builtin(),
     );
 
-    renderer.handle(&Event::HarnessModelSelected(HarnessModelSelected {
+    renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
         model: Some("test/model".into()),
         context_window: Some(200_000),
-        role: Some("smart".into()),
-        default_params: None,
+        role: "smart".into(),
+        baseline_params: None,
     }));
     renderer.handle(&Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
         level: Verbosity::High,
@@ -382,11 +419,11 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
                 .to_owned(),
         }],
     }));
-    renderer.handle(&Event::HarnessModelSelected(HarnessModelSelected {
+    renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
         model: Some("test/model".into()),
         context_window: Some(200_000),
-        role: Some("smart".into()),
-        default_params: Some(tau_proto::ModelParams {
+        role: "smart".into(),
+        baseline_params: Some(tau_proto::ModelParams {
             effort: tau_proto::Effort::Medium,
             verbosity: Verbosity::Medium,
             thinking_summary: tau_proto::ThinkingSummary::Auto,
@@ -418,7 +455,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
 }
 
 #[test]
-fn role_state_overrides_are_compared_to_config_defaults() {
+fn role_state_overrides_are_compared_to_role_baseline() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -427,8 +464,8 @@ fn role_state_overrides_are_compared_to_config_defaults() {
     );
 
     // HarnessRolesAvailable describes the current role including
-    // persisted state overrides. The status bar must use the
-    // config-only default_params from HarnessModelSelected instead.
+    // persisted state overrides. The status bar must use the role/provider
+    // baseline from HarnessRoleSelected instead.
     renderer.handle(&Event::HarnessRolesAvailable(HarnessRolesAvailable {
         roles: vec![HarnessRoleInfo {
             name: "smart".to_owned(),
@@ -436,11 +473,11 @@ fn role_state_overrides_are_compared_to_config_defaults() {
                 .to_owned(),
         }],
     }));
-    renderer.handle(&Event::HarnessModelSelected(HarnessModelSelected {
+    renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
         model: Some("test/model".into()),
         context_window: None,
-        role: Some("smart".into()),
-        default_params: Some(tau_proto::ModelParams {
+        role: "smart".into(),
+        baseline_params: Some(tau_proto::ModelParams {
             effort: tau_proto::Effort::Medium,
             verbosity: Verbosity::Medium,
             thinking_summary: tau_proto::ThinkingSummary::Auto,

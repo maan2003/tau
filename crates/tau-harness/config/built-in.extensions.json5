@@ -4,9 +4,9 @@
 // extension subcommand in `suffix`.
 [
     {
-        name: "core-agent",
-        suffix: ["ext", "agent"],
-        role: "agent",
+        name: "provider-openai",
+        suffix: ["ext", "ext-provider-openai"],
+        role: "provider",
         enable: true,
         config: {},
     },
