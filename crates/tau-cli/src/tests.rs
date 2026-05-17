@@ -8,8 +8,9 @@ use tau_proto::{
     ExtensionReady, HarnessContextUsageChanged, HarnessEffortChanged, HarnessRoleInfo,
     HarnessRoleSelected, HarnessRolesAvailable, HarnessVerbosityChanged, MessageItem,
     ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason, ServiceTier,
-    SessionPromptCreated, SessionPromptQueued, SessionStartReason, SessionStarted, ThinkingSummary,
-    ToolCallItem, ToolResult, UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
+    SessionPromptCreated, SessionPromptQueued, SessionPromptSteered, SessionStartReason,
+    SessionStarted, ThinkingSummary, ToolCallItem, ToolResult, UiPromptSubmitted,
+    UiRoleUpdateAction, Verbosity,
 };
 
 use super::chat::{DraftSlot, is_local_slash_command, should_send_draft_snapshot};
@@ -934,13 +935,10 @@ fn queued_prompt_renders_after_first_completes() {
         "sp-0", "s1",
     )));
 
-    // Second prompt queued.
-    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
-        text: "second".into(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    }));
+    // Regression: the production busy-submit path immediately publishes
+    // only `SessionPromptQueued`; there may be no preceding local
+    // `UiPromptSubmitted` echo for the renderer to replace. The queued
+    // event itself must make the user's prompt visible.
     renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
         session_id: "s1".into(),
         text: "second".into(),
@@ -973,6 +971,15 @@ fn queued_prompt_renders_after_first_completes() {
     assert!(
         vt.screen_contains(80, "> second"),
         "dispatched prompt should show normally, got: {:?}",
+        vt.screen_text(80)
+    );
+    assert_eq!(
+        vt.screen_text(80)
+            .iter()
+            .filter(|row| row.contains("second"))
+            .count(),
+        1,
+        "queued prompt should be promoted instead of duplicated, got: {:?}",
         vt.screen_text(80)
     );
 
@@ -1009,6 +1016,149 @@ fn queued_prompt_renders_after_first_completes() {
 }
 
 #[test]
+fn queued_prompt_then_late_ui_submit_advances_without_duplicate() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    // Regression: some paths can observe the durable queued event before
+    // a local UI echo. The late echo must not add a second copy, and the
+    // later prompt creation must promote the queued marker to one normal
+    // transcript item.
+    renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
+        session_id: "s1".into(),
+        text: "late echo".into(),
+    }));
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "late echo".into(),
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "late echo (queued)"));
+    assert_eq!(
+        vt.screen_text(80)
+            .iter()
+            .filter(|row| row.contains("late echo"))
+            .count(),
+        1,
+        "late UI echo should not duplicate queued prompt, got: {:?}",
+        vt.screen_text(80)
+    );
+
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-queued",
+        "s1",
+    )));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "late echo (queued)"));
+    assert!(vt.screen_contains(80, "> late echo"));
+    assert_eq!(
+        vt.screen_text(80)
+            .iter()
+            .filter(|row| row.contains("late echo"))
+            .count(),
+        1,
+        "created queued prompt should be promoted once, got: {:?}",
+        vt.screen_text(80)
+    );
+}
+
+#[test]
+fn queued_prompt_steered_promotes_without_duplicate() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    // Regression: steering folds a queued prompt into the in-flight turn
+    // immediately, without a later `SessionPromptCreated`. The queued
+    // marker should therefore be promoted in place to one normal user
+    // prompt instead of lingering or duplicating.
+    renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
+        session_id: "s1".into(),
+        text: "folded queued prompt".into(),
+    }));
+    sync(&handle);
+    assert!(
+        vt.screen_contains(80, "folded queued prompt (queued)"),
+        "queued marker should show before steering, got: {:?}",
+        vt.screen_text(80)
+    );
+
+    renderer.handle(&Event::SessionPromptSteered(SessionPromptSteered {
+        session_id: "s1".into(),
+        text: "folded queued prompt".into(),
+    }));
+    sync(&handle);
+    assert!(
+        !vt.screen_contains(80, "folded queued prompt (queued)"),
+        "queued marker should be gone after steering, got: {:?}",
+        vt.screen_text(80)
+    );
+    assert!(
+        vt.screen_contains(80, "> folded queued prompt"),
+        "steered prompt should show normally, got: {:?}",
+        vt.screen_text(80)
+    );
+    assert_eq!(
+        vt.screen_text(80)
+            .iter()
+            .filter(|row| row.contains("folded queued prompt"))
+            .count(),
+        1,
+        "steered queued prompt should be promoted instead of duplicated, got: {:?}",
+        vt.screen_text(80)
+    );
+}
+
+#[test]
+fn queued_prompt_does_not_replace_dispatched_same_text() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    // Regression: once a local echo has been accepted as a normal prompt,
+    // a later queued prompt with the same text is a separate message. Do
+    // not remove the earlier transcript block while rendering the queued
+    // marker.
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "repeat".into(),
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-0", "s1",
+    )));
+    renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
+        session_id: "s1".into(),
+        text: "repeat".into(),
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "repeat (queued)"));
+    assert_eq!(
+        vt.screen_text(80)
+            .iter()
+            .filter(|row| row.contains("repeat"))
+            .count(),
+        2,
+        "queued prompt should not remove an earlier dispatched prompt with the same text, got: {:?}",
+        vt.screen_text(80)
+    );
+}
+
+#[test]
 fn three_queued_prompts_render_sequentially() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
@@ -1019,13 +1169,13 @@ fn three_queued_prompts_render_sequentially() {
 
     // Three rapid prompts.
     for i in 0..3 {
-        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: format!("msg-{i}"),
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }));
         if i == 0 {
+            renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+                session_id: "s1".into(),
+                text: format!("msg-{i}"),
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            }));
             renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
                 "sp-0", "s1",
             )));

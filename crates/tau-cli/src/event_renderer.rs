@@ -35,8 +35,10 @@ pub(crate) struct EventRenderer {
     /// Compaction has first-class session lifecycle events rather than
     /// being inferred from the hidden compact prompt sent to the agent.
     compaction_blocks: HashMap<tau_proto::SessionId, tau_cli_term::BlockId>,
-    /// Block ID of the last user message (for moving on queue).
-    last_user_block: Option<tau_cli_term::BlockId>,
+    /// Last locally-echoed user message that has not yet been classified
+    /// as a normal or queued prompt. Used to replace only the matching
+    /// echo when the harness reports that prompt as queued.
+    last_user_block: Option<(tau_cli_term::BlockId, String)>,
     /// Queued user-message blocks (in above_sticky zone).
     /// When `SessionPromptCreated` fires for a dequeued prompt,
     /// the first entry is popped and moved back to history.
@@ -1342,6 +1344,13 @@ impl EventRenderer {
                 }
             }
             Event::UiPromptSubmitted(prompt) => {
+                if self
+                    .queued_user_blocks
+                    .front()
+                    .is_some_and(|(_, text)| text == &prompt.text)
+                {
+                    return;
+                }
                 self.reset_main_tool_usage();
                 let block = themed_block(
                     &self.theme,
@@ -1349,22 +1358,27 @@ impl EventRenderer {
                     format!("{}{}", self.submitted_prompt_prefix(), prompt.text),
                 );
                 let id = self.handle.print_output("user-prompt", block);
-                self.last_user_block = Some(id);
+                self.last_user_block = Some((id, prompt.text.clone()));
             }
             Event::SessionPromptQueued(queued) => {
-                if let Some(id) = self.last_user_block.take() {
-                    self.handle.remove_block(id);
-                    let block = themed_block(
-                        &self.theme,
-                        names::USER_PROMPT_QUEUED,
-                        format!("{}{} (queued)", self.submitted_prompt_prefix(), queued.text),
-                    );
-                    let queued_id = self.handle.new_block("user-prompt-queued", block);
-                    self.handle.push_above_sticky(queued_id);
-                    self.handle.redraw();
-                    self.queued_user_blocks
-                        .push_back((queued_id, queued.text.clone()));
+                self.reset_main_tool_usage();
+                if let Some((id, text)) = self.last_user_block.take() {
+                    if text == queued.text {
+                        self.handle.remove_block(id);
+                    } else {
+                        self.last_user_block = Some((id, text));
+                    }
                 }
+                let block = themed_block(
+                    &self.theme,
+                    names::USER_PROMPT_QUEUED,
+                    format!("{}{} (queued)", self.submitted_prompt_prefix(), queued.text),
+                );
+                let queued_id = self.handle.new_block("user-prompt-queued", block);
+                self.handle.push_above_sticky(queued_id);
+                self.handle.redraw();
+                self.queued_user_blocks
+                    .push_back((queued_id, queued.text.clone()));
             }
             Event::SessionPromptSteered(steered) => {
                 // The harness folded a queued prompt into the current
@@ -1404,6 +1418,7 @@ impl EventRenderer {
                 {
                     context.active_prompt = None;
                 }
+                self.last_user_block = None;
                 let entry = self
                     .prompts
                     .entry(prompt.session_prompt_id.to_string())
