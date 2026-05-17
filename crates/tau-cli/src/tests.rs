@@ -404,6 +404,131 @@ fn model_status_uses_symbol_prefixed_chips() {
 }
 
 #[test]
+fn model_status_shows_main_tool_usage_before_context() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
+        model: Some("test/model".into()),
+        context_window: Some(200_000),
+        role: "smart".into(),
+        baseline_params: None,
+    }));
+    renderer.handle(&Event::HarnessContextUsageChanged(
+        HarnessContextUsageChanged {
+            input_tokens: Some(12_000),
+            cached_tokens: None,
+            percent_used: Some(6),
+        },
+    ));
+
+    // Regression coverage for the bottom status bar: main-agent tool
+    // usage should mirror delegate progress chips (`%complete/total`)
+    // and should render immediately before the context chip, while
+    // side-conversation tool calls stay rolled up under their delegate.
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        session_prompt_id: "side-sp".into(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "side-call".into(),
+            name: tau_proto::ToolName::new("grep"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: ProviderStopReason::ToolCalls,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q1".to_owned(),
+        },
+        usage: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }));
+    sync(&handle);
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("+smart"))
+        .expect("status row after side response");
+    assert!(status_row.ends_with("#12k/200k"));
+    assert!(!status_row.contains('%'));
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "main-sp",
+        vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-1".into(),
+                name: tau_proto::ToolName::new("read"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-2".into(),
+                name: tau_proto::ToolName::new("grep"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+        ],
+    )));
+    sync(&handle);
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("+smart"))
+        .expect("status row after main response");
+    assert!(status_row.ends_with("%0/2 #12k/200k"));
+
+    renderer.handle(&Event::ToolResult(ToolResult {
+        call_id: "side-call".into(),
+        tool_name: tau_proto::ToolName::new("grep"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("side result".into()),
+        display: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q1".to_owned(),
+        },
+    }));
+    renderer.handle(&Event::ToolResult(ToolResult {
+        call_id: "call-1".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("main result".into()),
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("+smart"))
+        .expect("status row after tool result");
+    assert!(status_row.ends_with("%1/2 #12k/200k"));
+
+    // Starting a new user task in the same session resets the current-task
+    // tool chip. The context chip remains because it is model/session state,
+    // not per-task tool usage.
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "next task".into(),
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("+smart"))
+        .expect("status row after next prompt");
+    assert!(status_row.ends_with("#12k/200k"));
+    assert!(!status_row.contains('%'));
+}
+
+#[test]
 fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(

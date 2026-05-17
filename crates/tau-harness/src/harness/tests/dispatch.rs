@@ -28,6 +28,19 @@ fn assert_delegate_tools_counter(
     assert_eq!(counter.total, total);
 }
 
+fn assert_delegate_counter_order(progress: &tau_proto::DelegateProgress, labels: &[&str]) {
+    let display = progress
+        .display
+        .as_ref()
+        .expect("delegate progress display");
+    let actual: Vec<&str> = display
+        .progress_counters
+        .iter()
+        .map(|counter| counter.label.as_deref().expect("progress label"))
+        .collect();
+    assert_eq!(actual, labels);
+}
+
 fn assert_delegate_ctx_counter(
     progress: &tau_proto::DelegateProgress,
     complete: Option<u64>,
@@ -3465,7 +3478,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
 /// Sub-agent state changes (tool start, response usage, tool finish)
 /// must surface to the user as `DelegateProgress` events keyed on the
 /// parent's `delegate` tool call_id. The CLI uses these to repaint
-/// the running tool block as `delegate [task] #… %a/b …`.
+/// the running tool block as `delegate [task] %a/b #… …`.
 #[test]
 fn delegate_emits_progress_as_sub_agent_makes_progress() {
     let td = TempDir::new().expect("tempdir");
@@ -3563,6 +3576,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     assert_eq!(initial.tools_in_flight, 0);
     assert_eq!(initial.tools_total, 0);
     assert_delegate_tools_counter(&initial, Some(0), Some(0));
+    assert_delegate_counter_order(&initial, &["tools"]);
 
     let side_spid = h
         .prompt_conversations
@@ -3613,6 +3627,9 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     assert_delegate_tools_counter(&latest, Some(0), Some(1));
     assert_eq!(latest.ctx_input_tokens, Some(1234));
     assert_delegate_ctx_counter(&latest, Some(1234), None);
+    // Regression coverage for the live delegate line: renderers preserve
+    // progress_counters order, so tools must precede context in the UI.
+    assert_delegate_counter_order(&latest, &["tools", "ctx"]);
     assert_eq!(h.current_session_state.context_input_tokens, None);
 
     // Complete the sub-agent's tool — counters should drop and a

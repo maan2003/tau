@@ -5776,7 +5776,7 @@ fn shell_command_payload(command: &str) -> Option<tau_proto::ToolDisplayPayload>
 
 /// Build the [`ToolDisplay`] descriptor the renderer paints for a
 /// running `delegate` tool block. Carries the sub-task name as the
-/// args label and two progress counters (context and tools). The tools
+/// args label and two progress counters (tools and context). The tools
 /// counter is completed/total so users can infer the currently running
 /// count as `total - completed`. The trailing chip is set to
 /// [`ToolDisplayStatus::InProgress`] so the renderer paints
@@ -5791,7 +5791,13 @@ fn build_delegate_progress_display(
 ) -> tau_proto::ToolDisplay {
     use tau_proto::{ProgressCounter, ProgressUnit, ToolDisplayStatus};
 
-    let mut counters: Vec<ProgressCounter> = Vec::new();
+    let tools_completed = tools_total.saturating_sub(tools_in_flight);
+    let mut counters: Vec<ProgressCounter> = vec![ProgressCounter {
+        label: Some("tools".to_owned()),
+        unit: ProgressUnit::Count,
+        complete: Some(u64::from(tools_completed)),
+        total: Some(u64::from(tools_total)),
+    }];
     if ctx_input_tokens.is_some() || ctx_window.is_some() {
         counters.push(ProgressCounter {
             label: Some("ctx".to_owned()),
@@ -5807,13 +5813,6 @@ fn build_delegate_progress_display(
             total: None,
         });
     }
-    let tools_completed = tools_total.saturating_sub(tools_in_flight);
-    counters.push(ProgressCounter {
-        label: Some("tools".to_owned()),
-        unit: ProgressUnit::Count,
-        complete: Some(u64::from(tools_completed)),
-        total: Some(u64::from(tools_total)),
-    });
     tau_proto::ToolDisplay {
         args: format!("[{task_name}]"),
         progress_counters: counters,

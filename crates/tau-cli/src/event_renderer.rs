@@ -110,6 +110,13 @@ pub(crate) struct EventRenderer {
     current_context_input_tokens: Option<u64>,
     /// Current model context window, in tokens, if known.
     current_context_window: Option<u64>,
+    /// Main-agent tool calls completed for the current user task. Rendered
+    /// in the status bar alongside [`Self::main_tools_total`].
+    main_tools_completed: u64,
+    /// Main-agent tool calls requested for the current user task. Sub-agent
+    /// calls are excluded because they roll up under their `delegate`
+    /// parent.
+    main_tools_total: u64,
     /// Whether to render per-turn token usage stats below completed
     /// agent responses.
     show_token_stats: bool,
@@ -548,6 +555,8 @@ impl EventRenderer {
             current_context_percent: None,
             current_context_input_tokens: None,
             current_context_window: None,
+            main_tools_completed: 0,
+            main_tools_total: 0,
             redraw_counter: state.redraw_counter,
             last_full_render_count: 0,
             last_full_render_at: None,
@@ -1019,6 +1028,8 @@ impl EventRenderer {
         // can be recreated after clearing the terminal output.
         self.current_context_percent = None;
         self.current_context_input_tokens = None;
+        self.main_tools_completed = 0;
+        self.main_tools_total = 0;
         self.cumulative_agent_latency = Duration::ZERO;
         self.handle.clear_output();
         self.render_session_preamble();
@@ -1056,6 +1067,7 @@ impl EventRenderer {
         let effort_style = themed.add_style(names::STATUS_EFFORT);
         let verbosity_style = themed.add_style(names::STATUS_VERBOSITY);
         let service_tier_style = themed.add_style(names::STATUS_SERVICE_TIER);
+        let tools_style = right_themed.add_style(names::STATUS_TOOLS);
         let context_style = right_themed.add_style(names::STATUS_CONTEXT);
         let redraw_style = right_themed.add_style(names::REDRAW_COUNTER);
         let mut needs_space = false;
@@ -1141,6 +1153,14 @@ impl EventRenderer {
                 format!("@{session_id}"),
             );
         }
+        if let Some(tools) = self.main_tools_status_chip() {
+            push_status_chip(
+                &mut right_themed,
+                tools_style,
+                &mut right_needs_space,
+                format!("%{tools}"),
+            );
+        }
         if let Some(context) = self.context_status_chip() {
             push_status_chip(
                 &mut right_themed,
@@ -1208,6 +1228,28 @@ impl EventRenderer {
             .as_deref()?
             .parse()
             .ok()
+    }
+
+    fn main_tools_status_chip(&self) -> Option<String> {
+        (self.main_tools_total != 0)
+            .then(|| format!("{}/{}", self.main_tools_completed, self.main_tools_total))
+    }
+
+    fn record_main_tool_completed(&mut self) {
+        if self.main_tools_completed < self.main_tools_total {
+            self.main_tools_completed += 1;
+        }
+    }
+
+    fn reset_main_tool_usage(&mut self) {
+        if self.main_tools_completed == 0 && self.main_tools_total == 0 {
+            return;
+        }
+        self.main_tools_completed = 0;
+        self.main_tools_total = 0;
+        if self.model_status_block.is_some() {
+            self.render_model_status();
+        }
     }
 
     fn context_status_chip(&self) -> Option<String> {
@@ -1300,6 +1342,7 @@ impl EventRenderer {
                 }
             }
             Event::UiPromptSubmitted(prompt) => {
+                self.reset_main_tool_usage();
                 let block = themed_block(
                     &self.theme,
                     names::USER_PROMPT,
@@ -1542,6 +1585,7 @@ impl EventRenderer {
                 // a flood of nested invocations.
                 if finished.originator.is_user() {
                     let tool_calls = tool_calls_from_output_items(&finished.output_items);
+                    self.main_tools_total += tool_calls.len() as u64;
                     let summary_block_id = if tool_calls.is_empty() {
                         self.prompt_tool_summary = None;
                         None
@@ -1661,9 +1705,16 @@ impl EventRenderer {
                 // Sub-agent tool activity stays out of the user's
                 // transcript — its progress is rolled up under the
                 // parent's `delegate` block by `DelegateProgress`.
-                let prior = self.tool_calls.remove(call_id).unwrap_or_default();
+                let prior = self.tool_calls.remove(call_id);
+                let known_main_tool = prior
+                    .as_ref()
+                    .is_some_and(|prior| !prior.is_sub_agent && result.originator.is_user());
+                let prior = prior.unwrap_or_default();
                 if prior.is_sub_agent {
                     return;
+                }
+                if known_main_tool {
+                    self.record_main_tool_completed();
                 }
                 let existing_block_id = prior.block_id;
                 let last_progress = prior.delegate_last_progress;
@@ -1724,12 +1775,22 @@ impl EventRenderer {
                         display,
                     });
                 }
+                if known_main_tool {
+                    self.render_model_status();
+                }
             }
             Event::ToolError(error) => {
                 let call_id = error.call_id.as_str();
-                let prior = self.tool_calls.remove(call_id).unwrap_or_default();
+                let prior = self.tool_calls.remove(call_id);
+                let known_main_tool = prior
+                    .as_ref()
+                    .is_some_and(|prior| !prior.is_sub_agent && error.originator.is_user());
+                let prior = prior.unwrap_or_default();
                 if prior.is_sub_agent {
                     return;
+                }
+                if known_main_tool {
+                    self.record_main_tool_completed();
                 }
                 let existing_block_id = prior.block_id;
                 let last_progress = prior.delegate_last_progress;
@@ -1767,6 +1828,9 @@ impl EventRenderer {
                     block_id: bid,
                     display,
                 });
+                if known_main_tool {
+                    self.render_model_status();
+                }
             }
             Event::UiShellCommand(cmd) => {
                 // Create a running block now; the harness will echo
