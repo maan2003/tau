@@ -1282,7 +1282,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
             display: Some(tau_proto::ToolDisplay {
                 args: "src/main.rs".into(),
                 status: tau_proto::ToolDisplayStatus::InProgress,
-                status_text: "…".into(),
+                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
                 ..Default::default()
             }),
         }],
@@ -1356,7 +1356,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
                 display: Some(tau_proto::ToolDisplay {
                     args: "src/main.rs".into(),
                     status: tau_proto::ToolDisplayStatus::InProgress,
-                    status_text: "…".into(),
+                    status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
                     ..Default::default()
                 }),
             },
@@ -1368,7 +1368,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
                 display: Some(tau_proto::ToolDisplay {
                     args: "foo".into(),
                     status: tau_proto::ToolDisplayStatus::InProgress,
-                    status_text: "…".into(),
+                    status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
                     ..Default::default()
                 }),
             },
@@ -1447,7 +1447,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
             display: Some(tau_proto::ToolDisplay {
                 args: "src/main.rs".into(),
                 status: tau_proto::ToolDisplayStatus::InProgress,
-                status_text: "…".into(),
+                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
                 ..Default::default()
             }),
         }],
@@ -1495,7 +1495,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
             display: Some(tau_proto::ToolDisplay {
                 args: "foo".into(),
                 status: tau_proto::ToolDisplayStatus::InProgress,
-                status_text: "…".into(),
+                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
                 ..Default::default()
             }),
         }],
@@ -1561,7 +1561,7 @@ fn show_tools_compact_hides_payload_body() {
             display: Some(tau_proto::ToolDisplay {
                 args: "src/main.rs".into(),
                 status: tau_proto::ToolDisplayStatus::InProgress,
-                status_text: "…".into(),
+                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
                 ..Default::default()
             }),
         }],
@@ -1812,13 +1812,16 @@ fn render_tool_display_token_progress_formats_context_like_status_bar() {
             total: Some(200_000),
         }],
         status: ToolDisplayStatus::InProgress,
-        status_text: "…".into(),
+        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
         ..Default::default()
     };
 
     let rendered = render_tool_display("delegate", &display);
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(texts, vec!["#133.4k/200k", "…"]);
+    assert_eq!(
+        texts,
+        vec!["#133.4k/200k", tau_proto::PROGRESS_INDICATOR_TEXT]
+    );
 }
 
 #[test]

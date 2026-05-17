@@ -5310,7 +5310,8 @@ impl Harness {
 /// per-tool string knowledge. The descriptor carries the tool's
 /// args label (e.g. `"foo" in src` for grep, `[task]` for delegate)
 /// and is stamped with [`tau_proto::ToolDisplayStatus::InProgress`] /
-/// `"…"` so subscribers render the running ellipsis uniformly.
+/// [`tau_proto::PROGRESS_INDICATOR_TEXT`] so subscribers render the
+/// running ellipsis uniformly.
 ///
 /// Tools without a known label shape return `None`; the renderer
 /// falls back to a name-only block.
@@ -5404,7 +5405,7 @@ fn build_tool_args_display(
     Some(tau_proto::ToolDisplay {
         args,
         status: ToolDisplayStatus::InProgress,
-        status_text: "…".to_owned(),
+        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
         payload,
         ..Default::default()
     })
@@ -5490,8 +5491,8 @@ fn shell_command_payload(command: &str) -> Option<tau_proto::ToolDisplayPayload>
 /// args label and two progress counters (context and tools). The tools
 /// counter is completed/total so users can infer the currently running
 /// count as `total - completed`. The trailing chip is set to
-/// [`ToolDisplayStatus::InProgress`] so the renderer paints the `…`
-/// running indicator.
+/// [`ToolDisplayStatus::InProgress`] so the renderer paints
+/// [`tau_proto::PROGRESS_INDICATOR_TEXT`].
 fn build_delegate_progress_display(
     task_name: &str,
     ctx_input_tokens: Option<u64>,
@@ -5529,7 +5530,7 @@ fn build_delegate_progress_display(
         args: format!("[{task_name}]"),
         progress_counters: counters,
         status: ToolDisplayStatus::InProgress,
-        status_text: "…".to_owned(),
+        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
         ..Default::default()
     }
 }

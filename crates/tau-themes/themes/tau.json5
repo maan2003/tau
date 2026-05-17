@@ -25,7 +25,7 @@
     "tool.status.error":    { fg: "red" },
     "tool.status.info":     { fg: "blue" },
     "shell.output":         { },
-    "progress.indicator":   { bold: true },
+    "progress.indicator":   { fg: "cyan", bold: true },
 
     // -- Extensions --
     "extension.lifecycle":  { fg: "dark_grey" },

@@ -1376,7 +1376,8 @@ pub enum ToolDisplayStatus {
     Warning,
     Error,
     /// The tool is still running. Used by progress events. The
-    /// renderer trades the trailing status chip for a `…` indicator.
+    /// renderer trades the trailing status chip for
+    /// [`crate::PROGRESS_INDICATOR_TEXT`].
     InProgress,
 }
 

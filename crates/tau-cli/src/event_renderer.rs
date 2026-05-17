@@ -711,7 +711,11 @@ impl EventRenderer {
                 if let Some(existing) = self.compaction_blocks.remove(&started.session_id) {
                     self.handle.remove_block(existing);
                 }
-                let block = render_compaction_block(&self.theme, "…", CompactionStatus::Progress);
+                let block = render_compaction_block(
+                    &self.theme,
+                    tau_proto::PROGRESS_INDICATOR_TEXT,
+                    CompactionStatus::Progress,
+                );
                 let id = self.handle.new_block("compaction-progress", block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();

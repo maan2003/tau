@@ -30,6 +30,10 @@ pub use token_usage::*;
 /// First protocol version implemented by this crate.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// UI marker text for responses, thinking blocks, and tool calls that
+/// are still in progress.
+pub const PROGRESS_INDICATOR_TEXT: &str = "…";
+
 macro_rules! string_newtype {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*

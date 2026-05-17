@@ -366,7 +366,7 @@ fn info_suffix(text: String) -> ToolSuffixSegment {
 fn running_suffix_after(args: &str) -> ToolSuffixSegment {
     let no_leading_space = args.chars().next_back().is_some_and(char::is_whitespace);
     ToolSuffixSegment {
-        text: "…".to_owned(),
+        text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
         status: ToolStatus::Progress,
         no_leading_space,
     }
@@ -410,7 +410,10 @@ pub(crate) fn streaming_block(
     if needs_space {
         spans.push(Span::new(" ", body_span_style));
     }
-    spans.push(Span::new("…".to_owned(), progress_style));
+    spans.push(Span::new(
+        tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+        progress_style,
+    ));
 
     let mut block = StyledBlock::new(StyledText::from(spans));
     if let Some(bg) = body_ts.bg {
@@ -497,7 +500,7 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
     let mut status_text = if display.status_text.is_empty()
         && matches!(display.status, ToolDisplayStatus::InProgress)
     {
-        "…".to_owned()
+        tau_proto::PROGRESS_INDICATOR_TEXT.to_owned()
     } else {
         display.status_text.clone()
     };
@@ -652,7 +655,10 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
         ));
     }
     if summary.completed < summary.total {
-        suffixes.push(tool_suffix("…".to_owned(), ToolStatus::Progress));
+        suffixes.push(tool_suffix(
+            tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+            ToolStatus::Progress,
+        ));
     }
     ToolCallDisplay {
         tool_name: "tools".to_owned(),
