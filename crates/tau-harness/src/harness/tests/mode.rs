@@ -82,10 +82,9 @@ fn daemon_mode_accepts_later_clients() {
     server.join().expect("join").expect("daemon clean exit");
     let store = open_session_store(tau_config::settings::sessions_dir_of(&sp)).expect("reopen");
     let branch = store.session("s1").expect("session").current_branch();
-    // System AGENTS.md preamble + 2 × (user, tool.req, tool.res, agent).
-    assert_eq!(
-        branch.len(),
-        9,
+    // Optional system AGENTS.md preamble + 2 × (user, tool.req, tool.res, agent).
+    assert!(
+        matches!(branch.len(), 8 | 9),
         "expected full two-cycle persistence, got {branch:?}"
     );
 }

@@ -27,8 +27,8 @@ fn socket_transport_supports_later_attached_end_to_end_clients() {
         .open_session_store()
         .expect("session store should reopen");
     let session = store.session("session-1").expect("session should exist");
-    // System AGENTS.md preamble + 2 × (user, tool.req, tool.res, agent).
-    assert_eq!(session.current_branch().len(), 9);
+    // Optional system AGENTS.md preamble + 2 × (user, tool.req, tool.res, agent).
+    assert!(matches!(session.current_branch().len(), 8 | 9));
 }
 
 #[test]

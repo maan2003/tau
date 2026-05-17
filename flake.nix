@@ -160,7 +160,8 @@
 
             tests = craneLib.cargoNextest {
               cargoArtifacts = workspace;
-              cargoNextestExtraArgs = "--no-tests=pass";
+              cargoNextestExtraArgs = "--workspace";
+              nativeBuildInputs = [ pkgs.ripgrep ];
             };
 
             clippy = craneLib.cargoClippy {
