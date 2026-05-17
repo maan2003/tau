@@ -1147,11 +1147,11 @@ pub enum ToolSideEffects {
     /// calls can run concurrently and can be interleaved freely.
     Pure,
     /// May mutate externally observable state (filesystem, network,
-    /// processes, shared session data, …). Serialized against every
-    /// other in-flight tool call — the next tool does not dispatch
-    /// until this one's result has been received. Default so that
-    /// tools which don't explicitly opt in to `Pure` are treated
-    /// conservatively.
+    /// processes, shared session data, …). Serialized against other
+    /// in-flight tool calls in the same dispatch scope / conversation;
+    /// independent conversations can run their own mutating calls in
+    /// parallel. Default so that tools which don't explicitly opt in to
+    /// `Pure` are treated conservatively.
     #[default]
     Mutating,
 }

@@ -3251,6 +3251,217 @@ fn read_only_delegate_calls_dispatch_concurrently() {
     );
 }
 
+/// Mutating tool serialization is scoped to the owning conversation,
+/// not process-global. Two independent sub-agents may both need to run
+/// mutating work; making them wait on each other would unnecessarily
+/// serialize otherwise unrelated side tasks and can deadlock nested
+/// delegate workflows that depend on sub-agent progress.
+#[test]
+fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
+    use tau_proto::CborValue;
+
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = Some("test/model".into());
+    let _ = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: ToolName::new("delegate"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+    let _ = connect_test_tool(&mut h, "conn-mutate");
+    h.registry.register(
+        "conn-mutate",
+        ToolSpec {
+            name: ToolName::new("mutate"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+
+    // The parent uses read-only delegates only to create two realistic
+    // side conversations concurrently. The assertion below is about
+    // the mutating tools owned by those distinct side conversations.
+    let parent_cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &parent_cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), parent_cid.clone());
+    h.publish_for_conversation(
+        &parent_cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "fan out".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    let read_only_args = CborValue::Map(vec![(
+        CborValue::Text("read_only".to_owned()),
+        CborValue::Bool(true),
+    )]);
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: main_spid,
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "delegate-A".into(),
+                name: ToolName::new("delegate"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: read_only_args.clone(),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "delegate-B".into(),
+                name: ToolName::new("delegate"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: read_only_args,
+            }),
+        ],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("main response");
+
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-A".to_owned(),
+            instruction: "side task A".to_owned(),
+            tool_call_id: Some("delegate-A".into()),
+            task_name: Some("A".to_owned()),
+        },
+    )
+    .expect("query A");
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-B".to_owned(),
+            instruction: "side task B".to_owned(),
+            tool_call_id: Some("delegate-B".into()),
+            task_name: Some("B".to_owned()),
+        },
+    )
+    .expect("query B");
+
+    let cid_a = h
+        .conversations
+        .iter()
+        .find_map(|(cid, conv)| {
+            matches!(
+                &conv.originator,
+                tau_proto::PromptOriginator::Extension { query_id, .. } if query_id == "q-A"
+            )
+            .then_some(cid.clone())
+        })
+        .expect("conversation A");
+    let cid_b = h
+        .conversations
+        .iter()
+        .find_map(|(cid, conv)| {
+            matches!(
+                &conv.originator,
+                tau_proto::PromptOriginator::Extension { query_id, .. } if query_id == "q-B"
+            )
+            .then_some(cid.clone())
+        })
+        .expect("conversation B");
+    assert_ne!(cid_a, cid_b, "side conversations must be distinct");
+
+    let spid_a = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid == &cid_a).then_some(spid.clone()))
+        .expect("prompt A");
+    let spid_b = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid == &cid_b).then_some(spid.clone()))
+        .expect("prompt B");
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: spid_a,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "mut-A".into(),
+            name: ToolName::new("mutate"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q-A".to_owned(),
+        },
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("side response A");
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: spid_b,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "mut-B".into(),
+            name: ToolName::new("mutate"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q-B".to_owned(),
+        },
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("side response B");
+
+    let mut_a_id: ToolCallId = "mut-A".to_owned().into();
+    let mut_b_id: ToolCallId = "mut-B".to_owned().into();
+    assert_eq!(
+        h.in_flight_tool_kinds.get(&mut_a_id),
+        Some(&ToolSideEffects::Mutating),
+        "conversation A's mutating call should be in flight",
+    );
+    assert_eq!(
+        h.in_flight_tool_kinds.get(&mut_b_id),
+        Some(&ToolSideEffects::Mutating),
+        "conversation B's mutating call should be in flight too",
+    );
+    assert_eq!(h.tool_conversations.get("mut-A"), Some(&cid_a));
+    assert_eq!(h.tool_conversations.get("mut-B"), Some(&cid_b));
+    assert_ne!(
+        h.tool_conversations.get("mut-A"),
+        h.tool_conversations.get("mut-B"),
+        "mutating calls must be attributed to different dispatch scopes",
+    );
+    assert!(
+        h.pending_tool_invocations.is_empty(),
+        "cross-conversation Mutating calls should not queue behind each other",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Sub-agent state changes (tool start, response usage, tool finish)
 /// must surface to the user as `DelegateProgress` events keyed on the
 /// parent's `delegate` tool call_id. The CLI uses these to repaint
