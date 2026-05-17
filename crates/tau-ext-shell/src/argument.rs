@@ -14,6 +14,27 @@ pub(crate) fn optional_argument_int(arguments: &CborValue, key: &str) -> Option<
     cbor_map_int(arguments, key)
 }
 
+pub(crate) fn optional_argument_int_strict(
+    arguments: &CborValue,
+    key: &str,
+) -> Result<Option<i64>, String> {
+    match arguments {
+        CborValue::Map(entries) => entries
+            .iter()
+            .find_map(|(k, v)| match k {
+                CborValue::Text(k) if k == key => Some(match v {
+                    CborValue::Integer(n) => i128::from(*n).try_into().map(Some).map_err(|_| {
+                        format!("argument `{key}` must fit in a signed 64-bit integer")
+                    }),
+                    _ => Err(format!("argument `{key}` must be an integer")),
+                }),
+                _ => None,
+            })
+            .unwrap_or(Ok(None)),
+        _ => Ok(None),
+    }
+}
+
 pub(crate) fn optional_argument_bool(
     arguments: &CborValue,
     key: &str,

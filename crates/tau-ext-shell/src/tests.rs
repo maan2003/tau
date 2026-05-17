@@ -19,7 +19,7 @@ use crate::tools::find::run_find;
 use crate::tools::grep::{RipgrepError, classify_ripgrep_stderr, grep_result_map, run_grep};
 use crate::tools::ls::run_ls;
 use crate::tools::read::{format_read_range, read_file, slice_lines};
-use crate::tools::shell::{command_details_value, run_command};
+use crate::tools::shell::{CommandDetails, command_details_value, run_command};
 use crate::tools::write::write_file;
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, LS_TOOL_NAME,
@@ -200,6 +200,40 @@ fn startup_registers_gpt_shell_with_shell_command_visible_name() {
         }
     }
     assert!(found, "expected gpt_shell tool registration");
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn startup_registers_shell_schemas_with_cwd_and_timeout_minimum() {
+    // The model-visible schema must advertise the implemented working-directory
+    // argument and reject negative timeouts before invocation.
+    let (mut reader, mut writer) = spawn_extension();
+
+    let mut found_shell = false;
+    let mut found_gpt_shell = false;
+    for _ in 0..10 {
+        let event = reader
+            .read_event()
+            .expect("read")
+            .expect("startup event should arrive");
+        let Event::ToolRegister(register) = event else {
+            continue;
+        };
+        if register.tool.name == SHELL_TOOL_NAME || register.tool.name == GPT_SHELL_TOOL_NAME {
+            let parameters = register.tool.parameters.as_ref().expect("parameters");
+            let properties = &parameters["properties"];
+            assert_eq!(properties["cwd"]["type"], serde_json::json!("string"));
+            assert_eq!(properties["timeout"]["minimum"], serde_json::json!(0));
+            found_shell |= register.tool.name == SHELL_TOOL_NAME;
+            found_gpt_shell |= register.tool.name == GPT_SHELL_TOOL_NAME;
+        }
+    }
+    assert!(found_shell, "expected shell tool registration");
+    assert!(found_gpt_shell, "expected gpt_shell tool registration");
 
     writer
         .write_frame(&disconnect_frame(None))
@@ -2078,6 +2112,197 @@ fn shell_tool_long_display_args_are_middle_shortened() {
 }
 
 #[test]
+fn shell_tool_replaces_invalid_utf8_stdout_and_warns_in_stderr() {
+    // Regression coverage for agent-facing shell output collection: stdout
+    // can contain arbitrary bytes, and read_to_string used to drop all output
+    // after the first invalid UTF-8 sequence.
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text("printf '\\377stdout'".to_owned()),
+    )]);
+
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    assert_eq!(
+        cbor_map_text(&output.result, "stdout"),
+        Some("\u{fffd}stdout")
+    );
+    assert_eq!(
+        cbor_map_text(&output.result, "stderr"),
+        Some("[tau-shell] warning: stdout contained non-UTF-8 bytes; invalid bytes were replaced")
+    );
+}
+
+#[test]
+fn shell_tool_replaces_invalid_utf8_stderr_and_warns_before_stderr() {
+    // Regression coverage for agent-facing shell output collection: stderr
+    // must be decoded lossily too, with a warning that does not erase the
+    // original stderr text.
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text("printf '\\376stderr' >&2".to_owned()),
+    )]);
+
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    assert_eq!(cbor_map_text(&output.result, "stdout"), Some(""));
+    assert_eq!(
+        cbor_map_text(&output.result, "stderr"),
+        Some(
+            "[tau-shell] warning: stderr contained non-UTF-8 bytes; invalid bytes were replaced\n\u{fffd}stderr"
+        )
+    );
+}
+
+#[test]
+fn shell_tool_replaces_invalid_utf8_both_streams_with_combined_warning() {
+    // Regression coverage for commands that write invalid bytes to both pipes:
+    // the agent should see both decoded streams and one concise warning.
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text("printf '\\377stdout'; printf '\\376stderr' >&2".to_owned()),
+    )]);
+
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    assert_eq!(
+        cbor_map_text(&output.result, "stdout"),
+        Some("\u{fffd}stdout")
+    );
+    assert_eq!(
+        cbor_map_text(&output.result, "stderr"),
+        Some(
+            "[tau-shell] warning: stdout and stderr contained non-UTF-8 bytes; invalid bytes were replaced\n\u{fffd}stderr"
+        )
+    );
+}
+
+#[test]
+fn shell_tool_omits_truncation_metadata_without_truncation() {
+    // Compatibility metadata should stay sparse: total/truncated fields are
+    // only present when a stream was actually truncated.
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text("printf 'ok\\n'".to_owned()),
+    )]);
+
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    assert_eq!(cbor_map_text(&output.result, "stdout"), Some("ok\n"));
+    for field in [
+        "stdout_total_lines",
+        "stdout_total_bytes",
+        "stdout_truncated",
+        "stderr_total_lines",
+        "stderr_total_bytes",
+        "stderr_truncated",
+    ] {
+        assert!(
+            cbor_map_field(&output.result, field).is_none(),
+            "{field} should be absent without truncation"
+        );
+    }
+}
+
+#[test]
+fn shell_tool_reports_truncation_warnings_and_original_totals() {
+    // Regression coverage for shell truncation: agents need an explicit stderr
+    // warning plus original stream totals, while legacy line/byte counts remain
+    // stats for the returned (truncated and warning-prefixed) content.
+    let line_count = MAX_OUTPUT_LINES + 1;
+    let command = format!(
+        "i=0; while [ \"$i\" -lt {line_count} ]; do printf 'x\\n'; printf 'e\\n' >&2; i=$((i + 1)); done"
+    );
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text(command),
+    )]);
+
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let stdout = cbor_map_text(&output.result, "stdout").expect("stdout");
+    let stderr = cbor_map_text(&output.result, "stderr").expect("stderr");
+    assert!(stdout.starts_with("[Showing lines 2-2001 of 2001"));
+    assert!(stderr.starts_with(
+        "[tau-shell] warning: stdout and stderr were truncated; see truncation markers\n[Showing lines 2-2001 of 2001"
+    ));
+    assert_eq!(
+        cbor_int_field(&output.result, "stdout_total_lines"),
+        Some(2001)
+    );
+    assert_eq!(
+        cbor_int_field(&output.result, "stdout_total_bytes"),
+        Some(4002)
+    );
+    assert_eq!(
+        cbor_bool_field(&output.result, "stdout_truncated"),
+        Some(true)
+    );
+    assert_eq!(
+        cbor_int_field(&output.result, "stderr_total_lines"),
+        Some(2001)
+    );
+    assert_eq!(
+        cbor_int_field(&output.result, "stderr_total_bytes"),
+        Some(4002)
+    );
+    assert_eq!(
+        cbor_bool_field(&output.result, "stderr_truncated"),
+        Some(true)
+    );
+    assert!(
+        2001 < cbor_int_field(&output.result, "stderr_lines").expect("stderr_lines"),
+        "stderr_lines should count returned warning lines too"
+    );
+}
+
+#[test]
+fn shell_tool_keeps_invalid_utf8_and_truncation_warnings_ordered() {
+    // When multiple shell-side warnings apply, keep them outside the stream
+    // marker and in a deterministic order before stderr content.
+    let line_count = MAX_OUTPUT_LINES + 1;
+    let command = format!(
+        "printf '\\377'; i=0; while [ \"$i\" -lt {line_count} ]; do printf 'x\\n'; i=$((i + 1)); done"
+    );
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text(command),
+    )]);
+
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    assert_eq!(
+        cbor_map_text(&output.result, "stderr"),
+        Some(
+            "[tau-shell] warning: stdout contained non-UTF-8 bytes; invalid bytes were replaced\n[tau-shell] warning: stdout was truncated; see truncation marker in stdout"
+        )
+    );
+}
+
+#[test]
+fn shell_tool_runs_in_requested_cwd() {
+    // Regression coverage for the schema-exposed cwd argument: the execution
+    // path already supports it, and the shell must actually start there.
+    let tempdir = TempDir::new().expect("tempdir");
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("pwd".to_owned()),
+        ),
+        (
+            CborValue::Text("cwd".to_owned()),
+            CborValue::Text(tempdir.path().display().to_string()),
+        ),
+    ]);
+
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let cwd = tempdir.path().canonicalize().expect("canonical cwd");
+    let expected_stdout = format!("{}\n", cwd.display());
+    assert_eq!(
+        cbor_map_text(&output.result, "stdout"),
+        Some(expected_stdout.as_str())
+    );
+    assert_eq!(
+        cbor_map_text(&output.result, "cwd"),
+        Some(tempdir.path().to_string_lossy().as_ref())
+    );
+}
+
+#[test]
 fn shell_tool_timeout_preserves_partial_output() {
     let args = CborValue::Map(vec![
         (
@@ -2096,6 +2321,196 @@ fn shell_tool_timeout_preserves_partial_output() {
     assert_eq!(cbor_map_text(details, "stdout"), Some("before\n"));
     assert_eq!(cbor_int_field(details, "stdout_lines"), Some(1));
     assert_eq!(cbor_int_field(details, "stdout_bytes"), Some(7));
+    assert_eq!(cbor_bool_field(details, "timed_out"), Some(true));
+    assert_eq!(cbor_int_field(details, "timeout_secs"), Some(1));
+    assert_eq!(
+        cbor_map_text(details, "termination_reason"),
+        Some("timeout")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_tool_returns_after_foreground_exit_even_if_background_holds_pipe() {
+    // Regression coverage for background pipe holders: once the foreground
+    // shell exits, inherited stdout fds in background jobs must not make the
+    // shell tool wait for pipe EOF or capture late output.
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("(sleep 5; printf late) & printf early".to_owned()),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Integer(1.into()),
+        ),
+    ]);
+
+    let started = std::time::Instant::now();
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "background pipe holder delayed shell result for {elapsed:?}"
+    );
+    let stdout = cbor_map_text(&output.result, "stdout").expect("stdout");
+    assert_eq!(stdout, "early");
+    assert!(!stdout.contains("late"));
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_tool_timeout_returns_without_waiting_for_escaped_pipe_holder() {
+    // Regression coverage for timeout with an escaped pipe holder: process-group
+    // kill does not reach a setsid child, but timeout return must still be
+    // independent from that child's inherited stdout pipe closing.
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text(
+                "setsid sh -c 'sleep 5; printf late' & printf early; sleep 5".to_owned(),
+            ),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Integer(1.into()),
+        ),
+    ]);
+
+    let started = std::time::Instant::now();
+    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("timeout");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "escaped pipe holder delayed timeout result for {elapsed:?}"
+    );
+    let details = error.details.as_ref().expect("details");
+    let stdout = cbor_map_text(details, "stdout").expect("stdout");
+    assert_eq!(stdout, "early");
+    assert!(!stdout.contains("late"));
+    assert_eq!(cbor_bool_field(details, "timed_out"), Some(true));
+    assert_eq!(
+        cbor_map_text(details, "termination_reason"),
+        Some("timeout")
+    );
+}
+
+#[test]
+fn shell_tool_bounded_huge_output_reports_original_totals() {
+    // The shell reader keeps only a bounded tail in memory while counting the
+    // original stream, so huge stdout still reports total bytes and truncation.
+    let byte_count = MAX_OUTPUT_BYTES * 4 + 123;
+    let command = format!("yes x | head -c {byte_count}");
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text(command),
+    )]);
+
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let stdout = cbor_map_text(&output.result, "stdout").expect("stdout");
+    assert!(stdout.starts_with("[Showing lines "));
+    assert!(stdout.len() < byte_count);
+    assert_eq!(
+        cbor_int_field(&output.result, "stdout_total_bytes"),
+        Some(byte_count as i128)
+    );
+    assert_eq!(
+        cbor_bool_field(&output.result, "stdout_truncated"),
+        Some(true)
+    );
+    assert_eq!(
+        cbor_map_text(&output.result, "stderr"),
+        Some("[tau-shell] warning: stdout was truncated; see truncation marker in stdout")
+    );
+}
+
+#[test]
+fn shell_tool_timeout_zero_is_immediate_timeout() {
+    // A zero timeout is valid and means the child should be killed as soon as
+    // timeout accounting observes that it has not already exited.
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("sleep 1".to_owned()),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Integer(0.into()),
+        ),
+    ]);
+
+    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("timeout");
+    assert!(error.message.contains("command timed out after 0s"));
+    let details = error.details.as_ref().expect("details");
+    assert_eq!(cbor_bool_field(details, "timed_out"), Some(true));
+    assert_eq!(cbor_int_field(details, "timeout_secs"), Some(0));
+    assert_eq!(
+        cbor_map_text(details, "termination_reason"),
+        Some("timeout")
+    );
+}
+
+#[test]
+fn shell_tool_rejects_negative_timeout() {
+    // Negative durations cannot be represented by the runner; reject them
+    // explicitly instead of silently falling back to the default.
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("printf should-not-run".to_owned()),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Integer((-1).into()),
+        ),
+    ]);
+
+    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("timeout");
+    assert_eq!(error.message, "argument `timeout` must be non-negative");
+}
+
+#[test]
+fn shell_tool_rejects_wrong_type_timeout() {
+    // The old lenient integer helper ignored wrong-type values, causing the
+    // default timeout to be used without telling the agent its request was bad.
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("printf should-not-run".to_owned()),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Text("1".to_owned()),
+        ),
+    ]);
+
+    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("timeout");
+    assert_eq!(error.message, "argument `timeout` must be an integer");
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_tool_reports_signal_termination_details() {
+    // Regression coverage for signal deaths: shells killed by a signal do not
+    // have an exit code, but Unix exposes the terminating signal separately.
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("kill -TERM $$".to_owned()),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Integer(5.into()),
+        ),
+    ]);
+
+    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("signal");
+    assert!(error.message.contains("command terminated by signal 15"));
+    let details = error.details.as_ref().expect("details");
+    assert_eq!(cbor_int_field(details, "signal"), Some(15));
+    assert_eq!(cbor_bool_field(details, "timed_out"), Some(false));
+    assert_eq!(cbor_map_text(details, "termination_reason"), Some("signal"));
+    assert!(cbor_map_field(details, "status").is_none());
 }
 
 #[test]
@@ -2243,17 +2658,25 @@ fn classify_ripgrep_stderr_recognizes_stable_prefixes() {
 
 #[test]
 fn command_details_value_records_stdout_and_stderr_stats() {
-    let details = command_details_value(
-        "echo hi".to_owned(),
-        None,
-        Some(0),
-        "hi\nthere\n".to_owned(),
-        "oops\n".to_owned(),
-    );
+    let details = command_details_value(CommandDetails {
+        command: "echo hi".to_owned(),
+        cwd: None,
+        status: Some(0),
+        signal: None,
+        timed_out: false,
+        timeout_secs: Some(120),
+        termination_reason: "exit",
+        stdout: "hi\nthere\n".to_owned(),
+        stderr: "oops\n".to_owned(),
+        stdout_total: None,
+        stderr_total: None,
+    });
     assert_eq!(cbor_int_field(&details, "stdout_lines"), Some(2));
     assert_eq!(cbor_int_field(&details, "stdout_bytes"), Some(9));
     assert_eq!(cbor_int_field(&details, "stderr_lines"), Some(1));
     assert_eq!(cbor_int_field(&details, "stderr_bytes"), Some(5));
+    assert!(cbor_map_field(&details, "stdout_total_lines").is_none());
+    assert!(cbor_map_field(&details, "stderr_total_lines").is_none());
 }
 
 #[test]
@@ -2406,6 +2829,51 @@ fn truncate_tail_limits_by_bytes() {
     assert!(result.was_truncated);
     assert!(result.content.contains("last"));
     assert!(result.content.contains("[Showing lines"));
+}
+
+#[test]
+fn truncate_tail_keeps_suffix_for_one_huge_line() {
+    // Regression coverage for an oversized single-line stream: tail truncation
+    // used to keep zero lines and report an impossible `lines 2-1 of 1` range.
+    let input = "x".repeat(MAX_OUTPUT_BYTES + 100);
+    let result = truncate_tail(&input);
+
+    assert!(result.was_truncated);
+    assert!(result.content.contains("Line was truncated by byte cap"));
+    assert!(!result.content.contains("lines 2-1"));
+    assert!(result.content.ends_with(&"x".repeat(MAX_OUTPUT_BYTES)));
+}
+
+#[test]
+fn truncate_tail_keeps_suffix_for_huge_final_line() {
+    // When the final line alone exceeds the byte cap, the useful tail is a
+    // suffix of that line rather than an empty line range.
+    let final_line = format!("{}TAIL", "x".repeat(MAX_OUTPUT_BYTES + 100));
+    let input = format!("first\n{final_line}");
+    let result = truncate_tail(&input);
+
+    assert!(result.was_truncated);
+    assert!(result.content.contains("line 2 of 2"));
+    assert!(result.content.ends_with("TAIL"));
+    assert!(!result.content.contains("first"));
+}
+
+#[test]
+fn truncate_tail_preserves_utf8_boundary_for_huge_line_suffix() {
+    // Byte fallback must never slice through a multibyte codepoint; otherwise
+    // shell output truncation can panic or manufacture invalid UTF-8.
+    let input = "€".repeat(MAX_OUTPUT_BYTES / "€".len() + 100);
+    let result = truncate_tail(&input);
+    let suffix = result
+        .content
+        .split_once("\n\n")
+        .expect("truncation marker separator")
+        .1;
+
+    assert!(result.was_truncated);
+    assert!(result.content.contains("Line was truncated by byte cap"));
+    assert!(suffix.len() < MAX_OUTPUT_BYTES + 1);
+    assert!(suffix.chars().all(|ch| ch == '€'));
 }
 
 #[test]

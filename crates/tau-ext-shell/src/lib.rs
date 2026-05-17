@@ -334,10 +334,9 @@ where
             name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             model_visible_name: None,
             description: Some(
-                "Execute a shell command via `sh -c`. Returns stdout, stderr, \
-                 and exit status. Prefer the dedicated `read`/`write`/`edit`/\
-                 `grep`/`find`/`ls` tools when they fit — `sh` is for things \
-                 those tools can't do."
+                "Execute a shell command via `sh -c`. Non-zero exits and timeouts \
+                 are tool errors with stdout/stderr details. Prefer dedicated \
+                 tools like `read`, `grep`, and `find` when they fit."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
@@ -350,7 +349,12 @@ where
                     },
                     "timeout": {
                         "type": "integer",
+                        "minimum": 0,
                         "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 120"
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory for the command"
                     }
                 },
                 "required": ["command"]
@@ -363,8 +367,8 @@ where
             name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
             model_visible_name: Some(tau_proto::ToolName::new("shell_command")),
             description: Some(
-                "Runs a shell command and returns its output.\n\
-                 - For doing file changes, use the apply_patch"
+                "Run a shell command. Non-zero exits and timeouts are tool errors \
+                 with stdout/stderr details. For file changes, prefer apply_patch."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
@@ -377,7 +381,12 @@ where
                     },
                     "timeout": {
                         "type": "integer",
+                        "minimum": 0,
                         "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 120"
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory for the command"
                     }
                 },
                 "required": ["command"]

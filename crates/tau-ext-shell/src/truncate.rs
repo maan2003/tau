@@ -73,45 +73,82 @@ pub(crate) fn truncate_head_with_notice(input: &str, continuation_hint: &str) ->
 
 /// Truncate from the tail (keep last lines).  Used by `shell`.
 pub(crate) fn truncate_tail(input: &str) -> Truncated {
-    let all_lines: Vec<&str> = input.lines().collect();
-    let total_lines = all_lines.len();
-    let total_bytes = input.len();
+    truncate_tail_from_tail(input, input.lines().count(), input.len())
+}
 
+/// Truncate from a bounded tail suffix while preserving original stream totals.
+///
+/// `tail` must contain enough of the stream suffix to satisfy the normal shell
+/// tail truncation limits. This lets streaming readers discard older output
+/// without losing the user-visible truncation marker or total line/byte counts.
+pub(crate) fn truncate_tail_from_tail(
+    tail: &str,
+    total_lines: usize,
+    total_bytes: usize,
+) -> Truncated {
     if total_lines <= MAX_OUTPUT_LINES && total_bytes <= MAX_OUTPUT_BYTES {
         return Truncated {
-            content: input.to_owned(),
+            content: tail.to_owned(),
             was_truncated: false,
             total_lines,
             total_bytes,
         };
     }
 
+    let tail_lines: Vec<&str> = tail.lines().collect();
+
     // Walk backwards, accumulating lines until we hit a limit.
     let mut kept: Vec<&str> = Vec::new();
     let mut bytes = 0;
 
-    for &line in all_lines.iter().rev() {
-        if kept.len() >= MAX_OUTPUT_LINES || bytes + line.len() + 1 > MAX_OUTPUT_BYTES {
+    for &line in tail_lines.iter().rev() {
+        let next_bytes = bytes + line.len() + 1;
+        if kept.len() < MAX_OUTPUT_LINES && next_bytes <= MAX_OUTPUT_BYTES {
+            bytes = next_bytes;
+            kept.push(line);
+        } else {
             break;
         }
-        bytes += line.len() + 1;
-        kept.push(line);
     }
     kept.reverse();
 
-    let first_kept = total_lines - kept.len() + 1;
-    let last_kept = total_lines;
-    let mut result = format!(
-        "[Showing lines {first_kept}-{last_kept} of {total_lines} ({total_bytes} bytes total)]\n\n"
-    );
-    result.push_str(&kept.join("\n"));
+    let content = if kept.is_empty() && !tail.is_empty() {
+        let last_line = tail_lines.last().copied().unwrap_or(tail);
+        let suffix = valid_utf8_suffix(last_line, MAX_OUTPUT_BYTES);
+        let suffix_bytes = suffix.len();
+        let line_number = total_lines.max(1);
+        format!(
+            "[Showing last {suffix_bytes} bytes of line {line_number} of {total_lines} \
+             ({total_bytes} bytes total). Line was truncated by byte cap.]\n\n{suffix}"
+        )
+    } else {
+        let first_kept = total_lines - kept.len() + 1;
+        let last_kept = total_lines;
+        let mut result = format!(
+            "[Showing lines {first_kept}-{last_kept} of {total_lines} ({total_bytes} bytes total)]\n\n"
+        );
+        result.push_str(&kept.join("\n"));
+        result
+    };
 
     Truncated {
-        content: result,
+        content,
         was_truncated: true,
         total_lines,
         total_bytes,
     }
+}
+
+fn valid_utf8_suffix(line: &str, max_bytes: usize) -> &str {
+    if max_bytes < line.len() {
+        let mut start = line.len() - max_bytes;
+        while start < line.len() && !line.is_char_boundary(start) {
+            start += 1;
+        }
+        return &line[start..];
+    }
+
+    line
 }
 
 /// Truncate a single line, appending a marker if truncated.
