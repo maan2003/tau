@@ -276,7 +276,7 @@ mod tests {
         let skills = std::collections::HashMap::new();
         let prompt = build_system_prompt(&skills, "/tmp/work");
         assert!(prompt.contains("parallel"));
-        assert!(prompt.contains("Parallelize independent reads and searches"));
+        assert!(prompt.contains("make all independent tool calls in parallel"));
     }
 
     #[test]

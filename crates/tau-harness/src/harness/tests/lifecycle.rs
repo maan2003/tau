@@ -397,10 +397,9 @@ fn agents_context_is_injected_at_session_init() {
         })
         .expect("expected injected AGENTS.md user message");
     assert!(injected.contains("# AGENTS.md instructions"));
-    assert!(injected.contains("# AGENTS.md instructions for /repo/pkg"));
-    assert!(injected.contains("# AGENTS.md instructions for /repo"));
-    assert!(injected.contains("<INSTRUCTIONS>"));
-    assert!(injected.contains("</INSTRUCTIONS>"));
+    assert!(injected.contains("<AGENTS_FILE path=\"/repo/pkg/AGENTS.md\">"));
+    assert!(injected.contains("<AGENTS_FILE path=\"/repo/AGENTS.md\">"));
+    assert!(injected.contains("</AGENTS_FILE>"));
     let root_pos = injected.find("root rule").expect("root rule");
     let pkg_pos = injected.find("package rule").expect("package rule");
     assert!(
