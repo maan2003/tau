@@ -1,10 +1,8 @@
 //! Interactive chat as a socket client of the harness daemon: input
 //! loop, draft debouncer, and the threading glue that joins them.
 
-use std::fs::OpenOptions;
 use std::io::{self, BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
-use std::process::Stdio;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -15,7 +13,7 @@ use tau_proto::{
     PROTOCOL_VERSION, Subscribe, UiPromptDraft, UiPromptSubmitted,
 };
 
-use crate::daemon::{DaemonOutput, resolve_daemon};
+use crate::daemon::{daemon_output_for_session, resolve_daemon};
 use crate::event_renderer::EventRenderer;
 use crate::prompt_history::PromptHistoryStore;
 use crate::tool_render::ui_dir_block;
@@ -288,39 +286,7 @@ pub(crate) fn run_chat(
     let daemon_output = if attach {
         None
     } else {
-        // Route the daemon's stdout+stderr (where its tracing
-        // subscriber writes) into the per-session harness log so it
-        // sits next to per-extension logs under
-        // `<session>/logs/`. The CLI's own tracing still goes to
-        // `ui.log`; the two streams are intentionally separated so a
-        // session post-mortem doesn't need to pull from two places.
-        let sessions_dir = tau_session_inspect::default_sessions_dir();
-        let harness_log = tau_harness::harness_log_path(&sessions_dir, session_id);
-        if let Some(parent) = harness_log.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let start_offset = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&harness_log)?
-            .metadata()?
-            .len();
-        let stdout = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&harness_log)
-            .map(Stdio::from)?;
-        let stderr = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&harness_log)
-            .map(Stdio::from)?;
-        Some(DaemonOutput {
-            stdout,
-            stderr,
-            log_path: harness_log,
-            start_offset,
-        })
+        Some(daemon_output_for_session(session_id)?)
     };
     let daemon = resolve_daemon(attach, session_id, session_status, daemon_output)?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness daemon resolved");

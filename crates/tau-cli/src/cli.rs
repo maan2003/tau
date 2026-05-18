@@ -133,4 +133,11 @@ pub enum DevCommand {
         #[arg(long, default_value = "hello")]
         message: String,
     },
+
+    /// Print the rendered system prompt for a role.
+    PrintPrompt {
+        /// Role name to render.
+        #[arg(short = 'r', long = "role")]
+        role: String,
+    },
 }

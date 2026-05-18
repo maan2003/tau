@@ -40,10 +40,10 @@ pub fn dump_initial_prompt(
 pub use tau_core::{SessionEntry, SessionMeta, SessionTree, list_session_metas, session_is_locked};
 
 pub use crate::daemon::{
-    EmbeddedOptions, InteractionOutcome, ServeOptions, SessionLaunchStatus, run_component,
-    run_daemon, run_daemon_with_config, run_embedded_message, run_embedded_message_with_options,
-    run_embedded_message_with_trace, run_harness_daemon, send_daemon_message,
-    send_daemon_message_with_trace,
+    EmbeddedOptions, InteractionOutcome, ServeOptions, SessionLaunchStatus,
+    get_daemon_rendered_system_prompt, run_component, run_daemon, run_daemon_with_config,
+    run_embedded_message, run_embedded_message_with_options, run_embedded_message_with_trace,
+    run_harness_daemon, send_daemon_message, send_daemon_message_with_trace,
 };
 #[cfg(any(test, feature = "echo-agent"))]
 pub use crate::daemon::{run_daemon_with_echo, run_embedded_message_with_echo};

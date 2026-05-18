@@ -32,8 +32,8 @@ use tempfile::TempDir;
 use super::{AgentToolCall, HARNESS_CONNECTION_ID, Harness};
 use crate::conversation::ConversationTurnState;
 use crate::daemon::{
-    ServeOptions, bind_listener, run_daemon_with_echo, run_embedded_message_with_echo,
-    send_daemon_message, send_daemon_message_with_trace,
+    ServeOptions, bind_listener, get_daemon_rendered_system_prompt, run_daemon_with_echo,
+    run_embedded_message_with_echo, send_daemon_message, send_daemon_message_with_trace,
 };
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSource};
 use crate::error::HarnessError;

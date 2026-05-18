@@ -6,6 +6,7 @@ pub mod cli;
 mod chat;
 mod daemon;
 mod event_renderer;
+mod print_prompt;
 mod prompt_history;
 mod send;
 mod settings_registry;
@@ -377,6 +378,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     println!("wrote {}", out.display());
                     Ok(())
                 }
+                cli::DevCommand::PrintPrompt { role } => print_prompt::run_print_prompt(&role),
             },
 
             cli::Command::Ext { name } => {

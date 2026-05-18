@@ -258,6 +258,30 @@ pub struct SessionPromptCreatedResult {
     pub prompt: Option<crate::SessionPromptCreated>,
 }
 
+/// Request that the harness render the effective system prompt for one role.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GetRenderedSystemPrompt {
+    /// Request correlation id echoed by [`RenderedSystemPromptResult`].
+    pub request_id: String,
+    /// Role name whose resolved prompt should be rendered.
+    pub role: String,
+}
+
+/// Response to [`GetRenderedSystemPrompt`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RenderedSystemPromptResult {
+    /// Request correlation id copied from the request.
+    pub request_id: String,
+    /// Rendered prompt when the role exists and template rendering succeeds.
+    /// Exactly one of `prompt` and `error` should be present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Human-readable failure when the role is unknown or rendering fails.
+    /// Exactly one of `prompt` and `error` should be present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Receiver → sender acknowledgement that all log events with id
 /// `<= up_to` have been processed. Cumulative — newer acks supersede
 /// older ones.
@@ -291,6 +315,8 @@ pub enum Message {
     InterceptReply(InterceptReply),
     GetSessionPromptCreated(GetSessionPromptCreated),
     SessionPromptCreatedResult(Box<SessionPromptCreatedResult>),
+    GetRenderedSystemPrompt(GetRenderedSystemPrompt),
+    RenderedSystemPromptResult(Box<RenderedSystemPromptResult>),
     LogEvent(LogEvent),
     Ack(Ack),
 }

@@ -21,9 +21,9 @@ use crate::harness::{Harness, assistant_text_from_output_items, tool_calls_from_
 use crate::runtime_dir;
 use crate::settings::{Config, resolve_config};
 
-/// Cap on how long [`send_daemon_message_with_trace`] (a synchronous test
-/// helper) waits for a daemon response. This is not a daemon-wide knob —
-/// the long-running daemon paths block indefinitely on their event loop.
+/// Cap on how long synchronous socket helpers wait for a daemon response.
+/// This is not a daemon-wide knob — the long-running daemon paths block
+/// indefinitely on their event loop.
 const SEND_DAEMON_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -448,6 +448,73 @@ pub fn send_daemon_message(
     message: &str,
 ) -> Result<String, HarnessError> {
     Ok(send_daemon_message_with_trace(socket_path, session_id, message)?.response)
+}
+
+/// Requests the rendered system prompt for `role` from a running harness
+/// daemon.
+pub fn get_daemon_rendered_system_prompt(
+    socket_path: impl Into<PathBuf>,
+    role: &str,
+) -> Result<String, HarnessError> {
+    let request_id = next_rendered_prompt_request_id();
+    let mut peer = SocketPeer::connect(socket_path)?;
+    peer.send(&Frame::Message(Message::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+        client_name: "tau-print-prompt".into(),
+        client_kind: ClientKind::Ui,
+    })))?;
+    peer.send(&Frame::Message(Message::GetRenderedSystemPrompt(
+        tau_proto::GetRenderedSystemPrompt {
+            request_id: request_id.clone(),
+            role: role.to_owned(),
+        },
+    )))?;
+
+    let started_at = Instant::now();
+    loop {
+        if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
+            let _ = peer.send(&Frame::Message(Message::Disconnect(Disconnect {
+                reason: Some("done".to_owned()),
+            })));
+            return Err(HarnessError::ResponseTimeout);
+        }
+        if let Some(frame) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
+            let (_log_id, frame) = frame.peel_log();
+            match frame {
+                Frame::Message(Message::RenderedSystemPromptResult(result))
+                    if result.request_id == request_id =>
+                {
+                    let _ = peer.send(&Frame::Message(Message::Disconnect(Disconnect {
+                        reason: Some("done".to_owned()),
+                    })));
+                    if let Some(error) = result.error {
+                        return Err(HarnessError::Participant(error));
+                    }
+                    return result.prompt.ok_or_else(|| {
+                        HarnessError::Participant(
+                            "daemon returned no rendered system prompt".to_owned(),
+                        )
+                    });
+                }
+                Frame::Message(Message::Disconnect(d)) => {
+                    return Err(HarnessError::Participant(
+                        d.reason.unwrap_or_else(|| "daemon disconnected".to_owned()),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn next_rendered_prompt_request_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "tau-rendered-system-prompt-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Runs the harness daemon with runtime directory management.

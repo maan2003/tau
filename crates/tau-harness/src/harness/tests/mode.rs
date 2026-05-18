@@ -1,5 +1,13 @@
 use super::*;
 
+fn wait_for_socket(sock: &Path) {
+    let started = Instant::now();
+    while !sock.exists() {
+        assert!(started.elapsed() < Duration::from_secs(3), "socket timeout");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn embedded_mode_returns_provider_response_and_persists_history() {
     let td = TempDir::new().expect("tempdir");
@@ -68,11 +76,7 @@ fn daemon_mode_accepts_later_clients() {
         }
     });
 
-    let started = Instant::now();
-    while !sock.exists() {
-        assert!(started.elapsed() < Duration::from_secs(3), "socket timeout");
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_for_socket(&sock);
 
     let r1 = send_daemon_message(&sock, "s1", "hello").expect("first");
     let r2 = send_daemon_message(&sock, "s1", "again").expect("second");
@@ -112,6 +116,70 @@ fn daemon_mode_accepts_later_clients() {
         2,
         "expected both tool result rounds to persist, got {branch:?}"
     );
+}
+
+#[test]
+fn daemon_mode_renders_system_prompt_for_requested_role() {
+    // `tau dev print-prompt` asks the daemon for the same rendered prompt the
+    // harness would send to the provider. Exercise the socket helper rather
+    // than a direct Harness call so the debug command's request/response path is
+    // covered.
+    let td = TempDir::new().expect("tempdir");
+    let sock = td.path().join("daemon.sock");
+    let sp = td.path().join("state");
+
+    let server = thread::spawn({
+        let sock = sock.clone();
+        let sp = sp.clone();
+        move || {
+            run_daemon_with_echo(
+                sock,
+                sp,
+                "s1",
+                ServeOptions::builder().max_clients(1).build(),
+            )
+        }
+    });
+
+    wait_for_socket(&sock);
+
+    let prompt = get_daemon_rendered_system_prompt(&sock, "smart").expect("render prompt");
+    assert!(prompt.contains("expert coding assistant"));
+    assert!(prompt.contains("Current working directory:"));
+
+    server.join().expect("join").expect("daemon clean exit");
+}
+
+#[test]
+fn daemon_mode_reports_unknown_role_for_rendered_system_prompt_request() {
+    // The debug prompt endpoint must fail in-band with a participant error for
+    // typos, instead of silently falling back to the selected role and printing
+    // misleading prompt content.
+    let td = TempDir::new().expect("tempdir");
+    let sock = td.path().join("daemon.sock");
+    let sp = td.path().join("state");
+
+    let server = thread::spawn({
+        let sock = sock.clone();
+        let sp = sp.clone();
+        move || {
+            run_daemon_with_echo(
+                sock,
+                sp,
+                "s1",
+                ServeOptions::builder().max_clients(1).build(),
+            )
+        }
+    });
+
+    wait_for_socket(&sock);
+
+    let error = get_daemon_rendered_system_prompt(&sock, "missing-role").expect_err("unknown role");
+    assert!(
+        matches!(error, HarnessError::Participant(message) if message.contains("unknown role"))
+    );
+
+    server.join().expect("join").expect("daemon clean exit");
 }
 
 #[test]
@@ -167,11 +235,7 @@ fn traced_daemon_reports_shell_progress() {
         }
     });
 
-    let started = Instant::now();
-    while !sock.exists() {
-        assert!(started.elapsed() < Duration::from_secs(3));
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_for_socket(&sock);
 
     let o = send_daemon_message_with_trace(&sock, "s1", "shell printf hi").expect("ok");
     assert!(

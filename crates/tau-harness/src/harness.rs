@@ -2078,6 +2078,35 @@ impl Harness {
         );
     }
 
+    fn send_rendered_system_prompt_result(
+        &mut self,
+        connection_id: &str,
+        request: tau_proto::GetRenderedSystemPrompt,
+    ) {
+        let (prompt, error) = if !self.available_roles.contains_key(&request.role) {
+            (None, Some(format!("unknown role: {}", request.role)))
+        } else {
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "(unknown)".to_owned());
+            match self.render_system_prompt_for_role(&cwd, &request.role) {
+                Ok(prompt) => (Some(prompt), None),
+                Err(error) => (None, Some(error.to_string())),
+            }
+        };
+        let _ = self.bus.send_to(
+            connection_id,
+            None,
+            Frame::Message(Message::RenderedSystemPromptResult(Box::new(
+                tau_proto::RenderedSystemPromptResult {
+                    request_id: request.request_id,
+                    prompt,
+                    error,
+                },
+            ))),
+        );
+    }
+
     fn handle_extension_message(
         &mut self,
         source_id: &str,
@@ -2139,12 +2168,14 @@ impl Harness {
             Message::GetSessionPromptCreated(request) => {
                 self.send_session_prompt_created_result(source_id, request);
             }
-            // Messages sent by the harness only — extensions shouldn't
+            // Messages sent by clients or the harness only — extensions shouldn't
             // round-trip these. Ignore silently.
             Message::Configure(_)
             | Message::Disconnect(_)
+            | Message::GetRenderedSystemPrompt(_)
             | Message::InterceptRequest(_)
             | Message::SessionPromptCreatedResult(_)
+            | Message::RenderedSystemPromptResult(_)
             | Message::LogEvent(_) => {}
         }
         Ok(())
@@ -2402,6 +2433,10 @@ impl Harness {
                 self.send_session_prompt_created_result(client_id, request);
                 Ok(true)
             }
+            Message::GetRenderedSystemPrompt(request) => {
+                self.send_rendered_system_prompt_result(client_id, request);
+                Ok(true)
+            }
             // Other messages from clients are ignored (Configure, Ack,
             // LogEvent, InterceptRequest, InterceptReply, Emit,
             // ConfigError, Intercept).
@@ -2413,6 +2448,7 @@ impl Harness {
             | Message::InterceptReply(_)
             | Message::Ready(_)
             | Message::SessionPromptCreatedResult(_)
+            | Message::RenderedSystemPromptResult(_)
             | Message::LogEvent(_)
             | Message::Emit(_) => Ok(true),
         }

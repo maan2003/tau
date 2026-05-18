@@ -278,6 +278,15 @@ fn representative_messages() -> Vec<Message> {
         Message::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
         }),
+        Message::GetRenderedSystemPrompt(GetRenderedSystemPrompt {
+            request_id: "render-prompt-1".to_owned(),
+            role: "smart".to_owned(),
+        }),
+        Message::RenderedSystemPromptResult(Box::new(RenderedSystemPromptResult {
+            request_id: "render-prompt-1".to_owned(),
+            prompt: Some("You are helpful.".to_owned()),
+            error: None,
+        })),
         Message::LogEvent(LogEvent {
             id: LogEventId::new(42),
             recorded_at: UnixMicros::new(1_700_000_000_000_000),

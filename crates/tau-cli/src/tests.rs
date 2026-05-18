@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use clap::Parser;
 use tau_cli_term::TermHandle;
 use tau_cli_term_raw::{Color, Term};
 use tau_proto::{
@@ -20,6 +21,19 @@ use super::tool_render::{
     render_delegate_display, render_shell_block, render_token_stats_block, render_tool_block,
     render_tool_display, streaming_block, synthesize_fallback_display,
 };
+
+#[test]
+fn dev_print_prompt_parses_role_flag() {
+    // `tau dev print-prompt -r <role>` is a diagnostic command, so keep
+    // the clap shape pinned even though it is hidden from normal help.
+    let cli = super::cli::Cli::parse_from(["tau", "dev", "print-prompt", "-r", "smart"]);
+    match cli.command {
+        Some(super::cli::Command::Dev {
+            command: super::cli::DevCommand::PrintPrompt { role },
+        }) => assert_eq!(role, "smart"),
+        _ => panic!("unexpected command"),
+    }
+}
 
 #[test]
 fn local_slash_commands_are_identified_for_history_rendering() {
