@@ -1,6 +1,6 @@
 {
-  # This sample uses plain Nickel records/values on purpose. Tau's built-in
-  # harness config carries schema/default metadata and merges underneath user
+  # This sample uses plain Nickel records/values on purpose. Tau wraps its
+  # built-in harness defaults with schema/default metadata before merging user
   # config, so you normally do not need to copy `| Contract` annotations here.
 
   # Provider extensions publish the live model list and model metadata at
@@ -13,7 +13,7 @@
   # rush = fast/cheap low reasoning, foreman = orchestration/delegation.
   # Role `description` is shown in `/role ...` completions. The built-in
   # non-exported `systemPrompt` Nickel template also reads these descriptions
-  # for the foreman role's static smart/deep/rush delegation list.
+  # for the foreman role's configured delegation-role list.
   # roles = {
   #   smart = {
   #     # description = "Balanced coding assistant.",

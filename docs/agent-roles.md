@@ -13,8 +13,9 @@ A role can set:
 - `toolsProfile`: name of a tool-availability profile from `harness.ncl`
 
 Roles live in `harness.ncl` under `roles`. User config normally uses plain
-Nickel records like these; Tau's built-in harness config carries the contracts,
-defaults, and prompt-template metadata that merge underneath user overrides.
+Nickel records like these; Tau wraps its built-in harness defaults with the
+contracts, defaults, and prompt-template metadata that merge underneath user
+overrides.
 
 ```nickel
 {

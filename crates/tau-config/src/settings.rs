@@ -18,17 +18,28 @@ use tau_proto::{CborValue, ModelId, ToolName};
 // Built-in configs
 //
 // Tau ships its baseline `cli.ncl` and `harness.ncl` as ordinary source files
-// under `crates/tau-config/config/`, embedded via `include_str!`. They are
-// layered underneath the user's own files at load time (see
-// `load_nickel_layered_with_builtin`) so user partial overrides keep
-// working without the public `CliSettings` / `HarnessSettings` types
-// having to carry a `#[serde(default)]` and a synthesized `Default`
-// impl that secretly parses a file. CLI bindings are defaulted per
-// chord, not per field inside a binding record.
+// under `crates/tau-config/config/`, embedded via `include_str!`. The harness
+// baseline is wrapped with a sibling contracts file at load time, keeping the
+// main defaults close to user-authored Nickel while retaining schema/default
+// metadata. Built-ins are layered underneath the user's own files at load time
+// (see `load_nickel_layered_with_builtin`) so user partial overrides keep
+// working without the public `CliSettings` / `HarnessSettings` types having to
+// carry a `#[serde(default)]` and a synthesized `Default` impl that secretly
+// parses a file. CLI bindings are defaulted per chord, not per field inside a
+// binding record.
 // ---------------------------------------------------------------------------
 
 const BUILT_IN_CLI_NCL: &str = include_str!("../config/built-in.cli.ncl");
+const BUILT_IN_HARNESS_CONTRACTS_NCL: &str =
+    include_str!("../config/built-in.harness.contracts.ncl");
 const BUILT_IN_HARNESS_NCL: &str = include_str!("../config/built-in.harness.ncl");
+
+fn built_in_harness_ncl() -> String {
+    format!(
+        "let harnessContracts = ({}) in ({})",
+        BUILT_IN_HARNESS_CONTRACTS_NCL, BUILT_IN_HARNESS_NCL
+    )
+}
 
 fn parse_built_in<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> T {
     eval_nickel_to(name, text).unwrap_or_else(|err| {
@@ -363,7 +374,7 @@ impl HarnessSettings {
     /// The fully-populated baseline that ships with tau, parsed from
     /// the embedded `built-in.harness.ncl`.
     pub fn built_in() -> Self {
-        parse_built_in("built-in.harness.ncl", BUILT_IN_HARNESS_NCL)
+        parse_built_in("built-in.harness.ncl", &built_in_harness_ncl())
     }
 
     #[must_use]
@@ -618,7 +629,7 @@ pub fn load_harness_settings_with_source_in(
     dirs: &TauDirs,
 ) -> Result<LoadedHarnessSettings, SettingsError> {
     let nickel_source = composed_nickel_source_with_builtin(
-        BUILT_IN_HARNESS_NCL.to_owned(),
+        built_in_harness_ncl(),
         dirs.config_dir.as_deref(),
         "harness",
     )?;

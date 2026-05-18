@@ -179,6 +179,12 @@ fn harness_settings_export_ignores_non_exported_system_prompt() {
     let loaded = load_harness_settings_with_source_in(&dirs_with_config(dir)).expect("load");
     assert!(loaded.settings.roles.contains_key("smart"));
     assert!(loaded.nickel_source.contains("systemPrompt"));
+
+    let exported: serde_json::Value =
+        eval_nickel_to("composed harness raw export", &loaded.nickel_source)
+            .expect("export harness source");
+    assert!(exported.pointer("/roles/smart/systemPrompt").is_none());
+    assert!(exported.pointer("/roles/foreman/systemPrompt").is_none());
 }
 
 #[test]

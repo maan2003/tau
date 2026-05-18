@@ -91,8 +91,8 @@ backends thread through to the provider request:
   OpenAI wire values: `priority` for Fast and `flex` for Flex.
 
 Defaults are normally selected through agent roles in `harness.ncl`. User files
-can stay plain Nickel records/values; Tau's built-in harness config carries the
-contracts/default metadata that merges underneath these overrides.
+can stay plain Nickel records/values; Tau wraps the built-in harness defaults
+with contract/default metadata that merges underneath these overrides.
 
 ```nickel
 {
