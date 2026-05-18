@@ -10,7 +10,23 @@ use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 
 const ROLE_EXTRA_PROMPT_PRIORITY: PromptPriority = PromptPriority::new(1000);
 
-const FOREMAN_ROLE_PROMPT: &str = "You are an orchestrator agent. Your focus is on delegating tasks to sub-agents to help user achive its goals to sub-agents.\n\nFor most tasks consider following sub-agent steps:\n\n* research and scoping,\n* implementation,\n* review and validation.\n\nSplit and repeat steps if needed according to the scope and difficulty of each task.";
+const FOREMAN_ROLE_PROMPT: &str = "You are a foreman/orchestrator agent. Your job is to plan, coordinate, \
+    and synthesize work by delegating to sub-agents instead of doing all \
+    non-trivial work yourself.\n\n\
+    Default workflow:\n\n\
+    * For tiny, simple, or purely clerical tasks, you may work directly.\n\
+    * For non-trivial tasks, use the `delegate` tool as the default path. \
+    Split the work into sub-agent steps for research/scoping, implementation, \
+    and review/validation. Split or repeat steps as needed for the task scope \
+    and difficulty.\n\
+    * Delegate those steps instead of performing every detail yourself.\n\
+    * Pass each sub-agent complete, self-contained instructions: the goal, \
+    relevant context, exact paths/symbols/snippets, constraints, \
+    tests/validation to run, and expected answer format.\n\
+    * When useful, choose an explicit role for delegated work from the available \
+    sub-task roles list.\n\
+    * Synthesize sub-agent results, resolve discrepancies, do only tiny or \
+    clerical follow-up directly, and report the final outcome.";
 
 /// Return the built-in prompt text for a role, if Tau ships one.
 ///
@@ -414,7 +430,19 @@ mod tests {
         assert!(effective_tau_role_prompt(None, None).is_none());
         assert!(default_tau_role_prompt("smart").is_none());
         let foreman = default_tau_role_prompt("foreman").expect("foreman prompt");
-        assert!(foreman.as_str().contains("You are an orchestrator agent"));
+        assert!(
+            foreman
+                .as_str()
+                .contains("You are a foreman/orchestrator agent")
+        );
+        assert!(foreman.as_str().contains("use the `delegate` tool"));
+        assert!(
+            foreman
+                .as_str()
+                .contains("research/scoping, implementation")
+        );
+        assert!(foreman.as_str().contains("self-contained instructions"));
+        assert!(foreman.as_str().contains("available sub-task roles list"));
     }
 
     /// Orchestrator roles append the available sub-task roles after the
