@@ -26,6 +26,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         projectName = "tau";
+        cargoCrap = pkgs.callPackage ./nix/pkgs/cargo-crap.nix { };
 
         flakeboxLib = flakebox.lib.mkLib pkgs {
           config = {
@@ -188,6 +189,7 @@
         packages.default = multiBuild.tau;
         packages.tau = multiBuild.tau;
         packages.site = site;
+        packages."cargo-crap" = cargoCrap;
 
         ci = {
           inherit (multiBuild) workspace clippy tests;
@@ -201,6 +203,7 @@
             "rustc-codegen-cranelift-preview"
           ];
           packages = [
+            cargoCrap
             pkgs.cargo-nextest
             pkgs.taplo
             selfci.packages.${system}.default
