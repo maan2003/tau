@@ -33,6 +33,14 @@
             github.ci.buildOutputs = [ ".#ci.workspace" ];
             just.importPaths = [ "justfile.custom.just" ];
             just.rules.watch.enable = false;
+            toolchain.components = [
+              "rustc"
+              "cargo"
+              "clippy"
+              "rust-analyzer"
+              "rust-src"
+              "llvm-tools"
+            ];
           };
         };
 
@@ -171,6 +179,68 @@
               cargoClippyExtraArgs = "-- -D warnings";
             };
 
+            workspaceDepsCcov = craneLib.buildDepsOnly {
+              pname = "${projectName}-workspace-ccov";
+              buildPhaseCargoCommand = ''
+                source <(cargo llvm-cov show-env --export-prefix)
+                cargo build --locked --workspace --all-targets --profile $CARGO_PROFILE
+              '';
+              cargoBuildCommand = "dontuse";
+              cargoCheckCommand = "dontuse";
+              nativeBuildInputs = [ pkgs.cargo-llvm-cov ];
+              doCheck = false;
+            };
+
+            workspaceCcov = craneLib.buildWorkspace {
+              pname = "${projectName}-workspace-ccov";
+              cargoArtifacts = workspaceDepsCcov;
+              buildPhaseCargoCommand = ''
+                source <(cargo llvm-cov show-env --export-prefix)
+                cargo build --locked --workspace --all-targets --profile $CARGO_PROFILE
+              '';
+              nativeBuildInputs = [ pkgs.cargo-llvm-cov ];
+              doCheck = false;
+            };
+
+            testsCcov = craneLib.mkCargoDerivation {
+              pname = "${projectName}-tests-ccov";
+              cargoArtifacts = workspaceCcov;
+              buildPhaseCargoCommand = ''
+                source <(cargo llvm-cov show-env --export-prefix)
+                cargo nextest run --locked --workspace --all-targets --cargo-profile $CARGO_PROFILE --show-progress none
+                mkdir -p $out
+                cargo llvm-cov report --profile $CARGO_PROFILE --lcov --output-path $out/lcov.info
+                test -s $out/lcov.info
+              '';
+              doInstallCargoArtifacts = false;
+              nativeBuildInputs = [
+                pkgs.cargo-llvm-cov
+                pkgs.cargo-nextest
+                pkgs.ripgrep
+              ];
+              doCheck = false;
+            };
+
+            crap = craneLib.mkCargoDerivation {
+              pname = "${projectName}-cargo-crap-ccov";
+              cargoArtifacts = workspaceCcov;
+              buildPhaseCargoCommand = ''
+                test -s ${testsCcov}/lcov.info
+                ${cargoCrap}/bin/cargo-crap \
+                  --workspace \
+                  --lcov ${testsCcov}/lcov.info \
+                  --threshold 1000 \
+                  --min 1000 \
+                  --format markdown \
+                  --fail-above
+                mkdir -p $out
+                cp ${testsCcov}/lcov.info $out/lcov.info
+              '';
+              doInstallCargoArtifacts = false;
+              nativeBuildInputs = [ cargoCrap ];
+              doCheck = false;
+            };
+
             tau = replaceTauBuildInfo (
               craneLib.buildPackage {
                 cargoArtifacts = workspaceDeps;
@@ -192,7 +262,14 @@
         packages."cargo-crap" = cargoCrap;
 
         ci = {
-          inherit (multiBuild) workspace clippy tests;
+          inherit (multiBuild)
+            workspace
+            clippy
+            tests
+            workspaceCcov
+            testsCcov
+            crap
+            ;
         };
 
         legacyPackages = multiBuild;
