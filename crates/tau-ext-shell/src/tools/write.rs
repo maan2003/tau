@@ -15,12 +15,12 @@ pub(crate) fn write_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailur
     let path_buf = PathBuf::from(&path);
     let display_args = path_buf.display().to_string();
 
-    if let Some(parent) = path_buf.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).map_err(|error| {
-                ToolFailure::from(error.to_string()).with_args(display_args.clone())
-            })?;
-        }
+    if let Some(parent) = path_buf.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            ToolFailure::from(error.to_string()).with_args(display_args.clone())
+        })?;
     }
 
     let path_metadata = fs::symlink_metadata(&path_buf).ok();

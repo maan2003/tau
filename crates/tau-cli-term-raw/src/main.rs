@@ -252,7 +252,7 @@ fn spawn_animator(handle: TermHandle) {
             handle.redraw();
 
             // --- History: periodic tick message (styled) ---
-            if tick % 5 == 0 {
+            if tick.is_multiple_of(5) {
                 let t = tick / 5;
                 handle.print_output(
                     "demo-tick",

@@ -72,10 +72,10 @@ pub fn build_revision() -> String {
 #[must_use]
 pub fn build_last_modified() -> Option<String> {
     let bytes = read_static(&LAST_MODIFIED);
-    if !bytes.starts_with(PLACEHOLDER_TAG) {
-        if let Ok(date) = std::str::from_utf8(&bytes) {
-            return Some(date.to_owned());
-        }
+    if !bytes.starts_with(PLACEHOLDER_TAG)
+        && let Ok(date) = std::str::from_utf8(&bytes)
+    {
+        return Some(date.to_owned());
     }
     short_built_time(built_info::BUILT_TIME_UTC).filter(|date| date != "1980-01-01 00:00")
 }

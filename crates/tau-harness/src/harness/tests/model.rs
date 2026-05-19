@@ -640,7 +640,7 @@ fn load_roles_falls_back_to_smart_role_while_models_are_provider_owned() {
     assert!(!roles.contains_key("default"));
     assert_eq!(selected_role, "smart");
 
-    let available = vec!["local/deep".into(), "local/smart".into()];
+    let available = ["local/deep".into(), "local/smart".into()];
     let provider_models = provider_models(
         available
             .iter()
@@ -692,7 +692,7 @@ fn role_missing_fields_use_model_defaults() {
     let harness_settings =
         tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
     let (roles, _role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
-    let available = vec!["local/aaa".into(), "local/smart".into()];
+    let available = ["local/aaa".into(), "local/smart".into()];
     let available_provider_models = provider_models(
         available
             .iter()

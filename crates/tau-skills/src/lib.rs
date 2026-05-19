@@ -298,14 +298,14 @@ fn validate_name(name: &str, parent_dir_name: Option<&str>, path: &Path) -> Name
         };
     }
 
-    if let Some(parent) = parent_dir_name {
-        if name != parent {
-            diagnostics.push(SkillDiagnostic {
-                path: path.to_owned(),
-                kind: DiagnosticKind::Warning,
-                message: format!("name \"{name}\" does not match parent directory \"{parent}\""),
-            });
-        }
+    if let Some(parent) = parent_dir_name
+        && name != parent
+    {
+        diagnostics.push(SkillDiagnostic {
+            path: path.to_owned(),
+            kind: DiagnosticKind::Warning,
+            message: format!("name \"{name}\" does not match parent directory \"{parent}\""),
+        });
     }
 
     if name.len() > MAX_NAME_LENGTH {

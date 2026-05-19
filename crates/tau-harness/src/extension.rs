@@ -182,14 +182,14 @@ fn spawn_extension_stderr_logger(
 ) {
     use std::io::{BufReader, Write};
     thread::spawn(move || {
-        if let Some(parent) = log_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!(
-                    "tau: failed to create extension log dir {}: {e}",
-                    parent.display()
-                );
-                return;
-            }
+        if let Some(parent) = log_path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "tau: failed to create extension log dir {}: {e}",
+                parent.display()
+            );
+            return;
         }
         let mut file = match std::fs::OpenOptions::new()
             .create(true)

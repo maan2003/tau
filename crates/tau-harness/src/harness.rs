@@ -1664,10 +1664,9 @@ impl Harness {
             .prompt_conversations
             .get(&materialized.session_prompt_id)
             .cloned()
+            && let Some(conv) = self.conversations.get_mut(&cid)
         {
-            if let Some(conv) = self.conversations.get_mut(&cid) {
-                conv.last_prompt_id = Some(materialized.session_prompt_id);
-            }
+            conv.last_prompt_id = Some(materialized.session_prompt_id);
         }
     }
 
@@ -1774,39 +1773,38 @@ impl Harness {
         if let Event::SessionPromptCreated(prompt) = &event {
             self.note_session_prompt_created(prompt);
         }
-        if let Some(sync) = sync_head_for {
-            if let Some(node_id) = folded_node_id {
-                if let Some(c) = self.conversations.get_mut(&sync.cid) {
-                    // Only advance the conversation's own branch cursor when
-                    // the event produced a tree node. `tree.head()` is the
-                    // *global* write cursor and may sit on a sibling
-                    // conversation's last fold; syncing to it after a
-                    // non-folding event (e.g. `ProviderResponseFinished` with
-                    // only tool calls) would graft this conversation's next
-                    // tool request onto the wrong branch and produce orphan
-                    // ToolUse blocks downstream.
-                    c.head = Some(node_id);
-                    // Keep the dedup map's "built for" cursor in lockstep with
-                    // the just-folded linear extension. The dedup-decision
-                    // path already inserted any new (hash, call_id) entry
-                    // before the publish, so the map's contents already match
-                    // what a fresh rebuild from this new head would produce.
-                    // Bumping the cursor here lets the next tool result skip
-                    // the rebuild entirely (the steady-state hot path).
-                    //
-                    // We pass *every* fold through this hook, including ones
-                    // that didn't touch the dedup map (a `UserMessage` from
-                    // session re-init, an `AgentMessage`, a `ToolRequest`
-                    // node). [`ResultDedupMap::note_head_advanced_to`] guards
-                    // against the dangerous case — `built_for == None` plus a
-                    // non-dedup-eligible fold — by skipping the bump, so the
-                    // rebuild still triggers on the next dedup intake. Don't
-                    // gate this call on the event variant: that would re-couple
-                    // `commit_event` to per-tool semantics that the dedup
-                    // module deliberately owns.
-                    c.result_dedup.note_head_advanced_to(node_id);
-                }
-            }
+        if let Some(sync) = sync_head_for
+            && let Some(node_id) = folded_node_id
+            && let Some(c) = self.conversations.get_mut(&sync.cid)
+        {
+            // Only advance the conversation's own branch cursor when
+            // the event produced a tree node. `tree.head()` is the
+            // *global* write cursor and may sit on a sibling
+            // conversation's last fold; syncing to it after a
+            // non-folding event (e.g. `ProviderResponseFinished` with
+            // only tool calls) would graft this conversation's next
+            // tool request onto the wrong branch and produce orphan
+            // ToolUse blocks downstream.
+            c.head = Some(node_id);
+            // Keep the dedup map's "built for" cursor in lockstep with
+            // the just-folded linear extension. The dedup-decision
+            // path already inserted any new (hash, call_id) entry
+            // before the publish, so the map's contents already match
+            // what a fresh rebuild from this new head would produce.
+            // Bumping the cursor here lets the next tool result skip
+            // the rebuild entirely (the steady-state hot path).
+            //
+            // We pass *every* fold through this hook, including ones
+            // that didn't touch the dedup map (a `UserMessage` from
+            // session re-init, an `AgentMessage`, a `ToolRequest`
+            // node). [`ResultDedupMap::note_head_advanced_to`] guards
+            // against the dangerous case — `built_for == None` plus a
+            // non-dedup-eligible fold — by skipping the bump, so the
+            // rebuild still triggers on the next dedup intake. Don't
+            // gate this call on the event variant: that would re-couple
+            // `commit_event` to per-tool semantics that the dedup
+            // module deliberately owns.
+            c.result_dedup.note_head_advanced_to(node_id);
         }
         // Wrap in a `LogEvent` message envelope so subscribers get the
         // id and can ack after processing. Receivers that don't care
@@ -2967,13 +2965,13 @@ impl Harness {
             let _ = self.registry.unregister_connection(connection_id);
             self.emit_extension_exited(&meta.name);
         }
-        if meta.origin == ConnectionOrigin::Supervised {
-            if let Err(error) = self.try_respawn_supervised_extension(connection_id) {
-                self.emit_info(&format!(
-                    "failed to respawn extension {}: {error}",
-                    meta.name
-                ));
-            }
+        if meta.origin == ConnectionOrigin::Supervised
+            && let Err(error) = self.try_respawn_supervised_extension(connection_id)
+        {
+            self.emit_info(&format!(
+                "failed to respawn extension {}: {error}",
+                meta.name
+            ));
         }
     }
 
@@ -3277,12 +3275,12 @@ impl Harness {
     }
 
     fn check_config_exists(&mut self) {
-        if let Some(dir) = tau_config::settings::config_dir() {
-            if !dir.join("harness.yaml").exists() {
-                self.emit_info_important(
-                    "no config found; run `tau init` to create sample config files",
-                );
-            }
+        if let Some(dir) = tau_config::settings::config_dir()
+            && !dir.join("harness.yaml").exists()
+        {
+            self.emit_info_important(
+                "no config found; run `tau init` to create sample config files",
+            );
         }
     }
 
@@ -3632,10 +3630,10 @@ impl Harness {
         candidate_parent_cid: &ConversationId,
         candidate_mode: tau_proto::ToolExecutionMode,
     ) -> bool {
-        if let Some(exclusive_root) = self.active_exclusive_ancestor_for(candidate_parent_cid) {
-            if self.conversation_descends_from(active_cid, &exclusive_root) {
-                return false;
-            }
+        if let Some(exclusive_root) = self.active_exclusive_ancestor_for(candidate_parent_cid)
+            && self.conversation_descends_from(active_cid, &exclusive_root)
+        {
+            return false;
         }
         match candidate_mode {
             tau_proto::ToolExecutionMode::Shared => {
@@ -3808,10 +3806,10 @@ impl Harness {
     }
 
     fn release_ext_agent_query(&mut self, cid: &ConversationId) {
-        if self.active_ext_agent_queries.remove(cid).is_some() {
-            if let Err(error) = self.drain_pending_ext_agent_queries() {
-                self.emit_info(&format!("queued ext-agent dispatch failed: {error}"));
-            }
+        if self.active_ext_agent_queries.remove(cid).is_some()
+            && let Err(error) = self.drain_pending_ext_agent_queries()
+        {
+            self.emit_info(&format!("queued ext-agent dispatch failed: {error}"));
         }
     }
 
@@ -3878,16 +3876,16 @@ impl Harness {
             .store
             .session(session_id.as_str())
             .and_then(|t| t.head());
-        if want != have {
-            if let Some(target) = want {
-                self.publish_event(
-                    None,
-                    Event::UiNavigateTree(tau_proto::UiNavigateTree {
-                        session_id,
-                        node_id: target.get(),
-                    }),
-                );
-            }
+        if want != have
+            && let Some(target) = want
+        {
+            self.publish_event(
+                None,
+                Event::UiNavigateTree(tau_proto::UiNavigateTree {
+                    session_id,
+                    node_id: target.get(),
+                }),
+            );
         }
     }
 
@@ -4665,11 +4663,11 @@ impl Harness {
             _ => None,
         };
 
-        if let Some(session_id) = completed_session {
-            if let Err(error) = self.complete_session_init(session_id) {
-                self.emit_info(&format!("failed to initialize session: {error}"));
-                self.turn_state = TurnState::Idle;
-            }
+        if let Some(session_id) = completed_session
+            && let Err(error) = self.complete_session_init(session_id)
+        {
+            self.emit_info(&format!("failed to initialize session: {error}"));
+            self.turn_state = TurnState::Idle;
         }
     }
 
@@ -5553,13 +5551,13 @@ impl Harness {
             ));
             requested_tool_calls = false;
         }
-        if requested_tool_calls {
-            if let Some(call) = tool_calls.iter().find(|call| call.id.as_str().is_empty()) {
-                return Err(HarnessError::Participant(format!(
-                    "agent response {} contained tool call {} with empty call_id",
-                    response.session_prompt_id, call.name
-                )));
-            }
+        if requested_tool_calls
+            && let Some(call) = tool_calls.iter().find(|call| call.id.as_str().is_empty())
+        {
+            return Err(HarnessError::Participant(format!(
+                "agent response {} contained tool call {} with empty call_id",
+                response.session_prompt_id, call.name
+            )));
         }
         let is_non_tool_ext_query = self.conversations.get(&cid).is_some_and(|conv| {
             matches!(
@@ -5671,51 +5669,50 @@ impl Harness {
             ref name,
             ref query_id,
         } = response.originator
+            && (!requested_tool_calls || is_non_tool_ext_query)
         {
-            if !requested_tool_calls || is_non_tool_ext_query {
-                let source = self
-                    .conversations
-                    .get(&cid)
-                    .and_then(|c| c.source_connection.clone());
-                let error = if is_non_tool_ext_query && requested_tool_calls {
-                    Some(format!(
-                        "non-tool extension query attempted to call {} tool(s); refusing to execute",
-                        tool_calls.len()
-                    ))
-                } else {
-                    None
-                };
-                let result = tau_proto::ExtAgentQueryResult {
-                    query_id: query_id.clone(),
-                    text: assistant_text.clone().unwrap_or_default(),
-                    error,
-                };
-                if let Some(source) = source {
-                    let _ = self.bus.send_to(
-                        source.as_str(),
-                        None,
-                        Frame::Event(Event::ExtAgentQueryResult(result)),
-                    );
-                } else {
-                    // Should never happen — `source_connection` is set in
-                    // `handle_ext_agent_query` when the conversation is
-                    // spawned. Surface it via `harness.info` rather than
-                    // silently dropping so a future regression is visible.
-                    self.emit_info(&format!(
-                        "ext-query result for `{}` (extension `{}`) had no source connection — \
+            let source = self
+                .conversations
+                .get(&cid)
+                .and_then(|c| c.source_connection.clone());
+            let error = if is_non_tool_ext_query && requested_tool_calls {
+                Some(format!(
+                    "non-tool extension query attempted to call {} tool(s); refusing to execute",
+                    tool_calls.len()
+                ))
+            } else {
+                None
+            };
+            let result = tau_proto::ExtAgentQueryResult {
+                query_id: query_id.clone(),
+                text: assistant_text.clone().unwrap_or_default(),
+                error,
+            };
+            if let Some(source) = source {
+                let _ = self.bus.send_to(
+                    source.as_str(),
+                    None,
+                    Frame::Event(Event::ExtAgentQueryResult(result)),
+                );
+            } else {
+                // Should never happen — `source_connection` is set in
+                // `handle_ext_agent_query` when the conversation is
+                // spawned. Surface it via `harness.info` rather than
+                // silently dropping so a future regression is visible.
+                self.emit_info(&format!(
+                    "ext-query result for `{}` (extension `{}`) had no source connection — \
                          dropping",
-                        query_id, name
-                    ));
-                }
-                // Snap the tree head back to the default conversation's
-                // local head so the user's next interactive prompt
-                // continues on the main branch instead of the side branch.
-                self.snap_to_default_conversation();
-                self.conversations.remove(&cid);
-                self.release_ext_agent_query(&cid);
-                self.try_advance_queue();
-                return Ok(());
+                    query_id, name
+                ));
             }
+            // Snap the tree head back to the default conversation's
+            // local head so the user's next interactive prompt
+            // continues on the main branch instead of the side branch.
+            self.snap_to_default_conversation();
+            self.conversations.remove(&cid);
+            self.release_ext_agent_query(&cid);
+            self.try_advance_queue();
+            return Ok(());
         }
 
         if requested_tool_calls {
@@ -5992,10 +5989,10 @@ impl Harness {
         // state to any UI watching this delegate flow before the
         // mapping is cleared.
         let owner = self.tool_conversations.get(call_id).cloned();
-        if let Some(cid) = owner.as_ref() {
-            if let Some(conv) = self.conversations.get_mut(cid) {
-                conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
-            }
+        if let Some(cid) = owner.as_ref()
+            && let Some(conv) = self.conversations.get_mut(cid)
+        {
+            conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
         }
         if let Some(cid) = owner {
             self.emit_delegate_progress(&cid);

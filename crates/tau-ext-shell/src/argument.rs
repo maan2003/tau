@@ -85,10 +85,10 @@ pub(crate) fn argument_array<'a>(
     match arguments {
         CborValue::Map(entries) => {
             for (k, v) in entries {
-                if let (CborValue::Text(k), CborValue::Array(arr)) = (k, v) {
-                    if k == key {
-                        return Ok(arr);
-                    }
+                if let (CborValue::Text(k), CborValue::Array(arr)) = (k, v)
+                    && k == key
+                {
+                    return Ok(arr);
                 }
             }
             Err(format!("missing array argument: {key}"))

@@ -145,7 +145,7 @@ fn rendered_prompt_fragment_template_parts(
             // Preserve the caller's deterministic source/name tie-break within
             // a priority bucket. The harness gathers tool fragments in
             // priority/source/name order before rendering.
-            ordered.sort_by(|a, b| a.priority.cmp(&b.priority));
+            ordered.sort_by_key(|a| a.priority);
             ordered
         }
         .into_iter()

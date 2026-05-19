@@ -404,10 +404,11 @@ pub(crate) fn apply_event(
             // Each summary part is a separate paragraph. Insert a
             // blank line between parts so consecutive paragraphs
             // are visually separated.
-            if let Some(thinking) = state.thinking.as_mut() {
-                if !thinking.is_empty() && !thinking.ends_with("\n\n") {
-                    thinking.push_str("\n\n");
-                }
+            if let Some(thinking) = state.thinking.as_mut()
+                && !thinking.is_empty()
+                && !thinking.ends_with("\n\n")
+            {
+                thinking.push_str("\n\n");
             }
         }
         "response.function_call_arguments.delta" => {
@@ -472,13 +473,13 @@ pub(crate) fn apply_event(
                 }
                 if item["type"].as_str() == Some("message") {
                     state.set_message_phase_at(output_index, parse_phase_from_item(item));
-                    if event_type == "response.output_item.done" {
-                        if let Some(text) = message_text_from_output_item(item) {
-                            let previous_text = state.text.clone();
-                            state.set_message_text_at(output_index, &text);
-                            if state.text != previous_text {
-                                on_update(&state.text, state.thinking.as_deref());
-                            }
+                    if event_type == "response.output_item.done"
+                        && let Some(text) = message_text_from_output_item(item)
+                    {
+                        let previous_text = state.text.clone();
+                        state.set_message_text_at(output_index, &text);
+                        if state.text != previous_text {
+                            on_update(&state.text, state.thinking.as_deref());
                         }
                     }
                 }
@@ -910,10 +911,10 @@ fn message_text_from_output_item(item: &serde_json::Value) -> Option<String> {
             part.get("type").and_then(serde_json::Value::as_str),
             Some("output_text") | Some("text")
         );
-        if is_text_part {
-            if let Some(part_text) = part.get("text").and_then(serde_json::Value::as_str) {
-                text.push_str(part_text);
-            }
+        if is_text_part
+            && let Some(part_text) = part.get("text").and_then(serde_json::Value::as_str)
+        {
+            text.push_str(part_text);
         }
     }
 

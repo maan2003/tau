@@ -5575,10 +5575,10 @@ fn tool_events_carry_owning_conversation_originator() {
     let frames = sink.lock().expect("sink");
     let mut originators_by_call = std::collections::HashMap::new();
     for routed in frames.iter() {
-        if let Frame::Message(tau_proto::Message::LogEvent(env)) = &routed.frame {
-            if let Event::ToolRequest(req) = env.event.as_ref() {
-                originators_by_call.insert(req.call_id.as_str().to_owned(), req.originator.clone());
-            }
+        if let Frame::Message(tau_proto::Message::LogEvent(env)) = &routed.frame
+            && let Event::ToolRequest(req) = env.event.as_ref()
+        {
+            originators_by_call.insert(req.call_id.as_str().to_owned(), req.originator.clone());
         }
     }
     drop(frames);
