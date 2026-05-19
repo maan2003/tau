@@ -442,10 +442,6 @@ pub struct AgentRole {
     /// `<config_dir>/prompts/<name>.hbs`.
     #[serde(skip_serializing_if = "Option::is_none", rename = "promptOverride")]
     pub prompt_override: Option<String>,
-    /// Whether this role focuses on orchestrating and delegating work to
-    /// sub-agents. Defaults semantically to false when unset.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub orchestrator: Option<bool>,
     /// Explicit internal tool names enabled for this role. When unset, tools
     /// use their own default enablement.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -485,9 +481,6 @@ impl AgentRole {
         }
         if let Some(prompt_override) = &override_role.prompt_override {
             self.prompt_override = Some(prompt_override.clone());
-        }
-        if let Some(orchestrator) = override_role.orchestrator {
-            self.orchestrator = Some(orchestrator);
         }
         if let Some(tools) = &override_role.tools {
             self.tools = Some(tools.clone());

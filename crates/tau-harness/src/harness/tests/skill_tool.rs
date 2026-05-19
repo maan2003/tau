@@ -12,7 +12,7 @@ fn build_system_prompt_includes_skills() {
             add_to_prompt: true,
         },
     );
-    let prompt = build_system_prompt(&skills, "/tmp/work", None, &[]);
+    let prompt = build_system_prompt(&skills, "/tmp/work", &[]);
     assert!(prompt.contains("<available_skills>"));
     assert!(prompt.contains("<name>brave-search</name>"));
     assert!(prompt.contains("<description>Web search via Brave API</description>"));
@@ -34,7 +34,7 @@ fn build_system_prompt_excludes_hidden_skills() {
             add_to_prompt: false,
         },
     );
-    let prompt = build_system_prompt(&skills, "/tmp/work", None, &[]);
+    let prompt = build_system_prompt(&skills, "/tmp/work", &[]);
     assert!(!prompt.contains("<available_skills>"));
     assert!(!prompt.contains("hidden"));
 }
@@ -51,7 +51,7 @@ fn build_system_prompt_escapes_skill_xml_text() {
             add_to_prompt: true,
         },
     );
-    let prompt = build_system_prompt(&skills, "/tmp/work", None, &[]);
+    let prompt = build_system_prompt(&skills, "/tmp/work", &[]);
     assert!(prompt.contains("Use &lt;/description&gt; &amp; &lt;tag&gt; &quot;quotes&quot;"));
     assert!(!prompt.contains("Use </description>"));
 }
@@ -915,7 +915,7 @@ fn built_in_tau_self_knowledge_skills_are_available_without_file_paths() {
         assert_eq!(skill.add_to_prompt, advertised, "{name} prompt flag");
     }
 
-    let prompt = build_system_prompt(&h.discovered_skills, "/tmp/work", None, &[]);
+    let prompt = build_system_prompt(&h.discovered_skills, "/tmp/work", &[]);
     assert!(prompt.contains("<name>tau-self-knowledge</name>"));
     assert!(prompt.contains("Built-in information about Tau coding harness you are running in."));
     assert!(!prompt.contains("<name>tau-self-knowledge-architecture</name>"));

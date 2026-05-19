@@ -3,7 +3,7 @@
 //! [`tau_core::SessionTree`] into item-based prompt context.
 
 use tau_core::SessionEntry;
-use tau_proto::{CborValue, ContextItem, PromptContent, PromptFragment};
+use tau_proto::{CborValue, ContextItem, PromptFragment};
 
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 
@@ -40,14 +40,12 @@ pub(crate) struct RolePromptTemplateContext<'a> {
 pub(crate) fn build_system_prompt(
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     cwd: &str,
-    available_sub_task_roles_prompt: Option<&PromptContent>,
     prompt_fragments: &[PromptFragment],
 ) -> String {
     build_system_prompt_with_template_context(
         BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
         skills,
         cwd,
-        available_sub_task_roles_prompt,
         prompt_fragments,
         serde_json::json!({}),
         RolePromptTemplateContext { role_name: "", cwd },
@@ -59,7 +57,6 @@ pub(crate) fn build_system_prompt_with_template_context(
     system_template: &str,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     _cwd: &str,
-    available_sub_task_roles_prompt: Option<&PromptContent>,
     prompt_fragments: &[PromptFragment],
     session_context: serde_json::Value,
     template_context: RolePromptTemplateContext<'_>,
@@ -71,7 +68,6 @@ pub(crate) fn build_system_prompt_with_template_context(
         system_template,
         template_context,
         skills,
-        available_sub_task_roles_prompt,
         &fragments,
         session_context,
     )
@@ -81,17 +77,10 @@ fn render_system_prompt_template(
     system_template: &str,
     context: RolePromptTemplateContext<'_>,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
-    available_sub_task_roles_prompt: Option<&PromptContent>,
     prompt_fragments: &[PromptFragment],
     session_context: serde_json::Value,
 ) -> String {
-    let data = system_prompt_template_data(
-        context,
-        skills,
-        available_sub_task_roles_prompt,
-        prompt_fragments,
-        session_context,
-    );
+    let data = system_prompt_template_data(context, skills, prompt_fragments, session_context);
     let handlebars = prompt_template_renderer();
     match handlebars.render_template(system_template, &data) {
         Ok(rendered) => rendered,
@@ -134,32 +123,15 @@ fn prompt_template_data(
 fn system_prompt_template_data(
     context: RolePromptTemplateContext<'_>,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
-    available_sub_task_roles_prompt: Option<&PromptContent>,
     prompt_fragments: &[PromptFragment],
     session_context: serde_json::Value,
 ) -> serde_json::Value {
     let mut data = prompt_template_data(context, skills, session_context);
-    {
-        let object = data
-            .as_object_mut()
-            .expect("system prompt template data is an object");
-        object.insert(
-            "available_sub_task_roles_prompt".to_owned(),
-            prompt_content_value(available_sub_task_roles_prompt),
-        );
-    }
     let rendered_fragments = rendered_prompt_fragment_template_parts(prompt_fragments, &data);
     data.as_object_mut()
         .expect("system prompt template data is an object")
         .insert("prompt_fragments".to_owned(), rendered_fragments);
     data
-}
-
-fn prompt_content_value(content: Option<&PromptContent>) -> serde_json::Value {
-    content
-        .filter(|content| !content.is_empty())
-        .map(|content| serde_json::Value::String(content.as_str().to_owned()))
-        .unwrap_or(serde_json::Value::Null)
 }
 
 fn rendered_prompt_fragment_template_parts(
@@ -527,7 +499,7 @@ mod tests {
     #[test]
     fn build_system_prompt_without_fragments_does_not_render_cwd_prose() {
         let skills = std::collections::HashMap::new();
-        let prompt = build_system_prompt(&skills, "/tmp/work", None, &[]);
+        let prompt = build_system_prompt(&skills, "/tmp/work", &[]);
         assert!(prompt.contains("expert coding assistant"));
         assert!(!prompt.contains("Current working directory: /tmp/work"));
     }
@@ -541,7 +513,6 @@ mod tests {
             BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
             &skills,
             "/tmp/a&b<quoted>",
-            None,
             &[cwd_prompt_fragment()],
             serde_json::json!({
                 "cwd": [
@@ -561,7 +532,7 @@ mod tests {
     #[test]
     fn build_system_prompt_encourages_parallel_tool_calls() {
         let skills = std::collections::HashMap::new();
-        let prompt = build_system_prompt(&skills, "/tmp/work", None, &[]);
+        let prompt = build_system_prompt(&skills, "/tmp/work", &[]);
         assert!(prompt.contains("parallel"));
         assert!(prompt.contains("make all independent tool calls in parallel"));
     }
@@ -588,7 +559,6 @@ mod tests {
             BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
             &skills,
             "/tmp/work",
-            None,
             &fragments,
             serde_json::json!({}),
             RolePromptTemplateContext {
@@ -632,7 +602,6 @@ mod tests {
             BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
             &skills,
             "/tmp/work",
-            None,
             &fragments,
             serde_json::json!({}),
             RolePromptTemplateContext {
@@ -657,7 +626,7 @@ mod tests {
             discovered_skill("use <fast> \"mode\"", true),
         )]);
 
-        let prompt = build_system_prompt(&skills, "/tmp/work", None, &[]);
+        let prompt = build_system_prompt(&skills, "/tmp/work", &[]);
 
         assert!(prompt.contains("<name>a&amp;b</name>"));
         assert!(prompt.contains("<description>use &lt;fast&gt; &quot;mode&quot;</description>"));
@@ -677,7 +646,6 @@ mod tests {
             BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
             &skills,
             "/tmp/work",
-            None,
             &[],
             serde_json::json!({}),
             RolePromptTemplateContext {
@@ -720,7 +688,6 @@ alpha middle zeta "
             BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
             &skills,
             "/tmp/work",
-            None,
             &fragments,
             serde_json::json!({
                 "skills": [
@@ -751,7 +718,6 @@ alpha middle zeta "
             BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
             &std::collections::HashMap::new(),
             "/tmp/work",
-            None,
             &fragments,
             serde_json::json!({
                 "demo": [
@@ -782,7 +748,6 @@ alpha middle zeta "
                 cwd: "/tmp/work",
             },
             &std::collections::HashMap::new(),
-            None,
             &fragments,
             serde_json::json!({}),
         );
@@ -807,35 +772,11 @@ alpha middle zeta "
             tau_proto::PromptFragment::new("good", tau_proto::PromptPriority::new(20), "GOOD"),
         ];
 
-        let prompt = build_system_prompt(
-            &std::collections::HashMap::new(),
-            "/tmp/work",
-            None,
-            &fragments,
-        );
+        let prompt =
+            build_system_prompt(&std::collections::HashMap::new(), "/tmp/work", &fragments);
 
         assert!(prompt.contains("GOOD"));
         assert!(!prompt.contains("BAD {{missing.value}}"));
-    }
-
-    /// Orchestrator roles append the available sub-task roles after the
-    /// effective role prompt so user prompt overrides do not hide delegation
-    /// choices from the model.
-    #[test]
-    fn build_system_prompt_appends_available_roles_for_orchestrator_context() {
-        let skills = std::collections::HashMap::new();
-        let available_roles = tau_proto::PromptContent::new(
-            "## Available sub-task roles\n\n* `smart` - \"Individual contributor using state of the art model. Good default for most tasks.\"",
-        );
-
-        let prompt = build_system_prompt(&skills, "/tmp/work", Some(&available_roles), &[]);
-
-        let roles = prompt
-            .find("## Available sub-task roles")
-            .expect("available roles");
-        let base = prompt.find("expert coding assistant").expect("base prompt");
-        assert!(base < roles);
-        assert!(prompt.contains("* `smart` - \"Individual contributor using state of the art model. Good default for most tasks.\""));
     }
 
     /// Role prompt overrides, role extra prompts, and prompt fragments are
@@ -873,7 +814,6 @@ alpha middle zeta "
             BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
             &skills,
             "/tmp/work",
-            None,
             &fragments,
             serde_json::json!({
                 "cwd": [
@@ -911,13 +851,13 @@ alpha middle zeta "
     #[test]
     fn build_system_prompt_ignores_empty_prompt_fragment_sections() {
         let skills = std::collections::HashMap::new();
-        let without_hook = build_system_prompt(&skills, "/tmp/work", None, &[]);
+        let without_hook = build_system_prompt(&skills, "/tmp/work", &[]);
         let empty_fragments = vec![tau_proto::PromptFragment::new(
             "tool.empty",
             tau_proto::PromptPriority::new(10),
             "",
         )];
-        let with_empty_hook = build_system_prompt(&skills, "/tmp/work", None, &empty_fragments);
+        let with_empty_hook = build_system_prompt(&skills, "/tmp/work", &empty_fragments);
 
         assert_eq!(with_empty_hook, without_hook);
     }

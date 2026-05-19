@@ -15,7 +15,6 @@ roles:
     thinkingSummary: detailed
   foreman:
     description: Role focused on splitting and delegation of tasks to other sub-agents
-    orchestrator: true
     promptFragments:
       - name: foreman.instructions
         priority: 150
@@ -30,3 +29,15 @@ roles:
           * Pass each sub-agent complete, self-contained instructions: the goal, relevant context, exact paths/symbols/snippets, constraints, tests/validation to run, and expected answer format.
           * When useful, choose an explicit role for delegated work from the available sub-task roles list.
           * Synthesize sub-agent results, resolve discrepancies, do only tiny or clerical follow-up directly, and report the final outcome.
+      - name: foreman.available-roles
+        priority: 160
+        text: |-
+          {{#if session_context.delegate_roles~}}
+          ## Available sub-task roles
+
+          {{#each session_context.delegate_roles~}}
+          {{#each (sort value by="name")~}}
+          * `{{name}}` - "{{description}}"
+          {{/each~}}
+          {{/each~}}
+          {{/if~}}

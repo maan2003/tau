@@ -4439,54 +4439,6 @@ fn delegate_missing_default_smart_errors_when_smart_unavailable() {
     h.shutdown().expect("shutdown");
 }
 
-/// The foreman/orchestrator prompt lists only available sub-task roles, sorted
-/// by role name, with descriptions preserved for the model.
-#[test]
-fn orchestrator_available_sub_task_roles_are_sorted_and_described() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let available_model: tau_proto::ModelId = "test/available".into();
-    set_available_provider_models(
-        &mut h,
-        [provider_model_info(available_model.clone(), 128_000)],
-    );
-    h.available_roles = std::collections::HashMap::from([
-        (
-            "zeta".to_owned(),
-            tau_config::settings::AgentRole {
-                model: Some(available_model.clone()),
-                description: Some("last role".to_owned()),
-                ..Default::default()
-            },
-        ),
-        (
-            "alpha".to_owned(),
-            tau_config::settings::AgentRole {
-                model: Some(available_model),
-                description: Some("first role".to_owned()),
-                ..Default::default()
-            },
-        ),
-        (
-            "offline".to_owned(),
-            tau_config::settings::AgentRole {
-                model: Some("test/offline".into()),
-                description: Some("not shown".to_owned()),
-                ..Default::default()
-            },
-        ),
-    ]);
-
-    let prompt = h.available_sub_task_roles_prompt();
-    assert_eq!(
-        prompt.as_str(),
-        "## Available sub-task roles\n\n* `alpha` - \"first role\"\n* `zeta` - \"last role\""
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
 /// Regression: when one side conversation tears down (running
 /// `snap_to_default_conversation`) before another's tool result
 /// arrives, the result must still fold onto the *originating*

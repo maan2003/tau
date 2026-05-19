@@ -5082,18 +5082,12 @@ impl Harness {
     }
 
     fn build_system_prompt_for_role(&self, cwd: &str, role_name: &str) -> String {
-        let current_role = self.available_roles.get(role_name);
-        let available_sub_task_roles_prompt = current_role
-            .and_then(|role| role.orchestrator)
-            .unwrap_or(false)
-            .then(|| self.available_sub_task_roles_prompt());
         let prompt_fragments = self.gather_prompt_fragments_for_role(role_name);
         let system_template = self.system_template_for_role(role_name);
         build_system_prompt_with_template_context(
             system_template,
             &self.discovered_skills,
             cwd,
-            available_sub_task_roles_prompt.as_ref(),
             &prompt_fragments,
             self.session_context
                 .template_value(&self.current_session_id),
@@ -5115,19 +5109,6 @@ impl Harness {
             })
             .map(String::as_str)
             .unwrap_or("")
-    }
-
-    fn available_sub_task_roles_prompt(&self) -> tau_proto::PromptContent {
-        let mut lines = vec!["## Available sub-task roles".to_owned(), String::new()];
-        for name in self.available_delegate_role_names() {
-            let description = self
-                .available_roles
-                .get(&name)
-                .and_then(|role| role.description.as_deref())
-                .unwrap_or_default();
-            lines.push(format!("* `{name}` - \"{description}\""));
-        }
-        tau_proto::PromptContent::new(lines.join("\n"))
     }
 
     #[cfg(test)]

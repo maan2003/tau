@@ -9,8 +9,10 @@ use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 
 use tau_proto::{
-    Ack, CborValue, Event, ExtAgentQuery, Frame, FrameReader, FrameWriter, LogEventId, Message,
-    ToolError, ToolExecutionMode, ToolInvoke, ToolResult, ToolSpec,
+    Ack, CborValue, Event, ExtAgentQuery, ExtSessionContextPublish, ExtensionContextReady, Frame,
+    FrameReader, FrameWriter, HarnessRolesAvailable, LogEventId, Message, SessionContextKey,
+    SessionContextValue, SessionStarted, ToolError, ToolExecutionMode, ToolInvoke, ToolResult,
+    ToolSpec,
 };
 
 pub const LOG_TARGET: &str = "core-delegate";
@@ -35,6 +37,8 @@ where
         .subscribe([
             tau_proto::EventName::TOOL_INVOKE,
             tau_proto::EventName::EXTENSION_AGENT_QUERY_RESULT,
+            tau_proto::EventName::SESSION_STARTED,
+            tau_proto::EventName::HARNESS_ROLES_AVAILABLE,
         ])
         .register_tool(tool_spec())
         .ready_message("core-delegate ready")
@@ -50,6 +54,8 @@ where
     // needed.
     let mut pending: HashMap<String, (tau_proto::ToolCallId, tau_proto::ToolName)> = HashMap::new();
     let mut next_query_id: u64 = 0;
+    let mut current_session_id: Option<tau_proto::SessionId> = None;
+    let mut latest_roles: Vec<serde_json::Value> = Vec::new();
 
     while let Some(frame) = reader.read_frame()? {
         let (log_id, inner) = frame.peel_log();
@@ -98,6 +104,29 @@ where
                         query_id = %result.query_id,
                         "received result for unknown query_id",
                     );
+                }
+            }
+            Frame::Event(Event::SessionStarted(SessionStarted { session_id, .. })) => {
+                current_session_id = Some(session_id.clone());
+                publish_delegate_roles_context_and_ready(
+                    &mut writer,
+                    session_id.clone(),
+                    &latest_roles,
+                )?;
+            }
+            Frame::Event(Event::HarnessRolesAvailable(HarnessRolesAvailable { roles })) => {
+                latest_roles = roles
+                    .into_iter()
+                    .map(|role| {
+                        serde_json::json!({
+                            "name": role.name,
+                            "description": role.role_description.unwrap_or(role.description),
+                        })
+                    })
+                    .collect();
+                latest_roles.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+                if let Some(session_id) = current_session_id.clone() {
+                    publish_delegate_roles_context(&mut writer, session_id, &latest_roles)?;
                 }
             }
             Frame::Message(Message::Disconnect(_)) => {
@@ -199,6 +228,39 @@ fn ack_log_event<W: Write>(
     writer: &mut FrameWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
     writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn publish_delegate_roles_context<W: Write>(
+    writer: &mut FrameWriter<BufWriter<W>>,
+    session_id: tau_proto::SessionId,
+    roles: &[serde_json::Value],
+) -> Result<(), Box<dyn Error>> {
+    writer.write_frame(&Frame::Event(Event::ExtSessionContextPublish(
+        ExtSessionContextPublish {
+            session_id,
+            key: SessionContextKey::new("delegate_roles"),
+            value: SessionContextValue(serde_json::Value::Array(roles.to_vec())),
+        },
+    )))?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn publish_delegate_roles_context_and_ready<W: Write>(
+    writer: &mut FrameWriter<BufWriter<W>>,
+    session_id: tau_proto::SessionId,
+    roles: &[serde_json::Value],
+) -> Result<(), Box<dyn Error>> {
+    // The harness waits for every supervised tool extension subscribed to
+    // `session.started` to report that its per-session context is complete.
+    // Delegate subscribes only to publish the prompt-visible role list, so the
+    // readiness signal belongs immediately after that publish.
+    publish_delegate_roles_context(writer, session_id.clone(), roles)?;
+    writer.write_frame(&Frame::Event(Event::ExtensionContextReady(
+        ExtensionContextReady { session_id },
+    )))?;
     writer.flush()?;
     Ok(())
 }
@@ -413,6 +475,49 @@ mod tests {
         assert!(properties.contains_key("role"));
         assert!(!properties.contains_key("read_only"));
         assert_eq!(spec.execution_mode, ToolExecutionMode::Shared);
+    }
+
+    /// Regression coverage for the 9c3088c "don't special case foreman"
+    /// change: subscribing to `session.started` makes the harness wait for this
+    /// extension during session init, so delegate must pair its context publish
+    /// with `extension.context_ready`.
+    #[test]
+    fn session_started_context_publish_is_followed_by_context_ready() {
+        let mut output = Vec::new();
+        {
+            let mut writer = FrameWriter::new(BufWriter::new(&mut output));
+            publish_delegate_roles_context_and_ready(
+                &mut writer,
+                "s1".into(),
+                &[serde_json::json!({
+                    "name": "deep",
+                    "description": "Deep research",
+                })],
+            )
+            .expect("publish context and ready");
+        }
+
+        let mut reader = FrameReader::new(BufReader::new(output.as_slice()));
+        let first = reader
+            .read_frame()
+            .expect("read context frame")
+            .expect("context frame present");
+        assert!(matches!(
+            first,
+            Frame::Event(Event::ExtSessionContextPublish(publish))
+                if publish.session_id.as_str() == "s1"
+                    && publish.key.as_str() == "delegate_roles"
+        ));
+
+        let second = reader
+            .read_frame()
+            .expect("read ready frame")
+            .expect("ready frame present");
+        assert!(matches!(
+            second,
+            Frame::Event(Event::ExtensionContextReady(ready))
+                if ready.session_id.as_str() == "s1"
+        ));
     }
 
     #[test]

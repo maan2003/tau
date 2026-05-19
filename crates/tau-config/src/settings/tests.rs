@@ -225,7 +225,6 @@ fn harness_roles_merge_with_built_ins() {
         foreman.description.as_deref(),
         Some("Role focused on splitting and delegation of tasks to other sub-agents")
     );
-    assert_eq!(foreman.orchestrator, Some(true));
     assert!(
         foreman
             .prompt_fragments
@@ -235,10 +234,10 @@ fn harness_roles_merge_with_built_ins() {
 }
 
 #[test]
-fn harness_foreman_partial_override_keeps_built_in_prompt_and_orchestrator_flag() {
-    // The orchestrator marker and prompt are stored in the built-in harness
+fn harness_foreman_partial_override_keeps_built_in_prompt_fragments() {
+    // Built-in foreman prompt fragments are stored in the built-in harness
     // config, so a user can partially override foreman settings without
-    // accidentally disabling its delegation prompt behavior.
+    // accidentally disabling delegation prompt behavior.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
@@ -253,7 +252,6 @@ fn harness_foreman_partial_override_keeps_built_in_prompt_and_orchestrator_flag(
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     let foreman = &s.roles["foreman"];
-    assert_eq!(foreman.orchestrator, Some(true));
     assert!(foreman.prompt_fragments.iter().any(|fragment| {
         fragment
             .text
@@ -290,7 +288,6 @@ fn harness_foreman_prompt_override_replaces_built_in_prompt() {
             .map(|fragment| fragment.text.as_str()),
         Some("Custom foreman prompt.")
     );
-    assert_eq!(foreman.orchestrator, Some(true));
 }
 
 #[test]
@@ -339,7 +336,6 @@ fn harness_built_in_roles_load_from_json_with_foreman_prompt() {
     assert!(s.roles["deep"].prompt_fragments.is_empty());
     assert!(s.roles["rush"].prompt_fragments.is_empty());
     let foreman = &s.roles["foreman"];
-    assert_eq!(foreman.orchestrator, Some(true));
     let prompt = foreman
         .prompt_fragments
         .first()
@@ -375,7 +371,6 @@ fn harness_default_roles_alias_still_loads() {
         &vec![tau_proto::ToolName::new("read")]
     );
     let foreman = &s.roles["foreman"];
-    assert_eq!(foreman.orchestrator, Some(true));
     assert!(
         foreman
             .prompt_fragments
