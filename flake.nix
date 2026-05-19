@@ -221,18 +221,61 @@
               doCheck = false;
             };
 
+            # Regenerate nix/cargo-crap-baseline.json from this derivation after
+            # intentional CRAP-score changes land on the mainline.
+            crapBaseline = craneLib.mkCargoDerivation {
+              pname = "${projectName}-cargo-crap-ccov-baseline";
+              cargoArtifacts = workspaceCcov;
+              buildPhaseCargoCommand = ''
+                test -s ${testsCcov}/lcov.info
+                mkdir -p $out
+                ${cargoCrap}/bin/cargo-crap \
+                  --workspace \
+                  --lcov ${testsCcov}/lcov.info \
+                  --format json \
+                  --output $out/cargo-crap-baseline.json
+              '';
+              doInstallCargoArtifacts = false;
+              nativeBuildInputs = [ cargoCrap ];
+              doCheck = false;
+            };
+
+            crapReport = craneLib.mkCargoDerivation {
+              pname = "${projectName}-cargo-crap-ccov-report";
+              cargoArtifacts = workspaceCcov;
+              buildPhaseCargoCommand = ''
+                test -s ${testsCcov}/lcov.info
+                mkdir -p $out
+                ${cargoCrap}/bin/cargo-crap \
+                  --workspace \
+                  --lcov ${testsCcov}/lcov.info \
+                  --top 100 \
+                  --min 50 \
+                  --format markdown \
+                  --output $out/cargo-crap.md
+                cp ${testsCcov}/lcov.info $out/lcov.info
+              '';
+              doInstallCargoArtifacts = false;
+              nativeBuildInputs = [ cargoCrap ];
+              doCheck = false;
+            };
+
             crap = craneLib.mkCargoDerivation {
               pname = "${projectName}-cargo-crap-ccov";
               cargoArtifacts = workspaceCcov;
               buildPhaseCargoCommand = ''
                 test -s ${testsCcov}/lcov.info
+                # Keep this gate focused on severe CRAP-score regressions. A
+                # no-min baseline run is noisy because cargo-crap v0.2.0 matches
+                # duplicate same-file function names without using line numbers.
                 ${cargoCrap}/bin/cargo-crap \
                   --workspace \
                   --lcov ${testsCcov}/lcov.info \
+                  --baseline ${./nix/cargo-crap-baseline.json} \
                   --threshold 1000 \
                   --min 1000 \
-                  --format markdown \
-                  --fail-above
+                  --format github \
+                  --fail-regression
                 mkdir -p $out
                 cp ${testsCcov}/lcov.info $out/lcov.info
               '';
@@ -268,6 +311,8 @@
             tests
             workspaceCcov
             testsCcov
+            crapBaseline
+            crapReport
             crap
             ;
         };
