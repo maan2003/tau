@@ -53,12 +53,10 @@ use crate::model::{
     selected_params_for_role, thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::prompt::{
-    SystemPromptRenderer, assemble_conversation_from, assemble_prompt_context_from, cbor_map_bool,
+    assemble_conversation_from, assemble_prompt_context_from, build_system_prompt, cbor_map_bool,
     render_agents_context_message,
 };
-use crate::settings::{
-    Config, load_harness_settings_or_warn, load_harness_settings_with_source_or_warn,
-};
+use crate::settings::{Config, load_harness_settings_or_warn};
 use crate::turn::{PromptSubmission, TurnState};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -486,11 +484,8 @@ pub(crate) struct Harness {
     /// Available agent roles.
     pub(crate) available_roles: std::collections::HashMap<String, tau_config::settings::AgentRole>,
     /// Named role-selectable tool enablement overlays loaded from
-    /// `harness.ncl`.
+    /// `harness.json5`.
     pub(crate) tools_profiles: tau_config::settings::ToolsProfiles,
-    /// Lazy Nickel renderer for system prompts from the composed harness
-    /// config.
-    pub(crate) system_prompt_renderer: SystemPromptRenderer,
     /// Persisted role overrides loaded from state and changed at runtime.
     pub(crate) role_overrides: std::collections::HashMap<String, tau_config::settings::AgentRole>,
     /// Currently selected role. The resolved model is derived from this role
@@ -918,11 +913,7 @@ impl Harness {
             });
         }
 
-        let loaded_harness_settings = load_harness_settings_with_source_or_warn(&dirs)?;
-        let system_prompt_renderer =
-            SystemPromptRenderer::new(loaded_harness_settings.nickel_source.clone());
-        let harness_settings = loaded_harness_settings.settings;
-        let harness_settings_error = None;
+        let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(&dirs);
         let available_models = Vec::new();
         let (available_roles, role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
         let selected_model =
@@ -992,7 +983,6 @@ impl Harness {
             pending_provider_prompts: HashMap::new(),
             available_roles,
             tools_profiles,
-            system_prompt_renderer,
             role_overrides,
             selected_role,
             selected_model,
@@ -1134,11 +1124,7 @@ impl Harness {
         }
 
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "loading harness settings");
-        let loaded_harness_settings = load_harness_settings_with_source_or_warn(&dirs)?;
-        let system_prompt_renderer =
-            SystemPromptRenderer::new(loaded_harness_settings.nickel_source.clone());
-        let harness_settings = loaded_harness_settings.settings;
-        let harness_settings_error = None;
+        let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(&dirs);
         let available_models = Vec::new();
         let (available_roles, role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
         let selected_model =
@@ -1209,7 +1195,6 @@ impl Harness {
             pending_provider_prompts: HashMap::new(),
             available_roles,
             tools_profiles,
-            system_prompt_renderer,
             role_overrides,
             selected_role,
             selected_model,
@@ -2089,10 +2074,10 @@ impl Harness {
             let cwd = std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "(unknown)".to_owned());
-            match self.render_system_prompt_for_role(&cwd, &request.role) {
-                Ok(prompt) => (Some(prompt), None),
-                Err(error) => (None, Some(error.to_string())),
-            }
+            (
+                Some(self.build_system_prompt_for_role(&cwd, &request.role)),
+                None,
+            )
         };
         let _ = self.bus.send_to(
             connection_id,
@@ -2134,7 +2119,7 @@ impl Harness {
                     .unwrap_or_else(|| "extension".to_owned());
                 self.emit_info_important(&format!(
                     "extension {name} rejected its config: {}\nthe value of \
-                     `extensions.{name}.config` in harness.ncl is being ignored",
+                     `extensions.{name}.config` in harness.json5 is being ignored",
                     err.message,
                 ));
             }
@@ -2563,7 +2548,8 @@ impl Harness {
     fn handle_ui_role_delete(&mut self, role_name: String) -> Result<bool, HarnessError> {
         let was_selected = self.selected_role == role_name;
         let previous_override = self.role_overrides.remove(&role_name);
-        let configured_role = load_harness_settings_or_warn(&self.dirs)?
+        let configured_role = load_harness_settings_or_warn(&self.dirs)
+            .0
             .roles
             .get(&role_name)
             .cloned();
@@ -3124,7 +3110,7 @@ impl Harness {
 
     fn check_config_exists(&mut self) {
         if let Some(dir) = tau_config::settings::config_dir() {
-            if !dir.join("harness.ncl").exists() {
+            if !dir.join("harness.json5").exists() {
                 self.emit_info_important(
                     "no config found; run `tau init` to create sample config files",
                 );
@@ -3132,16 +3118,19 @@ impl Harness {
         }
     }
 
-    /// Surface settings-file parse errors captured during startup. Nickel
-    /// parse errors now fail startup, so this is retained only for callers
-    /// that already have an optional startup diagnostic.
+    /// Surface settings-file parse errors captured during the initial
+    /// load as `Important` `HarnessInfo`. The loaders already fell
+    /// back to defaults and wrote a short stderr line, but stderr is
+    /// hidden once the TUI takes over the terminal — without this the
+    /// user's only symptom is "my extensions vanished" / "my roles changed"
+    /// with no clue why.
     ///
     /// Taking the error as a parameter (instead of re-parsing the file
     /// here) keeps startup to a single parse and avoids a race where the
     /// user fixes the file between the two reads.
     ///
-    /// `cli.ncl` is intentionally not handled here: the CLI fails
-    /// fast on a malformed `cli.ncl` before the harness ever
+    /// `cli.json5` is intentionally not handled here: the CLI fails
+    /// fast on a malformed `cli.json5` before the harness ever
     /// spawns, so there's no "silently fell back to defaults" case
     /// to surface.
     fn emit_startup_settings_errors(
@@ -3149,27 +3138,31 @@ impl Harness {
         harness_settings_error: Option<tau_config::settings::SettingsError>,
     ) {
         if let Some(error) = harness_settings_error {
-            self.emit_info_important(&format!("harness.ncl failed to parse:\n{error}"));
+            self.emit_info_important(&format!(
+                "harness.json5 failed to parse — ignored.\n{error}"
+            ));
         }
     }
 
-    /// Push the configured `config` value (from `harness.ncl`) to
+    /// Push the configured `config` value (from `harness.json5`) to
     /// the just-said-Hello extension. Sends point-to-point so it
     /// arrives even if the extension hasn't subscribed to the
     /// `lifecycle` category yet. In-process extensions don't carry
     /// a `supervised_config` so they get the empty default — they
     /// already accept configuration via constructor parameters.
     fn send_lifecycle_configure(&mut self, source_id: &str) {
-        let config = self
+        let config_json = self
             .extensions
             .get(source_id)
             .and_then(|e| e.supervised_config.as_ref())
             .map(|cfg| cfg.config.clone())
-            .unwrap_or_else(|| tau_proto::CborValue::Map(Vec::new()));
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
         let _ = self.bus.send_to(
             source_id,
             None,
-            Frame::Message(Message::Configure(tau_proto::Configure { config })),
+            Frame::Message(Message::Configure(tau_proto::Configure {
+                config: tau_proto::json_to_cbor(&config_json),
+            })),
         );
     }
 
@@ -3983,9 +3976,7 @@ impl Harness {
             }
             _ => None,
         };
-        let Ok(live_settings) = load_harness_settings_or_warn(&self.dirs) else {
-            return;
-        };
+        let (live_settings, _) = load_harness_settings_or_warn(&self.dirs);
         self.publish_event(
             None,
             Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -4570,18 +4561,7 @@ impl Harness {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "(unknown)".to_owned());
-        let system_prompt = match self.build_current_system_prompt(&cwd) {
-            Ok(system_prompt) => system_prompt,
-            Err(error) => {
-                tracing::warn!(
-                    target: "harness",
-                    session_id = %session_id,
-                    error = %error,
-                    "skipping prompt prewarm: system prompt render failed",
-                );
-                return;
-            }
-        };
+        let system_prompt = self.build_current_system_prompt(&cwd);
         let event = Event::SessionPromptPrewarmRequested(SessionPromptPrewarmRequested {
             session_id: session_id.clone(),
             system_prompt,
@@ -4756,9 +4736,7 @@ impl Harness {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "(unknown)".to_owned());
-        let system_prompt = self
-            .render_system_prompt_for_role(&cwd, &role_name)
-            .expect("failed to render system prompt from harness Nickel config");
+        let system_prompt = self.build_system_prompt_for_role(&cwd, &role_name);
         // Fingerprint the non-input fields of the impending request.
         // Used to (a) drop the chain anchor when any of those fields
         // drifted since the anchor was minted (matches Pi's
@@ -4937,28 +4915,28 @@ impl Harness {
         )
     }
 
-    fn build_current_system_prompt(
-        &self,
-        cwd: &str,
-    ) -> Result<String, tau_config::settings::SettingsError> {
-        self.render_system_prompt_for_role(cwd, &self.selected_role)
+    fn build_current_system_prompt(&self, cwd: &str) -> String {
+        self.build_system_prompt_for_role(cwd, &self.selected_role)
     }
 
-    fn render_system_prompt_for_role(
-        &self,
-        cwd: &str,
-        role_name: &str,
-    ) -> Result<String, tau_config::settings::SettingsError> {
+    fn build_system_prompt_for_role(&self, cwd: &str, role_name: &str) -> String {
+        let current_role = self.available_roles.get(role_name);
+        let role_prompt = current_role.and_then(|role| role.prompt.as_ref());
+        let available_sub_task_roles_prompt = current_role
+            .and_then(|role| role.orchestrator)
+            .unwrap_or(false)
+            .then(|| self.available_sub_task_roles_prompt());
         let tool_prompt_hook = self.gather_tool_prompt_hook_for_role(role_name);
-        self.system_prompt_renderer.render(
+        build_system_prompt(
             &self.discovered_skills,
             cwd,
-            role_name,
+            role_prompt,
+            current_role.and_then(|role| role.extra_prompt.as_ref()),
+            available_sub_task_roles_prompt.as_ref(),
             &tool_prompt_hook,
         )
     }
 
-    #[cfg(test)]
     fn available_sub_task_roles_prompt(&self) -> tau_proto::PromptContent {
         let mut lines = vec!["## Available sub-task roles".to_owned(), String::new()];
         for name in self.available_delegate_role_names() {

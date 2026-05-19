@@ -18,7 +18,6 @@ pub enum HarnessError {
     SocketTransport(SocketTransportError),
     Route(RouteError),
     ToolRoute(ToolRouteError),
-    Settings(tau_config::settings::SettingsError),
     StartupTimeout,
     ResponseTimeout,
     ThreadJoin(String),
@@ -35,7 +34,6 @@ impl fmt::Display for HarnessError {
             Self::SocketTransport(source) => write!(f, "socket transport error: {source}"),
             Self::Route(source) => write!(f, "routing error: {source}"),
             Self::ToolRoute(source) => write!(f, "tool routing error: {source}"),
-            Self::Settings(source) => write!(f, "settings error: {source}"),
             Self::StartupTimeout => f.write_str("timed out waiting for extensions to start"),
             Self::ResponseTimeout => f.write_str("timed out waiting for agent response"),
             Self::ThreadJoin(name) => write!(f, "failed to join {name} thread cleanly"),
@@ -54,7 +52,6 @@ impl std::error::Error for HarnessError {
             Self::SocketTransport(source) => Some(source),
             Self::Route(source) => Some(source),
             Self::ToolRoute(source) => Some(source),
-            Self::Settings(source) => Some(source),
             _ => None,
         }
     }
@@ -88,11 +85,5 @@ impl From<RouteError> for HarnessError {
 impl From<ToolRouteError> for HarnessError {
     fn from(source: ToolRouteError) -> Self {
         Self::ToolRoute(source)
-    }
-}
-
-impl From<tau_config::settings::SettingsError> for HarnessError {
-    fn from(source: tau_config::settings::SettingsError) -> Self {
-        Self::Settings(source)
     }
 }

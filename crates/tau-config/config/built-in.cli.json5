@@ -1,0 +1,9 @@
+// Built-in CliSettings scalar defaults. Bindings live in
+// `built-in.cli-bindings.json5` and are merged in by `CliSettings::default()`.
+{
+    greeting: true,
+    show_logo: true,
+    bar_cursor: true,
+    prompt_symbol: "◯",
+    submitted_prompt_symbol: "⬤",
+}

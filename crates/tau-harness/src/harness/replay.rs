@@ -111,10 +111,7 @@ impl Harness {
         if selector_matches_event(selectors, &roles_event) {
             let _ = self.bus.send_to(client_id, None, Frame::Event(roles_event));
         }
-        let Ok(harness_settings) = crate::settings::load_harness_settings_or_warn(&self.dirs)
-        else {
-            return;
-        };
+        let (harness_settings, _) = crate::settings::load_harness_settings_or_warn(&self.dirs);
         let selected_event = Event::HarnessRoleSelected(HarnessRoleSelected {
             baseline_params: self.selected_model.as_ref().map(|model| {
                 baseline_params_for_selection(

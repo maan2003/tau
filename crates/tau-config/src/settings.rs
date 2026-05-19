@@ -1,10 +1,10 @@
 //! User settings loaded from `~/.config/tau/` with `.d/` directory
 //! overrides. Primary config files:
 //!
-//! - `cli.ncl` — CLI display preferences
-//! - `harness.ncl` — harness settings, extensions, and roles
+//! - `cli.json5` — CLI display preferences
+//! - `harness.json5` — harness settings, extensions, and roles
 //!
-//! Uses Nickel for human-authored layered configuration.
+//! Uses the `config` crate for layered JSON5 loading.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -12,37 +12,27 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{CborValue, ModelId, ToolName};
+use tau_proto::{ModelId, PromptContent, ToolName};
 
 // ---------------------------------------------------------------------------
 // Built-in configs
 //
-// Tau ships its baseline `cli.ncl` and `harness.ncl` as ordinary source files
-// under `crates/tau-config/config/`, embedded via `include_str!`. The harness
-// baseline is wrapped with a sibling contracts file at load time, keeping the
-// main defaults close to user-authored Nickel while retaining schema/default
-// metadata. Built-ins are layered underneath the user's own files at load time
-// (see `load_nickel_layered_with_builtin`) so user partial overrides keep
-// working without the public `CliSettings` / `HarnessSettings` types having to
-// carry a `#[serde(default)]` and a synthesized `Default` impl that secretly
-// parses a file. CLI bindings are defaulted per chord, not per field inside a
-// binding record.
+// Tau ships its baseline `cli.json5`, `cli-bindings.json5` and
+// `harness.json5` as ordinary source files under
+// `crates/tau-config/config/`, embedded via `include_str!`. They are
+// layered underneath the user's own files at load time (see
+// `load_json5_layered_with_builtin`) so user partial overrides keep
+// working without the public `CliSettings` / `HarnessSettings` types
+// having to carry a `#[serde(default)]` and a synthesized `Default`
+// impl that secretly parses a file.
 // ---------------------------------------------------------------------------
 
-const BUILT_IN_CLI_NCL: &str = include_str!("../config/built-in.cli.ncl");
-const BUILT_IN_HARNESS_CONTRACTS_NCL: &str =
-    include_str!("../config/built-in.harness.contracts.ncl");
-const BUILT_IN_HARNESS_NCL: &str = include_str!("../config/built-in.harness.ncl");
-
-fn built_in_harness_ncl() -> String {
-    format!(
-        "let harnessContracts = ({}) in ({})",
-        BUILT_IN_HARNESS_CONTRACTS_NCL, BUILT_IN_HARNESS_NCL
-    )
-}
+const BUILT_IN_CLI_JSON5: &str = include_str!("../config/built-in.cli.json5");
+const BUILT_IN_CLI_BINDINGS_JSON5: &str = include_str!("../config/built-in.cli-bindings.json5");
+const BUILT_IN_HARNESS_JSON5: &str = include_str!("../config/built-in.harness.json5");
 
 fn parse_built_in<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> T {
-    eval_nickel_to(name, text).unwrap_or_else(|err| {
+    json5::from_str(text).unwrap_or_else(|err| {
         panic!("tau ships with malformed {name}: {err}\nthis is a bug; please report it")
     })
 }
@@ -51,10 +41,10 @@ fn parse_built_in<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> T {
 // CLI settings
 // ---------------------------------------------------------------------------
 
-/// CLI display settings loaded from `cli.ncl`.
+/// CLI display settings loaded from `cli.json5`.
 ///
 /// Has no `Default` impl on purpose — the baseline lives in
-/// `config/built-in.cli.ncl` and is layered in by the loader. Use
+/// `config/built-in.cli.json5` and is layered in by the loader. Use
 /// [`CliSettings::built_in`] when you need a fresh, populated value
 /// in a test or fallback.
 #[derive(Clone, Debug, Deserialize)]
@@ -70,18 +60,20 @@ pub struct CliSettings {
     pub prompt_symbol: String,
     /// Symbol shown before submitted prompts in the transcript.
     pub submitted_prompt_symbol: String,
-    /// Key bindings for prompt-local shell actions. Defaults to an empty map
-    /// at the serde layer; the loader merges `built-in.cli.ncl` underneath the
-    /// user's bindings.
+    /// Key bindings for prompt-local shell actions. Defaults to an
+    /// empty map at the serde layer; the loader merges
+    /// `built-in.cli-bindings.json5` underneath the user's bindings.
     #[serde(default)]
     pub bind: HashMap<String, CliBindingAction>,
 }
 
 impl CliSettings {
     /// The fully-populated baseline that ships with tau, parsed from
-    /// the embedded `built-in.cli.ncl`.
+    /// the embedded `built-in.cli.json5` plus `built-in.cli-bindings.json5`.
     pub fn built_in() -> Self {
-        parse_built_in("built-in.cli.ncl", BUILT_IN_CLI_NCL)
+        let mut s: Self = parse_built_in("built-in.cli.json5", BUILT_IN_CLI_JSON5);
+        s.bind = default_cli_bindings();
+        s
     }
 }
 
@@ -149,6 +141,14 @@ impl Default for CliBindingAction {
             trim: false,
         }
     }
+}
+
+/// Parse the embedded `built-in.cli-bindings.json5`. Called from
+/// [`CliSettings::built_in`] and from [`load_cli_settings_in`] (the
+/// latter overlays user bindings on top of this baseline so users
+/// don't lose unmentioned keys when they customize a single chord).
+pub(crate) fn default_cli_bindings() -> HashMap<String, CliBindingAction> {
+    parse_built_in("built-in.cli-bindings.json5", BUILT_IN_CLI_BINDINGS_JSON5)
 }
 
 // ---------------------------------------------------------------------------
@@ -277,13 +277,39 @@ impl CliState {
 
 /// One named tools-profile: tool name -> enabled/disabled override.
 pub type ToolsProfile = HashMap<ToolName, bool>;
-/// All named tools-profiles loaded from `harness.ncl`.
+/// All named tools-profiles loaded from `harness.json5`.
 pub type ToolsProfiles = HashMap<String, ToolsProfile>;
 
-/// Harness/agent settings loaded from `harness.ncl`.
+fn default_tools_profiles() -> ToolsProfiles {
+    HashMap::from([(
+        "gpt".to_owned(),
+        HashMap::from([
+            (ToolName::new("apply_patch"), true),
+            (ToolName::new("edit"), false),
+            (ToolName::new("find"), false),
+            (ToolName::new("gpt_shell"), true),
+            (ToolName::new("grep"), false),
+            (ToolName::new("ls"), false),
+            (ToolName::new("read"), false),
+            (ToolName::new("shell"), false),
+            (ToolName::new("write"), false),
+        ]),
+    )])
+}
+
+fn merge_default_tools_profiles(profiles: &mut ToolsProfiles) {
+    for (name, built_in_profile) in default_tools_profiles() {
+        let profile = profiles.entry(name).or_default();
+        for (tool_name, enabled) in built_in_profile {
+            profile.entry(tool_name).or_insert(enabled);
+        }
+    }
+}
+
+/// Harness/agent settings loaded from `harness.json5`.
 ///
 /// Has no `Default` impl on purpose — the baseline lives in
-/// `config/built-in.harness.ncl` and is layered in by the loader.
+/// `config/built-in.harness.json5` and is layered in by the loader.
 /// Use [`HarnessSettings::built_in`] when you need a fresh,
 /// populated value in a test or fallback.
 #[derive(Clone, Debug)]
@@ -293,20 +319,20 @@ pub struct HarnessSettings {
     pub session_retention_days: u64,
 
     /// Extension table, keyed by name. Built-in entries (`provider-openai`,
-    /// `core-shell`, etc.) live in `config/built-in.harness.ncl`;
-    /// anything the user writes here overrides those per-field, or adds
-    /// a new extension.
+    /// `core-shell`) come pre-baked at the harness level; anything the
+    /// user writes here overrides those per-field, or adds a new
+    /// extension.
     ///
-    /// Example `harness.ncl`:
-    /// ```nickel
+    /// Example `harness.json5`:
+    /// ```json5
     /// {
-    ///   extensions = {
+    ///   extensions: {
     ///     // disable the built-in shell extension
-    ///     "core-shell" = { enable = false },
+    ///     "core-shell": { enable: false },
     ///     // run the OpenAI provider through ssh on a remote box
-    ///     "provider-openai" = { prefix = ["ssh", "user@host"] },
+    ///     "provider-openai": { prefix: ["ssh", "user@host"] },
     ///     // a third-party extension
-    ///     mything = { command = ["/usr/local/bin/my-tau-ext"] },
+    ///     mything: { command: ["/usr/local/bin/my-tau-ext"] },
     ///   },
     /// }
     /// ```
@@ -321,19 +347,6 @@ pub struct HarnessSettings {
     /// role may opt into one profile via `toolsProfile`; profile
     /// entries override an extension tool's `enabled_by_default` hint.
     pub tools_profiles: ToolsProfiles,
-}
-
-/// Harness settings plus the composed Nickel source they were exported from.
-///
-/// The harness keeps this source around so non-exported Nickel fields, such as
-/// lazy system-prompt templates, can be evaluated later with runtime context.
-#[derive(Clone, Debug)]
-pub struct LoadedHarnessSettings {
-    /// Exported harness settings consumed by Rust.
-    pub settings: HarnessSettings,
-    /// The exact built-in/user/drop-in Nickel layer expression used to export
-    /// [`Self::settings`].
-    pub nickel_source: String,
 }
 
 #[derive(Deserialize)]
@@ -372,9 +385,11 @@ impl<'de> Deserialize<'de> for HarnessSettings {
 
 impl HarnessSettings {
     /// The fully-populated baseline that ships with tau, parsed from
-    /// the embedded `built-in.harness.ncl`.
+    /// the embedded `built-in.harness.json5`.
     pub fn built_in() -> Self {
-        parse_built_in("built-in.harness.ncl", &built_in_harness_ncl())
+        let mut s: Self = parse_built_in("built-in.harness.json5", BUILT_IN_HARNESS_JSON5);
+        merge_default_tools_profiles(&mut s.tools_profiles);
+        s
     }
 
     #[must_use]
@@ -391,9 +406,10 @@ impl HarnessSettings {
 /// One entry in the harness's `extensions` map.
 ///
 /// All fields are optional on the wire so users can override just the
-/// fields they care about for built-in extensions. Nickel layering merges
-/// user config with built-in defaults before this is deserialized. `None`
-/// on any field means neither built-in nor user config set that field.
+/// fields they care about for built-in extensions; the harness merges
+/// these with built-in defaults at startup. `None` on any field means
+/// "the user did not say anything" — distinct from an empty value the
+/// user set on purpose.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExtensionEntry {
@@ -404,40 +420,40 @@ pub struct ExtensionEntry {
     pub prefix: Option<Vec<String>>,
 
     /// argv of the extension itself. `command[0]` is the executable;
-    /// the rest are arguments. Entries can omit `command` and use a
-    /// non-empty `suffix` to piggyback on the running tau binary.
+    /// the rest are arguments. For built-in extensions this defaults
+    /// to `[<current-exe>]`; for new entries this must be set
+    /// explicitly. Tau-piggybacking entries can omit `command` and
+    /// use `suffix` to pick the subcommand on the running tau binary.
     pub command: Option<Vec<String>>,
 
-    /// argv suffix appended after the current tau executable when `command` is
-    /// absent. Built-in extensions use this to select in-binary extension
-    /// subcommands without hard-coding an install path in Nickel. If `command`
-    /// is present, the resolver treats that argv as complete and ignores
-    /// `suffix`; include any extra arguments directly in `command`.
+    /// argv suffix appended after `command`. Symmetric to `prefix`.
+    /// Built-in extensions use this to spell their subcommand (e.g.
+    /// `["ext", "ext-provider-openai"]`) so the `command` slot stays
+    /// as the tau binary path.
     pub suffix: Option<Vec<String>>,
 
-    /// Whether to run this extension. Defaults to the built-in's `enable`
-    /// when present, otherwise the harness treats absence as `true`. Set to
-    /// `false` to keep the entry in config but skip spawning.
+    /// Whether to run this extension. Defaults to the built-in's
+    /// `enable` (or `true` for user-added entries). Set to `false`
+    /// to keep the entry in config but skip spawning.
     pub enable: Option<bool>,
 
     /// Role tag. Built-in providers use `role: "provider"`; entries
     /// without that role are treated as tool extensions.
     pub role: Option<String>,
 
-    /// Free-form CBOR-compatible configuration object handed to the extension
-    /// at startup via `LifecycleConfigure`. The harness does not
+    /// Free-form configuration object handed to the extension at
+    /// startup via `LifecycleConfigure`. The harness does not
     /// interpret it — the extension defines and validates its own
-    /// schema. Absent after Nickel layering means the harness uses an empty
-    /// config object.
-    #[serde(deserialize_with = "deserialize_extension_config_opt")]
-    pub config: Option<CborValue>,
+    /// schema. Absent on the wire means "merge nothing in", so the
+    /// built-in's default config object is used unchanged.
+    pub config: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
 // Harness roles
 // ---------------------------------------------------------------------------
 
-/// Partial harness role settings loaded from `harness.ncl` and persisted
+/// Partial harness role settings loaded from `harness.json5` and persisted
 /// to state. `None` means "use the selected model's fallback" for every field.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
@@ -449,21 +465,27 @@ pub struct AgentRole {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
     /// Reasoning effort preferred by this role.
-    #[serde(deserialize_with = "deserialize_opt_from_json_string")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<tau_proto::Effort>,
     /// Output verbosity preferred by this role.
-    #[serde(deserialize_with = "deserialize_opt_from_json_string")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verbosity: Option<tau_proto::Verbosity>,
     /// Thinking-summary mode preferred by this role.
-    #[serde(deserialize_with = "deserialize_opt_from_json_string")]
     #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingSummary")]
     pub thinking_summary: Option<tau_proto::ThinkingSummary>,
     /// Provider service tier preferred by this role.
-    #[serde(deserialize_with = "deserialize_opt_from_json_string")]
     #[serde(skip_serializing_if = "Option::is_none", rename = "serviceTier")]
     pub service_tier: Option<tau_proto::ServiceTier>,
+    /// User-provided replacement for the role's built-in prompt, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<PromptContent>,
+    /// Whether this role focuses on orchestrating and delegating work to
+    /// sub-agents. Defaults semantically to false when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<bool>,
+    /// Additional role-specific prompt text appended after the role prompt.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "extraPrompt")]
+    pub extra_prompt: Option<PromptContent>,
     /// Name of the harness tools profile applied when this role is active.
     #[serde(skip_serializing_if = "Option::is_none", rename = "toolsProfile")]
     pub tools_profile: Option<String>,
@@ -489,6 +511,15 @@ impl AgentRole {
         if let Some(service_tier) = override_role.service_tier {
             self.service_tier = Some(service_tier);
         }
+        if let Some(prompt) = &override_role.prompt {
+            self.prompt = Some(prompt.clone());
+        }
+        if let Some(orchestrator) = override_role.orchestrator {
+            self.orchestrator = Some(orchestrator);
+        }
+        if let Some(extra_prompt) = &override_role.extra_prompt {
+            self.extra_prompt = Some(extra_prompt.clone());
+        }
         if let Some(tools_profile) = &override_role.tools_profile {
             self.tools_profile = Some(tools_profile.clone());
         }
@@ -502,24 +533,13 @@ impl AgentRole {
 /// Errors from settings loading.
 #[derive(Debug)]
 pub enum SettingsError {
-    /// Reading a configuration file failed.
-    Io {
-        /// Path that failed to read.
-        path: PathBuf,
-        /// Underlying I/O error.
-        source: std::io::Error,
-    },
-    /// Nickel parsing/evaluation failed.
-    Nickel(String),
-    /// Exporting Nickel data into the Rust settings schema failed.
-    Deserialize(String),
+    Config(config::ConfigError),
 }
 
 impl fmt::Display for SettingsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
-            Self::Nickel(message) | Self::Deserialize(message) => f.write_str(message),
+            Self::Config(source) => write!(f, "settings error: {source}"),
         }
     }
 }
@@ -527,9 +547,14 @@ impl fmt::Display for SettingsError {
 impl std::error::Error for SettingsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Nickel(_) | Self::Deserialize(_) => None,
+            Self::Config(source) => Some(source),
         }
+    }
+}
+
+impl From<config::ConfigError> for SettingsError {
+    fn from(source: config::ConfigError) -> Self {
+        Self::Config(source)
     }
 }
 
@@ -569,7 +594,7 @@ pub fn sessions_dir() -> Option<PathBuf> {
 /// installations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TauDirs {
-    /// Where to look for `cli.ncl`, `harness.ncl`, etc.
+    /// Where to look for `cli.json5`, `harness.json5`, etc.
     pub config_dir: Option<PathBuf>,
     /// Where to read/write runtime state like `harness.json5`.
     pub state_dir: Option<PathBuf>,
@@ -584,85 +609,64 @@ impl Default for TauDirs {
     }
 }
 
-/// Loads CLI settings from `cli.ncl` with `cli.d/*.ncl` overrides.
+/// Loads CLI settings from `cli.json5` with `cli.d/*.json5` overrides.
 pub fn load_cli_settings() -> Result<CliSettings, SettingsError> {
     load_cli_settings_in(&TauDirs::default())
 }
 
 /// Like [`load_cli_settings`] but reads from an explicit directory layout.
 ///
-/// The embedded `built-in.cli.ncl` is layered underneath the user's
-/// own `cli.ncl` (and any `cli.d/*.ncl` drop-ins), so the user
+/// The embedded `built-in.cli.json5` is layered underneath the user's
+/// own `cli.json5` (and any `cli.d/*.json5` drop-ins), so the user
 /// can write a partial file and unmentioned fields fall back to the
 /// shipped defaults. The `bind` map is merged per-key on top so a
-/// user customizing one chord doesn't lose the others. Binding records
-/// themselves are replaced as a unit; built-in binding fields are not
-/// merged into user-provided binding records.
+/// user customizing one chord doesn't lose the others.
 pub fn load_cli_settings_in(dirs: &TauDirs) -> Result<CliSettings, SettingsError> {
-    load_nickel_layered_with_builtin(
-        BUILT_IN_CLI_NCL.to_owned(),
-        dirs.config_dir.as_deref(),
-        "cli",
-    )
+    let mut settings: CliSettings =
+        load_json5_layered_with_builtin(BUILT_IN_CLI_JSON5, dirs.config_dir.as_deref(), "cli")?;
+    let mut bindings = default_cli_bindings();
+    bindings.extend(settings.bind);
+    settings.bind = bindings;
+    Ok(settings)
 }
 
-/// Loads harness settings from `harness.ncl` with `harness.d/*.ncl`
+/// Loads harness settings from `harness.json5` with `harness.d/*.json5`
 /// overrides.
 pub fn load_harness_settings() -> Result<HarnessSettings, SettingsError> {
     load_harness_settings_in(&TauDirs::default())
 }
 
-/// Loads harness settings and retains the composed Nickel program used to
-/// produce them.
-pub fn load_harness_settings_with_source() -> Result<LoadedHarnessSettings, SettingsError> {
-    load_harness_settings_with_source_in(&TauDirs::default())
-}
-
 /// Like [`load_harness_settings`] but reads from an explicit directory layout.
 pub fn load_harness_settings_in(dirs: &TauDirs) -> Result<HarnessSettings, SettingsError> {
-    load_harness_settings_with_source_in(dirs).map(|loaded| loaded.settings)
-}
-
-/// Like [`load_harness_settings_with_source`] but reads from an explicit
-/// directory layout.
-pub fn load_harness_settings_with_source_in(
-    dirs: &TauDirs,
-) -> Result<LoadedHarnessSettings, SettingsError> {
-    let nickel_source = composed_nickel_source_with_builtin(
-        built_in_harness_ncl(),
+    let mut settings: HarnessSettings = load_json5_layered_with_builtin(
+        BUILT_IN_HARNESS_JSON5,
         dirs.config_dir.as_deref(),
         "harness",
     )?;
-    let settings = eval_nickel_to("composed harness.ncl", &nickel_source)?;
-    Ok(LoadedHarnessSettings {
-        settings,
-        nickel_source,
-    })
+    merge_default_tools_profiles(&mut settings.tools_profiles);
+    Ok(settings)
 }
 
-/// Stacks an embedded built-in Nickel string underneath the user's files.
+/// Stacks an embedded built-in JSON5 string underneath the user's files.
 /// `T` therefore doesn't need a `Default` impl — the built-in layer always
 /// supplies every required field.
-fn load_nickel_layered_with_builtin<T: for<'de> Deserialize<'de>>(
-    built_in_text: String,
+fn load_json5_layered_with_builtin<T: for<'de> Deserialize<'de>>(
+    built_in_text: &'static str,
     dir: Option<&Path>,
     name: &str,
 ) -> Result<T, SettingsError> {
-    let source = composed_nickel_source_with_builtin(built_in_text, dir, name)?;
-    eval_nickel_to(&format!("composed {name}.ncl"), &source)
-}
-
-fn composed_nickel_source_with_builtin(
-    built_in_text: String,
-    dir: Option<&Path>,
-    name: &str,
-) -> Result<String, SettingsError> {
-    let mut layers = vec![format!("({built_in_text})")];
+    let mut builder = config::Config::builder().add_source(
+        config::File::from_str(built_in_text, config::FileFormat::Json5).required(true),
+    );
 
     if let Some(dir) = dir {
-        let base_path = dir.join(format!("{name}.ncl"));
+        let base_path = dir.join(format!("{name}.json5"));
         if base_path.exists() {
-            layers.push(import_expr(&base_path));
+            builder = builder.add_source(
+                config::File::from(base_path)
+                    .format(config::FileFormat::Json5)
+                    .required(true),
+            );
         }
 
         let drop_dir = dir.join(format!("{name}.d"));
@@ -671,68 +675,23 @@ fn composed_nickel_source_with_builtin(
                 .into_iter()
                 .flatten()
                 .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|ext| ext == "ncl"))
+                .filter(|p| p.extension().is_some_and(|ext| ext == "json5"))
                 .collect();
             paths.sort();
             for path in paths {
-                layers.push(import_expr(&path));
+                builder = builder.add_source(
+                    config::File::from(path)
+                        .format(config::FileFormat::Json5)
+                        .required(true),
+                );
             }
         }
     }
 
-    Ok(layers.join(" & "))
-}
-
-fn eval_nickel_to<T: for<'de> Deserialize<'de>>(
-    name: &str,
-    text: &str,
-) -> Result<T, SettingsError> {
-    let mut context = nickel_lang::Context::new().with_source_name(name.to_owned());
-    let expr = context
-        .eval_deep_for_export(text)
-        .map_err(format_nickel_error)?;
-    expr.to_serde()
-        .map_err(|err| SettingsError::Deserialize(err.to_string()))
-}
-
-fn import_expr(path: &Path) -> String {
-    format!("(import {:?})", path.display().to_string())
-}
-
-fn deserialize_opt_from_json_string<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: for<'a> Deserialize<'a>,
-{
-    let Some(value) = Option::<String>::deserialize(deserializer)? else {
-        return Ok(None);
-    };
-    serde_json::from_value(serde_json::Value::String(value))
-        .map(Some)
-        .map_err(serde::de::Error::custom)
-}
-
-fn deserialize_extension_config_opt<'de, D>(deserializer: D) -> Result<Option<CborValue>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let mut value = Option::<CborValue>::deserialize(deserializer)?;
-    if let Some(value) = value.as_mut() {
-        tau_proto::normalize_integral_cbor_floats(value);
-    }
-    Ok(value)
-}
-
-fn format_nickel_error(error: nickel_lang::Error) -> SettingsError {
-    let mut out = Vec::new();
-    if error
-        .format(&mut out, nickel_lang::ErrorFormat::Text)
-        .is_ok()
-    {
-        SettingsError::Nickel(String::from_utf8_lossy(&out).into_owned())
-    } else {
-        SettingsError::Nickel(format!("{error:?}"))
-    }
+    builder
+        .build()?
+        .try_deserialize()
+        .map_err(SettingsError::from)
 }
 
 #[cfg(test)]

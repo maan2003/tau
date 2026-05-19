@@ -27,6 +27,9 @@ pub(crate) fn load_roles(
         let mut effective_role = role.clone();
         if let Some(configured_role) = roles.get(name) {
             effective_role.description = configured_role.description.clone();
+            effective_role.prompt = configured_role.prompt.clone();
+            effective_role.orchestrator = configured_role.orchestrator;
+            effective_role.extra_prompt = configured_role.extra_prompt.clone();
         }
         roles.insert(name.clone(), effective_role);
     }
@@ -371,6 +374,9 @@ fn load_last_selected_role(dirs: &tau_config::settings::TauDirs) -> Option<Strin
 
 fn role_without_config_metadata(mut role: AgentRole) -> AgentRole {
     role.description = None;
+    role.prompt = None;
+    role.orchestrator = None;
+    role.extra_prompt = None;
     role
 }
 

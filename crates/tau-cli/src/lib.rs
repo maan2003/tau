@@ -224,8 +224,8 @@ pub(crate) fn mint_short_id(prefix: &str) -> String {
 // `tau init`
 // ---------------------------------------------------------------------------
 
-const SAMPLE_CLI: &str = include_str!("../../../config/cli.ncl");
-const SAMPLE_HARNESS: &str = include_str!("../../../config/harness.ncl");
+const SAMPLE_CLI: &str = include_str!("../../../config/cli.json5");
+const SAMPLE_HARNESS: &str = include_str!("../../../config/harness.json5");
 
 fn run_init(force: bool) -> Result<(), CliError> {
     let Some(dir) = tau_config::settings::config_dir() else {
@@ -236,7 +236,7 @@ fn run_init(force: bool) -> Result<(), CliError> {
     };
     std::fs::create_dir_all(&dir)?;
 
-    let files = [("cli.ncl", SAMPLE_CLI), ("harness.ncl", SAMPLE_HARNESS)];
+    let files = [("cli.json5", SAMPLE_CLI), ("harness.json5", SAMPLE_HARNESS)];
 
     for (name, content) in &files {
         let path = dir.join(name);

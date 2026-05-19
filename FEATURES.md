@@ -17,7 +17,7 @@ anything else that speaks the protocol, or write a new one in any language.
 
 The default `tau` binary bundles all first-party components and dispatches via
 hidden `tau ext <name>` subcommands; you can replace any of them by editing
-`harness.ncl`.
+`harness.json5`.
 
 ### Persisted event log
 
@@ -54,15 +54,13 @@ See [`docs/interceptors.md`](docs/interceptors.md) and
 Because extensions are stdio child processes, running one on another machine
 is a matter of prefixing its argv with an `ssh` invocation:
 
-```nickel
-# harness.ncl
-{
-  extensions = {
-    "core-shell" = {
-      prefix = ["ssh", "user@host"],
-    },
+```json5
+// harness.json5
+extensions: {
+  "core-shell": {
+    prefix: ["ssh", "user@host"],
   },
-}
+},
 ```
 
 The harness prepends `prefix` to the resolved command. Anything that gives you
@@ -90,30 +88,26 @@ backends thread through to the provider request:
   toggles Codex's `fast` tier. Backends serialize Codex's exact
   OpenAI wire values: `priority` for Fast and `flex` for Flex.
 
-Defaults are normally selected through agent roles in `harness.ncl`. User files
-can stay plain Nickel records/values; Tau wraps the built-in harness defaults
-with contract/default metadata that merges underneath these overrides.
+Defaults are normally selected through agent roles in `harness.json5`:
 
-```nickel
-{
-  roles = {
-    smart = {
-      description = "Balanced coding assistant",
-      model = "chatgpt/gpt-5.5",
-      effort = "medium",
-      toolsProfile = "full",
-    },
-    deep = { effort = "xhigh", thinkingSummary = "detailed" },
-    rush = { effort = "low", serviceTier = "fast" },
-    foreman = {},
+```json5
+roles: {
+  smart: {
+    description: "Balanced coding assistant",
+    model: "chatgpt/gpt-5.5",
+    effort: "medium",
+    toolsProfile: "full",
   },
-}
+  deep: { effort: "xhigh", thinkingSummary: "detailed" },
+  rush: { effort: "low", serviceTier: "fast" },
+  foreman: { orchestrator: true },
+},
 ```
 
 Roles can include a `description` shown after the model/knob summary in
-`/role ...` completions. Roles can also select a named `toolsProfile`. The
-built-in `foreman` role appends an available sub-task role list to its prompt.
-Profiles live in `harness.ncl` under `toolsProfiles` and map tool names to booleans,
+`/role ...` completions. Roles can also select a named `toolsProfile`, and
+orchestrator roles append an available sub-task role list to their prompt.
+Profiles live in `harness.json5` under `toolsProfiles` and map tool names to booleans,
 overriding each tool's extension-declared `enabled_by_default` hint. Tau ships
 a built-in `gpt` profile that enables `apply_patch` while disabling direct
 file/search tools (`edit`, `write`, `read`, `grep`, `find`, and `ls`).
@@ -156,18 +150,16 @@ with `tau policy-show`.
 
 Every built-in extension is a regular extension under
 `crates/tau-ext-*/`. Each is configured under `extensions.<name>` in
-`harness.ncl` and can be disabled with `enable = false`, swapped via
-`command` / `prefix`, or given free-form `config` payload that arrives at
+`harness.json5` and can be disabled with `enable: false`, swapped via
+`command:` / `prefix:`, or given free-form `config:` payload that arrives at
 startup as a `LifecycleConfigure` message.
 
-```nickel
-{
-  extensions = {
-    "core-shell" = { enable = false },                       // disable
-    "provider-openai" = { prefix = ["ssh", "user@host"] },   // run remotely
-    "std-notifications" = { config = { idle_seconds = 30 } }, // reconfigure
-  },
-}
+```json5
+extensions: {
+  "core-shell":         { enable: false },                       // disable
+  "provider-openai":    { prefix: ["ssh", "user@host"] },        // run remotely
+  "std-notifications": { config: { idle_seconds: 30 } },         // reconfigure
+},
 ```
 
 ### `core-shell` — shell and filesystem tools
@@ -176,22 +168,22 @@ Registers the everyday tools the agent uses to inspect and edit a project:
 `shell`, `read`, `write`, `edit`, `grep`, `find`, `ls`, plus an `echo` tool
 for testing. The shell command and any wrapper prefix are configurable:
 
-```nickel
-"core-shell" = {
-  config = {
-    shell = {
-      command = "bash",
-      prefix = ["nix", "develop", "-c"],
+```json5
+"core-shell": {
+  config: {
+    shell: {
+      command: "bash",
+      prefix: ["nix", "develop", "-c"],
       // User-initiated `!`/`!!` commands are killed after this many
       // seconds. Tool-invoked `shell` calls use their own per-call
       // `timeout` argument (default 120s). Default: 3600 (1 hour).
-      user_command_timeout_secs = 3600,
+      user_command_timeout_secs: 3600,
       // Extra env vars injected into `shell` and `!`/`!!` children,
       // applied after the inherited environment so they override or
       // supplement it. Use this to set a custom `PAGER` or adjust paths.
-      extra_env = {
-        XDG_CONFIG_HOME = "/home/me/.config",
-        PAGER = "cat",
+      extra_env: {
+        XDG_CONFIG_HOME: "/home/me/.config",
+        PAGER: "cat",
       },
     },
   },
@@ -207,11 +199,13 @@ working directory, plus `$HOME/.agents*/skills` and
 machine- or user-specific instructions and skills that should usually be added
 to `.gitignore` instead of checked in.
 
-System prompt behavior is harness-owned rather than role-configurable. The
-built-in `foreman` role gets Tau's delegation workflow plus a sorted `Available
-sub-task roles` section. Extensions can also attach ordered prompt fragments to
-registered tools, so tool-specific instructions appear only when that tool is
-enabled for the active role.
+Role prompts are composable too: each `harness.json5` role may set `prompt` to
+replace the role's built-in prompt, if any, and `extraPrompt` to append local
+instructions after the role prompt. Roles with `orchestrator: true` then get a
+sorted `Available sub-task roles` section appended after the effective role
+prompt. Extensions can also attach ordered prompt
+fragments to registered tools, so tool-specific instructions appear only when
+that tool is enabled for the active role.
 
 ### `provider-openai` — OpenAI Responses backend
 
@@ -243,7 +237,7 @@ Plays a sound on prompt submit and on the final response of a turn. After
 `idle_seconds` of inactivity following a final response (default 60s) it emits
 a desktop notification with a static "Waiting for user input" body — useful
 when a long task finishes while you're in another window. Set
-`idle_agent_summary = true` in the `std-notifications` extension config to restore the old behavior that asks the
+`config.idle_agent_summary: true` to restore the old behavior that asks the
 agent for a one-sentence idle summary before notifying.
 
 ### `core-delegate` — sub-task delegation
@@ -265,7 +259,7 @@ tool) is shown in the parent UI alongside the delegate's task name and role.
 
 Proxies a single Exa-backed search tool, advertised to models as
 `web_search`, to Exa's hosted `web_search_exa` MCP endpoint. Disable in
-`harness.ncl` when not needed; supply an API key via config.
+`harness.json5` when not needed; supply an API key via config.
 
 
 ## CLI / UI
@@ -332,7 +326,7 @@ Examples:
 
 ### Customizable key bindings
 
-`cli.ncl` exposes a `bind` table that maps key chords to prompt-local
+`cli.json5` exposes a `bind:` table that maps key chords to prompt-local
 shell actions. Bindings are layered on top of built-ins; user entries with the
 same key replace the built-in binding.
 
@@ -343,9 +337,9 @@ Supported actions:
 - `shell-prompt-insert`: run the shell command and insert its stdout at the
   cursor on success.
 - `fast-toggle`: toggle Fast mode directly. For example:
-  `{ action = "fast-toggle" }`.
+  `{ action: "fast-toggle" }`.
 - `role-cycle`: cycle to the next available agent role directly. For example:
-  `{ action = "role-cycle" }`.
+  `{ action: "role-cycle" }`.
 - `prompt-history-search`: feed indexed prompt-history rows to a picker command,
   expose original prompts under `$TAU_PROMPT_HISTORY_DIR/<index>` for previews,
   then replace the prompt with the selected original prompt. The draft active
@@ -362,60 +356,56 @@ Command environment:
 
 Default bindings:
 
-```nickel
-{
-  bind = {
-    "C-f" = {
-      action = "shell-prompt-insert",
-      command = "rg --files --hidden --glob '!.git' | fzf --height=100%",
-      trim = true,
-    },
-    "C-s" = { action = "role-cycle" },
-    "C-r" = {
-      action = "prompt-history-search",
-      command = "fzf --height=100% --delimiter='\\t' --with-nth=2 --no-hscroll --preview 'cat \"$TAU_PROMPT_HISTORY_DIR\"/{1}' --preview-window 'right,60%,wrap' | cut -f1",
-      trim = true,
-    },
-    "C-t" = {
-      action = "shell-prompt-insert",
-      command = "RG_PREFIX='rg --line-number --column --no-heading --color=always --smart-case'; fzf --height=100% --ansi --disabled --bind \"change:reload:$RG_PREFIX {q} || true\" --delimiter : --preview 'bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null || awk -v line={2} '\\''line - 4 <= NR && NR <= line + 4 { printf \"%6d  %s\\n\", NR, $0 }'\\'' -- {1}' --preview-window '+{2}/2' | cut -d: -f1",
-      trim = true,
-    },
-    "C-y" = {
-      action = "shell-prompt-insert",
-      command = "if command -v jj >/dev/null 2>&1 && jj root --ignore-working-copy >/dev/null 2>&1; then jj log -r '::@' --no-graph -T 'change_id.shortest(8) ++ \"\\t\" ++ description.first_line() ++ \"\\n\"' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'jj show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; elif command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git log --format='%h%x09%s' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'git show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; fi",
-      trim = true,
-    },
-    "C-o" = {
-      action = "shell-prompt-edit",
-      command = "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"",
-    },
-    "C-g" = {
-      action = "shell-prompt-edit",
-      command = "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"",
-    },
+```json5
+bind: {
+  "C-f": {
+    action: "shell-prompt-insert",
+    command: "rg --files --hidden --glob '!.git' | fzf --height=100%",
+    trim: true,
   },
-}
+  "C-s": { action: "role-cycle" },
+  "C-r": {
+    action: "prompt-history-search",
+    command: "fzf --height=100% --delimiter='\\t' --with-nth=2 --no-hscroll --preview 'cat \"$TAU_PROMPT_HISTORY_DIR\"/{1}' --preview-window 'right,60%,wrap' | cut -f1",
+    trim: true,
+  },
+  "C-t": {
+    action: "shell-prompt-insert",
+    command: "RG_PREFIX='rg --line-number --column --no-heading --color=always --smart-case'; fzf --height=100% --ansi --disabled --bind \"change:reload:$RG_PREFIX {q} || true\" --delimiter : --preview 'bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null || awk -v line={2} '\\''line - 4 <= NR && NR <= line + 4 { printf \"%6d  %s\\n\", NR, $0 }'\\'' -- {1}' --preview-window '+{2}/2' | cut -d: -f1",
+    trim: true,
+  },
+  "C-y": {
+    action: "shell-prompt-insert",
+    command: "if command -v jj >/dev/null 2>&1 && jj root --ignore-working-copy >/dev/null 2>&1; then jj log -r '::@' --no-graph -T 'change_id.shortest(8) ++ \"\\t\" ++ description.first_line() ++ \"\\n\"' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'jj show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; elif command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git log --format='%h%x09%s' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'git show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; fi",
+    trim: true,
+  },
+  "C-o": {
+    action: "shell-prompt-edit",
+    command: "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"",
+  },
+  "C-g": {
+    action: "shell-prompt-edit",
+    command: "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"",
+  },
+},
 ```
 
 A Helix override:
 
-```nickel
-{
-  bind = {
-    "C-o" = {
-      action = "shell-prompt-edit",
-      command = "hx \"$TAU_PROMPT_PATH:$TAU_PROMPT_ROW:$TAU_PROMPT_COLUMN\"",
-    },
-    "C-g" = {
-      action = "shell-prompt-edit",
-      command = "hx \"$TAU_PROMPT_PATH:$TAU_PROMPT_ROW:$TAU_PROMPT_COLUMN\"",
-    },
+```json5
+bind: {
+  "C-o": {
+    action: "shell-prompt-edit",
+    command: 'hx "$TAU_PROMPT_PATH:$TAU_PROMPT_ROW:$TAU_PROMPT_COLUMN"',
   },
-}
+  "C-g": {
+    action: "shell-prompt-edit",
+    command: 'hx "$TAU_PROMPT_PATH:$TAU_PROMPT_ROW:$TAU_PROMPT_COLUMN"',
+  },
+},
 ```
 
-Use `trim = true` for commands like `fzf` whose selected value ends with a
+Use `trim: true` for commands like `fzf` whose selected value ends with a
 newline you do not want inserted into the prompt.
 
 ### `Ctrl+O` — edit prompt in your editor
@@ -440,31 +430,29 @@ Leading and trailing blank lines around the editable prompt are trimmed.
 Because bindings are arbitrary shell commands, wiring fzf or another picker
 into the prompt is straightforward:
 
-```nickel
-{
-  bind = {
-    "C-f" = {
-      action = "shell-prompt-insert",
-      command = "rg --files --hidden --glob '!.git' | fzf --height=100%",
-      trim = true,
-    },
-    "C-r" = {
-      action = "prompt-history-search",
-      command = "fzf --height=100% --delimiter='\\t' --with-nth=2 --no-hscroll --preview 'cat \"$TAU_PROMPT_HISTORY_DIR\"/{1}' --preview-window 'right,60%,wrap' | cut -f1",
-      trim = true,
-    },
-    "C-t" = {
-      action = "shell-prompt-insert",
-      command = "RG_PREFIX='rg --line-number --column --no-heading --color=always --smart-case'; fzf --height=100% --ansi --disabled --bind \"change:reload:$RG_PREFIX {q} || true\" --delimiter : --preview 'bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null || awk -v line={2} '\\''line - 4 <= NR && NR <= line + 4 { printf \"%6d  %s\\n\", NR, $0 }'\\'' -- {1}' --preview-window '+{2}/2' | cut -d: -f1",
-      trim = true,
-    },
-    "C-y" = {
-      action = "shell-prompt-insert",
-      command = "if command -v jj >/dev/null 2>&1 && jj root --ignore-working-copy >/dev/null 2>&1; then jj log -r '::@' --no-graph -T 'change_id.shortest(8) ++ \"\\t\" ++ description.first_line() ++ \"\\n\"' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'jj show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; elif command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git log --format='%h%x09%s' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'git show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; fi",
-      trim = true,
-    },
+```json5
+bind: {
+  "C-f": {
+    action: "shell-prompt-insert",
+    command: "rg --files --hidden --glob '!.git' | fzf --height=100%",
+    trim: true,
   },
-}
+  "C-r": {
+    action: "prompt-history-search",
+    command: "fzf --height=100% --delimiter='\\t' --with-nth=2 --no-hscroll --preview 'cat \"$TAU_PROMPT_HISTORY_DIR\"/{1}' --preview-window 'right,60%,wrap' | cut -f1",
+    trim: true,
+  },
+  "C-t": {
+    action: "shell-prompt-insert",
+    command: "RG_PREFIX='rg --line-number --column --no-heading --color=always --smart-case'; fzf --height=100% --ansi --disabled --bind \"change:reload:$RG_PREFIX {q} || true\" --delimiter : --preview 'bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null || awk -v line={2} '\\''line - 4 <= NR && NR <= line + 4 { printf \"%6d  %s\\n\", NR, $0 }'\\'' -- {1}' --preview-window '+{2}/2' | cut -d: -f1",
+    trim: true,
+  },
+  "C-y": {
+    action: "shell-prompt-insert",
+    command: "if command -v jj >/dev/null 2>&1 && jj root --ignore-working-copy >/dev/null 2>&1; then jj log -r '::@' --no-graph -T 'change_id.shortest(8) ++ \"\\t\" ++ description.first_line() ++ \"\\n\"' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'jj show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; elif command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git log --format='%h%x09%s' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'git show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; fi",
+    trim: true,
+  },
+},
 ```
 
 `C-r` searches prompt history (newest first), shows the selected prompt in an

@@ -43,7 +43,7 @@ use crate::model::{
     save_role_overrides, select_model_for_available, selected_params_for_role,
     thinking_summaries_for_model, verbosities_for_model,
 };
-use crate::prompt::render_builtin_system_prompt;
+use crate::prompt::build_system_prompt;
 use crate::turn::{PromptSubmission, TurnState};
 
 fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {

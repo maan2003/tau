@@ -72,7 +72,7 @@ Official packaging will come later — request a format or upvote existing reque
 
 Use `tau init` to generate config files.
 
-Use `tau provider login chatgpt` to enable the built-in ChatGPT/Codex provider; edit `harness.ncl` for harness-owned roles, defaults, and extension settings.
+Use `tau provider login chatgpt` to enable the built-in ChatGPT/Codex provider; edit `harness.json5` for harness-owned roles, defaults, and extension settings.
 
 By default, `tau` starts the harness daemon and the CLI UI.
 

@@ -1,8 +1,28 @@
 use tau_proto::{
-    Effort, ModelId, ProviderModelInfo, ProviderModelsUpdated, ThinkingSummary, Verbosity,
+    Effort, HarnessInfoLevel, ModelId, ProviderModelInfo, ProviderModelsUpdated, ThinkingSummary,
+    Verbosity,
 };
 
 use super::*;
+
+/// Scan the harness event log for an `Important` `HarnessInfo`
+/// containing `needle` and return its message. The startup paths emit
+/// these synchronously before the constructor returns, so by the time
+/// the test inspects the log every check_*_parses event is already
+/// committed — no need to pump the bus.
+fn find_important_info(h: &Harness, needle: &str) -> Option<String> {
+    let mut seq = 0;
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq + 1;
+        if let Event::HarnessInfo(info) = &entry.event
+            && info.level == HarnessInfoLevel::Important
+            && info.message.contains(needle)
+        {
+            return Some(info.message.clone());
+        }
+    }
+    None
+}
 
 fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
     ProviderModelInfo {
@@ -361,7 +381,7 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
 }
 
 /// Persisted role overrides are the live selection, but the baseline shown for
-/// "reset to role" must come from `harness.ncl`, not from state.
+/// "reset to role" must come from `harness.json5`, not from state.
 #[test]
 fn role_baseline_ignores_persisted_role_overrides() {
     let td = TempDir::new().expect("tempdir");
@@ -375,10 +395,10 @@ fn role_baseline_ignores_persisted_role_overrides() {
     };
 
     std::fs::write(
-        config_dir.join("harness.ncl"),
+        config_dir.join("harness.json5"),
         r#"{
-            roles = {
-                smart = { model = "openai/gpt-4.1", effort = "high", verbosity = "medium" },
+            roles: {
+                smart: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
             },
         }"#,
     )
@@ -419,9 +439,9 @@ fn role_baseline_ignores_persisted_role_overrides() {
     assert_eq!(baseline.verbosity, Verbosity::Medium);
 }
 
-/// Persisted runtime role overrides must never carry role descriptions.
-/// Config-only metadata must come from `harness.ncl` so changes are reflected
-/// after a restart instead of being shadowed by stale state.
+/// Persisted runtime role overrides must never carry prompt text or role
+/// descriptions. Config-only metadata must come from `harness.json5` so changes
+/// are reflected after a restart instead of being shadowed by stale state.
 #[test]
 fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
     let td = TempDir::new().expect("tempdir");
@@ -435,12 +455,14 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
     };
 
     std::fs::write(
-        config_dir.join("harness.ncl"),
+        config_dir.join("harness.json5"),
         r#"{
-            roles = {
-                smart = {
-                    description = "CURRENT CONFIG DESCRIPTION",
-                    model = "openai/gpt-4.1",
+            roles: {
+                smart: {
+                    description: "CURRENT CONFIG DESCRIPTION",
+                    model: "openai/gpt-4.1",
+                    prompt: "CURRENT CONFIG PROMPT",
+                    extraPrompt: "CURRENT CONFIG EXTRA",
                 },
             },
         }"#,
@@ -453,7 +475,9 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
             "role_overrides": {
                 "smart": {
                     "description": "STALE STATE DESCRIPTION",
-                    "model": "openai/gpt-4.1-mini"
+                    "model": "openai/gpt-4.1-mini",
+                    "prompt": "STALE STATE PROMPT",
+                    "extraPrompt": "STALE STATE EXTRA"
                 }
             }
         }"#,
@@ -473,14 +497,32 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
         role.description.as_deref(),
         Some("CURRENT CONFIG DESCRIPTION")
     );
+    assert_eq!(
+        role.prompt.as_ref().map(|prompt| prompt.as_str()),
+        Some("CURRENT CONFIG PROMPT")
+    );
+    assert_eq!(
+        role.extra_prompt.as_ref().map(|prompt| prompt.as_str()),
+        Some("CURRENT CONFIG EXTRA")
+    );
     let runtime_override = role_overrides.get("smart").expect("runtime override");
     assert!(runtime_override.description.is_none());
+    assert!(runtime_override.prompt.is_none());
+    assert!(runtime_override.extra_prompt.is_none());
 
     save_role_overrides(&dirs, &selected_role, &roles);
     let saved = std::fs::read_to_string(state_dir.join("harness.json5")).expect("read state");
     assert!(
         !saved.contains("description"),
         "saved state must strip description: {saved}"
+    );
+    assert!(
+        !saved.contains("prompt"),
+        "saved state must strip prompt fields: {saved}"
+    );
+    assert!(
+        !saved.contains("extraPrompt"),
+        "saved state must strip extraPrompt fields: {saved}"
     );
 }
 
@@ -547,11 +589,11 @@ fn load_roles_falls_back_to_smart_role_while_models_are_provider_owned() {
     };
 
     std::fs::write(
-        config_dir.join("harness.ncl"),
+        config_dir.join("harness.json5"),
         r#"{
-            roles = {
-                smart = { model = "local/smart" },
-                deep = { model = "local/deep" },
+            roles: {
+                smart: { model: "local/smart" },
+                deep: { model: "local/deep" },
             },
         }"#,
     )
@@ -600,11 +642,11 @@ fn role_missing_fields_use_model_defaults() {
     };
 
     std::fs::write(
-        config_dir.join("harness.ncl"),
+        config_dir.join("harness.json5"),
         r#"{
-            roles = {
-                smart = { model = "local/smart", effort = "high" },
-                plain = {},
+            roles: {
+                smart: { model: "local/smart", effort: "high" },
+                plain: {},
             },
         }"#,
     )
@@ -681,11 +723,11 @@ fn role_without_verbosity_picks_low_when_supported() {
     );
 }
 
-/// A malformed `harness.ncl` must fail harness startup. Nickel config errors
-/// should not fall back to built-ins because that would silently ignore user
-/// roles and extensions.
+/// A malformed `harness.json5` must surface in the UI as an `Important`
+/// `HarnessInfo`. Without this, the only symptom of a borked file is that
+/// user-configured extensions or roles vanish.
 #[test]
-fn borked_harness_ncl_fails_startup() {
+fn borked_harness_json5_emits_important_info() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -697,15 +739,18 @@ fn borked_harness_ncl_fails_startup() {
     };
 
     std::fs::write(
-        config_dir.join("harness.ncl"),
-        "{ extensions = { foo = { command = [ \"echo\" ",
+        config_dir.join("harness.json5"),
+        "{ extensions: { foo: { command: [ \"echo\" ",
     )
     .expect("write borked harness");
 
-    let Err(err) = echo_harness_with_dirs("s1", state_dir, dirs) else {
-        panic!("malformed config must fail startup");
-    };
-    assert!(err.to_string().contains("settings error"));
+    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    let message = find_important_info(&h, "harness.json5")
+        .expect("expected Important HarnessInfo about harness.json5");
+    assert!(
+        message.contains("failed to parse"),
+        "message should explain what happened, got: {message}"
+    );
 }
 
 /// Provider snapshots are the only source for effort choices. The harness
@@ -873,10 +918,10 @@ fn selected_params_restore_each_field_from_role_override() {
     };
 
     std::fs::write(
-        config_dir.join("harness.ncl"),
+        config_dir.join("harness.json5"),
         r#"{
-            roles = {
-                smart = { model = "openai/gpt-5" },
+            roles: {
+                smart: { model: "openai/gpt-5" },
             },
         }"#,
     )

@@ -3,115 +3,132 @@
 //! [`tau_core::SessionTree`] into item-based prompt context.
 
 use tau_core::SessionEntry;
-use tau_proto::{CborValue, ContextItem, PromptHook};
+use tau_proto::{CborValue, ContextItem, PromptContent, PromptHook, PromptPriority};
 
+use crate::dedup::DEDUP_MARKER;
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 
-/// Renders Tau's lazy Nickel system-prompt template plus harness-owned prompt
-/// hooks.
+const ROLE_EXTRA_PROMPT_PRIORITY: PromptPriority = PromptPriority::new(1000);
+
+/// Builds the system prompt from Tau defaults plus role/tool prompt hooks.
 ///
 /// Must be deterministic and stable across turns of the same session
 /// — see the linear-prefix invariant in `send_prompt_to_agent`.
 /// Tools and skills are sorted by name (HashMap iteration would
 /// otherwise drift). The current date is intentionally omitted:
 /// including it would invalidate the prompt cache every midnight
-/// UTC. cwd is threaded in from the caller so the caller owns the source of
-/// truth.
-#[derive(Clone, Debug)]
-pub(crate) struct SystemPromptRenderer {
-    nickel_source: String,
-}
-
-impl SystemPromptRenderer {
-    /// Creates a renderer for the composed harness Nickel source.
-    pub(crate) fn new(nickel_source: String) -> Self {
-        Self { nickel_source }
-    }
-
-    /// Evaluates the merged role/system prompt record with runtime prompt
-    /// context.
-    pub(crate) fn render(
-        &self,
-        skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
-        cwd: &str,
-        role_name: &str,
-        tool_prompt_hook: &PromptHook,
-    ) -> Result<String, tau_config::settings::SettingsError> {
-        let ctx = format!(
-            "{{ roleName | force = {}, cwd | force = {}, skills | force = {}, toolPromptHooksText | force = {} }}",
-            nickel_string_literal(role_name),
-            nickel_string_literal(cwd),
-            nickel_skills_literal(skills),
-            nickel_string_literal(&render_tool_prompt_hooks_section(tool_prompt_hook)),
-        );
-        let expr = format!(
-            "\
-let config = ({}) in
-let ctx = {ctx} in
-let role = std.record.get_or ctx.roleName {{}} config.roles in
-let smartPrompt = config.roles.smart.systemPrompt in
-# Custom roles may omit systemPrompt. In that case (and for an unknown role
-# name), render the built-in smart prompt with the selected roleName in ctx.
-# Built-in roles are expected to define their own systemPrompt records.
-let rolePrompt = std.record.get_or \"systemPrompt\" smartPrompt role in
-(rolePrompt & ctx).text",
-            self.nickel_source
-        );
-        let mut context = nickel_lang::Context::new()
-            .with_source_name("composed harness systemPrompt".to_owned());
-        let value = context
-            .eval_deep_for_export(&expr)
-            .map_err(format_nickel_error)?;
-        value
-            .to_serde()
-            .map_err(|err| tau_config::settings::SettingsError::Deserialize(err.to_string()))
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn render_builtin_system_prompt(
+/// UTC. cwd is threaded in from the caller so the caller owns the
+/// source of truth.
+pub(crate) fn build_system_prompt(
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     cwd: &str,
-    include_foreman_prompt: bool,
+    role_prompt: Option<&PromptContent>,
+    role_extra_prompt: Option<&PromptContent>,
+    available_sub_task_roles_prompt: Option<&PromptContent>,
     tool_prompt_hook: &PromptHook,
 ) -> String {
-    let loaded = tau_config::settings::load_harness_settings_with_source()
-        .expect("built-in harness settings should load");
-    let role_name = if include_foreman_prompt {
-        "foreman"
-    } else {
-        "smart"
-    };
-    SystemPromptRenderer::new(loaded.nickel_source)
-        .render(skills, cwd, role_name, tool_prompt_hook)
-        .expect("built-in system prompt should render")
-}
+    // Tool definitions are delivered out-of-band via the provider's
+    // tool-use channel, so we don't restate them here.
+    let mut prompt = format!(
+        "You are an expert coding assistant operating inside Tau, \
+         a coding agent harness. You help users by reading files, executing commands, \
+         editing code, and writing new files.\n\n\
+         You can call multiple tools in a single response. \
+         If you intend to call multiple tools and there are no dependencies between the calls, \
+         make all independent tool calls in parallel in the same response. \
+         Maximize use of parallel tool calls where possible to increase efficiency. \
+         However, if some tool calls depend on previous calls to inform dependent values, \
+         do NOT call these tools in parallel and instead call them sequentially. \
+         For instance, if one operation must complete before another starts, \
+         run these operations sequentially instead.\n\n\
+         Tau deduplicates tool result outputs. `{DEDUP_MARKER}` results are \
+         not errors, but an optimization pointing at an earlier identical result.\n\n",
+    );
 
-fn nickel_skills_literal(
-    skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
-) -> String {
+    // Available skills section.
     let mut prompt_skills: Vec<_> = skills.iter().filter(|(_, s)| s.add_to_prompt).collect();
     prompt_skills.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
-    let mut literal = String::from("[");
-    for (index, (name, skill)) in prompt_skills.iter().enumerate() {
-        if index > 0 {
-            literal.push_str(", ");
+    if !prompt_skills.is_empty() {
+        prompt.push_str(
+            "\nSkills provide specialized instructions for specific tasks.\n\
+             Below are skills you should be initially aware of. Use the skill tool to load a skill, and search for more skills.\n\n\
+             <available_skills>\n",
+        );
+        for (name, skill) in &prompt_skills {
+            let description = tau_skills::truncate_description(&skill.description);
+            prompt.push_str(&format!(
+                "  <skill>\n    <name>{}</name>\n    \
+                 <description>{}</description>\n  </skill>\n",
+                xml_escape(name.as_str()),
+                xml_escape(description.as_ref()),
+            ));
         }
-        let description = tau_skills::truncate_description(&skill.description);
-        literal.push_str("{ name = ");
-        literal.push_str(&nickel_string_literal(name.as_str()));
-        literal.push_str(", description = ");
-        literal.push_str(&nickel_string_literal(description.as_ref()));
-        literal.push_str(" }");
+        prompt.push_str("</available_skills>\n");
     }
-    literal.push(']');
-    literal
+
+    prompt.push_str(&format!("\nCurrent working directory: {cwd}\n"));
+
+    compose_system_prompt(
+        prompt,
+        role_prompt,
+        role_extra_prompt,
+        available_sub_task_roles_prompt,
+        tool_prompt_hook,
+    )
 }
 
-fn render_tool_prompt_hooks_section(tool_prompt_hook: &PromptHook) -> String {
-    let mut prompt = String::new();
-    append_prompt_hook(&mut prompt, tool_prompt_hook);
+fn compose_system_prompt(
+    tau_system_prompt: String,
+    role_prompt: Option<&PromptContent>,
+    role_extra_prompt: Option<&PromptContent>,
+    available_sub_task_roles_prompt: Option<&PromptContent>,
+    tool_prompt_hook: &PromptHook,
+) -> String {
+    let mut prompt = tau_system_prompt.trim_end().to_owned();
+
+    let mut role_extra_prompt_hook = PromptHook::new();
+    if let Some(content) = role_extra_prompt
+        && !content.is_empty()
+    {
+        role_extra_prompt_hook.insert((ROLE_EXTRA_PROMPT_PRIORITY, content.clone()));
+    }
+
+    let has_role_prompt = role_prompt.is_some_and(|content| !content.is_empty());
+    let has_role_extra = !role_extra_prompt_hook.is_empty();
+    let has_available_roles =
+        available_sub_task_roles_prompt.is_some_and(|content| !content.is_empty());
+    if has_role_prompt || has_role_extra || has_available_roles {
+        prompt.push_str("\n\n");
+        if let Some(content) = role_prompt
+            && !content.is_empty()
+        {
+            prompt.push_str(content.as_str());
+        }
+        if has_role_prompt && has_role_extra {
+            prompt.push('\n');
+        }
+        append_prompt_hook(&mut prompt, &role_extra_prompt_hook);
+        if (has_role_prompt || has_role_extra) && has_available_roles {
+            prompt.push_str("\n\n");
+        }
+        if let Some(content) = available_sub_task_roles_prompt
+            && !content.is_empty()
+        {
+            prompt.push_str(content.as_str());
+        }
+    }
+
+    if prompt_hook_has_content(tool_prompt_hook) {
+        prompt.push_str("\n\n");
+        append_prompt_hook(&mut prompt, tool_prompt_hook);
+    }
+
+    prompt.push('\n');
     prompt
+}
+
+fn prompt_hook_has_content(hook: &PromptHook) -> bool {
+    hook.iter().any(|(_, content)| !content.is_empty())
 }
 
 fn append_prompt_hook(prompt: &mut String, hook: &PromptHook) {
@@ -128,37 +145,19 @@ fn append_prompt_hook(prompt: &mut String, hook: &PromptHook) {
     }
 }
 
-fn nickel_string_literal(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len() + 2);
-    escaped.push('"');
+fn xml_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            ch if ch.is_control() => {
-                use std::fmt::Write as _;
-                let _ = write!(escaped, "\\u{:04x}", ch as u32);
-            }
-            ch => escaped.push(ch),
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
         }
     }
-    escaped.push('"');
     escaped
-}
-
-fn format_nickel_error(error: nickel_lang::Error) -> tau_config::settings::SettingsError {
-    let mut out = Vec::new();
-    if error
-        .format(&mut out, nickel_lang::ErrorFormat::Text)
-        .is_ok()
-    {
-        tau_config::settings::SettingsError::Nickel(String::from_utf8_lossy(&out).into_owned())
-    } else {
-        tau_config::settings::SettingsError::Nickel(format!("{error:?}"))
-    }
 }
 
 pub(crate) fn render_agents_context_message<'a>(
@@ -345,317 +344,72 @@ mod tests {
     }
 
     #[test]
-    fn render_builtin_system_prompt_includes_cwd() {
+    fn build_system_prompt_includes_cwd() {
         let skills = std::collections::HashMap::new();
-        let prompt = render_builtin_system_prompt(
+        let prompt = build_system_prompt(
             &skills,
             "/tmp/work",
-            false,
+            None,
+            None,
+            None,
             &tau_proto::PromptHook::new(),
         );
         assert!(prompt.contains("expert coding assistant"));
         assert!(prompt.contains("Current working directory: /tmp/work"));
-        assert!(!prompt.ends_with('\n'));
     }
 
     #[test]
-    fn render_builtin_system_prompt_encourages_parallel_tool_calls() {
+    fn build_system_prompt_encourages_parallel_tool_calls() {
         let skills = std::collections::HashMap::new();
-        let prompt = render_builtin_system_prompt(
+        let prompt = build_system_prompt(
             &skills,
             "/tmp/work",
-            false,
+            None,
+            None,
+            None,
             &tau_proto::PromptHook::new(),
         );
         assert!(prompt.contains("parallel"));
         assert!(prompt.contains("make all independent tool calls in parallel"));
     }
 
+    /// Orchestrator roles append the available sub-task roles after the
+    /// effective role prompt so user prompt overrides do not hide delegation
+    /// choices from the model.
     #[test]
-    fn system_prompt_renderer_includes_runtime_sections_from_nickel_template() {
-        // Runtime-only prompt data is passed to Nickel as an escaped record and
-        // composed by the non-exported template, not exported as role fields.
-        let mut skills = std::collections::HashMap::new();
-        skills.insert(
-            tau_proto::SkillName::from("escape-me"),
-            DiscoveredSkill {
-                source_id: "skills".into(),
-                description: "Use <xml> & quotes".to_owned(),
-                source: crate::discovery::DiscoveredSkillSource::File(std::path::PathBuf::from(
-                    "/skills/escape-me/SKILL.md",
-                )),
-                add_to_prompt: true,
-            },
-        );
-        let mut tool_hook = tau_proto::PromptHook::new();
-        tool_hook.insert((
-            tau_proto::PromptPriority::new(10),
-            tau_proto::PromptContent::new("TOOL HOOK"),
-        ));
-
-        let loaded = tau_config::settings::load_harness_settings_with_source()
-            .expect("load harness settings");
-        let prompt = SystemPromptRenderer::new(loaded.nickel_source)
-            .render(&skills, "/tmp/work", "smart", &tool_hook)
-            .expect("render prompt");
-
-        assert!(prompt.contains("Current working directory: /tmp/work"));
-        assert!(prompt.contains("<name>escape-me</name>"));
-        assert!(prompt.contains("Use &lt;xml&gt; &amp; quotes"));
-        assert!(prompt.contains(crate::dedup::DEDUP_MARKER));
-        assert!(prompt.contains("TOOL HOOK"));
-    }
-
-    #[test]
-    fn built_in_system_prompt_requires_runtime_context_fields() {
-        // Runtime context such as cwd must be provided by the renderer. The
-        // built-in template should not silently fall back to empty defaults.
-        let loaded = tau_config::settings::load_harness_settings_with_source()
-            .expect("load harness settings");
-        let expr = format!(
-            "\
-let config = ({}) in
-config.roles.smart.systemPrompt.text",
-            loaded.nickel_source
-        );
-        let mut context = nickel_lang::Context::new()
-            .with_source_name("built-in systemPrompt without runtime ctx".to_owned());
-
-        assert!(context.eval_deep_for_export(&expr).is_err());
-    }
-
-    /// The built-in foreman prompt carries Tau's delegation workflow and is
-    /// followed by the available sub-task roles list.
-    #[test]
-    fn render_builtin_system_prompt_includes_foreman_delegation_context() {
+    fn build_system_prompt_appends_available_roles_for_orchestrator_context() {
         let skills = std::collections::HashMap::new();
-        let prompt =
-            render_builtin_system_prompt(&skills, "/tmp/work", true, &tau_proto::PromptHook::new());
+        let role_prompt = tau_proto::PromptContent::new("CUSTOM FOREMAN");
+        let available_roles = tau_proto::PromptContent::new(
+            "## Available sub-task roles\n\n* `smart` - \"Individual contributor using state of the art model. Good default for most tasks.\"",
+        );
 
-        let role = prompt
-            .find("You are a foreman/orchestrator agent")
-            .expect("built-in foreman prompt");
+        let prompt = build_system_prompt(
+            &skills,
+            "/tmp/work",
+            Some(&role_prompt),
+            None,
+            Some(&available_roles),
+            &tau_proto::PromptHook::new(),
+        );
+
+        let role = prompt.find("CUSTOM FOREMAN").expect("role prompt");
         let roles = prompt
             .find("## Available sub-task roles")
             .expect("available roles");
         assert!(role < roles);
-        assert!(prompt.contains("use the `delegate` tool"));
         assert!(prompt.contains("* `smart` - \"Individual contributor using state of the art model. Good default for most tasks.\""));
-        assert!(prompt.contains("* `deep` - \"Deep reasoning expert"));
-        assert!(prompt.contains("* `rush` - \"Individual contributor using fast"));
-        assert!(!prompt.contains("* `foreman` - \""));
     }
 
+    /// Role prompt overrides, role extra prompts, and tool prompt hooks are
+    /// distinct layers. This pins their composition order so adding more hook
+    /// contributors later does not accidentally move tool instructions before
+    /// role instructions or ignore hook priority ordering.
     #[test]
-    fn system_prompt_renderer_uses_configured_sub_task_roles_list() {
-        // The foreman prompt should let user config choose exactly which
-        // sub-task roles are advertised, instead of hard-coding a static list.
-        let td = tempfile::TempDir::new().expect("tempdir");
-        std::fs::write(
-            td.path().join("harness.ncl"),
-            r#"{
-                    roles = {
-                        reviewer = {
-                            description = "Focused reviewer",
-                        },
-                        foreman = {
-                            systemPrompt = {
-                                sections = {
-                                    availableSubTaskRoles = {
-                                        roles = ["reviewer", "rush"],
-                                    },
-                                },
-                            },
-                        },
-                    },
-                }"#,
-        )
-        .expect("write");
-        let dirs = tau_config::settings::TauDirs {
-            config_dir: Some(td.path().to_path_buf()),
-            state_dir: None,
-        };
-        let loaded = tau_config::settings::load_harness_settings_with_source_in(&dirs)
-            .expect("load harness settings");
-
-        let prompt = SystemPromptRenderer::new(loaded.nickel_source)
-            .render(
-                &std::collections::HashMap::new(),
-                "/roles",
-                "foreman",
-                &tau_proto::PromptHook::new(),
-            )
-            .expect("render prompt");
-
-        assert!(prompt.contains("* `reviewer` - \"Focused reviewer\""));
-        assert!(prompt.contains("* `rush` - \"Individual contributor using fast and cheaper model for smaller well-defined tasks.\""));
-        assert!(!prompt.contains("* `smart` - \""));
-        assert!(!prompt.contains("* `deep` - \""));
-        assert!(!prompt.contains("* `foreman` - \""));
-    }
-
-    #[test]
-    fn system_prompt_renderer_uses_user_overridden_template_and_sibling_roles() {
-        // User harness.ncl can replace a non-exported role prompt record. The
-        // template is merged with runtime context, and still closes over merged
-        // sibling role config.
-        let td = tempfile::TempDir::new().expect("tempdir");
-        std::fs::write(
-            td.path().join("harness.ncl"),
-            r#"{
-                    roles = {
-                        smart = {
-                            description = "custom smart role",
-                            systemPrompt = {
-                                roleName | String,
-                                cwd | String,
-                                text = "role=%{roleName}; cwd=%{cwd}; smart=%{roles.smart.description}\n",
-                            },
-                        },
-                    },
-                }"#,
-        )
-        .expect("write");
-        let dirs = tau_config::settings::TauDirs {
-            config_dir: Some(td.path().to_path_buf()),
-            state_dir: None,
-        };
-        let loaded = tau_config::settings::load_harness_settings_with_source_in(&dirs)
-            .expect("load harness settings");
-        assert_eq!(
-            loaded.settings.roles["smart"].description.as_deref(),
-            Some("custom smart role")
-        );
-
-        let prompt = SystemPromptRenderer::new(loaded.nickel_source)
-            .render(
-                &std::collections::HashMap::new(),
-                "/override",
-                "smart",
-                &tau_proto::PromptHook::new(),
-            )
-            .expect("render prompt");
-
-        assert_eq!(
-            prompt,
-            "role=smart; cwd=/override; smart=custom smart role\n"
-        );
-    }
-
-    #[test]
-    fn system_prompt_renderer_merges_user_section_overrides_into_built_in_template() {
-        // Users should be able to tweak one named system-prompt section with a
-        // plain record, without repeating built-in contracts or replacing the
-        // whole template record. This protects the section-based Nickel layout
-        // from regressing back to whole-record override semantics.
-        let td = tempfile::TempDir::new().expect("tempdir");
-        std::fs::write(
-            td.path().join("harness.ncl"),
-            r#"{
-                    roles = {
-                        smart = {
-                            description = "section smart role",
-                            systemPrompt = {
-                                sections = {
-                                    intro = { enabled = false },
-                                    dedup = { enabled = false },
-                                    availableSkills = { enabled = false },
-                                    currentWorkingDirectory = {
-                                        order = 35,
-                                    },
-                                    custom = {
-                                        order = 45,
-                                        text = "; smart=%{roles.smart.description}",
-                                    },
-                                },
-                            },
-                        },
-                    },
-                }"#,
-        )
-        .expect("write");
-        let dirs = tau_config::settings::TauDirs {
-            config_dir: Some(td.path().to_path_buf()),
-            state_dir: None,
-        };
-        let loaded = tau_config::settings::load_harness_settings_with_source_in(&dirs)
-            .expect("load harness settings");
-
-        let prompt = SystemPromptRenderer::new(loaded.nickel_source)
-            .render(
-                &std::collections::HashMap::new(),
-                "/sections",
-                "smart",
-                &tau_proto::PromptHook::new(),
-            )
-            .expect("render prompt");
-
-        assert_eq!(
-            prompt,
-            "Current working directory: /sections\n\n; smart=section smart role"
-        );
-    }
-
-    #[test]
-    fn system_prompt_renderer_falls_back_to_smart_prompt_for_custom_role_without_template() {
-        // Custom roles are allowed to provide only model metadata. When they do
-        // not define a non-exported prompt template, render with smart's
-        // prompt record while preserving the selected runtime role name.
-        let td = tempfile::TempDir::new().expect("tempdir");
-        std::fs::write(
-            td.path().join("harness.ncl"),
-            r#"{
-                    roles = {
-                        custom = {
-                            description = "metadata-only custom role",
-                        },
-                    },
-                }"#,
-        )
-        .expect("write");
-        let dirs = tau_config::settings::TauDirs {
-            config_dir: Some(td.path().to_path_buf()),
-            state_dir: None,
-        };
-        let loaded = tau_config::settings::load_harness_settings_with_source_in(&dirs)
-            .expect("load harness settings");
-
-        let prompt = SystemPromptRenderer::new(loaded.nickel_source)
-            .render(
-                &std::collections::HashMap::new(),
-                "/custom",
-                "custom",
-                &tau_proto::PromptHook::new(),
-            )
-            .expect("render prompt");
-
-        assert!(prompt.contains("You are an expert coding assistant operating inside Tau"));
-        assert!(prompt.contains("Current working directory: /custom"));
-        assert!(!prompt.contains("You are a foreman/orchestrator agent"));
-    }
-
-    /// Non-foreman roles receive the base Tau prompt and tool hooks without
-    /// the built-in delegation workflow.
-    #[test]
-    fn render_builtin_system_prompt_omits_foreman_context_for_smart_roles() {
+    fn build_system_prompt_composes_role_and_tool_prompt_hooks_in_order() {
         let skills = std::collections::HashMap::new();
-        let prompt = render_builtin_system_prompt(
-            &skills,
-            "/tmp/work",
-            false,
-            &tau_proto::PromptHook::new(),
-        );
-
-        assert!(!prompt.contains("You are a foreman/orchestrator agent"));
-        assert!(!prompt.contains("Available sub-task roles"));
-    }
-
-    /// Tool prompt hooks remain a harness-owned layer after Tau's base prompt.
-    /// This pins priority ordering without allowing role-configured prompt
-    /// text to interleave with tool instructions.
-    #[test]
-    fn render_builtin_system_prompt_composes_tool_prompt_hooks_in_order() {
-        let skills = std::collections::HashMap::new();
+        let role_prompt = tau_proto::PromptContent::new("ROLE PROMPT");
+        let role_extra = tau_proto::PromptContent::new("ROLE EXTRA");
         let mut tool_hook = tau_proto::PromptHook::new();
         tool_hook.insert((
             tau_proto::PromptPriority::new(20),
@@ -666,29 +420,46 @@ config.roles.smart.systemPrompt.text",
             tau_proto::PromptContent::new("TOOL EARLY"),
         ));
 
-        let prompt = render_builtin_system_prompt(&skills, "/tmp/work", false, &tool_hook);
+        let prompt = build_system_prompt(
+            &skills,
+            "/tmp/work",
+            Some(&role_prompt),
+            Some(&role_extra),
+            None,
+            &tool_hook,
+        );
 
         let base = prompt
             .find("Current working directory: /tmp/work")
             .expect("base Tau system prompt should render cwd");
+        let role = prompt
+            .find("ROLE PROMPT")
+            .expect("role prompt should be rendered");
+        let extra = prompt
+            .find("ROLE EXTRA")
+            .expect("role extra prompt should be rendered");
         let early = prompt
             .find("TOOL EARLY")
             .expect("earlier-priority tool prompt should be rendered");
         let late = prompt
             .find("TOOL LATE")
             .expect("later-priority tool prompt should be rendered");
-        assert!(base < early);
+        assert!(base < role);
+        assert!(role < extra);
+        assert!(extra < early);
         assert!(early < late);
     }
 
     /// Empty hook entries are ignored without adding a blank prompt section.
     #[test]
-    fn render_builtin_system_prompt_ignores_empty_tool_prompt_hook_sections() {
+    fn build_system_prompt_ignores_empty_tool_prompt_hook_sections() {
         let skills = std::collections::HashMap::new();
-        let without_hook = render_builtin_system_prompt(
+        let without_hook = build_system_prompt(
             &skills,
             "/tmp/work",
-            false,
+            None,
+            None,
+            None,
             &tau_proto::PromptHook::new(),
         );
         let mut empty_hook = tau_proto::PromptHook::new();
@@ -697,7 +468,7 @@ config.roles.smart.systemPrompt.text",
             tau_proto::PromptContent::new(""),
         ));
         let with_empty_hook =
-            render_builtin_system_prompt(&skills, "/tmp/work", false, &empty_hook);
+            build_system_prompt(&skills, "/tmp/work", None, None, None, &empty_hook);
 
         assert_eq!(with_empty_hook, without_hook);
     }

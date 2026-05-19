@@ -646,43 +646,6 @@ pub fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
     }
 }
 
-/// Rewrites integral [`CborValue::Float`] values to [`CborValue::Integer`].
-///
-/// Nickel currently exports numbers to `CborValue` through serde as floats.
-/// Extension config schemas commonly use integer fields, so config loaders call
-/// this narrowly on free-form extension config values after Nickel export.
-pub fn normalize_integral_cbor_floats(value: &mut CborValue) {
-    match value {
-        CborValue::Array(values) => {
-            for value in values {
-                normalize_integral_cbor_floats(value);
-            }
-        }
-        CborValue::Map(entries) => {
-            for (key, value) in entries {
-                normalize_integral_cbor_floats(key);
-                normalize_integral_cbor_floats(value);
-            }
-        }
-        CborValue::Tag(_, inner) => normalize_integral_cbor_floats(inner),
-        CborValue::Float(float)
-            if float.is_finite()
-                && float.fract() == 0.0
-                && *float >= i64::MIN as f64
-                && *float <= i64::MAX as f64 =>
-        {
-            *value = CborValue::Integer((*float as i64).into());
-        }
-        CborValue::Null
-        | CborValue::Bool(_)
-        | CborValue::Integer(_)
-        | CborValue::Float(_)
-        | CborValue::Text(_)
-        | CborValue::Bytes(_)
-        | _ => {}
-    }
-}
-
 /// Convert a `serde_json::Value` into a [`CborValue`].
 ///
 /// Numbers are preserved as integers when possible, otherwise as

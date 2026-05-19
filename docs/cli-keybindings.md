@@ -1,6 +1,6 @@
 # CLI keybindings
 
-Keep this document in sync with the `bind` defaults in `crates/tau-config/config/built-in.cli.ncl` and the action parser in `crates/tau-cli-term/src/lib.rs`.
+Keep this document in sync with `crates/tau-config/config/built-in.cli-bindings.json5` and the action parser in `crates/tau-cli-term/src/lib.rs`.
 
 
 ## Built-in bindings
@@ -41,7 +41,7 @@ These keys are handled by the raw terminal prompt and are not configurable bindi
 
 ## Configurable actions
 
-Bindings live under `cli.bind` in config. The built-in bindings are merged below user bindings, so configuring one key does not remove the rest. Each binding is overridden as a whole record; built-in fields inside that binding are not preserved by partial overrides.
+Bindings live under `cli.bind` in config. The built-in bindings are merged below user bindings, so configuring one key does not remove the rest.
 
 - `prompt-previous` — move backward in prompt history.
 - `prompt-next` — move forward in prompt history.

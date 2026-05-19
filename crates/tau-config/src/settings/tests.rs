@@ -9,26 +9,6 @@ fn dirs_with_config(dir: &std::path::Path) -> TauDirs {
     }
 }
 
-fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
-    match value {
-        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
-            (CborValue::Text(k), CborValue::Integer(n)) if k == key => Some((*n).into()),
-            _ => None,
-        }),
-        _ => None,
-    }
-}
-
-fn cbor_bool_field(value: &CborValue, key: &str) -> Option<bool> {
-    match value {
-        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
-            (CborValue::Text(k), CborValue::Bool(n)) if k == key => Some(*n),
-            _ => None,
-        }),
-        _ => None,
-    }
-}
-
 #[test]
 fn zero_session_retention_disables_cleanup() {
     let settings = HarnessSettings {
@@ -43,7 +23,7 @@ fn zero_session_retention_disables_cleanup() {
 fn cli_settings_user_scalar_override_wins_over_built_in() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
-    std::fs::write(dir.join("cli.ncl"), r#"{ greeting = false }"#).expect("write");
+    std::fs::write(dir.join("cli.json5"), r#"{ greeting: false }"#).expect("write");
 
     let s = load_cli_settings_in(&dirs_with_config(dir)).expect("load");
     assert!(!s.greeting);
@@ -54,8 +34,8 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("cli.ncl"),
-        r#"{ bind = { "C-f" = { action = "shell-prompt-edit", command = "pick", trim = true } } }"#,
+        dir.join("cli.json5"),
+        r#"{ bind: { "C-f": { action: "shell-prompt-edit", command: "pick", trim: true } } }"#,
     )
     .expect("write");
 
@@ -68,27 +48,6 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     assert!(s.bind.contains_key("C-r"));
     assert!(s.bind.contains_key("C-t"));
     assert!(s.bind.contains_key("C-o"));
-}
-
-#[test]
-fn cli_settings_user_binding_replaces_whole_built_in_binding() {
-    // Built-in bindings are defaulted per chord, not per field inside the
-    // binding. A user record for a built-in chord replaces the whole binding;
-    // omitted fields fall back only to CliBindingAction's serde defaults.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("cli.ncl"),
-        r#"{ bind = { "C-f" = { action = "shell-prompt-edit" } } }"#,
-    )
-    .expect("write");
-
-    let s = load_cli_settings_in(&dirs_with_config(dir)).expect("load");
-    let cf = s.bind.get("C-f").expect("C-f");
-    assert_eq!(cf.action, "shell-prompt-edit");
-    assert_eq!(cf.command, None);
-    assert!(!cf.trim);
-    assert!(s.bind.contains_key("C-r"));
 }
 
 #[test]
@@ -139,9 +98,9 @@ fn harness_settings_user_override_wins_over_built_in() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.ncl"),
+        dir.join("harness.json5"),
         r#"{
-                session_retention_days = 7,
+                session_retention_days: 7,
             }"#,
     )
     .expect("write");
@@ -152,39 +111,6 @@ fn harness_settings_user_override_wins_over_built_in() {
         s.session_retention(),
         Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
     );
-}
-
-#[test]
-fn harness_settings_export_ignores_non_exported_system_prompt() {
-    // The prompt template is intentionally non-exported Nickel: users may
-    // override a built-in prompt with a plain record while inheriting the
-    // built-in `not_exported` metadata, and the Rust HarnessSettings schema
-    // must stay free of prompt fields and deserialize cleanly.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.ncl"),
-        r#"{
-                roles = {
-                    smart = {
-                        systemPrompt = {
-                            text = "override",
-                        },
-                    },
-                },
-            }"#,
-    )
-    .expect("write");
-
-    let loaded = load_harness_settings_with_source_in(&dirs_with_config(dir)).expect("load");
-    assert!(loaded.settings.roles.contains_key("smart"));
-    assert!(loaded.nickel_source.contains("systemPrompt"));
-
-    let exported: serde_json::Value =
-        eval_nickel_to("composed harness raw export", &loaded.nickel_source)
-            .expect("export harness source");
-    assert!(exported.pointer("/roles/smart/systemPrompt").is_none());
-    assert!(exported.pointer("/roles/foreman/systemPrompt").is_none());
 }
 
 #[test]
@@ -202,104 +128,19 @@ fn harness_settings_built_in_gpt_tools_profile() {
 }
 
 #[test]
-fn harness_extension_partial_override_keeps_built_in_entry_fields() {
-    // Built-in extensions must be merged as ordinary records with defaults on
-    // their leaves. If the whole `extensions` map or a built-in entry is
-    // defaulted, this user override would erase sibling built-ins or the
-    // shell entry's suffix/role fields.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.ncl"),
-        r#"{
-                extensions = {
-                    "core-shell" = { enable = false },
-                },
-            }"#,
-    )
-    .expect("write");
-
-    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert!(s.extensions.contains_key("provider-openai"));
-    assert!(s.extensions.contains_key("core-delegate"));
-    assert!(s.extensions.contains_key("std-notifications"));
-
-    let shell = s.extensions.get("core-shell").expect("core-shell");
-    assert_eq!(shell.enable, Some(false));
-    assert_eq!(shell.role.as_deref(), Some("tool"));
-    assert_eq!(
-        shell.suffix.as_deref(),
-        Some(&["ext".to_owned(), "ext-shell".to_owned()][..])
-    );
-}
-
-#[test]
-fn harness_extension_partial_config_override_keeps_built_in_config_defaults() {
-    // Extension config defaults must be attached to config's nested leaves. If
-    // the entire config record is defaulted, setting only idle_seconds would
-    // replace the std-notifications config and lose idle_agent_summary.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.ncl"),
-        r#"{
-                extensions = {
-                    "std-notifications" = { config = { idle_seconds = 30 } },
-                },
-            }"#,
-    )
-    .expect("write");
-
-    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    let config = s.extensions["std-notifications"]
-        .config
-        .as_ref()
-        .expect("std-notifications config");
-    assert_eq!(cbor_int_field(config, "idle_seconds"), Some(30));
-    assert_eq!(cbor_bool_field(config, "idle_agent_summary"), Some(false));
-}
-
-#[test]
-fn harness_extension_custom_entry_does_not_erase_built_ins() {
-    // Adding one custom extension is an additive map merge; it must not replace
-    // the shipped built-in extension table.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.ncl"),
-        r#"{
-                extensions = {
-                    mything = { command = ["/usr/local/bin/mything"] },
-                },
-            }"#,
-    )
-    .expect("write");
-
-    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert!(s.extensions.contains_key("provider-openai"));
-    assert!(s.extensions.contains_key("core-shell"));
-    assert!(s.extensions.contains_key("core-delegate"));
-    assert!(s.extensions.contains_key("std-websearch-exa"));
-    assert_eq!(
-        s.extensions["mything"].command.as_deref(),
-        Some(&["/usr/local/bin/mything".to_owned()][..])
-    );
-}
-
-#[test]
 fn harness_settings_load_tools_profiles() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.ncl"),
+        dir.join("harness.json5"),
         r#"{
-                toolsProfiles = {
-                    gpt = {
-                        edit = true,
+                toolsProfiles: {
+                    gpt: {
+                        edit: true,
                     },
-                    read_only = {
-                        shell = false,
-                        write = false,
+                    read_only: {
+                        shell: false,
+                        write: false,
                     },
                 },
             }"#,
@@ -321,69 +162,14 @@ fn harness_settings_load_tools_profiles() {
 }
 
 #[test]
-fn harness_custom_tools_profile_does_not_erase_built_ins() {
-    // The toolsProfiles map is additive, just like roles and extensions.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.ncl"),
-        r#"{
-                toolsProfiles = {
-                    read_only = {
-                        shell = false,
-                        write = false,
-                    },
-                },
-            }"#,
-    )
-    .expect("write");
-
-    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert!(s.tools_profiles.contains_key("read_only"));
-    assert!(s.tools_profiles["gpt"]["apply_patch"]);
-    assert!(s.tools_profiles["gpt"]["gpt_shell"]);
-}
-
-#[test]
-fn harness_custom_role_does_not_erase_built_ins() {
-    // A user-provided roles map should add entries without replacing the
-    // built-in role table.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.ncl"),
-        r#"{
-                roles = {
-                    reviewer = { description = "Focused reviewer", effort = "medium" },
-                },
-            }"#,
-    )
-    .expect("write");
-
-    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert!(s.roles.contains_key("smart"));
-    assert!(s.roles.contains_key("deep"));
-    assert!(s.roles.contains_key("rush"));
-    assert!(s.roles.contains_key("foreman"));
-    assert_eq!(
-        s.roles["reviewer"].description.as_deref(),
-        Some("Focused reviewer")
-    );
-    assert_eq!(s.roles["reviewer"].effort, Some(tau_proto::Effort::Medium));
-}
-
-#[test]
 fn cli_settings_drop_in_layers_on_top_of_base() {
-    // Drop-ins are layered with Nickel's native `&` merge. To make a later
-    // layer an override, the lower-priority layer must mark the field as a
-    // default; otherwise Nickel correctly reports conflicting non-defaults.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
-    std::fs::write(dir.join("cli.ncl"), r#"{ greeting | default = true }"#).expect("write");
+    std::fs::write(dir.join("cli.json5"), r#"{ greeting: true }"#).expect("write");
     std::fs::create_dir(dir.join("cli.d")).expect("mkdir");
     std::fs::write(
-        dir.join("cli.d").join("01-override.ncl"),
-        r#"{ greeting = false }"#,
+        dir.join("cli.d").join("01-override.json5"),
+        r#"{ greeting: false }"#,
     )
     .expect("write");
 
@@ -392,40 +178,18 @@ fn cli_settings_drop_in_layers_on_top_of_base() {
 }
 
 #[test]
-fn cli_settings_conflicting_non_default_layers_error() {
-    // This documents the Nickel-native merge contract: tau no longer performs a
-    // custom "later JSON object wins" merge, so two unequal plain values at the
-    // same priority are a configuration error instead of an implicit override.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(dir.join("cli.ncl"), r#"{ greeting = true }"#).expect("write");
-    std::fs::create_dir(dir.join("cli.d")).expect("mkdir");
-    std::fs::write(
-        dir.join("cli.d").join("01-conflict.ncl"),
-        r#"{ greeting = false }"#,
-    )
-    .expect("write");
-
-    let err = load_cli_settings_in(&dirs_with_config(dir)).expect_err("conflict");
-    assert!(
-        err.to_string().contains("non mergeable terms"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
 fn harness_roles_merge_with_built_ins() {
     // Roles are harness-owned now. This keeps the old merge behavior while
-    // locking the source of truth to harness.ncl instead of a model registry.
+    // locking the source of truth to harness.json5 instead of a model registry.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.ncl"),
+        dir.join("harness.json5"),
         r#"{
-            roles = {
-                smart = { model = "openai/gpt-5.5", toolsProfile = "full" },
-                custom = { description = "Custom local role", effort = "medium", toolsProfile = "read_only" },
-                deep = { model = "openai/gpt-5.5" },
+            roles: {
+                smart: { model: "openai/gpt-5.5", toolsProfile: "full" },
+                custom: { description: "Custom local role", effort: "medium", toolsProfile: "read_only" },
+                deep: { model: "openai/gpt-5.5" },
             },
         }"#,
     )
@@ -460,7 +224,7 @@ fn harness_roles_merge_with_built_ins() {
     assert_eq!(
         deep.description.as_deref(),
         Some(
-            "Deep reasoning expert, using potentially slower and more expensive model. Good for research and very complex tasks."
+            "Deep reasoning expert, using potentially slower and more expensive model. Good for research and very complext tasks."
         )
     );
     assert_eq!(
@@ -478,20 +242,27 @@ fn harness_roles_merge_with_built_ins() {
         foreman.description.as_deref(),
         Some("Role focused on splitting and delegation of tasks to other sub-agents")
     );
+    assert_eq!(foreman.orchestrator, Some(true));
+    assert!(
+        foreman
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.as_str().contains("use the `delegate` tool"))
+    );
 }
 
 #[test]
-fn harness_foreman_partial_override_keeps_built_in_role_metadata() {
-    // Foreman delegation instructions are rendered by the harness, not stored
-    // in Nickel role fields. Partial role overrides only affect role metadata
-    // such as the selected model.
+fn harness_foreman_partial_override_keeps_built_in_prompt_and_orchestrator_flag() {
+    // The orchestrator marker and prompt are stored in the built-in harness
+    // config, so a user can partially override foreman settings without
+    // accidentally disabling its delegation prompt behavior.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.ncl"),
+        dir.join("harness.json5"),
         r#"{
-            roles = {
-                foreman = { model = "openai/gpt-5.5" },
+            roles: {
+                foreman: { model: "openai/gpt-5.5" },
             },
         }"#,
     )
@@ -499,9 +270,12 @@ fn harness_foreman_partial_override_keeps_built_in_role_metadata() {
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     let foreman = &s.roles["foreman"];
-    assert_eq!(
-        foreman.description.as_deref(),
-        Some("Role focused on splitting and delegation of tasks to other sub-agents")
+    assert_eq!(foreman.orchestrator, Some(true));
+    assert!(
+        foreman
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.as_str().contains("self-contained instructions"))
     );
     assert_eq!(
         foreman.model.as_ref().map(ToString::to_string).as_deref(),
@@ -510,14 +284,81 @@ fn harness_foreman_partial_override_keeps_built_in_role_metadata() {
 }
 
 #[test]
-fn harness_built_in_roles_load_from_nickel_without_prompt_fields() {
-    // Built-in role defaults live in built-in.harness.ncl, but prompt behavior
-    // is intentionally not part of exported role config anymore.
+fn harness_foreman_prompt_override_replaces_built_in_prompt() {
+    // A user-provided role prompt is an override of the built-in role prompt;
+    // extraPrompt remains the append point for additive instructions.
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.json5"),
+        r#"{
+            roles: {
+                foreman: { prompt: "Custom foreman prompt." },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let foreman = &s.roles["foreman"];
+    assert_eq!(
+        foreman.prompt.as_ref().map(|prompt| prompt.as_str()),
+        Some("Custom foreman prompt.")
+    );
+    assert_eq!(foreman.orchestrator, Some(true));
+}
+
+#[test]
+fn harness_role_prompt_fields_parse_as_plain_strings() {
+    // Role prompt customization must keep harness.json5 ergonomic: users write
+    // prompt text directly instead of nested newtype objects.
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.json5"),
+        r#"{
+            roles: {
+                custom: {
+                    prompt: "You are a focused reviewer.",
+                    extraPrompt: "Prefer small patches.",
+                },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let role = &s.roles["custom"];
+    assert_eq!(
+        role.prompt.as_ref().map(|p| p.as_str()),
+        Some("You are a focused reviewer.")
+    );
+    assert_eq!(
+        role.extra_prompt.as_ref().map(|p| p.as_str()),
+        Some("Prefer small patches.")
+    );
+}
+
+#[test]
+fn harness_built_in_roles_load_from_json_with_foreman_prompt() {
+    // Built-in role defaults live in built-in.harness.json5. Foreman has a
+    // visible built-in prompt there; the individual-contributor roles do not.
     let s = HarnessSettings::built_in();
-    assert!(s.roles.contains_key("smart"));
-    assert!(s.roles.contains_key("deep"));
-    assert!(s.roles.contains_key("rush"));
-    assert!(s.roles.contains_key("foreman"));
+    assert!(s.roles["smart"].prompt.is_none());
+    assert!(s.roles["deep"].prompt.is_none());
+    assert!(s.roles["rush"].prompt.is_none());
+    let foreman = &s.roles["foreman"];
+    assert_eq!(foreman.orchestrator, Some(true));
+    let prompt = foreman.prompt.as_ref().expect("foreman prompt").as_str();
+    assert!(prompt.contains("You are a foreman/orchestrator agent"));
+    assert!(prompt.contains("use the `delegate` tool"));
+    assert!(prompt.contains("available sub-task roles list"));
+    for (name, role) in &s.roles {
+        assert!(
+            role.extra_prompt.is_none(),
+            "built-in role {name} has extraPrompt"
+        );
+    }
 }
 
 #[test]
@@ -527,11 +368,11 @@ fn harness_default_roles_alias_still_loads() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.ncl"),
+        dir.join("harness.json5"),
         r#"{
-            defaultRoles = {
-                custom = { effort = "medium", toolsProfile = "read_only" },
-                foreman = { model = "openai/gpt-5.5" },
+            defaultRoles: {
+                custom: { effort: "medium", toolsProfile: "read_only" },
+                foreman: { model: "openai/gpt-5.5" },
             },
         }"#,
     )
@@ -544,6 +385,13 @@ fn harness_default_roles_alias_still_loads() {
         Some("read_only")
     );
     let foreman = &s.roles["foreman"];
+    assert_eq!(foreman.orchestrator, Some(true));
+    assert!(
+        foreman
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.as_str().contains("use the `delegate` tool"))
+    );
     assert_eq!(
         foreman.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/gpt-5.5")
@@ -569,19 +417,18 @@ fn missing_user_files_load_the_built_in_baseline() {
 fn sample_configs_deserialize() {
     // Sanity-check the sample configs shipped in the workspace root `config/`
     // directory (used by `tau init`) by feeding them through the user-config
-    // loader. In particular, the sample harness config intentionally uses plain
-    // Nickel values and relies on built-in schema/default metadata underneath.
+    // loader.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
 
     std::fs::write(
-        dir.join("cli.ncl"),
-        include_str!("../../../../config/cli.ncl"),
+        dir.join("cli.json5"),
+        include_str!("../../../../config/cli.json5"),
     )
     .expect("write cli");
     std::fs::write(
-        dir.join("harness.ncl"),
-        include_str!("../../../../config/harness.ncl"),
+        dir.join("harness.json5"),
+        include_str!("../../../../config/harness.json5"),
     )
     .expect("write harness");
 

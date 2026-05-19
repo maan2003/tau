@@ -53,13 +53,13 @@ to scope to LinkedIn-style profiles or company pages.
 
 ## Configuration
 
-Enabled by default. Disable in `harness.ncl` if you'd rather not
+Enabled by default. Disable in `harness.json5` if you'd rather not
 make outbound HTTP calls:
 
-```nickel
+```json5
 {
-  extensions = {
-    "std-websearch-exa" = { enable = false },
+  extensions: {
+    "std-websearch-exa": { enable: false },
   },
 }
 ```
@@ -68,11 +68,11 @@ Override the upstream MCP endpoint via the `endpoint` field — useful
 for attaching a paid-tier `?exaApiKey=…` or pointing at a self-hosted
 `exa-mcp-server`:
 
-```nickel
+```json5
 {
-  extensions = {
-    "std-websearch-exa" = {
-      config = { endpoint = "https://mcp.exa.ai/mcp?exaApiKey=sk-…" },
+  extensions: {
+    "std-websearch-exa": {
+      config: { endpoint: "https://mcp.exa.ai/mcp?exaApiKey=sk-…" },
     },
   },
 }

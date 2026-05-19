@@ -92,31 +92,31 @@ having to bake "tau" into the title text.
 ## Configuration
 
 The extension reads its config from the `extensions.<name>.config`
-field of `harness.ncl`. All fields are optional; unknown fields
+field of `harness.json5`. All fields are optional; unknown fields
 are rejected with a `lifecycle.config_error` so the harness can
 surface typos to the user.
 
-```nickel
+```json5
 {
-  extensions = {
-    "std-notifications" = {
-      enable = true,
-      config = {
+  extensions: {
+    "std-notifications": {
+      enable: true,
+      config: {
         // Idle window (seconds) before the extension nudges the
         // user. Default: 60.
-        idle_seconds = 60,
+        idle_seconds: 60,
 
         // Ask the agent for a one-sentence idle summary before
         // notifying. Default: false; the default notification body is
         // the static "Waiting for user input" text.
-        idle_agent_summary = false,
+        idle_agent_summary: false,
 
         // Optional argv to invoke when the text notification
         // would normally fire (idle summary or fallback). The
         // command runs *in addition to* the OSC user-var write,
         // never instead of it, so existing terminal-side
         // consumers keep working.
-        idle_command = ["user-text-notification.sh"],
+        idle_command: ["user-text-notification.sh"],
       },
     },
   },
@@ -141,16 +141,16 @@ ignored. The main extension loop is never blocked on it.
 
 Examples:
 
-```nickel
+```json5
 // Plug in user-text-notification.sh directly.
-idle_command = ["user-text-notification.sh"]
+idle_command: ["user-text-notification.sh"]
 
 // Wrap in a custom dispatcher with extra args before the title.
-idle_command = ["my-notify.sh", "--channel", "tau-agent"]
+idle_command: ["my-notify.sh", "--channel", "tau-agent"]
 
 // Use anything that reads stdin: notify-send needs the body as an
 // arg, so wrap it in a shell:
-idle_command = [
+idle_command: [
   "bash", "-c",
   "body=$(cat); notify-send --app-name=tau \"$1\" \"$body\"",
   "_tau",

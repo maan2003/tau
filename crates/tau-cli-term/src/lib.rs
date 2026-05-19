@@ -394,7 +394,7 @@ enum PromptShellResult {
 }
 
 impl PromptShellAction {
-    // Keep this action list, built-in.cli.ncl's bind defaults, and
+    // Keep this action list, built-in.cli-bindings.json5, and
     // docs/cli-keybindings.md in sync.
     fn parse(action: &str) -> Option<Self> {
         match action {

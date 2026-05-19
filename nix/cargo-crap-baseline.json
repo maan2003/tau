@@ -2658,15 +2658,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-harness/src/prompt.rs",
-      "function": "nickel_string_literal",
-      "line": 131,
-      "cyclomatic": 9.0,
-      "coverage": 75.0,
-      "crap": 10.265625,
-      "crate": "tau-harness"
-    },
-    {
       "file": "/build/source/crates/tau-ext-shell/src/tools/grep.rs",
       "function": "read_grep_json",
       "line": 298,
@@ -4045,15 +4036,6 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/prompt.rs",
-      "function": "format_nickel_error",
-      "line": 152,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-harness/src/prompt.rs",
       "function": "assemble_prompt_context_from",
       "line": 255,
       "cyclomatic": 6.0,
@@ -4609,15 +4591,6 @@
       "coverage": 96.15384615384616,
       "crap": 5.001422394173874,
       "crate": "tau-cli-term-raw"
-    },
-    {
-      "file": "/build/source/crates/tau-config/src/settings.rs",
-      "function": "composed_nickel_source_with_builtin",
-      "line": 655,
-      "cyclomatic": 5.0,
-      "coverage": 96.29629629629629,
-      "crap": 5.001270131585632,
-      "crate": "tau-config"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -6681,15 +6654,6 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-harness/src/prompt.rs",
-      "function": "nickel_skills_literal",
-      "line": 90,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-harness"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/harness/skill_tool.rs",
       "function": "skill_body_from_prefix",
       "line": 508,
@@ -7201,15 +7165,6 @@
       "coverage": 85.71428571428571,
       "crap": 2.011661807580175,
       "crate": "tau-ext-websearch-exa"
-    },
-    {
-      "file": "/build/source/crates/tau-config/src/settings.rs",
-      "function": "format_nickel_error",
-      "line": 726,
-      "cyclomatic": 2.0,
-      "coverage": 87.5,
-      "crap": 2.0078125,
-      "crate": "tau-config"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -8576,24 +8531,6 @@
       "line": 611,
       "cyclomatic": 1.0,
       "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-config"
-    },
-    {
-      "file": "/build/source/crates/tau-config/src/settings.rs",
-      "function": "load_nickel_layered_with_builtin",
-      "line": 646,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "tau-config"
-    },
-    {
-      "file": "/build/source/crates/tau-config/src/settings.rs",
-      "function": "eval_nickel_to",
-      "line": 686,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
       "crap": 2.0,
       "crate": "tau-config"
     },

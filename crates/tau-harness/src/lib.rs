@@ -50,4 +50,4 @@ pub use crate::daemon::{run_daemon_with_echo, run_embedded_message_with_echo};
 pub use crate::error::HarnessError;
 pub use crate::extension::{harness_log_path, session_logs_dir};
 pub use crate::format::{format_extension_event, format_tool_progress};
-pub use crate::settings::default_config;
+pub use crate::settings::{builtin_extensions, default_config};

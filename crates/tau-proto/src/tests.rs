@@ -826,7 +826,7 @@ fn thinking_summary_round_trips_through_display_and_from_str() {
 }
 
 /// `ModelParams` serializes its bundled knobs as a flat object that
-/// drops fields at their default value. Lets `harness.ncl`
+/// drops fields at their default value. Lets `harness.json5`
 /// snapshots stay tiny and avoids surprising callers that introspect
 /// the wire shape.
 #[test]

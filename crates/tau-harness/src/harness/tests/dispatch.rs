@@ -1464,7 +1464,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
     .expect("finish first");
 
     // Simulate a skill becoming visible in the system prompt between
-    // turns. `render_builtin_system_prompt` renders any `add_to_prompt: true`
+    // turns. `build_system_prompt` renders any `add_to_prompt: true`
     // skill into the prompt body, so inserting one here is the
     // narrowest way to make the system_prompt string drift without
     // touching unrelated state.
@@ -4153,10 +4153,10 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
 }
 
 /// An explicit `delegate` role must be a real role switch for the sub-agent,
-/// not just UI metadata: the prompt uses that role's model, params, and tool
-/// profile.
+/// not just UI metadata: the prompt uses that role's model, params, prompt, and
+/// tool profile.
 #[test]
-fn delegate_explicit_role_uses_role_model_params_and_tools() {
+fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -4177,6 +4177,7 @@ fn delegate_explicit_role_uses_role_model_params_and_tools() {
             "smart".to_owned(),
             tau_config::settings::AgentRole {
                 model: Some(smart_model),
+                prompt: Some(tau_proto::PromptContent::new("SMART ROLE PROMPT")),
                 ..Default::default()
             },
         ),
@@ -4188,6 +4189,8 @@ fn delegate_explicit_role_uses_role_model_params_and_tools() {
                 verbosity: Some(tau_proto::Verbosity::High),
                 thinking_summary: Some(tau_proto::ThinkingSummary::Auto),
                 service_tier: Some(tau_proto::ServiceTier::Flex),
+                prompt: Some(tau_proto::PromptContent::new("WORKER ROLE PROMPT")),
+                extra_prompt: Some(tau_proto::PromptContent::new("WORKER EXTRA PROMPT")),
                 tools_profile: Some("worker-tools".to_owned()),
                 ..Default::default()
             },
@@ -4276,7 +4279,9 @@ fn delegate_explicit_role_uses_role_model_params_and_tools() {
         prompt.model_params.service_tier,
         Some(tau_proto::ServiceTier::Flex)
     );
-    assert!(!prompt.system_prompt.contains("foreman/orchestrator agent"));
+    assert!(prompt.system_prompt.contains("WORKER ROLE PROMPT"));
+    assert!(prompt.system_prompt.contains("WORKER EXTRA PROMPT"));
+    assert!(!prompt.system_prompt.contains("SMART ROLE PROMPT"));
     assert!(prompt.system_prompt.contains("ALLOWED TOOL PROMPT"));
     assert!(!prompt.system_prompt.contains("DENIED TOOL PROMPT"));
     assert!(

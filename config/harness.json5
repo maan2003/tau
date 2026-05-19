@@ -1,0 +1,58 @@
+{
+  // Provider extensions publish the live model list and model metadata at
+  // runtime. Harness config owns role defaults and extension settings.
+  // Use `/model <role>` to switch and `/role ...` to edit persisted role
+  // overrides.
+
+  // Optional role defaults. Built-in roles are merged underneath this map:
+  // smart = state-of-the-art default, deep = xhigh/detailed,
+  // rush = fast/cheap low reasoning, foreman = orchestration/delegation.
+  // Role `description` is shown in `/role ...` completions. Role `prompt`
+  // replaces the built-in role prompt, if any; `extraPrompt`
+  // appends additional role-specific instructions after it. Set
+  // `orchestrator: true` to append available sub-task roles to the role prompt.
+  // roles: {
+  //   smart: {
+  //     // description: "Balanced coding assistant.",
+  //     // model: "chatgpt/gpt-5.5",
+  //     // toolsProfile: "read_only",
+  //     // prompt: "You are a careful coding assistant.",
+  //     // extraPrompt: "Prefer small, reviewable changes.",
+  //   },
+  //   deep: {
+  //     // effort: "xhigh",
+  //     // thinkingSummary: "detailed",
+  //   },
+  //   rush: {
+  //     // effort: "low",
+  //     // thinkingSummary: "off",
+  //   },
+  // },
+
+  // Optional named per-role tool overlays. Each entry maps tool name to
+  // enabled/disabled and overrides that tool's `enabled_by_default` hint.
+  // toolsProfiles: {
+  //   // Built in by default:
+  //   // gpt: {
+  //   //   apply_patch: true,
+  //   //   edit: false,
+  //   //   find: false,
+  //   //   grep: false,
+  //   //   ls: false,
+  //   //   read: false,
+  //   //   write: false,
+  //   // },
+  //   read_only: {
+  //     shell: false,
+  //     write: false,
+  //     edit: false,
+  //   },
+  // },
+
+  // Optional built-in extension overrides.
+  // extensions: {
+  //   "core-shell": { enable: false },
+  //   "provider-openai": { enable: false },
+  //   "test-dummy": { enable: true },
+  // },
+}

@@ -101,7 +101,7 @@ pub trait Searcher: Send + Sync + 'static {
 ///
 /// All fields optional with `#[serde(default)]` so an empty or
 /// missing config object falls back to compiled-in defaults.
-/// `deny_unknown_fields` surfaces typos in `harness.ncl` as
+/// `deny_unknown_fields` surfaces typos in `harness.json5` as
 /// actionable `ConfigError`s instead of silently ignoring them.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]

@@ -1,7 +1,7 @@
 //! User configuration loading.
 //!
-//! Settings live in `~/.config/tau/` as Nickel: `cli.ncl` and
-//! `harness.ncl`, each with an optional `*.d/*.ncl` drop-in directory
+//! Settings live in `~/.config/tau/` as JSON5: `cli.json5` and
+//! `harness.json5`, each with an optional `*.d/*.json5` drop-in directory
 //! for layered overrides. See
 //! [`settings`] for the schema and loader entry points.
 //!

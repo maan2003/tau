@@ -1,0 +1,48 @@
+// Built-in extensions shipped with tau. argv = prefix ++ command ++ suffix.
+// When `command` is omitted, `builtin_extensions()` fills it with the
+// running tau binary, so each built-in only needs to specify the
+// extension subcommand in `suffix`.
+[
+    {
+        name: "provider-openai",
+        suffix: ["ext", "ext-provider-openai"],
+        role: "provider",
+        enable: true,
+        config: {},
+    },
+    {
+        name: "core-shell",
+        suffix: ["ext", "ext-shell"],
+        role: "tool",
+        enable: true,
+        config: {},
+    },
+    {
+        name: "test-dummy",
+        suffix: ["ext", "ext-test-dummy"],
+        role: "tool",
+        enable: false,
+        config: {},
+    },
+    {
+        name: "core-delegate",
+        suffix: ["ext", "ext-core-delegate"],
+        role: "tool",
+        enable: true,
+        config: {},
+    },
+    {
+        name: "std-notifications",
+        suffix: ["ext", "ext-std-notifications"],
+        role: "tool",
+        enable: true,
+        config: { idle_seconds: 60, idle_agent_summary: false },
+    },
+    {
+        name: "std-websearch-exa",
+        suffix: ["ext", "ext-websearch-exa"],
+        role: "tool",
+        enable: true,
+        config: {},
+    },
+]

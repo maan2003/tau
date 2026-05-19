@@ -61,7 +61,7 @@ pub struct Disconnect {
 /// point-to-point from the harness to the extension immediately
 /// after the harness sees the extension's
 /// [`Hello`](crate::Hello). Carries whatever the
-/// `config = { … }` value was for that extension in `harness.ncl`,
+/// `config: { … }` value was for that extension in `harness.json5`,
 /// or [`CborValue::Null`] / an empty map when no config was
 /// provided.
 ///
@@ -75,7 +75,7 @@ pub struct Configure {
 /// Reported by an extension when its
 /// [`Configure`](Configure) value is malformed (or
 /// otherwise unusable). The harness surfaces the message just like
-/// a `harness.ncl` parse error so the user can see why their
+/// a `harness.json5` parse error so the user can see why their
 /// per-extension config was rejected.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ConfigError {
