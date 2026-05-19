@@ -613,6 +613,526 @@ struct TerminalInputLoopCtx {
     prompt_history: PromptHistoryStore,
 }
 
+/// Local UI output used by the input thread while it holds `&mut HighTerm`.
+///
+/// The input loop cannot borrow `HighTerm` for rendering while it is also
+/// waiting on `get_next_event`, so this helper owns a cloned `TermHandle` and
+/// keeps the local status/echo styling in one place.
+struct LocalTerminalOutput {
+    handle: tau_cli_term::TermHandle,
+    theme: tau_themes::Theme,
+}
+
+impl LocalTerminalOutput {
+    fn new(handle: tau_cli_term::TermHandle, theme: tau_themes::Theme) -> Self {
+        Self { handle, theme }
+    }
+
+    fn system_info(&self, message: &str) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        self.handle.print_output(
+            "system-info",
+            themed_block(&self.theme, names::SYSTEM_INFO, message.to_owned()),
+        );
+    }
+
+    fn command_echo(&self, text: &str) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        self.handle.print_output(
+            "user-command",
+            themed_block(&self.theme, names::USER_PROMPT, text.to_owned()),
+        );
+    }
+}
+
+/// Result of trying to consume a submitted line as a local command.
+///
+/// `NotHandled` means the line should become a normal user prompt. `Continue`
+/// means a command consumed the line and the loop should wait for more input.
+/// `Exit` carries the daemon-disposition decision for `/quit` and `/detach`.
+enum CommandOutcome {
+    NotHandled,
+    Continue,
+    Exit(InputLoopExit),
+}
+
+/// Mutable state for one terminal input loop invocation.
+///
+/// Keeping the borrows and owned context together lets each command-family
+/// helper stay small while still sharing the same writer, session id, draft
+/// mailbox, and local output path as the old monolithic loop.
+struct TerminalInputSession<'a> {
+    term: &'a mut tau_cli_term::HighTerm,
+    writer: &'a WriterHandle,
+    session_id: &'a mut String,
+    ctx: TerminalInputLoopCtx,
+    output: LocalTerminalOutput,
+}
+
+impl<'a> TerminalInputSession<'a> {
+    fn run(&mut self) -> Result<InputLoopExit, CliError> {
+        loop {
+            let event = self.term.get_next_event()?;
+            if let Some(exit) = self.handle_event(event)? {
+                return Ok(exit);
+            }
+        }
+    }
+
+    fn handle_event(
+        &mut self,
+        event: tau_cli_term::Event,
+    ) -> Result<Option<InputLoopExit>, CliError> {
+        use tau_cli_term::Event as TermEvent;
+
+        match event {
+            TermEvent::Line(line) => self.handle_line(&line),
+            TermEvent::Eof => Ok(self.handle_eof()),
+            other => {
+                self.handle_non_exit_event(other);
+                Ok(None)
+            }
+        }
+    }
+
+    fn handle_non_exit_event(&self, event: tau_cli_term::Event) {
+        use tau_cli_term::Event as TermEvent;
+
+        // These events update local UI/session state only; none of them can
+        // terminate the input loop, unlike submitted lines and EOF.
+
+        match event {
+            TermEvent::Resize { .. } => {
+                tracing::debug!(target: "tau_cli::ui", "terminal resized");
+            }
+            TermEvent::BufferChanged => self.update_draft(),
+            TermEvent::FastToggle => self.toggle_fast_service_tier(),
+            TermEvent::RoleCycle | TermEvent::BackTab => self.cycle_role(),
+            TermEvent::Line(_) | TermEvent::Eof => {}
+        }
+    }
+
+    fn handle_line(&mut self, line: &str) -> Result<Option<InputLoopExit>, CliError> {
+        let text = line.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+
+        // Preserve the original side-effect order: every non-empty line is
+        // recorded before command handling, and local slash commands are echoed
+        // before they produce validation errors or exit the loop.
+        self.record_prompt_line(line, text);
+        if is_local_slash_command(text) {
+            self.output.command_echo(text);
+        }
+        self.handle_recorded_line(text)
+    }
+
+    fn handle_recorded_line(&mut self, text: &str) -> Result<Option<InputLoopExit>, CliError> {
+        match self.handle_known_command(text)? {
+            CommandOutcome::NotHandled => Ok(self.submit_prompt(text)),
+            CommandOutcome::Continue => Ok(None),
+            CommandOutcome::Exit(exit) => Ok(Some(exit)),
+        }
+    }
+
+    fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
+        // Keep session-lifecycle commands first: `/quit` and `/detach` exit
+        // immediately, while `/new` mutates `session_id` for later commands and
+        // prompt submission.
+        let outcome = self.handle_session_command(text)?;
+        if !matches!(outcome, CommandOutcome::NotHandled) {
+            return Ok(outcome);
+        }
+        if self.handle_non_session_command(text) {
+            return Ok(CommandOutcome::Continue);
+        }
+        Ok(CommandOutcome::NotHandled)
+    }
+
+    fn handle_non_session_command(&self, text: &str) -> bool {
+        // The grouping mirrors the old dispatch order while keeping each
+        // command-family helper below the cargo-crap hotspot range.
+        self.handle_navigation_or_role_shortcut(text) || self.handle_utility_or_shell_shortcut(text)
+    }
+
+    fn handle_navigation_or_role_shortcut(&self, text: &str) -> bool {
+        self.handle_tree_or_compact_command(text) || self.handle_role_setting_shortcut(text)
+    }
+
+    fn handle_utility_or_shell_shortcut(&self, text: &str) -> bool {
+        self.handle_utility_command(text)
+            || self.handle_role_selection_command(text)
+            || self.handle_shell_shortcut(text)
+    }
+
+    fn record_prompt_line(&self, line: &str, text: &str) {
+        if let Err(error) = self.ctx.prompt_history.append(line) {
+            tracing::warn!(target: "tau_cli::ui", %error, "failed to append persistent prompt history");
+        }
+        if let Ok(mut context) = self.ctx.editor_context.lock() {
+            context.previous_prompt = Some(text.to_owned());
+        }
+    }
+
+    fn handle_session_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
+        if text == "/quit" {
+            return Ok(CommandOutcome::Exit(InputLoopExit::Quit));
+        }
+        if text == "/cancel" {
+            let _ = send_event(
+                self.writer,
+                &Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+                    session_id: self.session_id.as_str().into(),
+                    // Broadcast cancel — abort whatever's in
+                    // flight, regardless of spid. The targeted
+                    // variant is used by the harness for
+                    // surgical preempts.
+                    session_prompt_id: None,
+                }),
+            );
+            return Ok(CommandOutcome::Continue);
+        }
+        if text == "/detach" {
+            // Tell the harness to stay alive after we leave,
+            // then exit the UI. If the write fails we still
+            // exit — the daemon will notice the disconnect
+            // and fall back to its default behavior.
+            let _ = send_event(
+                self.writer,
+                &Event::UiDetachRequest(tau_proto::UiDetachRequest {}),
+            );
+            return Ok(CommandOutcome::Exit(InputLoopExit::Detach));
+        }
+        if text == "/new" {
+            let cwd = std::env::current_dir()?;
+            let new_id = crate::daemon::mint_session_id(&cwd);
+            let _ = send_event(
+                self.writer,
+                &Event::UiSwitchSession(tau_proto::UiSwitchSession {
+                    new_session_id: new_id.as_str().into(),
+                    reason: tau_proto::SessionStartReason::New,
+                }),
+            );
+            *self.session_id = new_id;
+            return Ok(CommandOutcome::Continue);
+        }
+
+        Ok(CommandOutcome::NotHandled)
+    }
+
+    fn handle_tree_or_compact_command(&self, text: &str) -> bool {
+        self.handle_tree_command(text) || self.handle_compact_command(text)
+    }
+
+    fn handle_tree_command(&self, text: &str) -> bool {
+        if text == "/tree" {
+            let _ = send_event(
+                self.writer,
+                &Event::UiTreeRequest(tau_proto::UiTreeRequest {
+                    session_id: self.session_id.as_str().into(),
+                }),
+            );
+            return true;
+        }
+        if let Some(arg) = text.strip_prefix("/tree ") {
+            self.navigate_tree(arg.trim());
+            return true;
+        }
+        false
+    }
+
+    fn navigate_tree(&self, arg: &str) {
+        match arg.parse::<u64>() {
+            Ok(node_id) => {
+                let _ = send_event(
+                    self.writer,
+                    &Event::UiNavigateTree(tau_proto::UiNavigateTree {
+                        session_id: self.session_id.as_str().into(),
+                        node_id,
+                    }),
+                );
+            }
+            Err(_) => {
+                self.output
+                    .system_info("/tree <id>: id must be a non-negative integer");
+            }
+        }
+    }
+
+    fn handle_compact_command(&self, text: &str) -> bool {
+        if text == "/compact" {
+            let _ = send_event(
+                self.writer,
+                &Event::UiCompactRequest(tau_proto::UiCompactRequest {
+                    session_id: self.session_id.as_str().into(),
+                }),
+            );
+            return true;
+        }
+        if text.starts_with("/compact ") {
+            self.output
+                .system_info("/compact forces a compaction pass and takes no arguments");
+            return true;
+        }
+        false
+    }
+
+    fn handle_role_setting_shortcut(&self, text: &str) -> bool {
+        self.handle_effort_shortcut(text)
+            || self.handle_fast_shortcut(text)
+            || self.handle_verbosity_shortcut(text)
+            || self.handle_thinking_summary_shortcut(text)
+    }
+
+    fn handle_effort_shortcut(&self, text: &str) -> bool {
+        if let Some(arg) = text.strip_prefix("/effort ") {
+            self.update_current_role_setting("effort", arg.trim(), "/effort");
+            return true;
+        }
+        if text == "/effort" {
+            self.output.system_info(
+                "/effort <level> — one of: reset, off, minimal, low, medium, high, xhigh",
+            );
+            return true;
+        }
+        false
+    }
+
+    fn handle_fast_shortcut(&self, text: &str) -> bool {
+        if text == "/fast" {
+            self.toggle_fast_service_tier();
+            return true;
+        }
+        if text.starts_with("/fast ") {
+            self.output.system_info("/fast toggles Fast mode");
+            return true;
+        }
+        false
+    }
+
+    fn handle_verbosity_shortcut(&self, text: &str) -> bool {
+        if let Some(arg) = text.strip_prefix("/verbosity ") {
+            self.update_current_role_setting("verbosity", arg.trim(), "/verbosity");
+            return true;
+        }
+        if text == "/verbosity" {
+            self.output
+                .system_info("/verbosity <level> — one of: reset, low, medium, high");
+            return true;
+        }
+        false
+    }
+
+    fn handle_thinking_summary_shortcut(&self, text: &str) -> bool {
+        if let Some(arg) = text.strip_prefix("/thinking-summary ") {
+            self.update_current_role_setting("thinking-summary", arg.trim(), "/thinking-summary");
+            return true;
+        }
+        if text == "/thinking-summary" {
+            self.output.system_info(
+                "/thinking-summary <mode> — one of: reset, off, auto, concise, detailed",
+            );
+            return true;
+        }
+        false
+    }
+
+    fn update_current_role_setting(&self, setting: &str, value: &str, command: &str) {
+        match parse_role_setting_update(setting, value) {
+            Ok(action) => self.send_current_role_update(action),
+            Err(error) => self.output.system_info(&format!("{command}: {error}")),
+        }
+    }
+
+    fn handle_utility_command(&self, text: &str) -> bool {
+        if let Some(provider) = text.strip_prefix("/provider-auth ") {
+            let provider = provider.trim();
+            if !provider.is_empty() {
+                let output = &self.output;
+                run_provider_auth(provider, &|message| output.system_info(message));
+            }
+            return true;
+        }
+        if text == "/provider-auth" {
+            let output = &self.output;
+            run_provider_auth("", &|message| output.system_info(message));
+            return true;
+        }
+        if text == "/set" || text.starts_with("/set ") {
+            let output = &self.output;
+            handle_set_command(text, &self.ctx.renderer_tx, &|message| {
+                output.system_info(message);
+            });
+            return true;
+        }
+
+        false
+    }
+
+    fn handle_role_selection_command(&self, text: &str) -> bool {
+        if text == "/role" || text.starts_with("/role ") {
+            let output = &self.output;
+            handle_role_command(text, self.writer, &|message| output.system_info(message));
+            return true;
+        }
+        if let Some(role) = text.strip_prefix("/model ") {
+            let role = role.trim();
+            if !role.is_empty() {
+                let _ = send_event(
+                    self.writer,
+                    &Event::UiRoleSelect(tau_proto::UiRoleSelect {
+                        role: role.to_owned(),
+                    }),
+                );
+            }
+            return true;
+        }
+        if text == "/model" {
+            // No argument — just a reminder.
+            return true;
+        }
+
+        false
+    }
+
+    fn handle_shell_shortcut(&self, text: &str) -> bool {
+        // `!!<cmd>` / `!<cmd>`: run a shell command locally.
+        // `!!` excludes the result from the agent's context;
+        // `!` (single bang) includes it.
+        if let Some(command) = text.strip_prefix("!!") {
+            if let Err(error) = self.send_shell_shortcut(command, false) {
+                tracing::warn!(target: "tau_cli::ui", %error, "failed to send !! shell command");
+            }
+            return true;
+        }
+        if let Some(command) = text.strip_prefix('!') {
+            if let Err(error) = self.send_shell_shortcut(command, true) {
+                tracing::warn!(target: "tau_cli::ui", %error, "failed to send ! shell command");
+            }
+            return true;
+        }
+
+        false
+    }
+
+    fn send_shell_shortcut(&self, command: &str, include_in_context: bool) -> io::Result<()> {
+        let command = command.trim();
+        if command.is_empty() {
+            return Ok(());
+        }
+        send_shell_command(self.writer, self.session_id, command, include_in_context)
+    }
+
+    fn submit_prompt(&self, text: &str) -> Option<InputLoopExit> {
+        // Submission terminates the in-flight draft window —
+        // the buffer just got cleared by the user pressing
+        // Enter, so any pending draft is now stale. Invalidate
+        // before sending the submission so a debounce thread that
+        // already took an older snapshot can't emit it afterward.
+        let (mtx, cv) = &*self.ctx.draft_handle;
+        if let Ok(mut g) = mtx.lock() {
+            g.epoch = g.epoch.wrapping_add(1);
+            g.pending = None;
+            cv.notify_one();
+        }
+
+        self.ctx
+            .agent_in_progress
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if send_event(
+            self.writer,
+            &Event::UiPromptSubmitted(UiPromptSubmitted {
+                session_id: self.session_id.as_str().into(),
+                text: text.to_owned(),
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            }),
+        )
+        .is_err()
+        {
+            return Some(InputLoopExit::Quit);
+        }
+
+        None
+    }
+
+    fn handle_eof(&self) -> Option<InputLoopExit> {
+        if self
+            .ctx
+            .agent_in_progress
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.output.system_info(EOF_DURING_AGENT_NOTICE);
+            return None;
+        }
+
+        Some(InputLoopExit::Quit)
+    }
+
+    fn update_draft(&self) {
+        // Trailing-edge debounce: stash the latest buffer
+        // contents and wake the debounce thread; it will
+        // coalesce a typing burst into one `UiPromptDraft`
+        // per `DRAFT_DEBOUNCE` window.
+        let text = self.term.handle().get_buffer();
+        let (mtx, cv) = &*self.ctx.draft_handle;
+        if let Ok(mut g) = mtx.lock() {
+            g.pending = Some((
+                g.epoch,
+                UiPromptDraft {
+                    session_id: self.session_id.as_str().into(),
+                    text,
+                },
+            ));
+            tracing::trace!(target: "tau_cli::ui", "prompt draft updated");
+            cv.notify_one();
+        }
+    }
+
+    fn toggle_fast_service_tier(&self) {
+        // `fast_service_tier_state` is kept in sync by renderer events. Toggling
+        // from Fast sends `None` to restore the role/model default; toggling from
+        // any other state requests explicit Fast service.
+        let enabled = self
+            .ctx
+            .fast_service_tier_state
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let service_tier = if enabled {
+            None
+        } else {
+            Some(tau_proto::ServiceTier::Fast)
+        };
+        self.send_current_role_update(tau_proto::UiRoleUpdateAction::SetServiceTier {
+            service_tier,
+        });
+    }
+
+    fn send_current_role_update(&self, action: tau_proto::UiRoleUpdateAction) {
+        let output = &self.output;
+        send_current_role_update(
+            self.writer,
+            &self.ctx.current_role_state,
+            action,
+            &|message| output.system_info(message),
+        );
+    }
+
+    fn cycle_role(&self) {
+        let output = &self.output;
+        cycle_role(
+            self.writer,
+            &self.ctx.current_role_state,
+            &self.ctx.roles_available,
+            &|message| output.system_info(message),
+        );
+    }
+}
+
 fn terminal_input_loop(
     term: &mut tau_cli_term::HighTerm,
     writer: &WriterHandle,
@@ -623,339 +1143,15 @@ fn terminal_input_loop(
     // validation errors (`/effort foo`, `/tree blah`) from this
     // thread without borrowing `term` while the loop also holds
     // `&mut term` for `get_next_event`.
-    let local_handle = term.handle().clone();
-    let print_local = |message: &str| {
-        use tau_cli_term::resolve::themed_block;
-        use tau_themes::names;
-        local_handle.print_output(
-            "system-info",
-            themed_block(&ctx.theme, names::SYSTEM_INFO, message.to_owned()),
-        );
-    };
-    let print_local_command = |text: &str| {
-        use tau_cli_term::resolve::themed_block;
-        use tau_themes::names;
-        local_handle.print_output(
-            "user-command",
-            themed_block(&ctx.theme, names::USER_PROMPT, text.to_owned()),
-        );
-    };
-    use tau_cli_term::Event as TermEvent;
-
-    loop {
-        match term.get_next_event()? {
-            TermEvent::Line(line) => {
-                let text = line.trim();
-                if text.is_empty() {
-                    continue;
-                }
-                if let Err(error) = ctx.prompt_history.append(&line) {
-                    tracing::warn!(target: "tau_cli::ui", %error, "failed to append persistent prompt history");
-                }
-                if let Ok(mut context) = ctx.editor_context.lock() {
-                    context.previous_prompt = Some(text.to_owned());
-                }
-                if is_local_slash_command(text) {
-                    print_local_command(text);
-                }
-                if text == "/quit" {
-                    return Ok(InputLoopExit::Quit);
-                }
-                if text == "/cancel" {
-                    let _ = send_event(
-                        writer,
-                        &Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-                            session_id: session_id.as_str().into(),
-                            // Broadcast cancel — abort whatever's in
-                            // flight, regardless of spid. The targeted
-                            // variant is used by the harness for
-                            // surgical preempts.
-                            session_prompt_id: None,
-                        }),
-                    );
-                    continue;
-                }
-                if text == "/detach" {
-                    // Tell the harness to stay alive after we leave,
-                    // then exit the UI. If the write fails we still
-                    // exit — the daemon will notice the disconnect
-                    // and fall back to its default behavior.
-                    let _ = send_event(
-                        writer,
-                        &Event::UiDetachRequest(tau_proto::UiDetachRequest {}),
-                    );
-                    return Ok(InputLoopExit::Detach);
-                }
-                if text == "/new" {
-                    let cwd = std::env::current_dir()?;
-                    let new_id = crate::daemon::mint_session_id(&cwd);
-                    let _ = send_event(
-                        writer,
-                        &Event::UiSwitchSession(tau_proto::UiSwitchSession {
-                            new_session_id: new_id.as_str().into(),
-                            reason: tau_proto::SessionStartReason::New,
-                        }),
-                    );
-                    *session_id = new_id;
-                    continue;
-                }
-                if text == "/tree" {
-                    let _ = send_event(
-                        writer,
-                        &Event::UiTreeRequest(tau_proto::UiTreeRequest {
-                            session_id: session_id.as_str().into(),
-                        }),
-                    );
-                    continue;
-                }
-                if let Some(arg) = text.strip_prefix("/tree ") {
-                    match arg.trim().parse::<u64>() {
-                        Ok(node_id) => {
-                            let _ = send_event(
-                                writer,
-                                &Event::UiNavigateTree(tau_proto::UiNavigateTree {
-                                    session_id: session_id.as_str().into(),
-                                    node_id,
-                                }),
-                            );
-                        }
-                        Err(_) => {
-                            print_local("/tree <id>: id must be a non-negative integer");
-                        }
-                    }
-                    continue;
-                }
-                if text == "/compact" {
-                    let _ = send_event(
-                        writer,
-                        &Event::UiCompactRequest(tau_proto::UiCompactRequest {
-                            session_id: session_id.as_str().into(),
-                        }),
-                    );
-                    continue;
-                }
-                if text.starts_with("/compact ") {
-                    print_local("/compact forces a compaction pass and takes no arguments");
-                    continue;
-                }
-                if let Some(arg) = text.strip_prefix("/effort ") {
-                    match parse_role_setting_update("effort", arg.trim()) {
-                        Ok(action) => send_current_role_update(
-                            writer,
-                            &ctx.current_role_state,
-                            action,
-                            &print_local,
-                        ),
-                        Err(msg) => print_local(&format!("/effort: {msg}")),
-                    }
-                    continue;
-                }
-                if text == "/effort" {
-                    print_local(
-                        "/effort <level> — one of: reset, off, minimal, low, medium, high, xhigh",
-                    );
-                    continue;
-                }
-                if text == "/fast" {
-                    let enabled = ctx
-                        .fast_service_tier_state
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    let service_tier = if enabled {
-                        None
-                    } else {
-                        Some(tau_proto::ServiceTier::Fast)
-                    };
-                    send_current_role_update(
-                        writer,
-                        &ctx.current_role_state,
-                        tau_proto::UiRoleUpdateAction::SetServiceTier { service_tier },
-                        &print_local,
-                    );
-                    continue;
-                }
-                if text.starts_with("/fast ") {
-                    print_local("/fast toggles Fast mode");
-                    continue;
-                }
-                if let Some(arg) = text.strip_prefix("/verbosity ") {
-                    match parse_role_setting_update("verbosity", arg.trim()) {
-                        Ok(action) => send_current_role_update(
-                            writer,
-                            &ctx.current_role_state,
-                            action,
-                            &print_local,
-                        ),
-                        Err(error) => print_local(&format!("/verbosity: {error}")),
-                    }
-                    continue;
-                }
-                if text == "/verbosity" {
-                    print_local("/verbosity <level> — one of: reset, low, medium, high");
-                    continue;
-                }
-                if let Some(arg) = text.strip_prefix("/thinking-summary ") {
-                    match parse_role_setting_update("thinking-summary", arg.trim()) {
-                        Ok(action) => send_current_role_update(
-                            writer,
-                            &ctx.current_role_state,
-                            action,
-                            &print_local,
-                        ),
-                        Err(error) => print_local(&format!("/thinking-summary: {error}")),
-                    }
-                    continue;
-                }
-                if text == "/thinking-summary" {
-                    print_local(
-                        "/thinking-summary <mode> — one of: reset, off, auto, concise, detailed",
-                    );
-                    continue;
-                }
-                if let Some(provider) = text.strip_prefix("/provider-auth ") {
-                    let provider = provider.trim();
-                    if !provider.is_empty() {
-                        run_provider_auth(provider, &print_local);
-                    }
-                    continue;
-                }
-                if text == "/provider-auth" {
-                    run_provider_auth("", &print_local);
-                    continue;
-                }
-                if text == "/set" || text.starts_with("/set ") {
-                    handle_set_command(text, &ctx.renderer_tx, &print_local);
-                    continue;
-                }
-                if text == "/role" || text.starts_with("/role ") {
-                    handle_role_command(text, writer, &print_local);
-                    continue;
-                }
-                if let Some(role) = text.strip_prefix("/model ") {
-                    let role = role.trim();
-                    if !role.is_empty() {
-                        let _ = send_event(
-                            writer,
-                            &Event::UiRoleSelect(tau_proto::UiRoleSelect {
-                                role: role.to_owned(),
-                            }),
-                        );
-                    }
-                    continue;
-                }
-                if text == "/model" {
-                    // No argument — just a reminder.
-                    continue;
-                }
-
-                // `!!<cmd>` / `!<cmd>`: run a shell command locally.
-                // `!!` excludes the result from the agent's context;
-                // `!` (single bang) includes it.
-                if let Some(command) = text.strip_prefix("!!") {
-                    let command = command.trim();
-                    if !command.is_empty()
-                        && let Err(error) = send_shell_command(writer, session_id, command, false)
-                    {
-                        tracing::warn!(target: "tau_cli::ui", %error, "failed to send !! shell command");
-                    }
-                    continue;
-                }
-                if let Some(command) = text.strip_prefix('!') {
-                    let command = command.trim();
-                    if !command.is_empty()
-                        && let Err(error) = send_shell_command(writer, session_id, command, true)
-                    {
-                        tracing::warn!(target: "tau_cli::ui", %error, "failed to send ! shell command");
-                    }
-                    continue;
-                }
-
-                // Submission terminates the in-flight draft window —
-                // the buffer just got cleared by the user pressing
-                // Enter, so any pending draft is now stale. Invalidate
-                // before sending the submission so a debounce thread that
-                // already took an older snapshot can't emit it afterward.
-                {
-                    let (mtx, cv) = &*ctx.draft_handle;
-                    if let Ok(mut g) = mtx.lock() {
-                        g.epoch = g.epoch.wrapping_add(1);
-                        g.pending = None;
-                        cv.notify_one();
-                    }
-                }
-                ctx.agent_in_progress
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                if send_event(
-                    writer,
-                    &Event::UiPromptSubmitted(UiPromptSubmitted {
-                        session_id: session_id.as_str().into(),
-                        text: text.to_owned(),
-                        originator: tau_proto::PromptOriginator::User,
-                        ctx_id: None,
-                    }),
-                )
-                .is_err()
-                {
-                    return Ok(InputLoopExit::Quit);
-                }
-            }
-            TermEvent::Eof => {
-                if ctx
-                    .agent_in_progress
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    print_local(EOF_DURING_AGENT_NOTICE);
-                    continue;
-                }
-                return Ok(InputLoopExit::Quit);
-            }
-            TermEvent::Resize { .. } => {
-                tracing::debug!(target: "tau_cli::ui", "terminal resized");
-            }
-            TermEvent::BufferChanged => {
-                // Trailing-edge debounce: stash the latest buffer
-                // contents and wake the debounce thread; it will
-                // coalesce a typing burst into one `UiPromptDraft`
-                // per `DRAFT_DEBOUNCE` window.
-                let text = term.handle().get_buffer();
-                let (mtx, cv) = &*ctx.draft_handle;
-                if let Ok(mut g) = mtx.lock() {
-                    g.pending = Some((
-                        g.epoch,
-                        UiPromptDraft {
-                            session_id: session_id.as_str().into(),
-                            text,
-                        },
-                    ));
-                    tracing::trace!(target: "tau_cli::ui", "prompt draft updated");
-                    cv.notify_one();
-                }
-            }
-            TermEvent::FastToggle => {
-                let enabled = ctx
-                    .fast_service_tier_state
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let service_tier = if enabled {
-                    None
-                } else {
-                    Some(tau_proto::ServiceTier::Fast)
-                };
-                send_current_role_update(
-                    writer,
-                    &ctx.current_role_state,
-                    tau_proto::UiRoleUpdateAction::SetServiceTier { service_tier },
-                    &print_local,
-                );
-            }
-            TermEvent::RoleCycle | TermEvent::BackTab => {
-                cycle_role(
-                    writer,
-                    &ctx.current_role_state,
-                    &ctx.roles_available,
-                    &print_local,
-                );
-            }
-        }
+    let output = LocalTerminalOutput::new(term.handle().clone(), ctx.theme.clone());
+    TerminalInputSession {
+        term,
+        writer,
+        session_id,
+        ctx,
+        output,
     }
+    .run()
 }
 
 /// Build the `/set` argument completer. The first arg is a setting
