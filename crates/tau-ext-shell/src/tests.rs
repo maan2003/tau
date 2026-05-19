@@ -2732,6 +2732,7 @@ fn command_details_value_records_stdout_and_stderr_stats() {
         signal: None,
         timed_out: false,
         timeout_secs: Some(120),
+        exec_time_secs: None,
         termination_reason: "exit",
         stdout: "hi\nthere\n".to_owned(),
         stderr: "oops\n".to_owned(),
@@ -2744,6 +2745,27 @@ fn command_details_value_records_stdout_and_stderr_stats() {
     assert_eq!(cbor_int_field(&details, "stderr_bytes"), Some(5));
     assert!(cbor_map_field(&details, "stdout_total_lines").is_none());
     assert!(cbor_map_field(&details, "stderr_total_lines").is_none());
+    assert!(cbor_map_field(&details, "exec_time_secs").is_none());
+}
+
+#[test]
+fn command_details_value_records_slow_command_exec_time() {
+    let details = command_details_value(CommandDetails {
+        command: "sleep 6".to_owned(),
+        cwd: None,
+        status: Some(0),
+        signal: None,
+        timed_out: false,
+        timeout_secs: Some(120),
+        exec_time_secs: Some(6),
+        termination_reason: "exit",
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_total: None,
+        stderr_total: None,
+    });
+
+    assert_eq!(cbor_int_field(&details, "exec_time_secs"), Some(6));
 }
 
 #[test]

@@ -10,6 +10,7 @@ use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
 use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_tail, truncate_tail_from_tail};
 
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
+pub(crate) const SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
 
 /// Execute a `shell` tool call.
 ///
@@ -50,6 +51,7 @@ pub(crate) fn run_command(
                     signal: None,
                     timed_out: false,
                     timeout_secs: Some(timeout_secs),
+                    exec_time_secs: None,
                     termination_reason: "start_error",
                     stdout: String::new(),
                     stderr: String::new(),
@@ -58,7 +60,15 @@ pub(crate) fn run_command(
                 }))
         })?;
 
+    let started = std::time::Instant::now();
     let wait = wait_with_timeout(child, timeout);
+    let elapsed = started.elapsed();
+    let exec_time_secs =
+        if std::time::Duration::from_secs(SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS) < elapsed {
+            Some(elapsed.as_secs_f64().ceil() as u64)
+        } else {
+            None
+        };
 
     let status_code = wait.status_code;
     let signal = wait.signal;
@@ -111,6 +121,7 @@ pub(crate) fn run_command(
         signal,
         timed_out: wait.timed_out,
         timeout_secs: Some(timeout_secs),
+        exec_time_secs,
         termination_reason: wait.termination_reason,
         stdout: stdout_trunc.content,
         stderr: stderr_trunc.content,
@@ -903,6 +914,7 @@ pub(crate) struct CommandDetails {
     pub(crate) signal: Option<i32>,
     pub(crate) timed_out: bool,
     pub(crate) timeout_secs: Option<u64>,
+    pub(crate) exec_time_secs: Option<u64>,
     pub(crate) termination_reason: &'static str,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
@@ -918,6 +930,7 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
         signal,
         timed_out,
         timeout_secs,
+        exec_time_secs,
         termination_reason,
         stdout,
         stderr,
@@ -981,6 +994,12 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
         entries.push((
             CborValue::Text("timeout_secs".to_owned()),
             CborValue::Integer((timeout_secs as i64).into()),
+        ));
+    }
+    if let Some(exec_time_secs) = exec_time_secs {
+        entries.push((
+            CborValue::Text("exec_time_secs".to_owned()),
+            CborValue::Integer((exec_time_secs as i64).into()),
         ));
     }
     if let Some((total_lines, total_bytes)) = stdout_total {
