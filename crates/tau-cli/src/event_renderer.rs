@@ -347,6 +347,90 @@ fn role_value_completion(setting: &str, value: &str) -> tau_cli_term::Completion
     tau_cli_term::CompletionItem::new(value, description)
 }
 
+fn role_completion_matches(value: &str, needle: &str) -> bool {
+    needle.is_empty() || value.starts_with(needle) || value.contains(needle)
+}
+
+fn empty_role_completion_details() -> RoleCompletionDetails {
+    RoleCompletionDetails {
+        model: None,
+        effort: None,
+        verbosity: None,
+        thinking_summary: None,
+        service_tier: None,
+        tools_profile: None,
+        role_description: None,
+    }
+}
+
+fn role_setting_completions(
+    details: &RoleCompletionDetails,
+    needle: &str,
+) -> Vec<tau_cli_term::CompletionItem> {
+    [
+        ("delete", "delete this runtime role/override".to_owned()),
+        ("model", details.current_description("model")),
+        ("effort", details.current_description("effort")),
+        ("verbosity", details.current_description("verbosity")),
+        (
+            "thinking-summary",
+            details.current_description("thinking-summary"),
+        ),
+        ("service-tier", details.current_description("service-tier")),
+        (
+            "tools-profile",
+            details.current_description("tools-profile"),
+        ),
+    ]
+    .into_iter()
+    .filter(|(value, _)| role_completion_matches(value, needle))
+    .map(|(value, desc)| tau_cli_term::CompletionItem::new(value, desc))
+    .collect()
+}
+
+fn role_setting_value_completions(
+    setting: &str,
+    needle: &str,
+) -> Vec<tau_cli_term::CompletionItem> {
+    let values: &[&str] = match setting {
+        "model" | "tools-profile" => &["reset"],
+        "effort" => &["reset", "off", "minimal", "low", "medium", "high", "xhigh"],
+        "verbosity" => &["reset", "low", "medium", "high"],
+        "thinking-summary" => &["reset", "off", "auto", "concise", "detailed"],
+        "service-tier" => &["reset", "fast", "flex"],
+        _ => &[],
+    };
+    values
+        .iter()
+        .copied()
+        .filter(|value| role_completion_matches(value, needle))
+        .map(|value| role_value_completion(setting, value))
+        .collect()
+}
+
+fn role_command_completions(
+    role_items: &[(tau_cli_term::CompletionItem, RoleCompletionDetails)],
+    args: &[&str],
+) -> Vec<tau_cli_term::CompletionItem> {
+    match args.len() {
+        1 => role_items
+            .iter()
+            .filter(|(item, _)| role_completion_matches(&item.value, args[0]))
+            .map(|(item, _)| item.clone())
+            .collect(),
+        2 => {
+            let details = role_items
+                .iter()
+                .find(|(item, _)| item.value == args[0])
+                .map(|(_, details)| details.clone())
+                .unwrap_or_else(empty_role_completion_details);
+            role_setting_completions(&details, args[1])
+        }
+        3 => role_setting_value_completions(args[1], args[2]),
+        _ => Vec::new(),
+    }
+}
+
 struct TokenStatsBlockEntry {
     block_id: tau_cli_term::BlockId,
     usage: tau_proto::ProviderTokenUsage,
@@ -1514,10 +1598,25 @@ impl EventRenderer {
         );
     }
 
-    pub(crate) fn handle(&mut self, event: &Event) {
-        use tau_cli_term::resolve::themed_block;
-        use tau_themes::names;
+    fn learn_side_conversation_tool_calls(&mut self, event: &Event) {
+        let Event::ProviderResponseFinished(finished) = event else {
+            return;
+        };
+        if finished.originator.is_user() {
+            return;
+        }
+        for call in tool_calls_from_output_items(&finished.output_items) {
+            self.tool_calls.insert(
+                call.call_id.to_string(),
+                ToolCallState {
+                    is_sub_agent: true,
+                    ..ToolCallState::default()
+                },
+            );
+        }
+    }
 
+    pub(crate) fn handle(&mut self, event: &Event) {
         self.sync_agent_activity_for_lifecycle(event);
 
         if self.handle_compaction_event(event) {
@@ -1528,963 +1627,1230 @@ impl EventRenderer {
 
         // Side-conversation `ProviderResponseFinished` events get filtered
         // out by `originator_of(event).is_user()` below — but we still
-        // need to learn which `call_id`s those side conversations
-        // emit, so we can suppress the matching `ToolResult` /
-        // `ToolError` / `ToolProgress` (which carry no originator) on
-        // their way past. Otherwise sub-agent tool activity would
-        // leak into the user's transcript.
-        if let Event::ProviderResponseFinished(finished) = event
-            && !finished.originator.is_user()
-        {
-            for call in tool_calls_from_output_items(&finished.output_items) {
-                self.tool_calls.insert(
-                    call.call_id.to_string(),
-                    ToolCallState {
-                        is_sub_agent: true,
-                        ..ToolCallState::default()
-                    },
-                );
-            }
-        }
+        // need to learn which `call_id`s those side conversations emit,
+        // so later `ToolResult` / `ToolError` / `ToolProgress` events
+        // (which carry no originator) can be suppressed before they leak
+        // into the user's transcript.
+        self.learn_side_conversation_tool_calls(event);
 
-        // Skip events that belong to a side conversation spawned by an
-        // extension (e.g. the std-notifications idle-summarizer). They
-        // travel on the same bus as the user's interactive turn but
+        // Keep this filter immediately after the side-conversation tool-call
+        // learning above. Prompt lifecycle events from extension-owned side
+        // conversations share the bus with the user's interactive turn but
         // must not paint into the user's chat window or perturb its
         // pending-block bookkeeping.
         if !originator_of(event).is_user() {
             return;
         }
 
+        if self.handle_session_events(event)
+            || self.handle_prompt_events(event)
+            || self.handle_provider_response_events(event)
+            || self.handle_tool_events(event)
+            || self.handle_shell_events(event)
+            || self.handle_extension_events(event)
+            || self.handle_harness_status_events(event)
+            || self.handle_harness_role_events(event)
+            || self.handle_harness_available_events(event)
+            || self.handle_terminal_events(event)
+        {
+            return;
+        }
+
+        Self::trace_unhandled_event(event);
+    }
+
+    fn trace_unhandled_event(event: &Event) {
+        tracing::trace!(
+            target: "tau_cli::ui",
+            event = ?std::mem::discriminant(event),
+            "unhandled event variant"
+        );
+    }
+
+    fn handle_session_events(&mut self, event: &Event) -> bool {
         match event {
             Event::SessionStarted(started)
                 if matches!(started.reason, tau_proto::SessionStartReason::New) =>
             {
-                self.current_session_id = Some(started.session_id.clone());
-                self.clear_for_new_session();
+                self.handle_new_session_started(started);
+                true
             }
             Event::SessionStarted(started) => {
-                self.current_session_id = Some(started.session_id.clone());
-                if self.model_status_block.is_some()
-                    || self.current_model.is_some()
-                    || self.current_role.is_some()
-                {
-                    self.render_model_status();
-                }
+                self.handle_existing_session_started(started);
+                true
             }
+            _ => false,
+        }
+    }
+
+    fn handle_new_session_started(&mut self, started: &tau_proto::SessionStarted) {
+        self.current_session_id = Some(started.session_id.clone());
+        self.clear_for_new_session();
+    }
+
+    fn handle_existing_session_started(&mut self, started: &tau_proto::SessionStarted) {
+        self.current_session_id = Some(started.session_id.clone());
+        if self.model_status_block.is_some()
+            || self.current_model.is_some()
+            || self.current_role.is_some()
+        {
+            self.render_model_status();
+        }
+    }
+
+    fn handle_prompt_events(&mut self, event: &Event) -> bool {
+        match event {
             Event::UiPromptSubmitted(prompt) => {
-                if self
-                    .queued_user_blocks
-                    .front()
-                    .is_some_and(|(_, text)| text == &prompt.text)
-                {
-                    return;
-                }
-                self.reset_main_tool_usage();
-                let block = themed_block(
-                    &self.theme,
-                    names::USER_PROMPT,
-                    format!("{}{}", self.submitted_prompt_prefix(), prompt.text),
-                );
-                let id = self.handle.print_output("user-prompt", block);
-                self.last_user_block = Some((id, prompt.text.clone()));
+                self.handle_ui_prompt_submitted(prompt);
+                true
             }
             Event::SessionPromptQueued(queued) => {
-                self.reset_main_tool_usage();
-                if let Some((id, text)) = self.last_user_block.take() {
-                    if text == queued.text {
-                        self.handle.remove_block(id);
-                    } else {
-                        self.last_user_block = Some((id, text));
-                    }
-                }
-                let block = themed_block(
-                    &self.theme,
-                    names::USER_PROMPT_QUEUED,
-                    format!("{}{} (queued)", self.submitted_prompt_prefix(), queued.text),
-                );
-                let queued_id = self.handle.new_block("user-prompt-queued", block);
-                self.handle.push_above_sticky(queued_id);
-                self.handle.redraw();
-                self.queued_user_blocks
-                    .push_back((queued_id, queued.text.clone()));
+                self.handle_session_prompt_queued(queued);
+                true
             }
             Event::SessionPromptSteered(steered) => {
-                // The harness folded a queued prompt into the current
-                // turn's next round (alongside tool results) instead of
-                // waiting for `Idle`. Promote the "(queued)" rendering
-                // to a regular user prompt so the transcript reads
-                // naturally above the agent's continuing response.
-                if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
-                    self.handle.remove_block(queued_id);
-                    self.handle.print_output(
-                        "user-prompt-steered",
-                        themed_block(
-                            &self.theme,
-                            names::USER_PROMPT,
-                            format!("{}{text}", self.submitted_prompt_prefix()),
-                        ),
-                    );
-                    self.handle.redraw();
-                } else {
-                    // No matching "(queued)" block — fall back to
-                    // rendering the steered text directly so the user
-                    // still sees their message land.
-                    self.handle.print_output(
-                        "user-prompt-steered",
-                        themed_block(
-                            &self.theme,
-                            names::USER_PROMPT,
-                            format!("{}{}", self.submitted_prompt_prefix(), steered.text),
-                        ),
-                    );
-                    self.handle.redraw();
-                }
+                self.handle_session_prompt_steered(steered);
+                true
             }
             Event::SessionPromptCreated(prompt) => {
-                if prompt.originator.is_user()
-                    && let Ok(mut context) = self.editor_context.lock()
-                {
-                    context.active_prompt = None;
-                }
-                self.last_user_block = None;
-                let entry = self
-                    .prompts
-                    .entry(prompt.session_prompt_id.to_string())
-                    .or_default();
-                entry.started_at = Some(Instant::now());
-                if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
-                    self.handle.remove_block(queued_id);
-                    self.handle.print_output(
-                        "user-prompt-created",
-                        themed_block(
-                            &self.theme,
-                            names::USER_PROMPT,
-                            format!("{}{text}", self.submitted_prompt_prefix()),
-                        ),
-                    );
-                }
-
-                let block = streaming_block(&self.theme, names::AGENT_PENDING, "");
-                let id = self.handle.new_block(
-                    format!("agent-response-live:{}", prompt.session_prompt_id),
-                    block,
-                );
-                self.handle.push_above_active(id);
-                self.handle.redraw();
-                self.prompts
-                    .entry(prompt.session_prompt_id.to_string())
-                    .or_default()
-                    .response_block_id = Some(id);
+                self.handle_session_prompt_created(prompt);
+                true
             }
+            _ => false,
+        }
+    }
+
+    fn handle_ui_prompt_submitted(&mut self, prompt: &tau_proto::UiPromptSubmitted) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        if self
+            .queued_user_blocks
+            .front()
+            .is_some_and(|(_, text)| text == &prompt.text)
+        {
+            return;
+        }
+        self.reset_main_tool_usage();
+        let block = themed_block(
+            &self.theme,
+            names::USER_PROMPT,
+            format!("{}{}", self.submitted_prompt_prefix(), prompt.text),
+        );
+        let id = self.handle.print_output("user-prompt", block);
+        self.last_user_block = Some((id, prompt.text.clone()));
+    }
+
+    fn handle_session_prompt_queued(&mut self, queued: &tau_proto::SessionPromptQueued) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        self.reset_main_tool_usage();
+        if let Some((id, text)) = self.last_user_block.take() {
+            if text == queued.text {
+                self.handle.remove_block(id);
+            } else {
+                self.last_user_block = Some((id, text));
+            }
+        }
+        let block = themed_block(
+            &self.theme,
+            names::USER_PROMPT_QUEUED,
+            format!("{}{} (queued)", self.submitted_prompt_prefix(), queued.text),
+        );
+        let queued_id = self.handle.new_block("user-prompt-queued", block);
+        self.handle.push_above_sticky(queued_id);
+        self.handle.redraw();
+        self.queued_user_blocks
+            .push_back((queued_id, queued.text.clone()));
+    }
+
+    fn handle_session_prompt_steered(&mut self, steered: &tau_proto::SessionPromptSteered) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        // The harness folded a queued prompt into the current turn's next
+        // round (alongside tool results) instead of waiting for `Idle`.
+        // Promote the "(queued)" rendering to a regular user prompt so the
+        // transcript reads naturally above the agent's continuing response.
+        if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
+            self.handle.remove_block(queued_id);
+            self.handle.print_output(
+                "user-prompt-steered",
+                themed_block(
+                    &self.theme,
+                    names::USER_PROMPT,
+                    format!("{}{text}", self.submitted_prompt_prefix()),
+                ),
+            );
+            self.handle.redraw();
+        } else {
+            // No matching "(queued)" block — fall back to rendering the
+            // steered text directly so the user still sees their message land.
+            self.handle.print_output(
+                "user-prompt-steered",
+                themed_block(
+                    &self.theme,
+                    names::USER_PROMPT,
+                    format!("{}{}", self.submitted_prompt_prefix(), steered.text),
+                ),
+            );
+            self.handle.redraw();
+        }
+    }
+
+    fn handle_session_prompt_created(&mut self, prompt: &tau_proto::SessionPromptCreated) {
+        self.clear_editor_active_prompt_for_user_prompt(prompt.originator.is_user());
+        self.last_user_block = None;
+        self.prompts
+            .entry(prompt.session_prompt_id.to_string())
+            .or_default()
+            .started_at = Some(Instant::now());
+        self.promote_next_queued_prompt("user-prompt-created");
+        self.create_live_response_block(prompt);
+    }
+
+    fn clear_editor_active_prompt_for_user_prompt(&mut self, is_user_prompt: bool) {
+        if is_user_prompt && let Ok(mut context) = self.editor_context.lock() {
+            context.active_prompt = None;
+        }
+    }
+
+    fn promote_next_queued_prompt(&mut self, label: &'static str) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
+            self.handle.remove_block(queued_id);
+            self.handle.print_output(
+                label,
+                themed_block(
+                    &self.theme,
+                    names::USER_PROMPT,
+                    format!("{}{text}", self.submitted_prompt_prefix()),
+                ),
+            );
+        }
+    }
+
+    fn create_live_response_block(&mut self, prompt: &tau_proto::SessionPromptCreated) {
+        use tau_themes::names;
+
+        let block = streaming_block(&self.theme, names::AGENT_PENDING, "");
+        let id = self.handle.new_block(
+            format!("agent-response-live:{}", prompt.session_prompt_id),
+            block,
+        );
+        self.handle.push_above_active(id);
+        self.handle.redraw();
+        self.prompts
+            .entry(prompt.session_prompt_id.to_string())
+            .or_default()
+            .response_block_id = Some(id);
+    }
+
+    fn handle_provider_response_events(&mut self, event: &Event) -> bool {
+        match event {
             Event::ProviderPromptSubmitted(submitted) => {
-                self.prompts
-                    .entry(submitted.session_prompt_id.to_string())
-                    .or_default()
-                    .started_at = Some(Instant::now());
+                self.handle_provider_prompt_submitted(submitted);
+                true
             }
             Event::ProviderResponseUpdated(update) => {
-                let spid = update.session_prompt_id.as_str();
-
-                if update.originator.is_user()
-                    && let Ok(mut context) = self.editor_context.lock()
-                {
-                    context.active_prompt = if update.text.is_empty() {
-                        None
-                    } else {
-                        Some(update.text.clone())
-                    };
-                }
-
-                // Thinking is its own block, lazy-created the first
-                // time non-empty summary content arrives. Rendered
-                // above the response block (in `above_active`). Always
-                // accumulate the text so the toggle can flip on
-                // retroactively, but only paint the live block when
-                // `show_thinking` is on.
-                if let Some(thinking) = update.thinking.as_deref()
-                    && !thinking.is_empty()
-                {
-                    self.prompts
-                        .entry(spid.to_owned())
-                        .or_default()
-                        .thinking_text = Some(thinking.to_owned());
-                    if self.show_thinking {
-                        let block = streaming_block(&self.theme, names::AGENT_THINKING, thinking);
-                        let existing_tbid =
-                            self.prompts.get(spid).and_then(|s| s.thinking_block_id);
-                        if let Some(tbid) = existing_tbid {
-                            self.handle.set_block(tbid, block);
-                        } else {
-                            // Insert the thinking block ABOVE the
-                            // pending response block in `above_active`.
-                            // The response block was pushed first
-                            // (in SessionPromptCreated), so a plain
-                            // push would land below it. Briefly
-                            // remove the response, push thinking,
-                            // re-push response — net effect: thinking
-                            // is at the response's old position and
-                            // the response moves down by one.
-                            let tbid = self
-                                .handle
-                                .new_block(format!("agent-thinking-live:{spid}"), block);
-                            let response_bid =
-                                self.prompts.get(spid).and_then(|s| s.response_block_id);
-                            if let Some(response_bid) = response_bid {
-                                self.handle.remove_above_active(response_bid);
-                                self.handle.push_above_active(tbid);
-                                self.handle.push_above_active(response_bid);
-                            } else {
-                                self.handle.push_above_active(tbid);
-                            }
-                            self.prompts
-                                .entry(spid.to_owned())
-                                .or_default()
-                                .thinking_block_id = Some(tbid);
-                        }
-                        self.handle.redraw();
-                    }
-                }
-
-                if let Some(bid) = self.prompts.get(spid).and_then(|s| s.response_block_id) {
-                    let block =
-                        streaming_block(&self.theme, names::AGENT_RESPONSE, update.text.clone());
-                    self.handle.set_block(bid, block);
-                    self.handle.redraw();
-                }
+                self.handle_provider_response_updated(update);
+                true
             }
             Event::ProviderResponseFinished(finished) => {
-                let spid = finished.session_prompt_id.as_str();
-                // Drain the whole per-prompt state in one shot — every
-                // field tracked through the stream is consumed here.
-                let prompt_state = self.prompts.remove(spid).unwrap_or_default();
-                let turn_latency = prompt_state
-                    .started_at
-                    .map(|started_at| started_at.elapsed());
-                if let Some(latency) = turn_latency {
-                    self.cumulative_agent_latency += latency;
-                }
-
-                // Finalize the thinking block above the response.
-                // The item-model finish event no longer carries a
-                // separate thinking string; use the latest streamed
-                // snapshot if one was captured.
-                let thinking = prompt_state.thinking_text;
-                if let Some(tbid) = prompt_state.thinking_block_id {
-                    self.handle.remove_block(tbid);
-                }
-                if self.show_thinking
-                    && let Some(thinking) = thinking.filter(|t| !t.is_empty())
-                {
-                    let bid = self.handle.print_output(
-                        "agent-thinking",
-                        themed_block(&self.theme, names::AGENT_THINKING, thinking.clone()),
-                    );
-                    self.thinking_history.push(ThinkingBlockEntry {
-                        block_id: bid,
-                        text: thinking,
-                    });
-                }
-
-                if let Some(bid) = prompt_state.response_block_id {
-                    self.handle.remove_block(bid);
-                }
-
-                let full_assistant_text = assistant_text_from_output_items(&finished.output_items);
-                if let Some(text) = full_assistant_text.as_deref() {
-                    if finished.originator.is_user()
-                        && let Ok(mut context) = self.editor_context.lock()
-                    {
-                        context.last_agent_response = Some(text.to_owned());
-                        context.active_prompt = None;
-                    }
-                }
-                if let Some(usage) = finished.usage.clone() {
-                    let previous_usage = self.token_stats_history.last().map(|entry| &entry.usage);
-                    let block = if self.show_token_stats {
-                        render_token_stats_block(
-                            &self.theme,
-                            &usage,
-                            previous_usage,
-                            turn_latency,
-                            Some(self.cumulative_agent_latency),
-                        )
-                    } else {
-                        Self::empty_block()
-                    };
-                    let bid = self.handle.print_output("token-stats", block);
-                    self.token_stats_history.push(TokenStatsBlockEntry {
-                        block_id: bid,
-                        usage,
-                        turn_latency,
-                        total_latency: Some(self.cumulative_agent_latency),
-                    });
-                }
-
-                // Only the main agent's tool calls land in the UI as
-                // their own blocks. Sub-agent (side conversation) tool
-                // activity is summarized live under the parent's
-                // `delegate` block via `DelegateProgress` instead, so
-                // the user sees one line per delegation rather than
-                // a flood of nested invocations.
-                if finished.originator.is_user() {
-                    self.main_agent_turn_active = true;
-                    let tool_calls = tool_calls_from_output_items(&finished.output_items);
-                    self.main_tools_total += tool_calls.len() as u64;
-                    self.set_main_tools_visible(!tool_calls.is_empty());
-                    let summary_block_id = if tool_calls.is_empty() {
-                        self.prompt_tool_summary = None;
-                        None
-                    } else if matches!(
-                        self.show_tools,
-                        tau_config::settings::ShowTools::SummarizePrompt
-                    ) {
-                        let total_delta = tool_calls.len() as u64;
-                        let id = if let Some(id) = self.prompt_tool_summary {
-                            if let Some(summary) = self.tool_summaries.get_mut(&id) {
-                                summary.total += total_delta;
-                            }
-                            self.update_tool_summary_block(id);
-                            id
-                        } else {
-                            let summary = ToolSummaryDisplay {
-                                total: total_delta,
-                                ..ToolSummaryDisplay::default()
-                            };
-                            let block = self.render_summary_block(&summary);
-                            let id = self.handle.new_block("tool-summary:prompt", block);
-                            self.handle.push_above_active(id);
-                            self.tool_summaries.insert(id, summary);
-                            self.prompt_tool_summary = Some(id);
-                            id
-                        };
-                        Some(id)
-                    } else {
-                        let summary = ToolSummaryDisplay {
-                            total: tool_calls.len() as u64,
-                            ..ToolSummaryDisplay::default()
-                        };
-                        let block = self.render_summary_block(&summary);
-                        let id = self.handle.new_block("tool-summary:turn", block);
-                        self.handle.push_above_active(id);
-                        self.tool_summaries.insert(id, summary);
-                        Some(id)
-                    };
-                    for item in &finished.output_items {
-                        match item {
-                            ContextItem::Message(message) => {
-                                if let Some(text) = assistant_text_from_message_item(message) {
-                                    self.handle.print_output(
-                                        "agent-response",
-                                        themed_block(&self.theme, names::AGENT_RESPONSE, text),
-                                    );
-                                }
-                            }
-                            ContextItem::ToolCall(call) => {
-                                let display_payload = tool_display_from_call(call);
-                                let display =
-                                    format_tool_call(call.name.as_str(), Some(&display_payload));
-                                let block = self.render_tool_history_block(&display);
-                                let id = self.handle.new_block(
-                                    format!("tool-call:{}:{}", call.name, call.call_id),
-                                    block,
-                                );
-                                self.handle.push_history(id);
-                                self.tool_calls.insert(
-                                    call.call_id.to_string(),
-                                    ToolCallState {
-                                        block_id: Some(id),
-                                        live_display: Some(display),
-                                        summary_block_id,
-                                        is_main_delegate: call.name.as_str() == "delegate",
-                                        ..ToolCallState::default()
-                                    },
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-                    if !finished.output_items.is_empty() {
-                        self.handle.redraw();
-                    }
-                }
-                self.render_model_status();
+                self.handle_provider_response_finished(finished);
+                true
             }
-            Event::ToolProgress(progress) => {
-                let state = self.tool_calls.get(progress.call_id.as_str());
-                if state.is_some_and(|s| s.is_sub_agent) {
-                    return;
-                }
-                if state.is_none_or(|s| s.block_id.is_none()) {
-                    let text = tau_harness::format_tool_progress(progress);
+            _ => false,
+        }
+    }
+
+    fn handle_provider_prompt_submitted(&mut self, submitted: &tau_proto::ProviderPromptSubmitted) {
+        self.prompts
+            .entry(submitted.session_prompt_id.to_string())
+            .or_default()
+            .started_at = Some(Instant::now());
+    }
+
+    fn handle_provider_response_updated(&mut self, update: &tau_proto::ProviderResponseUpdated) {
+        let spid = update.session_prompt_id.as_str();
+        self.update_editor_active_prompt(update);
+        self.update_live_thinking_block(spid, update.thinking.as_deref());
+        self.update_live_response_block(spid, &update.text);
+    }
+
+    fn update_editor_active_prompt(&mut self, update: &tau_proto::ProviderResponseUpdated) {
+        if update.originator.is_user()
+            && let Ok(mut context) = self.editor_context.lock()
+        {
+            context.active_prompt = if update.text.is_empty() {
+                None
+            } else {
+                Some(update.text.clone())
+            };
+        }
+    }
+
+    fn update_live_thinking_block(&mut self, spid: &str, thinking: Option<&str>) {
+        use tau_themes::names;
+
+        let Some(thinking) = thinking else {
+            return;
+        };
+        if thinking.is_empty() {
+            return;
+        }
+        self.prompts
+            .entry(spid.to_owned())
+            .or_default()
+            .thinking_text = Some(thinking.to_owned());
+        if !self.show_thinking {
+            return;
+        }
+        let block = streaming_block(&self.theme, names::AGENT_THINKING, thinking);
+        let existing_tbid = self.prompts.get(spid).and_then(|s| s.thinking_block_id);
+        if let Some(tbid) = existing_tbid {
+            self.handle.set_block(tbid, block);
+        } else {
+            self.insert_live_thinking_block(spid, block);
+        }
+        self.handle.redraw();
+    }
+
+    fn insert_live_thinking_block(&mut self, spid: &str, block: tau_cli_term::StyledBlock) {
+        // Insert the thinking block ABOVE the pending response block in
+        // `above_active`. The response block was pushed first (in
+        // SessionPromptCreated), so a plain push would land below it. Briefly
+        // remove the response, push thinking, re-push response — net effect:
+        // thinking is at the response's old position and the response moves
+        // down by one.
+        let tbid = self
+            .handle
+            .new_block(format!("agent-thinking-live:{spid}"), block);
+        let response_bid = self.prompts.get(spid).and_then(|s| s.response_block_id);
+        if let Some(response_bid) = response_bid {
+            self.handle.remove_above_active(response_bid);
+            self.handle.push_above_active(tbid);
+            self.handle.push_above_active(response_bid);
+        } else {
+            self.handle.push_above_active(tbid);
+        }
+        self.prompts
+            .entry(spid.to_owned())
+            .or_default()
+            .thinking_block_id = Some(tbid);
+    }
+
+    fn update_live_response_block(&mut self, spid: &str, text: &str) {
+        use tau_themes::names;
+
+        if let Some(bid) = self.prompts.get(spid).and_then(|s| s.response_block_id) {
+            let block = streaming_block(&self.theme, names::AGENT_RESPONSE, text.to_owned());
+            self.handle.set_block(bid, block);
+            self.handle.redraw();
+        }
+    }
+
+    fn handle_provider_response_finished(
+        &mut self,
+        finished: &tau_proto::ProviderResponseFinished,
+    ) {
+        let (prompt_state, turn_latency) = self.take_finished_prompt_state(finished);
+        self.finalize_finished_thinking_block(
+            prompt_state.thinking_block_id,
+            prompt_state.thinking_text,
+        );
+        self.finalize_finished_response_block(prompt_state.response_block_id);
+
+        let full_assistant_text = assistant_text_from_output_items(&finished.output_items);
+        self.record_finished_assistant_context(finished, full_assistant_text.as_deref());
+        self.record_finished_token_stats(finished, turn_latency);
+        self.render_user_provider_response_items(finished);
+        self.render_model_status();
+    }
+
+    fn take_finished_prompt_state(
+        &mut self,
+        finished: &tau_proto::ProviderResponseFinished,
+    ) -> (PromptState, Option<Duration>) {
+        let spid = finished.session_prompt_id.as_str();
+        // Drain the whole per-prompt state in one shot — every field tracked
+        // through the stream is consumed here.
+        let prompt_state = self.prompts.remove(spid).unwrap_or_default();
+        let turn_latency = prompt_state
+            .started_at
+            .map(|started_at| started_at.elapsed());
+        if let Some(latency) = turn_latency {
+            self.cumulative_agent_latency += latency;
+        }
+        (prompt_state, turn_latency)
+    }
+
+    fn finalize_finished_thinking_block(
+        &mut self,
+        thinking_block_id: Option<tau_cli_term::BlockId>,
+        thinking: Option<String>,
+    ) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        // Finalize the thinking block above the response. The item-model finish
+        // event no longer carries a separate thinking string; use the latest
+        // streamed snapshot if one was captured.
+        if let Some(tbid) = thinking_block_id {
+            self.handle.remove_block(tbid);
+        }
+        if self.show_thinking
+            && let Some(thinking) = thinking.filter(|t| !t.is_empty())
+        {
+            let bid = self.handle.print_output(
+                "agent-thinking",
+                themed_block(&self.theme, names::AGENT_THINKING, thinking.clone()),
+            );
+            self.thinking_history.push(ThinkingBlockEntry {
+                block_id: bid,
+                text: thinking,
+            });
+        }
+    }
+
+    fn finalize_finished_response_block(
+        &mut self,
+        response_block_id: Option<tau_cli_term::BlockId>,
+    ) {
+        if let Some(bid) = response_block_id {
+            self.handle.remove_block(bid);
+        }
+    }
+
+    fn record_finished_assistant_context(
+        &mut self,
+        finished: &tau_proto::ProviderResponseFinished,
+        full_assistant_text: Option<&str>,
+    ) {
+        let Some(text) = full_assistant_text else {
+            return;
+        };
+        if finished.originator.is_user()
+            && let Ok(mut context) = self.editor_context.lock()
+        {
+            context.last_agent_response = Some(text.to_owned());
+            context.active_prompt = None;
+        }
+    }
+
+    fn record_finished_token_stats(
+        &mut self,
+        finished: &tau_proto::ProviderResponseFinished,
+        turn_latency: Option<Duration>,
+    ) {
+        let Some(usage) = finished.usage.clone() else {
+            return;
+        };
+        let previous_usage = self.token_stats_history.last().map(|entry| &entry.usage);
+        let block = if self.show_token_stats {
+            render_token_stats_block(
+                &self.theme,
+                &usage,
+                previous_usage,
+                turn_latency,
+                Some(self.cumulative_agent_latency),
+            )
+        } else {
+            Self::empty_block()
+        };
+        let bid = self.handle.print_output("token-stats", block);
+        self.token_stats_history.push(TokenStatsBlockEntry {
+            block_id: bid,
+            usage,
+            turn_latency,
+            total_latency: Some(self.cumulative_agent_latency),
+        });
+    }
+
+    fn render_user_provider_response_items(
+        &mut self,
+        finished: &tau_proto::ProviderResponseFinished,
+    ) {
+        if !finished.originator.is_user() {
+            return;
+        }
+        // Only the main agent's tool calls land in the UI as their own blocks.
+        // Sub-agent activity is summarized live under the parent's `delegate`
+        // block via `DelegateProgress` instead, so the user sees one line per
+        // delegation rather than a flood of nested invocations.
+        self.main_agent_turn_active = true;
+        let tool_calls = tool_calls_from_output_items(&finished.output_items);
+        self.main_tools_total += tool_calls.len() as u64;
+        self.set_main_tools_visible(!tool_calls.is_empty());
+        let summary_block_id = self.prepare_tool_summary_for_finished_calls(&tool_calls);
+        for item in &finished.output_items {
+            self.render_finished_context_item(item, summary_block_id);
+        }
+        if !finished.output_items.is_empty() {
+            self.handle.redraw();
+        }
+    }
+
+    fn prepare_tool_summary_for_finished_calls(
+        &mut self,
+        tool_calls: &[ToolCallItem],
+    ) -> Option<tau_cli_term::BlockId> {
+        if tool_calls.is_empty() {
+            self.prompt_tool_summary = None;
+            return None;
+        }
+        if matches!(
+            self.show_tools,
+            tau_config::settings::ShowTools::SummarizePrompt
+        ) {
+            return Some(self.create_or_update_prompt_tool_summary(tool_calls.len() as u64));
+        }
+        Some(self.create_turn_tool_summary(tool_calls.len() as u64))
+    }
+
+    fn create_or_update_prompt_tool_summary(&mut self, total_delta: u64) -> tau_cli_term::BlockId {
+        if let Some(id) = self.prompt_tool_summary {
+            if let Some(summary) = self.tool_summaries.get_mut(&id) {
+                summary.total += total_delta;
+            }
+            self.update_tool_summary_block(id);
+            return id;
+        }
+        let summary = ToolSummaryDisplay {
+            total: total_delta,
+            ..ToolSummaryDisplay::default()
+        };
+        let block = self.render_summary_block(&summary);
+        let id = self.handle.new_block("tool-summary:prompt", block);
+        self.handle.push_above_active(id);
+        self.tool_summaries.insert(id, summary);
+        self.prompt_tool_summary = Some(id);
+        id
+    }
+
+    fn create_turn_tool_summary(&mut self, total: u64) -> tau_cli_term::BlockId {
+        let summary = ToolSummaryDisplay {
+            total,
+            ..ToolSummaryDisplay::default()
+        };
+        let block = self.render_summary_block(&summary);
+        let id = self.handle.new_block("tool-summary:turn", block);
+        self.handle.push_above_active(id);
+        self.tool_summaries.insert(id, summary);
+        id
+    }
+
+    fn render_finished_context_item(
+        &mut self,
+        item: &ContextItem,
+        summary_block_id: Option<tau_cli_term::BlockId>,
+    ) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        match item {
+            ContextItem::Message(message) => {
+                if let Some(text) = assistant_text_from_message_item(message) {
                     self.handle.print_output(
-                        "tool-progress",
-                        themed_block(&self.theme, names::SHELL_OUTPUT, text),
+                        "agent-response",
+                        themed_block(&self.theme, names::AGENT_RESPONSE, text),
                     );
                 }
+            }
+            ContextItem::ToolCall(call) => self.render_finished_tool_call(call, summary_block_id),
+            _ => {}
+        }
+    }
+
+    fn render_finished_tool_call(
+        &mut self,
+        call: &ToolCallItem,
+        summary_block_id: Option<tau_cli_term::BlockId>,
+    ) {
+        let display_payload = tool_display_from_call(call);
+        let display = format_tool_call(call.name.as_str(), Some(&display_payload));
+        let block = self.render_tool_history_block(&display);
+        let id = self
+            .handle
+            .new_block(format!("tool-call:{}:{}", call.name, call.call_id), block);
+        self.handle.push_history(id);
+        self.tool_calls.insert(
+            call.call_id.to_string(),
+            ToolCallState {
+                block_id: Some(id),
+                live_display: Some(display),
+                summary_block_id,
+                is_main_delegate: call.name.as_str() == "delegate",
+                ..ToolCallState::default()
+            },
+        );
+    }
+
+    fn handle_tool_events(&mut self, event: &Event) -> bool {
+        match event {
+            Event::ToolProgress(progress) => {
+                self.handle_tool_progress(progress);
+                true
             }
             Event::ToolDelegateProgress(progress) => {
-                let call_id = progress.call_id.as_str();
-                // Snapshot the latest counters and ctx info regardless
-                // of whether the block is still live; the `ToolResult`
-                // handler reuses them on the completion line.
-                let state = self.tool_calls.entry(call_id.to_owned()).or_default();
-                state.delegate_last_progress = Some(progress.clone());
-                let Some(bid) = state.block_id else {
-                    // Block already torn down (delegate finished or
-                    // never rendered) — nothing to update.
-                    return;
-                };
-                let display = match &progress.display {
-                    Some(descriptor) => {
-                        render_delegate_display(descriptor, progress.role.as_deref())
-                    }
-                    None => render_delegate_display(
-                        &synthesize_fallback_display("delegate", None),
-                        progress.role.as_deref(),
-                    ),
-                };
-                state.live_display = Some(display.clone());
-                let block = self.render_tool_history_block(&display);
-                self.handle.set_block(bid, block);
-                self.handle.redraw();
+                self.handle_tool_delegate_progress(progress);
+                true
             }
             Event::ToolResult(result) => {
-                let call_id = result.call_id.as_str();
-                // Sub-agent tool activity stays out of the user's
-                // transcript — its progress is rolled up under the
-                // parent's `delegate` block by `DelegateProgress`.
-                let prior = self.tool_calls.remove(call_id);
-                let known_main_tool = prior
-                    .as_ref()
-                    .is_some_and(|prior| !prior.is_sub_agent && result.originator.is_user());
-                let prior = prior.unwrap_or_default();
-                if prior.is_sub_agent {
-                    return;
-                }
-                if known_main_tool {
-                    self.record_main_tool_completed();
-                    if self.main_agent_turn_active {
-                        self.main_tools_visible = true;
-                    }
-                }
-                let existing_block_id = prior.block_id;
-                let last_progress = prior.delegate_last_progress;
-                let display = if result.tool_name.as_str() == "delegate" {
-                    let role = last_progress.as_ref().and_then(|p| p.role.as_deref());
-                    let descriptor = build_delegate_completion_display(
-                        last_progress.as_ref().and_then(|p| p.display.as_ref()),
-                        &result.result,
-                        None,
-                    );
-                    render_delegate_display(&descriptor, role)
-                } else if let Some(descriptor) = &result.display {
-                    render_tool_display(&result.tool_name, descriptor)
-                } else {
-                    render_tool_display(
-                        &result.tool_name,
-                        &synthesize_fallback_display(&result.tool_name, None),
-                    )
-                };
-                let diff = result
-                    .display
-                    .as_ref()
-                    .and_then(|d| match &d.payload {
-                        Some(tau_proto::ToolDisplayPayload::Diff(s)) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .or_else(|| extract_diff(&result.result));
-                self.record_tool_summary_result(
-                    prior.summary_block_id,
-                    result.display.as_ref(),
-                    diff.as_ref(),
-                    false,
-                );
-                if let Some(diff) = diff {
-                    let block = self.render_diff_history_block(&display, &diff);
-                    let bid = if let Some(bid) = existing_block_id {
-                        self.handle.set_block(bid, block);
-                        self.handle.redraw();
-                        bid
-                    } else {
-                        self.handle.print_output("tool-diff", block)
-                    };
-                    self.diff_blocks.push(DiffBlockEntry {
-                        block_id: bid,
-                        display,
-                        diff,
-                    });
-                } else {
-                    let block = self.render_tool_history_block(&display);
-                    let bid = if let Some(bid) = existing_block_id {
-                        self.handle.set_block(bid, block);
-                        self.handle.redraw();
-                        bid
-                    } else {
-                        self.handle.print_output("tool-result", block)
-                    };
-                    self.tool_history.push(ToolBlockEntry {
-                        block_id: bid,
-                        display,
-                    });
-                }
-                if known_main_tool && self.main_agent_turn_active {
-                    self.render_model_status();
-                }
+                self.handle_tool_result(result);
+                true
             }
             Event::ToolError(error) => {
-                let call_id = error.call_id.as_str();
-                let prior = self.tool_calls.remove(call_id);
-                let known_main_tool = prior
-                    .as_ref()
-                    .is_some_and(|prior| !prior.is_sub_agent && error.originator.is_user());
-                let prior = prior.unwrap_or_default();
-                if prior.is_sub_agent {
-                    return;
-                }
-                if known_main_tool {
-                    self.record_main_tool_completed();
-                    if self.main_agent_turn_active {
-                        self.main_tools_visible = true;
-                    }
-                }
-                let existing_block_id = prior.block_id;
-                let last_progress = prior.delegate_last_progress;
-                let cbor = error.details.as_ref();
-                let display = if error.tool_name.as_str() == "delegate" {
-                    let role = last_progress.as_ref().and_then(|p| p.role.as_deref());
-                    let descriptor = build_delegate_completion_display(
-                        last_progress.as_ref().and_then(|p| p.display.as_ref()),
-                        cbor.unwrap_or(&CborValue::Null),
-                        Some(&error.message),
-                    );
-                    render_delegate_display(&descriptor, role)
-                } else if let Some(descriptor) = &error.display {
-                    render_tool_display(&error.tool_name, descriptor)
-                } else {
-                    render_tool_display(
-                        &error.tool_name,
-                        &synthesize_fallback_display(&error.tool_name, Some(&error.message)),
-                    )
-                };
-                self.record_tool_summary_result(
-                    prior.summary_block_id,
-                    error.display.as_ref(),
-                    None,
-                    true,
-                );
-                let block = self.render_tool_history_block(&display);
-                let bid = if let Some(bid) = existing_block_id {
-                    self.handle.set_block(bid, block);
-                    self.handle.redraw();
-                    bid
-                } else {
-                    self.handle.print_output("tool-error", block)
-                };
-                self.tool_history.push(ToolBlockEntry {
-                    block_id: bid,
-                    display,
-                });
-                if known_main_tool && self.main_agent_turn_active {
-                    self.render_model_status();
-                }
+                self.handle_tool_error(error);
+                true
             }
             Event::ToolCancelled(cancelled) => {
-                let call_id = cancelled.call_id.as_str();
-                let prior = self.tool_calls.remove(call_id);
-                let known_main_tool = prior.as_ref().is_some_and(|prior| !prior.is_sub_agent);
-                let prior = prior.unwrap_or_default();
-                if prior.is_sub_agent {
-                    return;
-                }
-                if known_main_tool {
-                    self.record_main_tool_completed();
-                    if self.main_agent_turn_active {
-                        self.main_tools_visible = true;
-                    }
-                }
-                let display = render_tool_display(
-                    &cancelled.tool_name,
-                    &synthesize_fallback_display(&cancelled.tool_name, Some("cancelled")),
-                );
-                self.record_tool_summary_result(prior.summary_block_id, None, None, true);
-                let block = self.render_tool_history_block(&display);
-                let bid = if let Some(bid) = prior.block_id {
-                    self.handle.set_block(bid, block);
-                    self.handle.redraw();
-                    bid
-                } else {
-                    self.handle.print_output("tool-cancelled", block)
-                };
-                self.tool_history.push(ToolBlockEntry {
-                    block_id: bid,
-                    display,
-                });
-                if known_main_tool && self.main_agent_turn_active {
-                    self.render_model_status();
-                }
+                self.handle_tool_cancelled(cancelled);
+                true
             }
+            _ => false,
+        }
+    }
+
+    fn handle_tool_progress(&mut self, progress: &tau_proto::ToolProgress) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        let state = self.tool_calls.get(progress.call_id.as_str());
+        if state.is_some_and(|s| s.is_sub_agent) {
+            return;
+        }
+        if state.is_none_or(|s| s.block_id.is_none()) {
+            let text = tau_harness::format_tool_progress(progress);
+            self.handle.print_output(
+                "tool-progress",
+                themed_block(&self.theme, names::SHELL_OUTPUT, text),
+            );
+        }
+    }
+
+    fn handle_tool_delegate_progress(&mut self, progress: &tau_proto::DelegateProgress) {
+        let call_id = progress.call_id.as_str();
+        // Snapshot the latest counters and ctx info regardless of whether the
+        // block is still live; the `ToolResult` handler reuses them on the
+        // completion line.
+        let state = self.tool_calls.entry(call_id.to_owned()).or_default();
+        state.delegate_last_progress = Some(progress.clone());
+        let Some(bid) = state.block_id else {
+            // Block already torn down (delegate finished or never rendered) —
+            // nothing to update.
+            return;
+        };
+        let display = match &progress.display {
+            Some(descriptor) => render_delegate_display(descriptor, progress.role.as_deref()),
+            None => render_delegate_display(
+                &synthesize_fallback_display("delegate", None),
+                progress.role.as_deref(),
+            ),
+        };
+        state.live_display = Some(display.clone());
+        let block = self.render_tool_history_block(&display);
+        self.handle.set_block(bid, block);
+        self.handle.redraw();
+    }
+
+    fn take_finished_tool_call(
+        &mut self,
+        call_id: &str,
+        originator_is_user: bool,
+    ) -> Option<(ToolCallState, bool)> {
+        let prior = self.tool_calls.remove(call_id);
+        let known_main_tool = prior
+            .as_ref()
+            .is_some_and(|prior| !prior.is_sub_agent && originator_is_user);
+        let prior = prior.unwrap_or_default();
+        if prior.is_sub_agent {
+            return None;
+        }
+        if known_main_tool {
+            self.record_main_tool_completed();
+            if self.main_agent_turn_active {
+                self.main_tools_visible = true;
+            }
+        }
+        Some((prior, known_main_tool))
+    }
+
+    fn handle_tool_result(&mut self, result: &tau_proto::ToolResult) {
+        let call_id = result.call_id.as_str();
+        // Sub-agent tool activity stays out of the user's transcript — its
+        // progress is rolled up under the parent's `delegate` block by
+        // `DelegateProgress`.
+        let Some((prior, known_main_tool)) =
+            self.take_finished_tool_call(call_id, result.originator.is_user())
+        else {
+            return;
+        };
+        let display = Self::tool_result_display(result, prior.delegate_last_progress.as_ref());
+        let diff = Self::tool_result_diff(result);
+        self.record_tool_summary_result(
+            prior.summary_block_id,
+            result.display.as_ref(),
+            diff.as_ref(),
+            false,
+        );
+        self.record_tool_result_block(prior.block_id, display, diff);
+        self.render_model_status_after_tool_completion(known_main_tool);
+    }
+
+    fn tool_result_display(
+        result: &tau_proto::ToolResult,
+        last_progress: Option<&tau_proto::DelegateProgress>,
+    ) -> ToolCallDisplay {
+        if result.tool_name.as_str() == "delegate" {
+            let role = last_progress.and_then(|p| p.role.as_deref());
+            let descriptor = build_delegate_completion_display(
+                last_progress.and_then(|p| p.display.as_ref()),
+                &result.result,
+                None,
+            );
+            render_delegate_display(&descriptor, role)
+        } else if let Some(descriptor) = &result.display {
+            render_tool_display(&result.tool_name, descriptor)
+        } else {
+            render_tool_display(
+                &result.tool_name,
+                &synthesize_fallback_display(&result.tool_name, None),
+            )
+        }
+    }
+
+    fn tool_result_diff(result: &tau_proto::ToolResult) -> Option<tau_proto::DiffSummary> {
+        result
+            .display
+            .as_ref()
+            .and_then(|d| match &d.payload {
+                Some(tau_proto::ToolDisplayPayload::Diff(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .or_else(|| extract_diff(&result.result))
+    }
+
+    fn record_tool_result_block(
+        &mut self,
+        existing_block_id: Option<tau_cli_term::BlockId>,
+        display: ToolCallDisplay,
+        diff: Option<tau_proto::DiffSummary>,
+    ) {
+        if let Some(diff) = diff {
+            let block = self.render_diff_history_block(&display, &diff);
+            let bid =
+                self.update_existing_or_print_tool_block(existing_block_id, "tool-diff", block);
+            self.diff_blocks.push(DiffBlockEntry {
+                block_id: bid,
+                display,
+                diff,
+            });
+        } else {
+            let block = self.render_tool_history_block(&display);
+            let bid =
+                self.update_existing_or_print_tool_block(existing_block_id, "tool-result", block);
+            self.tool_history.push(ToolBlockEntry {
+                block_id: bid,
+                display,
+            });
+        }
+    }
+
+    fn handle_tool_error(&mut self, error: &tau_proto::ToolError) {
+        let call_id = error.call_id.as_str();
+        let Some((prior, known_main_tool)) =
+            self.take_finished_tool_call(call_id, error.originator.is_user())
+        else {
+            return;
+        };
+        let display = Self::tool_error_display(error, prior.delegate_last_progress.as_ref());
+        self.record_tool_summary_result(prior.summary_block_id, error.display.as_ref(), None, true);
+        self.record_plain_finished_tool_block(prior.block_id, display, "tool-error");
+        self.render_model_status_after_tool_completion(known_main_tool);
+    }
+
+    fn tool_error_display(
+        error: &tau_proto::ToolError,
+        last_progress: Option<&tau_proto::DelegateProgress>,
+    ) -> ToolCallDisplay {
+        let cbor = error.details.as_ref();
+        if error.tool_name.as_str() == "delegate" {
+            let role = last_progress.and_then(|p| p.role.as_deref());
+            let descriptor = build_delegate_completion_display(
+                last_progress.and_then(|p| p.display.as_ref()),
+                cbor.unwrap_or(&CborValue::Null),
+                Some(&error.message),
+            );
+            render_delegate_display(&descriptor, role)
+        } else if let Some(descriptor) = &error.display {
+            render_tool_display(&error.tool_name, descriptor)
+        } else {
+            render_tool_display(
+                &error.tool_name,
+                &synthesize_fallback_display(&error.tool_name, Some(&error.message)),
+            )
+        }
+    }
+
+    fn handle_tool_cancelled(&mut self, cancelled: &tau_proto::ToolCancelled) {
+        let call_id = cancelled.call_id.as_str();
+        let Some((prior, known_main_tool)) = self.take_finished_tool_call(call_id, true) else {
+            return;
+        };
+        let display = render_tool_display(
+            &cancelled.tool_name,
+            &synthesize_fallback_display(&cancelled.tool_name, Some("cancelled")),
+        );
+        self.record_tool_summary_result(prior.summary_block_id, None, None, true);
+        self.record_plain_finished_tool_block(prior.block_id, display, "tool-cancelled");
+        self.render_model_status_after_tool_completion(known_main_tool);
+    }
+
+    fn record_plain_finished_tool_block(
+        &mut self,
+        existing_block_id: Option<tau_cli_term::BlockId>,
+        display: ToolCallDisplay,
+        label: &'static str,
+    ) {
+        let block = self.render_tool_history_block(&display);
+        let bid = self.update_existing_or_print_tool_block(existing_block_id, label, block);
+        self.tool_history.push(ToolBlockEntry {
+            block_id: bid,
+            display,
+        });
+    }
+
+    fn update_existing_or_print_tool_block(
+        &mut self,
+        existing_block_id: Option<tau_cli_term::BlockId>,
+        label: &'static str,
+        block: tau_cli_term::StyledBlock,
+    ) -> tau_cli_term::BlockId {
+        if let Some(bid) = existing_block_id {
+            self.handle.set_block(bid, block);
+            self.handle.redraw();
+            bid
+        } else {
+            self.handle.print_output(label, block)
+        }
+    }
+
+    fn render_model_status_after_tool_completion(&mut self, known_main_tool: bool) {
+        if known_main_tool && self.main_agent_turn_active {
+            self.render_model_status();
+        }
+    }
+
+    fn handle_shell_events(&mut self, event: &Event) -> bool {
+        match event {
             Event::UiShellCommand(cmd) => {
-                // Create a running block now; the harness will echo
-                // progress and a finished event back to us via the
-                // bus. Both bangs render the same; the context bit
-                // just labels the suffix.
-                let label = if cmd.include_in_context {
-                    "running".to_owned()
-                } else {
-                    "running [no context]".to_owned()
-                };
-                let block = render_shell_block(&self.theme, &cmd.command, "", Some(&label));
-                let block_id = self
-                    .handle
-                    .new_block(format!("shell-command:{}", cmd.command_id), block);
-                self.handle.push_above_active(block_id);
-                self.handle.redraw();
-                self.shell_blocks.insert(
-                    cmd.command_id.to_string(),
-                    ShellBlockState {
-                        block_id,
-                        command: cmd.command.clone(),
-                        include_in_context: cmd.include_in_context,
-                        output: String::new(),
-                    },
-                );
+                self.handle_ui_shell_command(cmd);
+                true
             }
             Event::ShellCommandProgress(progress) => {
-                if let Some(state) = self.shell_blocks.get_mut(progress.command_id.as_str()) {
-                    state.output.push_str(&progress.chunk);
-                    let label = if state.include_in_context {
-                        "running".to_owned()
-                    } else {
-                        "running [no context]".to_owned()
-                    };
-                    let block = render_shell_block(
-                        &self.theme,
-                        &state.command,
-                        &state.output,
-                        Some(&label),
-                    );
-                    self.handle.set_block(state.block_id, block);
-                    self.handle.redraw();
-                }
+                self.handle_shell_command_progress(progress);
+                true
             }
             Event::ShellCommandFinished(finished) => {
-                let Some(state) = self.shell_blocks.remove(finished.command_id.as_str()) else {
-                    return;
-                };
-                // Use the final, post-truncation output from the
-                // extension rather than our streaming buffer so the
-                // UI matches what the harness injected into context.
-                self.handle.remove_block(state.block_id);
-                let suffix = if finished.cancelled {
-                    "cancelled".to_owned()
-                } else {
-                    match finished.exit_code {
-                        Some(0) => "[0]".to_owned(),
-                        Some(code) => format!("[{code}]"),
-                        None => "[?]".to_owned(),
-                    }
-                };
-                let suffix = if state.include_in_context {
-                    suffix
-                } else {
-                    format!("{suffix} [no context]")
-                };
-                let block = render_shell_block(
-                    &self.theme,
-                    &finished.command,
-                    &finished.output,
-                    Some(&suffix),
-                );
-                self.handle.print_output("shell-finished", block);
+                self.handle_shell_command_finished(finished);
+                true
             }
+            _ => false,
+        }
+    }
+
+    fn shell_running_label(include_in_context: bool) -> String {
+        if include_in_context {
+            "running".to_owned()
+        } else {
+            "running [no context]".to_owned()
+        }
+    }
+
+    fn handle_ui_shell_command(&mut self, cmd: &tau_proto::UiShellCommand) {
+        // Create a running block now; the harness will echo progress and a
+        // finished event back to us via the bus. Both bangs render the same;
+        // the context bit just labels the suffix.
+        let label = Self::shell_running_label(cmd.include_in_context);
+        let block = render_shell_block(&self.theme, &cmd.command, "", Some(&label));
+        let block_id = self
+            .handle
+            .new_block(format!("shell-command:{}", cmd.command_id), block);
+        self.handle.push_above_active(block_id);
+        self.handle.redraw();
+        self.shell_blocks.insert(
+            cmd.command_id.to_string(),
+            ShellBlockState {
+                block_id,
+                command: cmd.command.clone(),
+                include_in_context: cmd.include_in_context,
+                output: String::new(),
+            },
+        );
+    }
+
+    fn handle_shell_command_progress(&mut self, progress: &tau_proto::ShellCommandProgress) {
+        if let Some(state) = self.shell_blocks.get_mut(progress.command_id.as_str()) {
+            state.output.push_str(&progress.chunk);
+            let label = Self::shell_running_label(state.include_in_context);
+            let block =
+                render_shell_block(&self.theme, &state.command, &state.output, Some(&label));
+            self.handle.set_block(state.block_id, block);
+            self.handle.redraw();
+        }
+    }
+
+    fn handle_shell_command_finished(&mut self, finished: &tau_proto::ShellCommandFinished) {
+        let Some(state) = self.shell_blocks.remove(finished.command_id.as_str()) else {
+            return;
+        };
+        // Use the final, post-truncation output from the extension rather than
+        // our streaming buffer so the UI matches what the harness injected into
+        // context.
+        self.handle.remove_block(state.block_id);
+        let suffix = Self::shell_finished_suffix(finished, state.include_in_context);
+        let block = render_shell_block(
+            &self.theme,
+            &finished.command,
+            &finished.output,
+            Some(&suffix),
+        );
+        self.handle.print_output("shell-finished", block);
+    }
+
+    fn shell_finished_suffix(
+        finished: &tau_proto::ShellCommandFinished,
+        include_in_context: bool,
+    ) -> String {
+        let suffix = if finished.cancelled {
+            "cancelled".to_owned()
+        } else {
+            match finished.exit_code {
+                Some(0) => "[0]".to_owned(),
+                Some(code) => format!("[{code}]"),
+                None => "[?]".to_owned(),
+            }
+        };
+        if include_in_context {
+            suffix
+        } else {
+            format!("{suffix} [no context]")
+        }
+    }
+
+    fn handle_extension_events(&mut self, event: &Event) -> bool {
+        match event {
             Event::ExtensionStarting(starting) => {
-                let block =
-                    extension_status_block(&self.theme, &starting.extension_name, "starting");
-                let id = self.handle.new_block(
-                    format!("extension-starting:{}", starting.instance_id),
-                    block,
-                );
-                self.handle.push_above_active(id);
-                self.handle.redraw();
-                self.extension_blocks.insert(starting.instance_id, id);
+                self.handle_extension_starting(starting);
+                true
             }
             Event::ExtensionReady(ready) => {
-                if let Some(bid) = self.extension_blocks.remove(&ready.instance_id) {
-                    self.handle.remove_block(bid);
-                }
-                self.ready_extensions
-                    .insert(ready.extension_name.to_string());
-                self.handle.print_output(
-                    "extension-ready",
-                    extension_status_block(&self.theme, &ready.extension_name, "ready"),
-                );
+                self.handle_extension_ready(ready);
+                true
             }
             Event::ExtensionExited(exited) => {
-                if let Some(bid) = self.extension_blocks.remove(&exited.instance_id) {
-                    self.handle.remove_block(bid);
-                }
-                self.ready_extensions.remove(exited.extension_name.as_str());
-                self.handle.print_output(
-                    "extension-exited",
-                    extension_status_block(&self.theme, &exited.extension_name, "exited"),
-                );
+                self.handle_extension_exited(exited);
+                true
             }
             Event::ExtAgentsMdAvailable(agents) => {
-                self.handle.print_output(
-                    "agents-md",
-                    system_loaded_block(&self.theme, &agents.file_path, &agents.content),
-                );
+                self.handle_agents_md_available(agents);
+                true
             }
             Event::ExtensionContextReady(_) => {
-                self.handle.print_output(
-                    "extension-context-ready",
-                    system_status_block(&self.theme, "session context ", "ready"),
-                );
+                self.handle_extension_context_ready();
+                true
             }
+            _ => false,
+        }
+    }
+
+    fn handle_extension_starting(&mut self, starting: &tau_proto::ExtensionStarting) {
+        let block = extension_status_block(&self.theme, &starting.extension_name, "starting");
+        let id = self.handle.new_block(
+            format!("extension-starting:{}", starting.instance_id),
+            block,
+        );
+        self.handle.push_above_active(id);
+        self.handle.redraw();
+        self.extension_blocks.insert(starting.instance_id, id);
+    }
+
+    fn handle_extension_ready(&mut self, ready: &tau_proto::ExtensionReady) {
+        if let Some(bid) = self.extension_blocks.remove(&ready.instance_id) {
+            self.handle.remove_block(bid);
+        }
+        self.ready_extensions
+            .insert(ready.extension_name.to_string());
+        self.handle.print_output(
+            "extension-ready",
+            extension_status_block(&self.theme, &ready.extension_name, "ready"),
+        );
+    }
+
+    fn handle_extension_exited(&mut self, exited: &tau_proto::ExtensionExited) {
+        if let Some(bid) = self.extension_blocks.remove(&exited.instance_id) {
+            self.handle.remove_block(bid);
+        }
+        self.ready_extensions.remove(exited.extension_name.as_str());
+        self.handle.print_output(
+            "extension-exited",
+            extension_status_block(&self.theme, &exited.extension_name, "exited"),
+        );
+    }
+
+    fn handle_agents_md_available(&mut self, agents: &tau_proto::ExtAgentsMdAvailable) {
+        self.handle.print_output(
+            "agents-md",
+            system_loaded_block(&self.theme, &agents.file_path, &agents.content),
+        );
+    }
+
+    fn handle_extension_context_ready(&mut self) {
+        self.handle.print_output(
+            "extension-context-ready",
+            system_status_block(&self.theme, "session context ", "ready"),
+        );
+    }
+
+    fn handle_harness_status_events(&mut self, event: &Event) -> bool {
+        match event {
             Event::HarnessInfo(info) => {
                 self.handle
                     .print_output("harness-info", render_harness_info(&self.theme, info));
+                true
             }
             Event::HarnessSessionDir(session_dir) => {
-                self.handle.print_output(
-                    "session-dir",
-                    session_status_block(
-                        &self.theme,
-                        &session_dir.path,
-                        "/",
-                        session_dir.status.as_str(),
-                    ),
-                );
+                self.handle_harness_session_dir(session_dir);
+                true
             }
             Event::HarnessUiDir(ui_dir) => {
                 self.handle
                     .print_output("ui-dir", ui_dir_block(&self.theme, &ui_dir.path));
+                true
             }
-            Event::HarnessModelsAvailable(_models) => {}
+            Event::HarnessModelsAvailable(_models) => true,
+            _ => false,
+        }
+    }
+
+    fn handle_harness_session_dir(&mut self, session_dir: &tau_proto::HarnessSessionDir) {
+        self.handle.print_output(
+            "session-dir",
+            session_status_block(
+                &self.theme,
+                &session_dir.path,
+                "/",
+                session_dir.status.as_str(),
+            ),
+        );
+    }
+
+    fn handle_harness_role_events(&mut self, event: &Event) -> bool {
+        match event {
             Event::HarnessRolesAvailable(roles) => {
-                let model_items: Vec<tau_cli_term::CompletionItem> = roles
-                    .roles
-                    .iter()
-                    .map(|r| tau_cli_term::CompletionItem::new(&r.name, &r.description))
-                    .collect();
-                let role_defaults: HashMap<String, RoleCompletionDetails> = roles
-                    .roles
-                    .iter()
-                    .map(|r| (r.name.clone(), RoleCompletionDetails::from_role_info(r)))
-                    .collect();
-                let role_items: Vec<(tau_cli_term::CompletionItem, RoleCompletionDetails)> = roles
-                    .roles
-                    .iter()
-                    .filter_map(|role| {
-                        let details = role_defaults.get(&role.name)?.clone();
-                        Some((
-                            tau_cli_term::CompletionItem::new(
-                                &role.name,
-                                details.short_description(),
-                            ),
-                            details,
-                        ))
-                    })
-                    .collect();
-                if let Ok(mut available) = self.roles_available.lock() {
-                    *available = roles.roles.iter().map(|r| r.name.clone()).collect();
-                }
-                self.role_defaults = role_defaults;
-                if self.current_role.is_some() && self.model_status_block.is_some() {
-                    self.render_model_status();
-                }
-                self.completion_data
-                    .set_arg_completions(tau_cli_term::CommandName::new("/model"), model_items);
-                let completer: tau_cli_term::ArgCompleter = std::sync::Arc::new(move |args| {
-                    fn matches(value: &str, needle: &str) -> bool {
-                        needle.is_empty() || value.starts_with(needle) || value.contains(needle)
-                    }
-                    match args.len() {
-                        1 => role_items
-                            .iter()
-                            .filter(|(item, _)| matches(&item.value, args[0]))
-                            .map(|(item, _)| item.clone())
-                            .collect(),
-                        2 => {
-                            let details = role_items
-                                .iter()
-                                .find(|(item, _)| item.value == args[0])
-                                .map(|(_, details)| details.clone())
-                                .unwrap_or(RoleCompletionDetails {
-                                    model: None,
-                                    effort: None,
-                                    verbosity: None,
-                                    thinking_summary: None,
-                                    service_tier: None,
-                                    tools_profile: None,
-                                    role_description: None,
-                                });
-                            [
-                                ("delete", "delete this runtime role/override".to_owned()),
-                                ("model", details.current_description("model")),
-                                ("effort", details.current_description("effort")),
-                                ("verbosity", details.current_description("verbosity")),
-                                (
-                                    "thinking-summary",
-                                    details.current_description("thinking-summary"),
-                                ),
-                                ("service-tier", details.current_description("service-tier")),
-                                (
-                                    "tools-profile",
-                                    details.current_description("tools-profile"),
-                                ),
-                            ]
-                            .into_iter()
-                            .filter(|(value, _)| matches(value, args[1]))
-                            .map(|(value, desc)| tau_cli_term::CompletionItem::new(value, desc))
-                            .collect()
-                        }
-                        3 => match args[1] {
-                            "model" | "tools-profile" => ["reset"]
-                                .into_iter()
-                                .filter(|value| matches(value, args[2]))
-                                .map(|value| role_value_completion(args[1], value))
-                                .collect(),
-                            "effort" => {
-                                ["reset", "off", "minimal", "low", "medium", "high", "xhigh"]
-                                    .into_iter()
-                                    .filter(|value| matches(value, args[2]))
-                                    .map(|value| role_value_completion(args[1], value))
-                                    .collect()
-                            }
-                            "verbosity" => ["reset", "low", "medium", "high"]
-                                .into_iter()
-                                .filter(|value| matches(value, args[2]))
-                                .map(|value| role_value_completion(args[1], value))
-                                .collect(),
-                            "thinking-summary" => ["reset", "off", "auto", "concise", "detailed"]
-                                .into_iter()
-                                .filter(|value| matches(value, args[2]))
-                                .map(|value| role_value_completion(args[1], value))
-                                .collect(),
-                            "service-tier" => ["reset", "fast", "flex"]
-                                .into_iter()
-                                .filter(|value| matches(value, args[2]))
-                                .map(|value| role_value_completion(args[1], value))
-                                .collect(),
-                            _ => Vec::new(),
-                        },
-                        _ => Vec::new(),
-                    }
-                });
-                self.completion_data
-                    .set_arg_completer(tau_cli_term::CommandName::new("/role"), completer);
+                self.handle_harness_roles_available(roles);
+                true
             }
             Event::HarnessRoleSelected(selected) => {
-                self.current_model = selected.model.clone();
-                self.current_role = Some(selected.role.clone());
-                self.baseline_params = selected.baseline_params;
-                if let Ok(mut role) = self.current_role_state.lock() {
-                    *role = Some(selected.role.clone());
-                }
-                self.current_context_window = selected.context_window;
-                self.render_model_status();
+                self.handle_harness_role_selected(selected);
+                true
             }
             Event::HarnessContextUsageChanged(changed) => {
                 self.current_context_input_tokens = changed.input_tokens;
                 self.current_context_percent = changed.percent_used;
                 self.render_model_status();
+                true
             }
             Event::HarnessEffortChanged(changed) => {
                 self.current_params.effort = changed.level;
                 self.effort_state
                     .store(changed.level.as_u8(), std::sync::atomic::Ordering::Relaxed);
                 self.render_model_status();
+                true
             }
             Event::HarnessServiceTierChanged(changed) => {
-                self.current_params.service_tier = changed.service_tier;
-                self.fast_service_tier_state.store(
-                    matches!(changed.service_tier, Some(tau_proto::ServiceTier::Fast)),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                self.render_model_status();
+                self.handle_harness_service_tier_changed(changed);
+                true
             }
             Event::HarnessVerbosityChanged(changed) => {
                 self.current_params.verbosity = changed.level;
                 self.verbosity_state
                     .store(changed.level.as_u8(), std::sync::atomic::Ordering::Relaxed);
                 self.render_model_status();
+                true
             }
             Event::HarnessThinkingSummaryChanged(changed) => {
                 self.current_params.thinking_summary = changed.level;
                 self.thinking_summary_state
                     .store(changed.level.as_u8(), std::sync::atomic::Ordering::Relaxed);
                 self.render_model_status();
+                true
             }
+            _ => false,
+        }
+    }
+
+    fn handle_harness_roles_available(&mut self, roles: &tau_proto::HarnessRolesAvailable) {
+        let model_items: Vec<tau_cli_term::CompletionItem> = roles
+            .roles
+            .iter()
+            .map(|r| tau_cli_term::CompletionItem::new(&r.name, &r.description))
+            .collect();
+        let role_defaults: HashMap<String, RoleCompletionDetails> = roles
+            .roles
+            .iter()
+            .map(|r| (r.name.clone(), RoleCompletionDetails::from_role_info(r)))
+            .collect();
+        let role_items = Self::role_completion_items(roles, &role_defaults);
+        if let Ok(mut available) = self.roles_available.lock() {
+            *available = roles.roles.iter().map(|r| r.name.clone()).collect();
+        }
+        self.role_defaults = role_defaults;
+        if self.current_role.is_some() && self.model_status_block.is_some() {
+            self.render_model_status();
+        }
+        self.completion_data
+            .set_arg_completions(tau_cli_term::CommandName::new("/model"), model_items);
+        let completer: tau_cli_term::ArgCompleter =
+            std::sync::Arc::new(move |args| role_command_completions(&role_items, args));
+        self.completion_data
+            .set_arg_completer(tau_cli_term::CommandName::new("/role"), completer);
+    }
+
+    fn role_completion_items(
+        roles: &tau_proto::HarnessRolesAvailable,
+        role_defaults: &HashMap<String, RoleCompletionDetails>,
+    ) -> Vec<(tau_cli_term::CompletionItem, RoleCompletionDetails)> {
+        roles
+            .roles
+            .iter()
+            .filter_map(|role| {
+                let details = role_defaults.get(&role.name)?.clone();
+                Some((
+                    tau_cli_term::CompletionItem::new(&role.name, details.short_description()),
+                    details,
+                ))
+            })
+            .collect()
+    }
+
+    fn handle_harness_role_selected(&mut self, selected: &tau_proto::HarnessRoleSelected) {
+        self.current_model = selected.model.clone();
+        self.current_role = Some(selected.role.clone());
+        self.baseline_params = selected.baseline_params;
+        if let Ok(mut role) = self.current_role_state.lock() {
+            *role = Some(selected.role.clone());
+        }
+        self.current_context_window = selected.context_window;
+        self.render_model_status();
+    }
+
+    fn handle_harness_service_tier_changed(
+        &mut self,
+        changed: &tau_proto::HarnessServiceTierChanged,
+    ) {
+        self.current_params.service_tier = changed.service_tier;
+        self.fast_service_tier_state.store(
+            matches!(changed.service_tier, Some(tau_proto::ServiceTier::Fast)),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.render_model_status();
+    }
+
+    fn handle_harness_available_events(&mut self, event: &Event) -> bool {
+        match event {
+            Event::HarnessEffortsAvailable(avail) => {
+                self.handle_harness_efforts_available(avail);
+                true
+            }
+            Event::HarnessVerbositiesAvailable(avail) => {
+                self.handle_harness_verbosities_available(avail);
+                true
+            }
+            Event::HarnessThinkingSummariesAvailable(avail) => {
+                self.handle_harness_thinking_summaries_available(avail);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_harness_efforts_available(&mut self, avail: &tau_proto::HarnessEffortsAvailable) {
+        let mut items = vec![tau_cli_term::CompletionItem::new(
+            "reset",
+            "use the model default effort",
+        )];
+        items.extend(
+            avail
+                .levels
+                .iter()
+                .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
+        );
+        self.completion_data
+            .set_arg_completions(tau_cli_term::CommandName::new("/effort"), items);
+        if let Ok(mut set) = self.efforts_available.lock() {
+            set.clear();
+            set.extend(avail.levels.iter().copied());
+        }
+    }
+
+    fn handle_harness_verbosities_available(
+        &mut self,
+        avail: &tau_proto::HarnessVerbositiesAvailable,
+    ) {
+        let mut items = vec![tau_cli_term::CompletionItem::new(
+            "reset",
+            "use the model default verbosity",
+        )];
+        items.extend(
+            avail
+                .levels
+                .iter()
+                .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
+        );
+        self.completion_data
+            .set_arg_completions(tau_cli_term::CommandName::new("/verbosity"), items);
+        if let Ok(mut set) = self.verbosities_available.lock() {
+            set.clear();
+            set.extend(avail.levels.iter().copied());
+        }
+    }
+
+    fn handle_harness_thinking_summaries_available(
+        &mut self,
+        avail: &tau_proto::HarnessThinkingSummariesAvailable,
+    ) {
+        let mut items = vec![tau_cli_term::CompletionItem::new(
+            "reset",
+            "use the model default thinking summary",
+        )];
+        items.extend(
+            avail
+                .levels
+                .iter()
+                .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
+        );
+        self.completion_data
+            .set_arg_completions(tau_cli_term::CommandName::new("/thinking-summary"), items);
+        if let Ok(mut set) = self.thinking_summaries_available.lock() {
+            set.clear();
+            set.extend(avail.levels.iter().copied());
+        }
+    }
+
+    fn handle_terminal_events(&mut self, event: &Event) -> bool {
+        match event {
             Event::Osc1337SetUserVar(req) => {
                 let in_tmux = std::env::var_os("TMUX").is_some();
                 let seq = build_osc1337_set_user_var(&req.name, &req.value, in_tmux);
                 self.handle.print_terminal_escape(seq);
+                true
             }
-            Event::HarnessEffortsAvailable(avail) => {
-                let mut items = vec![tau_cli_term::CompletionItem::new(
-                    "reset",
-                    "use the model default effort",
-                )];
-                items.extend(
-                    avail
-                        .levels
-                        .iter()
-                        .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
-                );
-                self.completion_data
-                    .set_arg_completions(tau_cli_term::CommandName::new("/effort"), items);
-                if let Ok(mut set) = self.efforts_available.lock() {
-                    set.clear();
-                    set.extend(avail.levels.iter().copied());
-                }
-            }
-            Event::HarnessVerbositiesAvailable(avail) => {
-                let mut items = vec![tau_cli_term::CompletionItem::new(
-                    "reset",
-                    "use the model default verbosity",
-                )];
-                items.extend(
-                    avail
-                        .levels
-                        .iter()
-                        .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
-                );
-                self.completion_data
-                    .set_arg_completions(tau_cli_term::CommandName::new("/verbosity"), items);
-                if let Ok(mut set) = self.verbosities_available.lock() {
-                    set.clear();
-                    set.extend(avail.levels.iter().copied());
-                }
-            }
-            Event::HarnessThinkingSummariesAvailable(avail) => {
-                let mut items = vec![tau_cli_term::CompletionItem::new(
-                    "reset",
-                    "use the model default thinking summary",
-                )];
-                items.extend(
-                    avail
-                        .levels
-                        .iter()
-                        .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
-                );
-                self.completion_data.set_arg_completions(
-                    tau_cli_term::CommandName::new("/thinking-summary"),
-                    items,
-                );
-                if let Ok(mut set) = self.thinking_summaries_available.lock() {
-                    set.clear();
-                    set.extend(avail.levels.iter().copied());
-                }
-            }
-            other => {
-                tracing::trace!(
-                    target: "tau_cli::ui",
-                    event = ?std::mem::discriminant(other),
-                    "unhandled event variant"
-                );
-            }
+            _ => false,
         }
     }
 }
