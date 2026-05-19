@@ -39,9 +39,9 @@ function job_coverage() {
     selfci step fail
   fi
 
-  selfci step start "cargo-crap"
+  selfci step start "cargo-crap gates"
   if ! nix build -L .#ci.crap ; then
-    >&2 echo "cargo-crap: failed - CRAP regression detected; refactor to simplify/decompose and/or increase test coverage of flagged code"
+    >&2 echo "cargo-crap: failed - CRAP regression or high-CRAP function detected; refactor to simplify/decompose and/or increase test coverage of flagged code"
     selfci step fail
   fi
 }

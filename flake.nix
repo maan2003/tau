@@ -260,8 +260,8 @@
               doCheck = false;
             };
 
-            crap = craneLib.mkCargoDerivation {
-              pname = "${projectName}-cargo-crap-ccov";
+            crapRegression = craneLib.mkCargoDerivation {
+              pname = "${projectName}-cargo-crap-ccov-regression";
               cargoArtifacts = workspaceCcov;
               buildPhaseCargoCommand = ''
                 test -s ${testsCcov}/lcov.info
@@ -283,6 +283,35 @@
               nativeBuildInputs = [ cargoCrap ];
               doCheck = false;
             };
+
+            crapAbsolute = craneLib.mkCargoDerivation {
+              pname = "${projectName}-cargo-crap-ccov-absolute";
+              cargoArtifacts = workspaceCcov;
+              buildPhaseCargoCommand = ''
+                test -s ${testsCcov}/lcov.info
+                # Catch severe new high-CRAP functions that --fail-regression
+                # reports as new but does not fail on.
+                ${cargoCrap}/bin/cargo-crap \
+                  --workspace \
+                  --lcov ${testsCcov}/lcov.info \
+                  --threshold 1000 \
+                  --min 1000 \
+                  --format github \
+                  --fail-above
+                mkdir -p $out
+                cp ${testsCcov}/lcov.info $out/lcov.info
+              '';
+              doInstallCargoArtifacts = false;
+              nativeBuildInputs = [ cargoCrap ];
+              doCheck = false;
+            };
+
+            crap = pkgs.runCommand "${projectName}-cargo-crap-ccov" { } ''
+              mkdir -p $out
+              ln -s ${crapRegression} $out/regression
+              ln -s ${crapAbsolute} $out/absolute
+              cp ${crapRegression}/lcov.info $out/lcov.info
+            '';
 
             tau = replaceTauBuildInfo (
               craneLib.buildPackage {
@@ -313,6 +342,8 @@
             testsCcov
             crapBaseline
             crapReport
+            crapRegression
+            crapAbsolute
             crap
             ;
         };

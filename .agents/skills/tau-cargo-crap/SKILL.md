@@ -13,18 +13,21 @@ Use this when `selfci check` fails in the `coverage/cargo-crap` step or when wor
 
 ```bash
 nix build -L .#ci.testsCcov
-nix build -L .#ci.crap
+nix build -L .#ci.crapRegression
+nix build -L .#ci.crapAbsolute
 nix build -L .#ci.crapReport -o result-crap-report
 sed -n '1,120p' result-crap-report/cargo-crap.md
 ```
 
-`.#ci.crapReport` is the non-blocking inventory report. `.#ci.crap` is the blocking gate used by selfci.
+`.#ci.crapReport` is the non-blocking inventory report. `.#ci.crapRegression` and `.#ci.crapAbsolute` are the blocking gates; `.#ci.crap` aggregates them for selfci compatibility.
 
 ## Current CI model
 
-- The blocking gate uses LCOV from the Nix coverage derivation, not a local `cargo llvm-cov` run.
-- `.#ci.crap` compares against `nix/cargo-crap-baseline.json` with `--fail-regression`.
-- The gate is intentionally focused on severe entries with `--threshold 1000 --min 1000`.
+- The blocking gates use LCOV from the Nix coverage derivation, not a local `cargo llvm-cov` run.
+- `.#ci.crapRegression` compares against `nix/cargo-crap-baseline.json` with `--fail-regression`.
+- `.#ci.crapAbsolute` fails current entries above the severe threshold with `--fail-above`.
+- `.#ci.crap` is the aggregate/selfci compatibility output that builds both gates.
+- The gates are intentionally focused on severe entries with `--threshold 1000 --min 1000`.
 - Do not “fix” failures by raising the threshold. Refactor/decompose flagged code or add meaningful coverage.
 
 ## Baseline regeneration
@@ -41,8 +44,8 @@ Generate the baseline through Nix. The LCOV paths in this setup are `/build/sour
 
 ## cargo-crap pitfalls
 
-- `--fail-regression` fails only existing functions whose CRAP score increased; new high-CRAP functions are reported but do not fail by that flag alone.
-- `--min` filters the current entries before baseline comparison. This is why the CI gate is a severe-regression gate, not a full-repo no-regression gate.
+- `--fail-regression` fails only existing functions whose CRAP score increased; new high-CRAP functions are reported but do not fail by that flag alone, so `.#ci.crapAbsolute` also runs `--fail-above`.
+- `--min` filters the current entries before baseline comparison. This is why the regression gate is a severe-regression gate, not a full-repo no-regression gate.
 - cargo-crap v0.2.0 baseline matching keys on `(file, function)` and ignores line numbers. Without `--min 1000`, Tau currently gets false regressions for duplicate same-file function names like multiple `From` impls.
 
 ## Refactoring flagged code
@@ -53,6 +56,8 @@ For code fixes, preserve behavior first and split dispatch-heavy functions into 
 
 ```bash
 treefmt
+nix build -L .#ci.crapRegression
+nix build -L .#ci.crapAbsolute
 nix build -L .#ci.crap
 selfci check
 ```
