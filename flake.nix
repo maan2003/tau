@@ -294,8 +294,8 @@
                 ${cargoCrap}/bin/cargo-crap \
                   --workspace \
                   --lcov ${testsCcov}/lcov.info \
-                  --threshold 1000 \
-                  --min 1000 \
+                  --threshold 500 \
+                  --min 100 \
                   --format github \
                   --fail-above
                 mkdir -p $out

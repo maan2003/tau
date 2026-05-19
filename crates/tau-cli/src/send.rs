@@ -186,3 +186,162 @@ fn find_daemon_for_session(session_id: &str) -> Option<PathBuf> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use tau_proto::{Event, PromptOriginator, UiRoleUpdateAction};
+
+    use super::event_for_line;
+
+    const SESSION_ID: &str = "test-session";
+
+    fn event(text: &str) -> Option<Event> {
+        event_for_line(SESSION_ID, text)
+    }
+
+    fn prompt_text(text: &str) -> String {
+        match event(text).expect("prompt event") {
+            Event::UiPromptSubmitted(prompt) => {
+                assert_eq!(prompt.session_id, SESSION_ID);
+                assert_eq!(prompt.originator, PromptOriginator::User);
+                assert_eq!(prompt.ctx_id, None);
+                prompt.text
+            }
+            other => panic!("expected UiPromptSubmitted, got {other:?}"),
+        }
+    }
+
+    /// Headless send intentionally treats interactive-only exit commands as
+    /// no-ops.
+    #[test]
+    fn quit_and_detach_are_no_ops() {
+        assert_eq!(event("/quit"), None);
+        assert_eq!(event("/detach"), None);
+    }
+
+    /// `/cancel` maps to the broadcast cancel form; the harness may later
+    /// retarget it.
+    #[test]
+    fn cancel_requests_prompt_cancellation() {
+        match event("/cancel").expect("cancel event") {
+            Event::UiCancelPrompt(cancel) => {
+                assert_eq!(cancel.session_id, SESSION_ID);
+                assert_eq!(cancel.session_prompt_id, None);
+            }
+            other => panic!("expected UiCancelPrompt, got {other:?}"),
+        }
+    }
+
+    /// Tree commands are daemon-side operations, while malformed navigation
+    /// stays a prompt.
+    #[test]
+    fn tree_commands_request_or_navigate_tree() {
+        match event("/tree").expect("tree event") {
+            Event::UiTreeRequest(req) => assert_eq!(req.session_id, SESSION_ID),
+            other => panic!("expected UiTreeRequest, got {other:?}"),
+        }
+
+        match event("/tree 42").expect("navigate event") {
+            Event::UiNavigateTree(req) => {
+                assert_eq!(req.session_id, SESSION_ID);
+                assert_eq!(req.node_id, 42);
+            }
+            other => panic!("expected UiNavigateTree, got {other:?}"),
+        }
+
+        assert_eq!(prompt_text("/tree nope"), "/tree nope");
+    }
+
+    /// `/compact` must reach the harness instead of being sent as prompt text.
+    #[test]
+    fn compact_requests_compaction() {
+        match event("/compact").expect("compact event") {
+            Event::UiCompactRequest(req) => assert_eq!(req.session_id, SESSION_ID),
+            other => panic!("expected UiCompactRequest, got {other:?}"),
+        }
+    }
+
+    /// Local configuration commands are ignored by `tau send`; they only make
+    /// sense in chat UI.
+    #[test]
+    fn local_configuration_commands_are_ignored() {
+        for command in [
+            "/effort",
+            "/effort high",
+            "/fast",
+            "/fast on",
+            "/verbosity",
+            "/verbosity high",
+            "/thinking-summary",
+            "/thinking-summary auto",
+        ] {
+            assert_eq!(event(command), None, "{command}");
+        }
+    }
+
+    /// Role selection aliases are forwarded as role-select events, with bare
+    /// `/role` ignored.
+    #[test]
+    fn role_select_commands_pick_roles() {
+        assert_eq!(event("/role"), None);
+
+        match event("/role reviewer").expect("role select") {
+            Event::UiRoleSelect(select) => assert_eq!(select.role, "reviewer"),
+            other => panic!("expected UiRoleSelect, got {other:?}"),
+        }
+
+        match event("/model reviewer").expect("model role select") {
+            Event::UiRoleSelect(select) => assert_eq!(select.role, "reviewer"),
+            other => panic!("expected UiRoleSelect, got {other:?}"),
+        }
+
+        assert_eq!(event("/model "), None);
+    }
+
+    /// `/role <role> delete` is the headless spelling for deleting a runtime
+    /// role override.
+    #[test]
+    fn role_delete_command_updates_roles() {
+        match event("/role scratch delete").expect("role update") {
+            Event::UiRoleUpdate(update) => {
+                assert_eq!(update.role, "scratch");
+                assert_eq!(update.action, UiRoleUpdateAction::Delete);
+            }
+            other => panic!("expected UiRoleUpdate, got {other:?}"),
+        }
+    }
+
+    /// Shell commands produce dynamic ids but preserve command text and
+    /// context-inclusion mode.
+    #[test]
+    fn shell_commands_record_context_mode() {
+        match event("!! echo hi").expect("ui-only shell command") {
+            Event::UiShellCommand(command) => {
+                assert_eq!(command.session_id, SESSION_ID);
+                assert!(command.command_id.as_str().starts_with("ui-sh-"));
+                assert_eq!(command.command, "echo hi");
+                assert!(!command.include_in_context);
+            }
+            other => panic!("expected UiShellCommand, got {other:?}"),
+        }
+
+        match event("! echo hi").expect("context shell command") {
+            Event::UiShellCommand(command) => {
+                assert_eq!(command.session_id, SESSION_ID);
+                assert!(command.command_id.as_str().starts_with("ui-sh-"));
+                assert_eq!(command.command, "echo hi");
+                assert!(command.include_in_context);
+            }
+            other => panic!("expected UiShellCommand, got {other:?}"),
+        }
+
+        assert_eq!(event("!!"), None);
+        assert_eq!(event("!"), None);
+    }
+
+    /// Unrecognized text is submitted unchanged as a normal user prompt.
+    #[test]
+    fn normal_text_submits_user_prompt() {
+        assert_eq!(prompt_text("explain this diff"), "explain this diff");
+    }
+}

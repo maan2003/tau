@@ -2466,155 +2466,13 @@ impl Harness {
         }
 
         match event {
-            Event::UiRoleSelect(select) => {
-                if !self.available_roles.contains_key(&select.role) {
-                    self.publish_event(
-                        None,
-                        Event::HarnessInfo(tau_proto::HarnessInfo {
-                            message: format!("unknown role: {}", select.role),
-                            level: tau_proto::HarnessInfoLevel::Normal,
-                        }),
-                    );
-                    return Ok(true);
-                }
-
-                let was_empty = self.selected_model.is_none();
-                self.selected_role = select.role.clone();
-                self.reconcile_selected_model_with_available();
-                save_role_overrides(&self.dirs, &self.selected_role, &self.role_overrides);
-                if self.selected_model.is_none() {
-                    self.publish_event(
-                        None,
-                        Event::HarnessInfo(tau_proto::HarnessInfo {
-                            message: format!("role `{}` has no available model", select.role),
-                            level: tau_proto::HarnessInfoLevel::Normal,
-                        }),
-                    );
-                }
-                self.publish_current_model_state();
-                if was_empty && self.selected_model.is_some() && self.turn_state.is_idle() {
-                    self.try_advance_queue();
-                }
-                Ok(true)
-            }
-            Event::UiRoleUpdate(req) => {
-                let mut selected_role_changed = false;
-                let selected_was_empty = self.selected_model.is_none();
-                match req.action {
-                    tau_proto::UiRoleUpdateAction::Delete => {
-                        let was_selected = self.selected_role == req.role;
-                        let previous_override = self.role_overrides.remove(&req.role);
-                        let configured_role = load_harness_settings_or_warn(&self.dirs)?
-                            .roles
-                            .get(&req.role)
-                            .cloned();
-
-                        if let Some(role) = configured_role {
-                            self.available_roles.insert(req.role.clone(), role);
-                            selected_role_changed = was_selected;
-                        } else {
-                            let removed_role = self.available_roles.remove(&req.role);
-                            if self.available_roles.is_empty() {
-                                if let Some(role) = removed_role {
-                                    self.available_roles.insert(req.role.clone(), role);
-                                }
-                                if let Some(role) = previous_override {
-                                    self.role_overrides.insert(req.role.clone(), role);
-                                }
-                                self.emit_info("/role: cannot delete the last role");
-                            } else if was_selected {
-                                self.selected_role = fallback_role(&self.available_roles);
-                                selected_role_changed = true;
-                            }
-                        }
-                    }
-                    action => {
-                        if let Some(next_role) = self.role_after_update(&req.role, action) {
-                            self.available_roles
-                                .insert(req.role.clone(), next_role.clone());
-                            self.role_overrides.insert(req.role.clone(), next_role);
-                            selected_role_changed = self.selected_role == req.role;
-                        }
-                    }
-                }
-                if selected_role_changed {
-                    self.reconcile_selected_model_with_available();
-                    self.publish_current_model_state();
-                    if selected_was_empty
-                        && self.selected_model.is_some()
-                        && self.turn_state.is_idle()
-                    {
-                        self.try_advance_queue();
-                    }
-                }
-                save_role_overrides(&self.dirs, &self.selected_role, &self.role_overrides);
-                self.publish_event(
-                    None,
-                    Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
-                        roles: role_infos(
-                            &self.provider_model_info,
-                            &self.available_roles,
-                            &self.tools_profiles,
-                            &self.available_models,
-                        ),
-                    }),
-                );
-                Ok(true)
-            }
-            Event::UiPromptSubmitted(prompt) => {
-                // Stash the correlation tag on the default conversation
-                // before submission; `send_prompt_to_agent_for` will
-                // consume it when it constructs the matching
-                // `SessionPromptCreated`. Queued prompts drop the tag
-                // (the queue stores text only) — the daemon helper
-                // only exercises the synchronous-dispatch path.
-                if let Some(c) = self.conversations.get_mut(&self.default_conversation_id) {
-                    c.next_ctx_id = prompt.ctx_id.clone();
-                }
-                let submission =
-                    self.submit_user_prompt(prompt.session_id.clone(), prompt.text.clone())?;
-                if matches!(submission, PromptSubmission::Queued) {
-                    self.publish_event(
-                        None,
-                        Event::SessionPromptQueued(SessionPromptQueued {
-                            session_id: prompt.session_id.clone(),
-                            text: prompt.text.clone(),
-                        }),
-                    );
-                    if self.selected_model.is_none() {
-                        self.emit_info(
-                            "selected role has no available model — use /model to pick a role or enable a provider",
-                        );
-                    }
-                }
-                Ok(true)
-            }
-            Event::UiSwitchSession(req) => {
-                self.publish_event(Some(client_id), Event::UiSwitchSession(req.clone()));
-                self.switch_session(req.new_session_id, req.reason)?;
-                Ok(true)
-            }
-            Event::UiTreeRequest(req) => {
-                self.publish_event(Some(client_id), Event::UiTreeRequest(req.clone()));
-                self.handle_tree_request(&req.session_id);
-                Ok(true)
-            }
-            Event::UiNavigateTree(req) => {
-                // Validate the target node exists in *this* harness's
-                // bound session before publishing — `apply_event` for
-                // `UiNavigateTree` is also a no-op for unknown ids,
-                // but we want a user-visible error message rather
-                // than a silent drop.
-                if self.handle_navigate_tree(&req.session_id, req.node_id) {
-                    self.publish_event(Some(client_id), Event::UiNavigateTree(req));
-                }
-                Ok(true)
-            }
-            Event::UiCompactRequest(req) => {
-                self.publish_event(Some(client_id), Event::UiCompactRequest(req.clone()));
-                self.handle_compact_request(req.session_id);
-                Ok(true)
-            }
+            Event::UiRoleSelect(select) => self.handle_ui_role_select(select),
+            Event::UiRoleUpdate(req) => self.handle_ui_role_update(req),
+            Event::UiPromptSubmitted(prompt) => self.handle_ui_prompt_submitted(prompt),
+            Event::UiSwitchSession(req) => self.handle_ui_switch_session(client_id, req),
+            Event::UiTreeRequest(req) => self.handle_ui_tree_request(client_id, req),
+            Event::UiNavigateTree(req) => self.handle_ui_navigate_tree(client_id, req),
+            Event::UiCompactRequest(req) => self.handle_ui_compact_request(client_id, req),
             Event::UiCancelPrompt(req) => {
                 self.handle_cancel_prompt(&req.session_id);
                 Ok(true)
@@ -2624,6 +2482,189 @@ impl Harness {
                 Ok(true)
             }
         }
+    }
+
+    fn handle_ui_role_select(
+        &mut self,
+        select: tau_proto::UiRoleSelect,
+    ) -> Result<bool, HarnessError> {
+        if !self.available_roles.contains_key(&select.role) {
+            self.publish_event(
+                None,
+                Event::HarnessInfo(tau_proto::HarnessInfo {
+                    message: format!("unknown role: {}", select.role),
+                    level: tau_proto::HarnessInfoLevel::Normal,
+                }),
+            );
+            return Ok(true);
+        }
+
+        let was_empty = self.selected_model.is_none();
+        self.selected_role = select.role.clone();
+        self.reconcile_selected_model_with_available();
+        save_role_overrides(&self.dirs, &self.selected_role, &self.role_overrides);
+        if self.selected_model.is_none() {
+            self.publish_event(
+                None,
+                Event::HarnessInfo(tau_proto::HarnessInfo {
+                    message: format!("role `{}` has no available model", select.role),
+                    level: tau_proto::HarnessInfoLevel::Normal,
+                }),
+            );
+        }
+        self.publish_current_model_state();
+        if was_empty && self.selected_model.is_some() && self.turn_state.is_idle() {
+            self.try_advance_queue();
+        }
+        Ok(true)
+    }
+
+    fn handle_ui_role_update(
+        &mut self,
+        req: tau_proto::UiRoleUpdate,
+    ) -> Result<bool, HarnessError> {
+        let mut selected_role_changed = false;
+        let selected_was_empty = self.selected_model.is_none();
+        match req.action {
+            tau_proto::UiRoleUpdateAction::Delete => {
+                selected_role_changed = self.handle_ui_role_delete(req.role)?;
+            }
+            action => {
+                if let Some(next_role) = self.role_after_update(&req.role, action) {
+                    self.available_roles
+                        .insert(req.role.clone(), next_role.clone());
+                    self.role_overrides.insert(req.role.clone(), next_role);
+                    selected_role_changed = self.selected_role == req.role;
+                }
+            }
+        }
+        if selected_role_changed {
+            self.reconcile_selected_model_with_available();
+            self.publish_current_model_state();
+            if selected_was_empty && self.selected_model.is_some() && self.turn_state.is_idle() {
+                self.try_advance_queue();
+            }
+        }
+        save_role_overrides(&self.dirs, &self.selected_role, &self.role_overrides);
+        self.publish_event(
+            None,
+            Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
+                roles: role_infos(
+                    &self.provider_model_info,
+                    &self.available_roles,
+                    &self.tools_profiles,
+                    &self.available_models,
+                ),
+            }),
+        );
+        Ok(true)
+    }
+
+    fn handle_ui_role_delete(&mut self, role_name: String) -> Result<bool, HarnessError> {
+        let was_selected = self.selected_role == role_name;
+        let previous_override = self.role_overrides.remove(&role_name);
+        let configured_role = load_harness_settings_or_warn(&self.dirs)?
+            .roles
+            .get(&role_name)
+            .cloned();
+
+        if let Some(role) = configured_role {
+            self.available_roles.insert(role_name, role);
+            return Ok(was_selected);
+        }
+
+        let removed_role = self.available_roles.remove(&role_name);
+        if self.available_roles.is_empty() {
+            if let Some(role) = removed_role {
+                self.available_roles.insert(role_name.clone(), role);
+            }
+            if let Some(role) = previous_override {
+                self.role_overrides.insert(role_name.clone(), role);
+            }
+            self.emit_info("/role: cannot delete the last role");
+            return Ok(false);
+        }
+        if was_selected {
+            self.selected_role = fallback_role(&self.available_roles);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn handle_ui_prompt_submitted(
+        &mut self,
+        prompt: tau_proto::UiPromptSubmitted,
+    ) -> Result<bool, HarnessError> {
+        // Stash the correlation tag on the default conversation
+        // before submission; `send_prompt_to_agent_for` will consume
+        // it when it constructs the matching `SessionPromptCreated`.
+        // Queued prompts drop the tag (the queue stores text only) —
+        // the daemon helper only exercises the synchronous-dispatch
+        // path.
+        if let Some(c) = self.conversations.get_mut(&self.default_conversation_id) {
+            c.next_ctx_id = prompt.ctx_id.clone();
+        }
+        let submission = self.submit_user_prompt(prompt.session_id.clone(), prompt.text.clone())?;
+        if matches!(submission, PromptSubmission::Queued) {
+            self.publish_event(
+                None,
+                Event::SessionPromptQueued(SessionPromptQueued {
+                    session_id: prompt.session_id.clone(),
+                    text: prompt.text.clone(),
+                }),
+            );
+            if self.selected_model.is_none() {
+                self.emit_info(
+                    "selected role has no available model — use /model to pick a role or enable a provider",
+                );
+            }
+        }
+        Ok(true)
+    }
+
+    fn handle_ui_switch_session(
+        &mut self,
+        client_id: &str,
+        req: tau_proto::UiSwitchSession,
+    ) -> Result<bool, HarnessError> {
+        self.publish_event(Some(client_id), Event::UiSwitchSession(req.clone()));
+        self.switch_session(req.new_session_id, req.reason)?;
+        Ok(true)
+    }
+
+    fn handle_ui_tree_request(
+        &mut self,
+        client_id: &str,
+        req: tau_proto::UiTreeRequest,
+    ) -> Result<bool, HarnessError> {
+        self.publish_event(Some(client_id), Event::UiTreeRequest(req.clone()));
+        self.handle_tree_request(&req.session_id);
+        Ok(true)
+    }
+
+    fn handle_ui_navigate_tree(
+        &mut self,
+        client_id: &str,
+        req: tau_proto::UiNavigateTree,
+    ) -> Result<bool, HarnessError> {
+        // Validate the target node exists in *this* harness's bound
+        // session before publishing — `apply_event` for
+        // `UiNavigateTree` is also a no-op for unknown ids, but we want
+        // a user-visible error message rather than a silent drop.
+        if self.handle_navigate_tree(&req.session_id, req.node_id) {
+            self.publish_event(Some(client_id), Event::UiNavigateTree(req));
+        }
+        Ok(true)
+    }
+
+    fn handle_ui_compact_request(
+        &mut self,
+        client_id: &str,
+        req: tau_proto::UiCompactRequest,
+    ) -> Result<bool, HarnessError> {
+        self.publish_event(Some(client_id), Event::UiCompactRequest(req.clone()));
+        self.handle_compact_request(req.session_id);
+        Ok(true)
     }
 
     fn handle_cancel_prompt(&mut self, session_id: &SessionId) {
