@@ -456,8 +456,10 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
                 smart: {
                     description: "CURRENT CONFIG DESCRIPTION",
                     model: "openai/gpt-4.1",
-                    prompt: "CURRENT CONFIG PROMPT",
-                    extraPrompt: "CURRENT CONFIG EXTRA",
+                    promptFragments: [
+                        { name: "smart.prompt", priority: 100, text: "CURRENT CONFIG PROMPT" },
+                        { name: "smart.extra", priority: 200, text: "CURRENT CONFIG EXTRA" },
+                    ],
                 },
             },
         }"#,
@@ -470,10 +472,7 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
             "role_overrides": {
                 "smart": {
                     "description": "STALE STATE DESCRIPTION",
-                    "model": "openai/gpt-4.1-mini",
-                    "prompt": "STALE STATE PROMPT",
-                    "extraPrompt": "STALE STATE EXTRA"
-                }
+                    "model": "openai/gpt-4.1-mini"                }
             }
         }"#,
     )
@@ -493,17 +492,20 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
         Some("CURRENT CONFIG DESCRIPTION")
     );
     assert_eq!(
-        role.prompt.as_ref().map(|prompt| prompt.as_str()),
+        role.prompt_fragments
+            .first()
+            .map(|fragment| fragment.text.as_str()),
         Some("CURRENT CONFIG PROMPT")
     );
     assert_eq!(
-        role.extra_prompt.as_ref().map(|prompt| prompt.as_str()),
+        role.prompt_fragments
+            .get(1)
+            .map(|fragment| fragment.text.as_str()),
         Some("CURRENT CONFIG EXTRA")
     );
     let runtime_override = role_overrides.get("smart").expect("runtime override");
     assert!(runtime_override.description.is_none());
-    assert!(runtime_override.prompt.is_none());
-    assert!(runtime_override.extra_prompt.is_none());
+    assert!(runtime_override.prompt_fragments.is_empty());
 
     save_role_overrides(&dirs, &selected_role, &roles);
     let saved = std::fs::read_to_string(state_dir.join("harness.yaml")).expect("read state");
@@ -514,10 +516,6 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
     assert!(
         !saved.contains("prompt"),
         "saved state must strip prompt fields: {saved}"
-    );
-    assert!(
-        !saved.contains("extraPrompt"),
-        "saved state must strip extraPrompt fields: {saved}"
     );
 }
 

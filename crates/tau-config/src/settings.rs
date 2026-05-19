@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{ModelId, PromptContent, ToolName};
+use tau_proto::{ModelId, PromptContent, PromptPriority, ToolName};
 
 // ---------------------------------------------------------------------------
 // Built-in configs
@@ -439,16 +439,14 @@ pub struct AgentRole {
     /// Provider service tier preferred by this role.
     #[serde(skip_serializing_if = "Option::is_none", rename = "serviceTier")]
     pub service_tier: Option<tau_proto::ServiceTier>,
-    /// User-provided replacement for the role's built-in prompt, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<PromptContent>,
+    /// Prompt fragments contributed by this role. Fragments are rendered as
+    /// Handlebars templates and ordered together with tool/extension fragments.
+    #[serde(skip_serializing_if = "Vec::is_empty", rename = "promptFragments")]
+    pub prompt_fragments: Vec<RolePromptFragment>,
     /// Whether this role focuses on orchestrating and delegating work to
     /// sub-agents. Defaults semantically to false when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orchestrator: Option<bool>,
-    /// Additional role-specific prompt text appended after the role prompt.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "extraPrompt")]
-    pub extra_prompt: Option<PromptContent>,
     /// Explicit internal tool names enabled for this role. When unset, tools
     /// use their own default enablement.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -483,14 +481,11 @@ impl AgentRole {
         if let Some(service_tier) = override_role.service_tier {
             self.service_tier = Some(service_tier);
         }
-        if let Some(prompt) = &override_role.prompt {
-            self.prompt = Some(prompt.clone());
+        if !override_role.prompt_fragments.is_empty() {
+            self.prompt_fragments = override_role.prompt_fragments.clone();
         }
         if let Some(orchestrator) = override_role.orchestrator {
             self.orchestrator = Some(orchestrator);
-        }
-        if let Some(extra_prompt) = &override_role.extra_prompt {
-            self.extra_prompt = Some(extra_prompt.clone());
         }
         if let Some(tools) = &override_role.tools {
             self.tools = Some(tools.clone());
@@ -499,6 +494,19 @@ impl AgentRole {
             self.disable_tools = override_role.disable_tools.clone();
         }
     }
+}
+
+/// One prompt fragment configured on a harness role.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RolePromptFragment {
+    /// Stable fragment name, preferably namespaced by role or purpose.
+    pub name: String,
+    /// Priority controlling placement among all prompt fragments. Lower values
+    /// render earlier.
+    pub priority: PromptPriority,
+    /// Handlebars template text rendered into the system prompt.
+    pub text: PromptContent,
 }
 
 // ---------------------------------------------------------------------------

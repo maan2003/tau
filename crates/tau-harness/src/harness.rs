@@ -84,6 +84,38 @@ pub(crate) struct SessionContextStore {
     >,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PromptFragmentSource {
+    RoleConfig {
+        role_name: String,
+    },
+    Extension {
+        connection_id: tau_proto::ConnectionId,
+    },
+    Tool {
+        connection_id: tau_proto::ConnectionId,
+    },
+}
+
+impl PromptFragmentSource {
+    fn sort_key(&self) -> (&str, u8) {
+        match self {
+            // Role-config fragments have no extension connection id. Keep them
+            // deterministic without pretending they came from a magic string
+            // connection.
+            Self::RoleConfig { role_name } => (role_name.as_str(), 0),
+            Self::Extension { connection_id } => (connection_id.as_str(), 1),
+            Self::Tool { connection_id } => (connection_id.as_str(), 2),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SourcedPromptFragment {
+    source: PromptFragmentSource,
+    fragment: PromptFragment,
+}
+
 impl SessionContextStore {
     /// Store or replace one contributor's value for a session context key.
     pub(crate) fn publish(
@@ -5014,7 +5046,6 @@ impl Harness {
 
     fn build_system_prompt_for_role(&self, cwd: &str, role_name: &str) -> String {
         let current_role = self.available_roles.get(role_name);
-        let role_prompt = current_role.and_then(|role| role.prompt.as_ref());
         let available_sub_task_roles_prompt = current_role
             .and_then(|role| role.orchestrator)
             .unwrap_or(false)
@@ -5023,8 +5054,6 @@ impl Harness {
         build_system_prompt_with_template_context(
             &self.discovered_skills,
             cwd,
-            role_prompt,
-            current_role.and_then(|role| role.extra_prompt.as_ref()),
             available_sub_task_roles_prompt.as_ref(),
             &prompt_fragments,
             self.session_context
@@ -5058,9 +5087,30 @@ impl Harness {
             .flat_map(|(connection_id, fragments)| {
                 fragments
                     .values()
-                    .map(move |fragment| (connection_id.clone(), fragment.clone()))
+                    .map(move |fragment| SourcedPromptFragment {
+                        source: PromptFragmentSource::Extension {
+                            connection_id: connection_id.clone(),
+                        },
+                        fragment: fragment.clone(),
+                    })
             })
             .collect();
+        if let Some(role) = self.available_roles.get(role_name) {
+            fragments.extend(
+                role.prompt_fragments
+                    .iter()
+                    .map(|fragment| SourcedPromptFragment {
+                        source: PromptFragmentSource::RoleConfig {
+                            role_name: role_name.to_owned(),
+                        },
+                        fragment: PromptFragment::new(
+                            fragment.name.clone(),
+                            fragment.priority,
+                            fragment.text.clone(),
+                        ),
+                    }),
+            );
+        }
         fragments.extend(
             self.registry
                 .all_tool_providers()
@@ -5070,18 +5120,24 @@ impl Harness {
                     provider
                         .prompt_fragment
                         .as_ref()
-                        .map(|fragment| (provider.connection_id.clone(), fragment.clone()))
+                        .map(|fragment| SourcedPromptFragment {
+                            source: PromptFragmentSource::Tool {
+                                connection_id: provider.connection_id.clone(),
+                            },
+                            fragment: fragment.clone(),
+                        })
                 }),
         );
         fragments.sort_by(|a, b| {
-            a.1.priority
-                .cmp(&b.1.priority)
-                .then_with(|| a.0.cmp(&b.0))
-                .then_with(|| a.1.name.cmp(&b.1.name))
+            a.fragment
+                .priority
+                .cmp(&b.fragment.priority)
+                .then_with(|| a.source.sort_key().cmp(&b.source.sort_key()))
+                .then_with(|| a.fragment.name.cmp(&b.fragment.name))
         });
         fragments
             .into_iter()
-            .map(|(_, fragment)| fragment)
+            .map(|sourced| sourced.fragment)
             .collect()
     }
 

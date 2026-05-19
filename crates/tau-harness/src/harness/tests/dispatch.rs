@@ -4177,7 +4177,11 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
             "smart".to_owned(),
             tau_config::settings::AgentRole {
                 model: Some(smart_model),
-                prompt: Some(tau_proto::PromptContent::new("SMART ROLE PROMPT")),
+                prompt_fragments: vec![tau_config::settings::RolePromptFragment {
+                    name: "smart.instructions".to_owned(),
+                    priority: tau_proto::PromptPriority::new(100),
+                    text: tau_proto::PromptContent::new("SMART ROLE PROMPT"),
+                }],
                 ..Default::default()
             },
         ),
@@ -4189,8 +4193,18 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
                 verbosity: Some(tau_proto::Verbosity::High),
                 thinking_summary: Some(tau_proto::ThinkingSummary::Auto),
                 service_tier: Some(tau_proto::ServiceTier::Flex),
-                prompt: Some(tau_proto::PromptContent::new("WORKER ROLE PROMPT")),
-                extra_prompt: Some(tau_proto::PromptContent::new("WORKER EXTRA PROMPT")),
+                prompt_fragments: vec![
+                    tau_config::settings::RolePromptFragment {
+                        name: "worker.instructions".to_owned(),
+                        priority: tau_proto::PromptPriority::new(100),
+                        text: tau_proto::PromptContent::new("WORKER ROLE PROMPT"),
+                    },
+                    tau_config::settings::RolePromptFragment {
+                        name: "worker.extra".to_owned(),
+                        priority: tau_proto::PromptPriority::new(200),
+                        text: tau_proto::PromptContent::new("WORKER EXTRA PROMPT"),
+                    },
+                ],
                 tools: Some(vec![ToolName::new("allowed_tool")]),
                 disable_tools: vec![ToolName::new("denied_tool")],
                 ..Default::default()
