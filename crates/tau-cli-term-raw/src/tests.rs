@@ -1006,10 +1006,10 @@ fn ctrl_k_steps_history_back_with_column_preserved() {
     assert_eq!(handle.get_cursor(), 1);
 }
 
-/// Regression guard from `fix(cli): keep Ctrl-C from exiting prompt`: Ctrl-C on
-/// an empty prompt is a notice, not EOF.
+/// Ctrl-C on an empty prompt should avoid accidental exits: the first press
+/// warns, and only the second consecutive press exits the prompt.
 #[test]
-fn ctrl_c_empty_prompt_prints_notice_not_eof() {
+fn ctrl_c_empty_prompt_requires_second_press_to_exit() {
     let buf = SharedBuffer::new();
     let (term, _handle, input_tx) =
         Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
@@ -1019,12 +1019,63 @@ fn ctrl_c_empty_prompt_prints_notice_not_eof() {
             KeyCode::Char('c'),
             KeyModifiers::CONTROL,
         )))
-        .expect("ctrl-c");
+        .expect("first ctrl-c");
 
     match term.get_next_event().expect("event") {
-        Event::Notice(message) => assert_eq!(message, "Use Ctrl+D to exit"),
+        Event::Notice(message) => assert_eq!(message, "Press Ctrl-C again to exit"),
         _ => panic!("expected notice"),
     }
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("second ctrl-c");
+
+    assert!(matches!(term.get_next_event().expect("event"), Event::Eof));
+}
+
+/// Any intervening key should disarm the empty-prompt Ctrl-C exit guard so the
+/// user must press Ctrl-C twice consecutively to exit.
+#[test]
+fn ctrl_c_exit_guard_resets_after_other_key() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("first ctrl-c");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::Notice(_)
+    ));
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )))
+        .expect("type x");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    handle.set_buffer(String::new(), 0);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("ctrl-c after reset");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::Notice(_)
+    ));
 }
 
 /// Clearing a non-empty prompt with Ctrl-C should participate in undo/redo like
