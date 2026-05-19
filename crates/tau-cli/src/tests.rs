@@ -193,9 +193,9 @@ fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
 }
 
 /// Role-update parsing must keep explicit `off` distinct from clearing a field;
-/// otherwise `/effort off` and `/thinking-summary off` would accidentally reset
-/// the selected role instead of storing the user's requested off state. `reset`
-/// is the only textual way to clear a setting.
+/// otherwise `/role <role> effort off` and `/role <role> thinking-summary off`
+/// would accidentally reset the selected role instead of storing the user's
+/// requested off state. `reset` is the only textual way to clear a setting.
 #[test]
 fn role_setting_updates_are_typed_and_reset_aware() {
     use super::chat::parse_role_setting_update;

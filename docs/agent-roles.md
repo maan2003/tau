@@ -105,7 +105,7 @@ Examples:
 
 Use `reset` as the value to clear a field and return to model/provider fallback behavior (`off` is still the explicit off value for `effort` and `thinking-summary`).
 
-The convenience commands `/effort`, `/verbosity`, `/thinking-summary`, and `/fast` mutate the currently selected role using the same role-update path.
+The convenience command `/fast` mutates the currently selected role using the same role-update path.
 
 The `<role>` argument completes existing roles, but any new name can be used to create a role for the current run. Add it to `roles` if it should be available after restart.
 

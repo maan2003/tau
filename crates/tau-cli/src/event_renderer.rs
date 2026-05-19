@@ -163,25 +163,11 @@ pub(crate) struct EventRenderer {
     current_role_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Shared ordered role names for input-thread role cycling.
     roles_available: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    /// Shared set of currently-available effort levels, mirrored
-    /// from `HarnessEffortsAvailable`.
-    efforts_available:
-        std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<tau_proto::Effort>>>,
     /// Shared verbosity mirror kept symmetric with `effort_state`.
     verbosity_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    /// Allowed verbosity set, mirrored from
-    /// `HarnessVerbositiesAvailable`. Also drives `/verbosity` arg
-    /// completions.
-    verbosities_available:
-        std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<tau_proto::Verbosity>>>,
     /// Shared thinking-summary mirror. Kept symmetric with the
     /// other knobs for future cycle helpers.
     thinking_summary_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    /// Allowed thinking-summary set, mirrored from
-    /// `HarnessThinkingSummariesAvailable`. Drives the
-    /// `/thinking-summary` arg completions.
-    thinking_summaries_available:
-        std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<tau_proto::ThinkingSummary>>>,
     /// Context appended to files opened by the external prompt editor.
     /// Locked with `if let Ok(...)` rather than [`crate::locked`] because
     /// this is best-effort UI metadata: if another holder panicked we'd
@@ -758,22 +744,11 @@ impl EventRenderer {
             fast_service_tier_state: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             current_role_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
             roles_available: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            // Empty until the first `HarnessEffortsAvailable`
-            // arrives.
-            efforts_available: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::BTreeSet::new(),
-            )),
             verbosity_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
                 tau_proto::Verbosity::default().as_u8(),
             )),
-            verbosities_available: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::BTreeSet::new(),
-            )),
             thinking_summary_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
                 tau_proto::ThinkingSummary::default().as_u8(),
-            )),
-            thinking_summaries_available: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::BTreeSet::new(),
             )),
             editor_context: std::sync::Arc::new(std::sync::Mutex::new(
                 tau_cli_term::EditorContext::default(),
@@ -2789,66 +2764,21 @@ impl EventRenderer {
     }
 
     fn handle_harness_efforts_available(&mut self, avail: &tau_proto::HarnessEffortsAvailable) {
-        let mut items = vec![tau_cli_term::CompletionItem::new(
-            "reset",
-            "use the model default effort",
-        )];
-        items.extend(
-            avail
-                .levels
-                .iter()
-                .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
-        );
-        self.completion_data
-            .set_arg_completions(tau_cli_term::CommandName::new("/effort"), items);
-        if let Ok(mut set) = self.efforts_available.lock() {
-            set.clear();
-            set.extend(avail.levels.iter().copied());
-        }
+        let _ = avail;
     }
 
     fn handle_harness_verbosities_available(
         &mut self,
         avail: &tau_proto::HarnessVerbositiesAvailable,
     ) {
-        let mut items = vec![tau_cli_term::CompletionItem::new(
-            "reset",
-            "use the model default verbosity",
-        )];
-        items.extend(
-            avail
-                .levels
-                .iter()
-                .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
-        );
-        self.completion_data
-            .set_arg_completions(tau_cli_term::CommandName::new("/verbosity"), items);
-        if let Ok(mut set) = self.verbosities_available.lock() {
-            set.clear();
-            set.extend(avail.levels.iter().copied());
-        }
+        let _ = avail;
     }
 
     fn handle_harness_thinking_summaries_available(
         &mut self,
         avail: &tau_proto::HarnessThinkingSummariesAvailable,
     ) {
-        let mut items = vec![tau_cli_term::CompletionItem::new(
-            "reset",
-            "use the model default thinking summary",
-        )];
-        items.extend(
-            avail
-                .levels
-                .iter()
-                .map(|l| tau_cli_term::CompletionItem::plain(l.as_str())),
-        );
-        self.completion_data
-            .set_arg_completions(tau_cli_term::CommandName::new("/thinking-summary"), items);
-        if let Ok(mut set) = self.thinking_summaries_available.lock() {
-            set.clear();
-            set.extend(avail.levels.iter().copied());
-        }
+        let _ = avail;
     }
 
     fn handle_terminal_events(&mut self, event: &Event) -> bool {

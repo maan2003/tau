@@ -71,15 +71,7 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
             session_id: session_id.into(),
         }));
     }
-    if text == "/effort"
-        || text.starts_with("/effort ")
-        || text == "/fast"
-        || text.starts_with("/fast ")
-        || text == "/verbosity"
-        || text.starts_with("/verbosity ")
-        || text == "/thinking-summary"
-        || text.starts_with("/thinking-summary ")
-    {
+    if text == "/fast" || text.starts_with("/fast ") {
         return None;
     }
     if text == "/role" {
@@ -265,16 +257,7 @@ mod tests {
     /// sense in chat UI.
     #[test]
     fn local_configuration_commands_are_ignored() {
-        for command in [
-            "/effort",
-            "/effort high",
-            "/fast",
-            "/fast on",
-            "/verbosity",
-            "/verbosity high",
-            "/thinking-summary",
-            "/thinking-summary auto",
-        ] {
+        for command in ["/fast", "/fast on"] {
             assert_eq!(event(command), None, "{command}");
         }
     }

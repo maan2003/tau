@@ -679,7 +679,7 @@ pub enum Effort {
     High = 4,
     /// `rename_all = "snake_case"` would emit `x_high` for this
     /// variant, but the canonical wire string is `xhigh` everywhere
-    /// else (`/effort xhigh`, OpenAI's `reasoning_effort` field,
+    /// else (`/role smart effort xhigh`, OpenAI's `reasoning_effort` field,
     /// `Display`, `FromStr`, `effort_wire`). Pin it explicitly so
     /// serde-driven config paths (`default_efforts`,
     /// `reasoningEfforts`) agree with the rest.

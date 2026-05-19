@@ -407,19 +407,7 @@ pub(crate) fn run_chat(
             "/compact",
             "Force a provider-side compaction pass on the current session",
         ),
-        SlashCommand::new(
-            "/effort",
-            "Set reasoning effort: off, minimal, low, medium, high, xhigh",
-        ),
-        SlashCommand::new(
-            "/verbosity",
-            "Set output verbosity: low, medium, high (provider-dependent)",
-        ),
         SlashCommand::new("/fast", "Toggle Fast mode"),
-        SlashCommand::new(
-            "/thinking-summary",
-            "Set reasoning summary mode: off, auto, concise, detailed",
-        ),
         SlashCommand::new(
             "/set",
             "Set a UI setting (e.g. /set show-diff true); Tab cycles names + values",
@@ -531,7 +519,7 @@ pub(crate) fn run_chat(
 
     // Terminal input loop — shares the writer with the debounce
     // thread via `WriterHandle`. Theme clone is for printing local
-    // validation errors (e.g. `/effort foo`) through the same
+    // validation errors (e.g. `/role smart effort foo`) through the same
     // TermHandle as remote events, so they don't garble the TUI like
     // `eprintln!` would.
     let mut active_session_id = session_id.to_owned();
@@ -903,24 +891,7 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_role_setting_shortcut(&self, text: &str) -> bool {
-        self.handle_effort_shortcut(text)
-            || self.handle_fast_shortcut(text)
-            || self.handle_verbosity_shortcut(text)
-            || self.handle_thinking_summary_shortcut(text)
-    }
-
-    fn handle_effort_shortcut(&self, text: &str) -> bool {
-        if let Some(arg) = text.strip_prefix("/effort ") {
-            self.update_current_role_setting("effort", arg.trim(), "/effort");
-            return true;
-        }
-        if text == "/effort" {
-            self.output.system_info(
-                "/effort <level> — one of: reset, off, minimal, low, medium, high, xhigh",
-            );
-            return true;
-        }
-        false
+        self.handle_fast_shortcut(text)
     }
 
     fn handle_fast_shortcut(&self, text: &str) -> bool {
@@ -933,40 +904,6 @@ impl<'a> TerminalInputSession<'a> {
             return true;
         }
         false
-    }
-
-    fn handle_verbosity_shortcut(&self, text: &str) -> bool {
-        if let Some(arg) = text.strip_prefix("/verbosity ") {
-            self.update_current_role_setting("verbosity", arg.trim(), "/verbosity");
-            return true;
-        }
-        if text == "/verbosity" {
-            self.output
-                .system_info("/verbosity <level> — one of: reset, low, medium, high");
-            return true;
-        }
-        false
-    }
-
-    fn handle_thinking_summary_shortcut(&self, text: &str) -> bool {
-        if let Some(arg) = text.strip_prefix("/thinking-summary ") {
-            self.update_current_role_setting("thinking-summary", arg.trim(), "/thinking-summary");
-            return true;
-        }
-        if text == "/thinking-summary" {
-            self.output.system_info(
-                "/thinking-summary <mode> — one of: reset, off, auto, concise, detailed",
-            );
-            return true;
-        }
-        false
-    }
-
-    fn update_current_role_setting(&self, setting: &str, value: &str, command: &str) {
-        match parse_role_setting_update(setting, value) {
-            Ok(action) => self.send_current_role_update(action),
-            Err(error) => self.output.system_info(&format!("{command}: {error}")),
-        }
     }
 
     fn handle_utility_command(&self, text: &str) -> bool {
@@ -1160,7 +1097,7 @@ fn terminal_input_loop(
     ctx: TerminalInputLoopCtx,
 ) -> Result<InputLoopExit, CliError> {
     // Cloned `TermHandle` so we can `print_output` for client-side
-    // validation errors (`/effort foo`, `/tree blah`) from this
+    // validation errors (`/role smart effort foo`, `/tree blah`) from this
     // thread without borrowing `term` while the loop also holds
     // `&mut term` for `get_next_event`.
     let output = LocalTerminalOutput::new(term.handle().clone(), ctx.theme.clone());
@@ -1240,10 +1177,7 @@ pub(crate) fn is_local_slash_command(text: &str) -> bool {
             | "/new"
             | "/tree"
             | "/compact"
-            | "/effort"
             | "/fast"
-            | "/verbosity"
-            | "/thinking-summary"
             | "/provider-auth"
             | "/set"
             | "/role"

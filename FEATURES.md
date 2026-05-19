@@ -112,11 +112,11 @@ file/search tools (`edit`, `write`, `read`, `grep`, `find`, and `ls`).
 settings, with built-in/configured role overrides persisted. See
 [`docs/agent-roles.md`](docs/agent-roles.md).
 
-In the UI: `/effort medium`, `/verbosity low`, `/thinking-summary
-concise`. Shift+Tab cycles to the next agent role. Model knobs are
-slash-command-only today. Asking for an unsupported level (e.g.
-`/effort xhigh` on a mini model, `/verbosity high` on a provider that
-doesn't support it) degrades and surfaces a `HarnessInfo` notice rather
+In the UI: `/role smart effort medium`, `/role smart verbosity low`,
+`/role smart thinking-summary concise`. Tab cycles to the next agent role.
+Model knobs are slash-command-only today. Asking for an unsupported
+level (e.g. `effort xhigh` on a mini model, `verbosity high` on a provider
+that doesn't support it) degrades and surfaces a `HarnessInfo` notice rather
 than silently dropping the field.
 
 The status bar renders only the selected agent role, falling back to the
@@ -272,11 +272,9 @@ Type `/` for menu autocompletion. The built-in set:
 | `/quit`             | Exit the session                                     |
 | `/detach`           | Leave the UI, keep the harness running for reattach  |
 | `/new`              | Start a fresh session in this harness                |
-| `/model <id>`       | Switch model (Tab completes from provider list)      |
-| `/effort <level>`   | Set reasoning effort                                 |
-| `/verbosity <level>`| Set output verbosity (`low`/`medium`/`high`)         |
-| `/fast` | Toggle Codex Fast mode (`service_tier: fast`)      |
-| `/thinking-summary <mode>` | Set reasoning-summary mode (`off`/`auto`/`concise`/`detailed`) |
+| `/model <role>`     | Switch agent role                                    |
+| `/role <role> ...`  | Switch, create, edit, or delete an agent role        |
+| `/fast`             | Toggle Codex Fast mode (`service_tier: fast`)        |
 | `/tree [id]`        | Print session tree; with `id`, rewind head           |
 | `/set <name> <val>` | Set a UI setting (Tab cycles names + values)         |
 
