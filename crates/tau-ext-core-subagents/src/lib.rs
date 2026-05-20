@@ -445,13 +445,13 @@ impl WaitTracker {
             Some(WaitCallState::Consumed) => WaitStart::reply(wait_error_reply(
                 wait.call_id,
                 wait.tool_name,
-                format!("result for tool call {target} already consumed"),
+                format!("result for tool call `{target}` already consumed"),
                 None,
             )),
             None => WaitStart::reply(wait_error_reply(
                 wait.call_id,
                 wait.tool_name,
-                format!("unknown tool call: {target}"),
+                format!("unknown tool call: `{target}`"),
                 None,
             )),
         }
