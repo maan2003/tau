@@ -44,7 +44,8 @@ pub struct Theme {
     styles: HashMap<StyleName, ThemeStyle>,
 }
 
-const BUILTIN_THEME: &str = include_str!("../themes/tau.json5");
+const BUILTIN_DARK_THEME: &str = include_str!("../themes/tau.json5");
+const BUILTIN_LIGHT_THEME: &str = include_str!("../themes/tau-light.json5");
 
 impl Theme {
     /// Creates an empty theme (everything uses default styling).
@@ -52,13 +53,25 @@ impl Theme {
         Self::default()
     }
 
-    /// Returns the built-in "tau" theme.
+    /// Returns the built-in "tau" dark theme.
     ///
     /// This is the default theme used when no user theme is configured.
     pub fn builtin() -> Self {
+        Self::builtin_dark()
+    }
+
+    /// Returns the built-in "tau" dark theme.
+    pub fn builtin_dark() -> Self {
         // The embedded JSON5 is validated by tests; parsing cannot
         // fail at runtime.
-        Self::parse(BUILTIN_THEME).expect("built-in theme is valid JSON5")
+        Self::parse(BUILTIN_DARK_THEME).expect("built-in dark theme is valid JSON5")
+    }
+
+    /// Returns the built-in "tau-light" theme.
+    pub fn builtin_light() -> Self {
+        // The embedded JSON5 is validated by tests; parsing cannot
+        // fail at runtime.
+        Self::parse(BUILTIN_LIGHT_THEME).expect("built-in light theme is valid JSON5")
     }
 
     /// Loads a theme from a JSON5 file.

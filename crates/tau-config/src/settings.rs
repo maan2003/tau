@@ -72,6 +72,8 @@ pub struct CliSettings {
     pub redraw_counter: bool,
     /// How tool calls are rendered in the transcript by default.
     pub show_tools: ShowTools,
+    /// Which built-in color theme to use for the terminal UI.
+    pub theme: CliTheme,
     /// Key bindings for prompt-local shell actions. Defaults to an
     /// empty map at the serde layer; the loader merges
     /// `built-in.cli-bindings.yaml` underneath the user's bindings.
@@ -203,6 +205,20 @@ pub struct CliState {
     /// How tool calls are rendered in the transcript. Controlled by
     /// `/set show-tools <off|summarize-turn|summarize-prompt|compact|full>`.
     pub show_tools: ShowTools,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum CliTheme {
+    /// Choose a built-in theme from terminal background hints when available.
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    /// Use the built-in dark-background theme.
+    #[serde(rename = "dark")]
+    Dark,
+    /// Use the built-in light-background theme.
+    #[serde(rename = "light")]
+    Light,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

@@ -433,13 +433,14 @@ pub(crate) fn run_chat(
             "Refresh OAuth for a provider (runs `tau provider login [name]`)",
         ),
     ];
-    let theme = tau_themes::Theme::builtin();
     // Fail fast on a malformed `cli.yaml`. The fields here drive
-    // keybindings, prompt symbol, and cursor shape — silently falling
-    // back to defaults would leave the user with broken keybindings
-    // and no clue why. Refuse to start the TUI instead.
+    // keybindings, prompt symbol, cursor shape, and theme — silently
+    // falling back to defaults would leave the user with broken
+    // keybindings or unreadable colors and no clue why. Refuse to
+    // start the TUI instead.
     let settings = tau_config::settings::load_cli_settings()
         .map_err(|error| CliError::Participant(format!("cli.yaml failed to parse:\n{error}")))?;
+    let theme = crate::theme::select_theme(settings.theme);
     let prompt_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROMPT_MARKER);
     let prompt = tau_cli_term::Span::new(format!("{} ", settings.prompt_symbol), prompt_style);
     let cursor_shape = if settings.bar_cursor {

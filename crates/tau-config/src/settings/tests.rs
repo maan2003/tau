@@ -43,6 +43,17 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
     assert!(!s.greeting);
     assert!(!s.show_thinking);
     assert_eq!(s.show_tools, ShowTools::Compact);
+    assert_eq!(s.theme, CliTheme::Auto);
+}
+
+#[test]
+fn cli_settings_theme_override() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(dir.join("cli.yaml"), r#"{ theme: "light" }"#).expect("write");
+
+    let s = load_cli_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(s.theme, CliTheme::Light);
 }
 
 #[test]

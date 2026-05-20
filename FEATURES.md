@@ -476,11 +476,13 @@ updates to avoid full repaints on each token.
 
 ### Theming
 
-The UI ships with a built-in Solarized-derived "tau" theme. Themes map
-semantic style names (`prompt.marker`, `banner.accent`, `system.info`, diff
-hunks, reasoning blocks, …) to terminal attributes; user themes can be
-loaded from a JSON5 file. See `crates/tau-themes/themes/tau.json5` for the
-full style key list.
+The UI ships with built-in dark and light "tau" themes. `cli.yaml` can set
+`theme: dark`, `theme: light`, or `theme: auto`; auto currently uses terminal
+background hints such as `COLORFGBG` and falls back to dark. Themes map semantic
+style names (`prompt.marker`, `banner.accent`, `system.info`, diff hunks,
+reasoning blocks, …) to terminal attributes. See
+`crates/tau-themes/themes/tau.json5` and `tau-light.json5` for the full style
+key list.
 
 ### Session resume and detach
 

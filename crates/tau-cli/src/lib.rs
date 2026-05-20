@@ -10,6 +10,7 @@ mod print_prompt;
 mod prompt_history;
 mod send;
 mod settings_registry;
+mod theme;
 mod tool_render;
 mod ui_logging;
 

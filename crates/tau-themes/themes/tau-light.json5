@@ -1,0 +1,90 @@
+// Built-in "tau-light" theme.
+//
+// Tuned for light terminal backgrounds. Style names mirror tau.json5 so the
+// CLI can switch built-ins without changing semantic rendering code.
+{
+  styles: {
+    // -- User input --
+    "user.prompt":          { bold: true },
+    "user.prompt.queued":   { fg: "grey" },
+
+    // -- Agent responses --
+    "agent.response":       { fg: "dark_blue", italic: true },
+    "agent.pending":        { fg: "grey" },
+    "agent.thinking":       { fg: "grey", italic: true },
+
+    // -- Tool execution --
+    "tool.output":          { },
+    "tool.name":            { fg: "dark_yellow" },
+    "tool.args":            { },
+    "tool.status.success":  { fg: "dark_green" },
+    "tool.status.error":    { fg: "dark_red" },
+    "tool.status.info":     { fg: "dark_blue" },
+    "tool.status.time":     { fg: "dark_yellow" },
+    "shell.output":         { },
+    "progress.indicator":   { fg: "dark_cyan", bold: true },
+
+    // -- Extensions --
+    "extension.lifecycle":  { fg: "grey" },
+    "extension.status":     { },
+
+    // -- Sessions --
+    "session.status":       { },
+
+    // -- System --
+    "system.info":          { fg: "grey" },
+    "system.info.important": { fg: "dark_red", bold: true },
+    "system.disconnect":    { fg: "dark_red", bold: true },
+    "system.path":          { fg: "dark_blue" },
+    "system.status":        { },
+
+    // -- Status bar --
+    "model.status":         { fg: "grey" },
+    "status.model":         { fg: "grey" },
+    "status.role":          { fg: "dark_yellow" },
+    "status.session":       { fg: "dark_cyan" },
+    "status.context":       { fg: "dark_blue" },
+    "status.effort":        { fg: "dark_yellow" },
+    "status.verbosity":     { fg: "dark_magenta" },
+    "status.service_tier":  { fg: "dark_green" },
+    "status.tools":         { fg: "dark_yellow" },
+    "redraw.counter":       { fg: "dark_red" },
+
+    // -- Token stats --
+    "token.stats":                  { fg: "grey" },
+    "token.stats.symbol.delta":     { bold: true },
+    "token.stats.symbol.sigma":     { bold: true },
+    "token.stats.symbol.up":        { },
+    "token.stats.symbol.down":      { },
+    "token.stats.metric.cache_hit": { },
+    "token.stats.metric.cache_warn": { fg: "dark_yellow" },
+    "token.stats.metric.cache_miss": { fg: "dark_red" },
+    "token.stats.metric.input":     { },
+    "token.stats.metric.output":    { },
+    "token.stats.metric.latency":   { },
+
+    // -- Prompt --
+    "prompt.marker":        { bold: true },
+
+    // -- Completion menu --
+    "completion.label":     { fg: "dark_green" },
+    "completion.desc":      { fg: "grey" },
+    "completion.selected":  { fg: "black", bg: "cyan", bold: true },
+
+    // -- Banner --
+    "banner.accent":        { fg: "dark_yellow" },
+    "banner.logo":          { fg: "black" },
+    "banner.name":          { fg: "black", bold: true },
+    "banner.version":       { fg: "grey" },
+    "banner.build":         { fg: "grey" },
+    "banner.pun":           { fg: "dark_yellow" },
+
+    // -- Diffs --
+    "diff.added":           { fg: "dark_green" },
+    "diff.removed":         { fg: "dark_red" },
+    "diff.context":         { fg: "grey" },
+    "diff.hunk_header":     { fg: "dark_cyan" },
+    "diff.added.inline":    { fg: "black", bg: "green", bold: true },
+    "diff.removed.inline":  { fg: "black", bg: "red",   bold: true },
+  }
+}

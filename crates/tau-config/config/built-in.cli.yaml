@@ -8,4 +8,5 @@ show_thinking: true
 show_token_stats: false
 redraw_counter: false
 show_tools: full
+theme: auto
 bind: {}

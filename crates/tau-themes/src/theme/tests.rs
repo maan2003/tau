@@ -199,6 +199,32 @@ fn builtin_theme_parses() {
 }
 
 #[test]
+fn builtin_light_theme_parses() {
+    let theme = Theme::builtin_light();
+
+    // Light mode intentionally uses darker colors for contrast on a
+    // bright terminal background while preserving the dark theme's
+    // semantic style names.
+    let tool_err = theme.resolve_style(&StyleName::new("tool.status.error"));
+    assert_eq!(tool_err.fg, Some(Color::DarkRed));
+
+    let tool_ok = theme.resolve_style(&StyleName::new("tool.status.success"));
+    assert_eq!(tool_ok.fg, Some(Color::DarkGreen));
+
+    let progress = theme.resolve_style(&StyleName::new(crate::names::PROGRESS_INDICATOR));
+    assert_eq!(progress.fg, Some(Color::DarkCyan));
+    assert!(progress.bold);
+
+    let selected = theme.resolve_style(&StyleName::new("completion.selected"));
+    assert!(selected.bold);
+    assert_eq!(selected.fg, Some(Color::Black));
+    assert_eq!(selected.bg, Some(Color::Cyan));
+
+    let token_stats = theme.resolve_style(&StyleName::new("token.stats"));
+    assert_eq!(token_stats.fg, Some(Color::Grey));
+}
+
+#[test]
 fn builtin_theme_missing_style_is_default() {
     let theme = Theme::builtin();
     let style = theme.resolve_style(&StyleName::new("nonexistent.style"));
