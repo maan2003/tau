@@ -74,7 +74,8 @@ The output of `read` and `shell` is intentionally similar, and should support
 the same semantics. The meaning of the line prefix is different: line number vs stdout/stderr information
 
 `shell` tool will add `duration_seconds: {number}` header for commands that took longer
-than 5s to execute.
+than 5s to execute. Whole-second precision is acceptable; finer precision is
+not needed.
 
 `shell` tool should reliably timeout operations that take longer than timeout argument,
 but currently 100% reliable child process termination is not implemented and will

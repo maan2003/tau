@@ -14,15 +14,12 @@ pub(crate) const SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
 
 /// Execute a `shell` tool call.
 ///
-/// **Non-zero exit semantics.** A non-zero exit status is surfaced as
-/// `ToolError`, not `ToolResult` — even for benign cases like `grep`
-/// finding no matches. Stdout/stderr details are preserved subject to
-/// truncation, so the agent still sees what happened. The reason: every
-/// model we target treats `ToolError` as a signal worth attending to,
-/// and conflating "command ran" with "command failed" pushes
-/// shell-script-style exit-code logic into the agent's prompt. Callers
-/// that want exit codes returned as data should use a dedicated tool
-/// (`grep`, `find`, `ls`) instead of `shell`.
+/// **Process outcome semantics.** Commands that start successfully always
+/// produce `ToolResult`, even when they exit non-zero, time out, or terminate
+/// by signal. Those expected process outcomes are represented by structured
+/// result fields such as `status`, `timed_out`, `signal`, and
+/// `termination_reason`; true invocation/config/start errors remain
+/// `ToolError`.
 pub(crate) fn run_command(
     arguments: &CborValue,
     shell_config: &ShellConfig,
@@ -92,11 +89,8 @@ pub(crate) fn run_command(
         valid_utf8: !wait.had_invalid_utf8,
     });
 
-    if success {
-        let mut display = ok_display(display_args);
-        display.payload = display_payload;
-        display.stats = text_stats(&combined);
-        Ok(ToolOutput { result, display })
+    let mut display = if success {
+        ok_display(display_args)
     } else {
         let exit_label = status_code
             .map(|v| v.to_string())
@@ -106,31 +100,18 @@ pub(crate) fn run_command(
         } else if let Some(signal) = signal {
             format!("signal {signal}")
         } else {
-            exit_label.clone()
+            exit_label
         };
-        let mut display = ToolDisplay {
+        ToolDisplay {
             args: display_args,
             status: ToolDisplayStatus::Error,
             status_text,
-            payload: display_payload,
             ..Default::default()
-        };
-        display.stats = text_stats(&combined);
-        let message = if wait.timed_out {
-            format!("command timed out after {timeout_secs}s")
-        } else if let Some(signal) = signal {
-            format!("command terminated by signal {signal}")
-        } else if status_code.is_some() {
-            format!("command exited with status {exit_label}")
-        } else {
-            "command terminated for unknown reason".to_owned()
-        };
-        Err(ToolFailure {
-            message,
-            details: Some(Box::new(result)),
-            display: Box::new(display),
-        })
-    }
+        }
+    };
+    display.payload = display_payload;
+    display.stats = text_stats(&combined);
+    Ok(ToolOutput { result, display })
 }
 
 fn parse_timeout_secs(arguments: &CborValue) -> Result<u64, String> {

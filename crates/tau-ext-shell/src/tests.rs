@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::{fs, thread};
 
 use tau_proto::{
-    CborValue, EventName, Frame, FrameReader, FrameWriter, Message, ToolDisplayPayload, ToolInvoke,
+    CborValue, EventName, Frame, FrameReader, FrameWriter, Message, ToolDisplayPayload,
+    ToolDisplayStatus, ToolInvoke,
 };
 use tempfile::TempDir;
 
@@ -2478,15 +2479,16 @@ fn shell_tool_timeout_preserves_partial_output() {
         ),
     ]);
 
-    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("timeout");
-    assert!(error.message.contains("command timed out after 1s"));
-    let details = error.details.as_ref().expect("details");
-    assert_eq!(cbor_map_text(details, "output"), Some("out before"));
-    assert!(cbor_map_field(details, "total_lines").is_none());
-    assert_eq!(cbor_bool_field(details, "timed_out"), Some(true));
-    assert!(cbor_int_field(details, "timeout_secs").is_none());
+    let output =
+        run_command(&args, &crate::config::ShellConfig::default()).expect("timeout result");
+    assert_eq!(output.display.status, ToolDisplayStatus::Error);
+    assert_eq!(output.display.status_text, "timeout");
+    assert_eq!(cbor_map_text(&output.result, "output"), Some("out before"));
+    assert!(cbor_map_field(&output.result, "total_lines").is_none());
+    assert_eq!(cbor_bool_field(&output.result, "timed_out"), Some(true));
+    assert!(cbor_int_field(&output.result, "timeout_secs").is_none());
     assert_eq!(
-        cbor_map_text(details, "termination_reason"),
+        cbor_map_text(&output.result, "termination_reason"),
         Some("timeout")
     );
 }
@@ -2549,19 +2551,21 @@ fn shell_tool_timeout_returns_without_waiting_for_escaped_pipe_holder() {
     ]);
 
     let started = std::time::Instant::now();
-    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("timeout");
+    let result =
+        run_command(&args, &crate::config::ShellConfig::default()).expect("timeout result");
     let elapsed = started.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(2),
         "escaped pipe holder delayed timeout result for {elapsed:?}"
     );
-    let details = error.details.as_ref().expect("details");
-    let output = cbor_map_text(details, "output").expect("output");
+    assert_eq!(result.display.status, ToolDisplayStatus::Error);
+    assert_eq!(result.display.status_text, "timeout");
+    let output = cbor_map_text(&result.result, "output").expect("output");
     assert_eq!(output, "out(no_nl) early");
     assert!(!output.contains("late"));
-    assert_eq!(cbor_bool_field(details, "timed_out"), Some(true));
+    assert_eq!(cbor_bool_field(&result.result, "timed_out"), Some(true));
     assert_eq!(
-        cbor_map_text(details, "termination_reason"),
+        cbor_map_text(&result.result, "termination_reason"),
         Some("timeout")
     );
 }
@@ -2600,13 +2604,14 @@ fn shell_tool_timeout_zero_is_immediate_timeout() {
         ),
     ]);
 
-    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("timeout");
-    assert!(error.message.contains("command timed out after 0s"));
-    let details = error.details.as_ref().expect("details");
-    assert_eq!(cbor_bool_field(details, "timed_out"), Some(true));
-    assert!(cbor_int_field(details, "timeout_secs").is_none());
+    let output =
+        run_command(&args, &crate::config::ShellConfig::default()).expect("timeout result");
+    assert_eq!(output.display.status, ToolDisplayStatus::Error);
+    assert_eq!(output.display.status_text, "timeout");
+    assert_eq!(cbor_bool_field(&output.result, "timed_out"), Some(true));
+    assert!(cbor_int_field(&output.result, "timeout_secs").is_none());
     assert_eq!(
-        cbor_map_text(details, "termination_reason"),
+        cbor_map_text(&output.result, "termination_reason"),
         Some("timeout")
     );
 }
@@ -2665,13 +2670,16 @@ fn shell_tool_reports_signal_termination_details() {
         ),
     ]);
 
-    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("signal");
-    assert!(error.message.contains("command terminated by signal 15"));
-    let details = error.details.as_ref().expect("details");
-    assert_eq!(cbor_int_field(details, "signal"), Some(15));
-    assert!(cbor_bool_field(details, "timed_out").is_none());
-    assert_eq!(cbor_map_text(details, "termination_reason"), Some("signal"));
-    assert!(cbor_map_field(details, "status").is_none());
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("signal result");
+    assert_eq!(output.display.status, ToolDisplayStatus::Error);
+    assert_eq!(output.display.status_text, "signal 15");
+    assert_eq!(cbor_int_field(&output.result, "signal"), Some(15));
+    assert!(cbor_bool_field(&output.result, "timed_out").is_none());
+    assert_eq!(
+        cbor_map_text(&output.result, "termination_reason"),
+        Some("signal")
+    );
+    assert!(cbor_map_field(&output.result, "status").is_none());
 }
 
 #[test]
@@ -2694,13 +2702,16 @@ fn shell_tool_reports_failures_with_details() {
 
     let _progress = reader.read_event().expect("read").expect("progress");
 
-    let error = reader.read_event().expect("read").expect("error");
-    let Event::ToolError(error) = error else {
-        panic!("expected tool error");
+    let result = reader.read_event().expect("read").expect("result");
+    let Event::ToolResult(result) = result else {
+        panic!("expected tool result");
     };
-    assert_eq!(error.tool_name, SHELL_TOOL_NAME);
-    assert!(error.message.contains("command exited with status 7"));
-    assert!(error.details.is_some());
+    assert_eq!(result.tool_name, SHELL_TOOL_NAME);
+    assert_eq!(cbor_int_field(&result.result, "status"), Some(7));
+    assert_eq!(
+        cbor_map_text(&result.result, "termination_reason"),
+        Some("exit")
+    );
 
     writer
         .write_frame(&disconnect_frame(None))
