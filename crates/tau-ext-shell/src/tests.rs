@@ -2680,7 +2680,7 @@ fn command_details_value_records_combined_output_stats() {
         status: Some(0),
         signal: None,
         timed_out: false,
-        exec_time_secs: None,
+        total_seconds: None,
         termination_reason: "exit",
         output: "1 hi\n2 oops".to_owned(),
         total_lines: 2,
@@ -2693,7 +2693,7 @@ fn command_details_value_records_combined_output_stats() {
     assert_eq!(cbor_int_field(&details, "total_bytes"), Some(11));
     assert_eq!(cbor_bool_field(&details, "valid_utf8"), Some(true));
     assert!(cbor_map_field(&details, "truncated").is_none());
-    assert!(cbor_map_field(&details, "exec_time_secs").is_none());
+    assert!(cbor_map_field(&details, "total_seconds").is_none());
 }
 
 #[test]
@@ -2702,7 +2702,7 @@ fn command_details_value_records_slow_command_exec_time() {
         status: Some(0),
         signal: None,
         timed_out: false,
-        exec_time_secs: Some(6),
+        total_seconds: Some(6),
         termination_reason: "exit",
         output: String::new(),
         total_lines: 0,
@@ -2711,7 +2711,7 @@ fn command_details_value_records_slow_command_exec_time() {
         valid_utf8: true,
     });
 
-    assert_eq!(cbor_int_field(&details, "exec_time_secs"), Some(6));
+    assert_eq!(cbor_int_field(&details, "total_seconds"), Some(6));
 }
 
 #[test]
