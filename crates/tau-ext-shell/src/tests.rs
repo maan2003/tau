@@ -2526,7 +2526,7 @@ fn shell_tool_reports_signal_termination_details() {
     assert!(error.message.contains("command terminated by signal 15"));
     let details = error.details.as_ref().expect("details");
     assert_eq!(cbor_int_field(details, "signal"), Some(15));
-    assert_eq!(cbor_bool_field(details, "timed_out"), Some(false));
+    assert!(cbor_bool_field(details, "timed_out").is_none());
     assert_eq!(cbor_map_text(details, "termination_reason"), Some("signal"));
     assert!(cbor_map_field(details, "status").is_none());
 }
@@ -2691,7 +2691,9 @@ fn command_details_value_records_combined_output_stats() {
     assert_eq!(cbor_map_text(&details, "output"), Some("1 hi\n2 oops"));
     assert_eq!(cbor_int_field(&details, "total_lines"), Some(2));
     assert_eq!(cbor_int_field(&details, "total_bytes"), Some(11));
-    assert_eq!(cbor_bool_field(&details, "valid_utf8"), Some(true));
+    assert!(cbor_map_field(&details, "valid_utf8").is_none());
+    assert!(cbor_map_field(&details, "timed_out").is_none());
+    assert!(cbor_map_field(&details, "termination_reason").is_none());
     assert!(cbor_map_field(&details, "truncated").is_none());
     assert!(cbor_map_field(&details, "total_seconds").is_none());
 }

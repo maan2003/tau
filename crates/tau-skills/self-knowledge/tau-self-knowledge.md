@@ -1,6 +1,7 @@
 ---
 name: tau-self-knowledge
-description: Built-in information about Tau coding harness you are running in.
+description: >
+  Use when asked about Tau coding agent you're running in: how it works, to change it config, etc.
 advertise: true
 ---
 

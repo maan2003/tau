@@ -956,19 +956,25 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
             CborValue::Text("total_bytes".to_owned()),
             CborValue::Integer((total_bytes as i64).into()),
         ),
-        (
+    ];
+    if !valid_utf8 {
+        entries.push((
             CborValue::Text("valid_utf8".to_owned()),
-            CborValue::Bool(valid_utf8),
-        ),
-        (
+            CborValue::Bool(false),
+        ));
+    }
+    if timed_out {
+        entries.push((
             CborValue::Text("timed_out".to_owned()),
-            CborValue::Bool(timed_out),
-        ),
-        (
+            CborValue::Bool(true),
+        ));
+    }
+    if timed_out || signal.is_some() || status != Some(0) || termination_reason != "exit" {
+        entries.push((
             CborValue::Text("termination_reason".to_owned()),
             CborValue::Text(termination_reason.to_owned()),
-        ),
-    ];
+        ));
+    }
     if truncated {
         entries.push((
             CborValue::Text("truncated".to_owned()),
