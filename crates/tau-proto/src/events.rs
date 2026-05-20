@@ -1421,7 +1421,7 @@ pub struct ToolDisplay {
     /// when the tool has nothing useful to surface beyond its name.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub args: String,
-    /// Compact `(NM, NL, NkB)`-style stats. Each field is optional
+    /// Compact `NM, NL, NkB`-style stats. Each field is optional
     /// so the renderer can omit a slot rather than emit `(0M, 1L)`.
     #[serde(default, skip_serializing_if = "ToolDisplayStats::is_empty")]
     pub stats: ToolDisplayStats,

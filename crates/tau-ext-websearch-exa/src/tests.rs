@@ -157,7 +157,10 @@ fn forwards_query_and_num_results_to_searcher_and_returns_text() {
     };
     assert!(text.contains("Title: hi"));
     let display = result.display.expect("display");
-    assert_eq!(display.info_chips, vec!["(1, 2L, 25B)".to_owned()]);
+    assert!(display.info_chips.is_empty());
+    assert_eq!(display.stats.matches, Some(1));
+    assert_eq!(display.stats.lines, Some(2));
+    assert_eq!(display.stats.bytes, Some(25));
 
     let calls = searcher.calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);

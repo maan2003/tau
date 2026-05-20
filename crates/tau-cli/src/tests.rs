@@ -1802,7 +1802,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
         tau_proto::UnixMicros::new(3_000_000),
     );
     sync(&handle);
-    assert!(vt.screen_contains(80, "read src/main.rs (1L, 13B) 2s ok"));
+    assert!(vt.screen_contains(80, "read src/main.rs 1L, 13B 2s ok"));
     assert!(!vt.screen_contains(80, "read src/main.rs …"));
 }
 
@@ -1922,8 +1922,8 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
-    assert!(vt.screen_contains(80, "tools 2/2 (1L, 13B) ok: 1 err: 1"));
-    assert!(!vt.screen_contains(80, "read src/main.rs (1L, 13B) ok"));
+    assert!(vt.screen_contains(80, "tools 2/2 1L, 13B ok: 1 err: 1"));
+    assert!(!vt.screen_contains(80, "read src/main.rs 1L, 13B ok"));
     assert!(!vt.screen_contains(80, "grep foo err: nope"));
 }
 
@@ -1968,7 +1968,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
-    assert!(vt.screen_contains(80, "tools 1/1 (1L, 13B) ok: 1"));
+    assert!(vt.screen_contains(80, "tools 1/1 1L, 13B ok: 1"));
 
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-1",
@@ -1983,7 +1983,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
         })],
     )));
     sync(&handle);
-    assert!(vt.screen_contains(80, "tools 1/2 (1L, 13B) ok: 1 …"));
+    assert!(vt.screen_contains(80, "tools 1/2 1L, 13B ok: 1 …"));
     assert!(!vt.screen_contains(80, "tools 1/1"));
     assert!(!vt.screen_contains(80, "grep foo"));
 
@@ -2006,8 +2006,8 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
-    assert!(vt.screen_contains(80, "tools 2/2 (3, 1L, 13B) ok: 2"));
-    assert!(!vt.screen_contains(80, "read src/main.rs (1L, 13B) ok"));
+    assert!(vt.screen_contains(80, "tools 2/2 3, 1L, 13B ok: 2"));
+    assert!(!vt.screen_contains(80, "read src/main.rs 1L, 13B ok"));
     assert!(!vt.screen_contains(80, "grep foo (3 matches) ok"));
 }
 
@@ -2061,7 +2061,7 @@ fn show_tools_compact_hides_payload_body() {
         tau_proto::UnixMicros::new(1_000_000),
     );
     sync(&handle);
-    assert!(vt.screen_contains(80, "read src/main.rs (1L, 13B) 0s ok"));
+    assert!(vt.screen_contains(80, "read src/main.rs 1L, 13B 0s ok"));
     assert!(!vt.screen_contains(80, "fn main()"));
 }
 
@@ -2118,7 +2118,11 @@ fn websearch_tool_result_shows_result_count_and_size() {
         ),
         display: Some(tau_proto::ToolDisplay {
             args: String::new(),
-            info_chips: vec!["(2, 5L, 73B)".into()],
+            stats: tau_proto::ToolDisplayStats {
+                matches: Some(2),
+                lines: Some(193),
+                bytes: Some(7370),
+            },
             status: tau_proto::ToolDisplayStatus::Success,
             status_text: "ok".into(),
             ..Default::default()
@@ -2126,7 +2130,7 @@ fn websearch_tool_result_shows_result_count_and_size() {
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
-    assert!(vt.screen_contains(80, "websearch_exa (2, 5L, 73B) ok"));
+    assert!(vt.screen_contains(80, "websearch_exa 2, 193L, 7.2kB ok"));
 }
 
 #[test]
@@ -2191,7 +2195,7 @@ fn agents_md_loaded_event_shows_output_stats() {
     let rows = vt.screen_text(80);
     assert!(
         rows.iter()
-            .any(|row| row.contains("loaded: /tmp/AGENTS.md (2L, 11B)")),
+            .any(|row| row.contains("loaded: /tmp/AGENTS.md 2L, 11B")),
         "loaded event should include output stats: {rows:?}"
     );
 }
@@ -2216,7 +2220,7 @@ fn render_tool_display_assembles_chips_in_order() {
     assert_eq!(rendered.tool_name, "grep");
     assert_eq!(rendered.args, "\"foo\" in src");
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(texts, vec!["(3, 7L, 120B)", "ok"]);
+    assert_eq!(texts, vec!["3, 7L, 120B", "ok"]);
     assert!(matches!(
         rendered.suffixes.last().expect("status suffix").status,
         ToolStatus::Success
@@ -2272,10 +2276,7 @@ fn render_delegate_display_marks_input_and_output_stats() {
     };
     let rendered = render_delegate_display(&input, None);
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(
-        texts,
-        vec!["↘︎ (2L, 12B)", tau_proto::PROGRESS_INDICATOR_TEXT]
-    );
+    assert_eq!(texts, vec!["↘︎ 2L, 12B", tau_proto::PROGRESS_INDICATOR_TEXT]);
 
     let output = ToolDisplay {
         args: "[audit]".into(),
@@ -2290,7 +2291,7 @@ fn render_delegate_display_marks_input_and_output_stats() {
     };
     let rendered = render_delegate_display(&output, None);
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(texts, vec!["↖︎ (3L, 24B)", "ok"]);
+    assert_eq!(texts, vec!["↖︎ 3L, 24B", "ok"]);
 }
 
 #[test]

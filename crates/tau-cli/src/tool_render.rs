@@ -426,7 +426,11 @@ pub(crate) fn format_tool_duration(duration: Duration) -> String {
 }
 
 fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
-    stats_suffix(None, text)
+    info_suffix(format_stats(
+        None,
+        Some(text.lines().count() as u64),
+        Some(text.len() as u64),
+    ))
 }
 
 fn abbreviate_inline_text(text: &str) -> String {
@@ -445,16 +449,6 @@ fn abbreviate_inline_text(text: &str) -> String {
         .copied()
         .collect();
     format!("{head}┄{tail}")
-}
-
-fn stats_suffix(prefix: Option<String>, text: &str) -> ToolSuffixSegment {
-    let mut parts = Vec::new();
-    if let Some(prefix) = prefix {
-        parts.push(prefix);
-    }
-    parts.push(format!("{}L", text.lines().count()));
-    parts.push(format!("{}B", text.len()));
-    info_suffix(format!("({})", parts.join(", ")))
 }
 
 /// Render a `delegate` display with the agent role as a dedicated
@@ -605,11 +599,7 @@ fn format_stats(matches: Option<u64>, lines: Option<u64>, bytes: Option<u64>) ->
     if let Some(b) = bytes {
         parts.push(format_tool_display_bytes(b));
     }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("({})", parts.join(", "))
-    }
+    parts.join(", ")
 }
 
 fn format_tool_display_bytes(bytes: u64) -> String {

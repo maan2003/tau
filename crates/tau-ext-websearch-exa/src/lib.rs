@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use tau_proto::{
     Ack, CborValue, ConfigError, Event, Frame, FrameReader, FrameWriter, LogEventId, Message,
-    ToolDisplay, ToolDisplayStatus, ToolError, ToolExecutionMode, ToolInvoke, ToolResult, ToolSpec,
+    ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError, ToolExecutionMode, ToolInvoke,
+    ToolResult, ToolSpec,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -300,9 +301,9 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
 }
 
 fn exa_ok_display(response: &str) -> ToolDisplay {
-    // Count Title:/URL: lines for a `(N results, NL, NB)` chip. Either
-    // half may be missing (formatter quirks), so use the higher count
-    // as the result tally — matches the previous CLI behaviour.
+    // Count Title:/URL: lines for the result tally. Either half may be
+    // missing (formatter quirks), so use the higher count to match the
+    // previous CLI behaviour.
     let titles = response
         .lines()
         .filter(|line| line.starts_with("Title:"))
@@ -312,27 +313,18 @@ fn exa_ok_display(response: &str) -> ToolDisplay {
         .filter(|line| line.starts_with("URL:"))
         .count();
     let results = titles.max(urls);
-    let chip = if 0 < results {
-        format!(
-            "({results}, {}L, {}B)",
-            response.lines().count(),
-            response.len()
-        )
-    } else if response.is_empty() {
-        String::new()
-    } else {
-        format!("({}L, {}B)", response.lines().count(), response.len())
-    };
-    let mut display = ToolDisplay {
+    let has_response = !response.is_empty();
+    ToolDisplay {
         args: String::new(),
+        stats: ToolDisplayStats {
+            matches: (0 < results).then_some(results as u64),
+            lines: has_response.then_some(response.lines().count() as u64),
+            bytes: has_response.then_some(response.len() as u64),
+        },
         status: ToolDisplayStatus::Success,
         status_text: "ok".to_owned(),
         ..Default::default()
-    };
-    if !chip.is_empty() {
-        display.info_chips.push(chip);
     }
-    display
 }
 
 fn exa_error_display(message: &str) -> ToolDisplay {
