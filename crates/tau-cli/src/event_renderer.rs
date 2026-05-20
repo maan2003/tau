@@ -2365,16 +2365,43 @@ impl EventRenderer {
     }
 
     fn upsert_tool_duration_suffix(display: &mut ToolCallDisplay, duration: Duration) {
-        let suffix = tool_duration_suffix(duration);
-        if let Some(existing) = display
+        use crate::tool_render::ToolStatus;
+
+        display
             .suffixes
-            .iter_mut()
-            .find(|suffix| matches!(suffix.status, crate::tool_render::ToolStatus::Time))
+            .retain(|suffix| !matches!(suffix.status, ToolStatus::Time));
+
+        let insert_at = display
+            .suffixes
+            .iter()
+            .position(|suffix| {
+                matches!(
+                    suffix.status,
+                    ToolStatus::Success
+                        | ToolStatus::Warning
+                        | ToolStatus::Error
+                        | ToolStatus::Progress
+                )
+            })
+            .unwrap_or(display.suffixes.len());
+
+        let mut suffix = tool_duration_suffix(duration);
+        if insert_at == 0
+            && display
+                .args
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
         {
-            *existing = suffix;
-            return;
+            suffix.no_leading_space = true;
         }
-        display.suffixes.push(suffix);
+        if let Some(next) = display.suffixes.get_mut(insert_at)
+            && matches!(next.status, ToolStatus::Progress)
+        {
+            next.no_leading_space = false;
+        }
+
+        display.suffixes.insert(insert_at, suffix);
     }
 
     fn handle_tool_delegate_progress(&mut self, progress: &tau_proto::DelegateProgress) {

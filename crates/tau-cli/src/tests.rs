@@ -1769,7 +1769,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
         tau_proto::UnixMicros::new(1_000_000),
     );
     sync(&handle);
-    assert!(vt.screen_contains(80, "read src/main.rs … 0s"));
+    assert!(vt.screen_contains(80, "read src/main.rs 0s …"));
 
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
@@ -1802,7 +1802,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
         tau_proto::UnixMicros::new(3_000_000),
     );
     sync(&handle);
-    assert!(vt.screen_contains(80, "read src/main.rs (1L, 13B) ok 2s"));
+    assert!(vt.screen_contains(80, "read src/main.rs (1L, 13B) 2s ok"));
     assert!(!vt.screen_contains(80, "read src/main.rs …"));
 }
 
