@@ -12,6 +12,8 @@ use std::process::Command;
 /// - Overrides display-related environment variables with `TERM=dumb` /
 ///   `NO_COLOR=1` / `CLICOLOR=0` so well-behaved tools suppress ANSI escapes
 ///   and TTY-only fancy output.
+/// - Clears Cargo build-time variables that can confuse tools executed outside
+///   the extension's build context.
 /// - Closes stdin so interactive prompts (`sudo`, `ssh`, `read`) fail fast
 ///   instead of hanging on input that will never arrive.
 /// - On Unix, runs `setsid()` in the child so it becomes the leader of a new
@@ -20,7 +22,8 @@ use std::process::Command;
 pub(crate) fn apply_command_isolation(cmd: &mut Command) {
     cmd.env("TERM", "dumb")
         .env("NO_COLOR", "1")
-        .env("CLICOLOR", "0");
+        .env("CLICOLOR", "0")
+        .env_remove("CARGO_MANIFEST_DIR");
 
     cmd.stdin(std::process::Stdio::null());
 

@@ -2252,6 +2252,23 @@ fn command_isolation_preserves_explicit_environment() {
 }
 
 #[test]
+fn command_isolation_clears_cargo_manifest_dir() {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg("printf %s \"${CARGO_MANIFEST_DIR-unset}\"")
+        .env("CARGO_MANIFEST_DIR", "/should/not/leak")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::isolation::apply_command_isolation(&mut cmd);
+    let output = cmd.output().expect("run env probe");
+    assert!(output.status.success(), "env probe failed: {output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf8 stdout"),
+        "unset"
+    );
+}
+
+#[test]
 fn shell_extension_rejects_invalid_config() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
