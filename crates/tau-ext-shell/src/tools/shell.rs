@@ -686,10 +686,10 @@ enum OutputStream {
 }
 
 impl OutputStream {
-    fn fd_number(self) -> u8 {
+    fn prefix(self) -> &'static str {
         match self {
-            Self::Stdout => 1,
-            Self::Stderr => 2,
+            Self::Stdout => "out",
+            Self::Stderr => "err",
         }
     }
 }
@@ -869,7 +869,7 @@ impl StreamDecoder {
 }
 
 fn render_output_line(line: &OutputLine) -> String {
-    let prefix = line.stream.fd_number().to_string();
+    let prefix = line.stream.prefix();
     match &line.content {
         OutputContent::Text { text, no_nl } => {
             let marker = no_nl.then_some("no_nl");
@@ -881,7 +881,7 @@ fn render_output_line(line: &OutputLine) -> String {
             } else {
                 "invalid-utf8"
             };
-            mark_line(&prefix, marker)
+            mark_line(&format_output_line(prefix, None, ""), marker)
         }
     }
 }

@@ -2129,7 +2129,7 @@ fn shell_tool_reports_progress_and_success() {
     assert_eq!(result.tool_name, SHELL_TOOL_NAME);
     assert_eq!(
         optional_argument_text(&result.result, "output"),
-        Some("1(no_nl) hello".to_owned())
+        Some("out(no_nl) hello".to_owned())
     );
 
     writer
@@ -2169,7 +2169,7 @@ fn gpt_shell_tool_reports_progress_and_success() {
     assert_eq!(result.tool_name, GPT_SHELL_TOOL_NAME);
     assert_eq!(
         optional_argument_text(&result.result, "output"),
-        Some("1(no_nl) hello".to_owned())
+        Some("out(no_nl) hello".to_owned())
     );
 
     writer
@@ -2223,7 +2223,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
     };
     assert_eq!(
         optional_argument_text(&result.result, "output"),
-        Some("1(no_nl) ok".to_owned())
+        Some("out(no_nl) ok".to_owned())
     );
 
     writer
@@ -2335,7 +2335,7 @@ fn shell_tool_marks_invalid_utf8_stdout_line_and_marks_output_invalid() {
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
     assert_eq!(
         cbor_map_text(&output.result, "output"),
-        Some("1(invalid-utf8,no_nl)")
+        Some("out(invalid-utf8,no_nl)")
     );
     assert_eq!(cbor_bool_field(&output.result, "valid_utf8"), Some(false));
 }
@@ -2353,7 +2353,7 @@ fn shell_tool_replaces_invalid_utf8_stderr_and_marks_output_invalid() {
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
     assert_eq!(
         cbor_map_text(&output.result, "output"),
-        Some("2(invalid-utf8,no_nl)")
+        Some("err(invalid-utf8,no_nl)")
     );
     assert_eq!(cbor_bool_field(&output.result, "valid_utf8"), Some(false));
 }
@@ -2370,7 +2370,7 @@ fn shell_tool_replaces_invalid_utf8_both_streams_in_combined_output() {
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
     assert_eq!(
         cbor_map_text(&output.result, "output"),
-        Some("1(invalid-utf8,no_nl)\n2(invalid-utf8,no_nl)")
+        Some("out(invalid-utf8,no_nl)\nerr(invalid-utf8,no_nl)")
     );
     assert_eq!(cbor_bool_field(&output.result, "valid_utf8"), Some(false));
 }
@@ -2385,7 +2385,7 @@ fn shell_tool_omits_truncation_marker_without_truncation() {
     )]);
 
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
-    assert_eq!(cbor_map_text(&output.result, "output"), Some("1 ok"));
+    assert_eq!(cbor_map_text(&output.result, "output"), Some("out ok"));
     for field in ["truncated"] {
         assert!(
             cbor_map_field(&output.result, field).is_none(),
@@ -2410,9 +2410,9 @@ fn shell_tool_reports_truncation_marker_and_original_totals() {
 
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
     let combined = cbor_map_text(&output.result, "output").expect("output");
-    assert!(combined.starts_with("1 x") || combined.starts_with("2 e"));
+    assert!(combined.starts_with("out x") || combined.starts_with("err e"));
     assert!(combined.contains("\n...\n"));
-    assert!(combined.contains("\n1 x") || combined.contains("\n2 e"));
+    assert!(combined.contains("\nout x") || combined.contains("\nerr e"));
     assert_eq!(
         cbor_int_field(&output.result, "total_lines"),
         Some((line_count * 2) as i128)
@@ -2457,7 +2457,7 @@ fn shell_tool_runs_in_requested_cwd() {
 
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
     let cwd = tempdir.path().canonicalize().expect("canonical cwd");
-    let expected_stdout = format!("1 {}", cwd.display());
+    let expected_stdout = format!("out {}", cwd.display());
     assert_eq!(
         cbor_map_text(&output.result, "output"),
         Some(expected_stdout.as_str())
@@ -2481,7 +2481,7 @@ fn shell_tool_timeout_preserves_partial_output() {
     let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("timeout");
     assert!(error.message.contains("command timed out after 1s"));
     let details = error.details.as_ref().expect("details");
-    assert_eq!(cbor_map_text(details, "output"), Some("1 before"));
+    assert_eq!(cbor_map_text(details, "output"), Some("out before"));
     assert!(cbor_map_field(details, "total_lines").is_none());
     assert_eq!(cbor_bool_field(details, "timed_out"), Some(true));
     assert!(cbor_int_field(details, "timeout_secs").is_none());
@@ -2516,7 +2516,7 @@ fn shell_tool_returns_after_foreground_exit_even_if_background_holds_pipe() {
         "background pipe holder delayed shell result for {elapsed:?}"
     );
     let output = cbor_map_text(&output.result, "output").expect("output");
-    assert_eq!(output, "1(no_nl) early");
+    assert_eq!(output, "out(no_nl) early");
     assert!(!output.contains("late"));
 }
 
@@ -2557,7 +2557,7 @@ fn shell_tool_timeout_returns_without_waiting_for_escaped_pipe_holder() {
     );
     let details = error.details.as_ref().expect("details");
     let output = cbor_map_text(details, "output").expect("output");
-    assert_eq!(output, "1(no_nl) early");
+    assert_eq!(output, "out(no_nl) early");
     assert!(!output.contains("late"));
     assert_eq!(cbor_bool_field(details, "timed_out"), Some(true));
     assert_eq!(
@@ -2756,6 +2756,10 @@ fn mark_line_merges_existing_markers_when_truncating() {
         "1(no_nl,truncated)"
     );
     assert_eq!(mark_line("2(crlf) hello", "truncated"), "2(crlf,truncated)");
+    assert_eq!(
+        mark_line("out(no_nl) hello", "truncated"),
+        "out(no_nl,truncated)"
+    );
 }
 
 #[test]
@@ -2835,11 +2839,11 @@ fn command_details_value_records_combined_output_stats() {
         termination_reason: "exit",
         total_lines: None,
         total_bytes: None,
-        output: "1 hi\n2 oops".to_owned(),
+        output: "out hi\nerr oops".to_owned(),
         truncated: false,
         valid_utf8: true,
     });
-    assert_eq!(cbor_map_text(&details, "output"), Some("1 hi\n2 oops"));
+    assert_eq!(cbor_map_text(&details, "output"), Some("out hi\nerr oops"));
     assert!(cbor_map_field(&details, "total_lines").is_none());
     assert!(cbor_map_field(&details, "total_bytes").is_none());
     assert!(cbor_map_field(&details, "valid_utf8").is_none());

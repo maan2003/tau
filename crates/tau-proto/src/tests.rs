@@ -916,11 +916,11 @@ fn tool_response_renders_output_field_as_body_without_label() {
         ),
         (
             CborValue::Text("output".to_owned()),
-            CborValue::Text("1 stdout\n2 stderr".to_owned()),
+            CborValue::Text("out stdout\nerr stderr".to_owned()),
         ),
     ]));
 
-    assert_eq!(response.render(), "status: 0\n\n1 stdout\n2 stderr");
+    assert_eq!(response.render(), "status: 0\n\nout stdout\nerr stderr");
 }
 
 #[test]

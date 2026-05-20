@@ -339,10 +339,10 @@ where
                 "Execute a shell command via `sh -c`. Non-zero exits and timeouts \
                  are tool errors with output details. Output is capped at 2000 lines / \
                  50 KB; truncated output keeps the first 1000 and last 1000 lines \
-                 separated by a literal `...` line. Output lines are prefixed with `1 ` \
-                 for stdout or `2 ` for stderr; missing trailing newlines are marked, e.g. \
-                 `1(no_nl)`. Invalid UTF-8 and lines that would exceed the 50 KB output \
-                 budget are marker-only, e.g. `1(invalid-utf8)` or `2(truncated)`. \
+                 separated by a literal `...` line. Output lines are prefixed with `out ` \
+                 for stdout or `err ` for stderr; missing trailing newlines are marked, e.g. \
+                 `out(no_nl)`. Invalid UTF-8 and lines that would exceed the 50 KB output \
+                 budget are marker-only, e.g. `out(invalid-utf8)` or `err(truncated)`. \
                  Truncated results include `truncated: true`, `total_lines`, and `total_bytes`. \
                  Commands taking longer than 5 seconds include duration metadata. Prefer dedicated \
                  tools like `read`, `grep`, and `find` when they fit."
@@ -379,7 +379,7 @@ where
                 "Run a shell command. Non-zero exits and timeouts are tool errors \
                  with output details. Output is capped at 2000 lines / 50 KB; truncated \
                  output keeps the first 1000 and last 1000 lines separated by `...`. \
-                 Output lines are prefixed with `1 ` for stdout or `2 ` for stderr; missing \
+                 Output lines are prefixed with `out ` for stdout or `err ` for stderr; missing \
                  trailing newlines are marked with `(no_nl)`. Invalid UTF-8 and lines that \
                  would exceed the 50 KB output budget are marker-only. Truncated results \
                  include `truncated: true`, `total_lines`, and `total_bytes`. Commands taking \

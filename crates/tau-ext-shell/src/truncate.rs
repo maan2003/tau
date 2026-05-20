@@ -21,7 +21,7 @@ pub(crate) struct Truncated {
 ///
 /// When the line count is too high, the first and last 1000 lines are kept with
 /// a literal `...` separator between them. Lines that are individually too long
-/// are replaced by a marker-only line such as `1(truncated)` so no misleading
+/// are replaced by a marker-only line such as `out(truncated)` so no misleading
 /// partial content is shown.
 pub(crate) fn truncate_line_oriented(input: &str) -> Truncated {
     let lines: Vec<&str> = input.lines().collect();
