@@ -78,7 +78,10 @@ const SELF_KNOWLEDGE_HARNESS_CONFIG: &str =
 const SELF_KNOWLEDGE_UI_CONFIG: &str = include_str!("../../tau-config/config/built-in.cli.yaml");
 
 pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
-    format!("[tau-internal] Tool call `{call_id}` is complete.")
+    format!(
+        "{} Tool call `{call_id}` is complete.",
+        crate::INTERNAL_MARKER
+    )
 }
 
 fn load_system_prompt_templates(config_dir: Option<&Path>) -> HashMap<String, String> {
@@ -4567,7 +4570,7 @@ impl Harness {
             // collision, or an explicit same-id reset in tests). If
             // we reused the existing tree head, the dedup map would
             // lazily rebuild from old tool results and emit confusing
-            // `[tau-dedup]` pointers to outputs the model cannot see
+            // `[tau-internal]` pointers to outputs the model cannot see
             // in the fresh conversation.
             None
         } else {

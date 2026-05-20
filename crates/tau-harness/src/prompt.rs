@@ -577,7 +577,7 @@ mod tests {
         let prompt = build_system_prompt(&skills, &[]);
         assert!(prompt.contains("[tau-internal]"));
         assert!(prompt.contains("background tool notifications"));
-        assert!(prompt.contains("[tau-dedup]"));
+        assert!(prompt.contains("deduplicated tool result pointers"));
     }
 
     /// Role prompts are configuration templates. They should be rendered just

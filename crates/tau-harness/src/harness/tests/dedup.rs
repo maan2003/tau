@@ -3,11 +3,12 @@
 //! Each test drives `Harness::handle_extension_event` with synthetic
 //! `ToolResult` / `ToolError` frames and inspects the persisted
 //! session tree to verify that the recorded entry is either the
-//! original content or a `[tau-dedup]` pointer back to the first
+//! original content or a `[tau-internal]` pointer back to the first
 //! occurrence on the conversation's branch.
 
 use super::*;
-use crate::dedup::{DEDUP_MARKER, DEFAULT_THRESHOLD_BYTES};
+use crate::INTERNAL_MARKER;
+use crate::dedup::DEFAULT_THRESHOLD_BYTES;
 use crate::harness::PendingTool;
 
 /// Drive a single `ToolResult` through the harness's normal intake
@@ -138,15 +139,15 @@ fn cross_turn_identical_result_collapses_to_pointer() {
         panic!("deduped result should be a CborValue::Text pointer; got: {dedup_result:?}");
     };
     assert!(
-        text.starts_with(DEDUP_MARKER),
-        "deduped text must start with the dedup marker; got: {text:?}",
+        text.starts_with(INTERNAL_MARKER),
+        "deduped text must start with the internal marker; got: {text:?}",
     );
     assert!(
         text.contains("call_first"),
         "pointer must reference the first call_id; got: {text:?}",
     );
     // Lock in the terse pointer budget. The format is
-    // `[tau-dedup] same as <tool> <call_id>` — currently ~50 B for
+    // `[tau-internal] same as <tool> <call_id>` — currently ~50 B for
     // a typical tool name + OpenAI-style call_id. Cap at 100 B so a
     // future format change that grows the pointer significantly
     // (and erodes the dedup win) trips this test instead of slipping
@@ -193,7 +194,7 @@ fn small_results_below_threshold_are_not_deduped() {
 
 /// A result that hashes to the same value as a *previously emitted
 /// pointer* on the branch must not dedup against that pointer. The
-/// rebuild-time skip on `[tau-dedup]`-prefixed entries is what
+/// rebuild-time skip on dedup-pointer entries is what
 /// guarantees this; without it, a real result whose bytes happened to
 /// match the pointer text would be redirected to the pointer's
 /// (wrong) call_id.
@@ -275,7 +276,7 @@ fn identical_errors_collapse_but_distinct_details_stay() {
         unreachable!()
     };
     assert!(
-        m2.starts_with(DEDUP_MARKER),
+        m2.starts_with(INTERNAL_MARKER),
         "identical second error must dedup to a pointer; got message: {m2:?}",
     );
     assert!(
@@ -462,7 +463,7 @@ fn dedup_refuses_to_self_point() {
 
     // Manually run the dedup intake again on a result with the same
     // call_id and same content. Without the self-pointer guard this
-    // would produce `[tau-dedup] identical to ... call_solo ...` —
+    // would produce `[tau-internal] same as ... call_solo ...` —
     // a pointer to itself.
     let mut replay = ToolResult {
         call_id: "call_solo".into(),

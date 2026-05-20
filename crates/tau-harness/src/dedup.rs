@@ -12,7 +12,7 @@
 //! This module replaces the *content* of any tool result whose CBOR
 //! encoding hashes to the same value as a result already on the
 //! conversation's branch with a short pointer
-//! (`[tau-dedup] same as <tool_name> <call_id>`). The first
+//! (`[tau-internal] same as <tool_name> <call_id>`). The first
 //! occurrence is kept verbatim — only the duplicates are collapsed.
 //! The model can cross-reference the pointer to the original
 //! `call_id` which is still present earlier in its own context.
@@ -39,13 +39,7 @@ use std::collections::HashMap;
 use tau_core::SessionEntry;
 use tau_proto::{CborValue, NodeId, ToolCallId, ToolResultStatus};
 
-/// Sentinel prefix on dedup-pointer text. Picked so it is exceedingly
-/// unlikely to appear at the start of a real tool output. Used both
-/// as a marker for the model ("this is a synthesized pointer, not
-/// real content") and as the rebuild-time skip predicate so a pointer
-/// is never re-hashed and re-inserted into the map (which would let a
-/// later real result accidentally dedup against the *pointer* text).
-pub(crate) const DEDUP_MARKER: &str = "[tau-dedup]";
+use crate::INTERNAL_MARKER;
 
 /// Minimum CBOR-serialized size of a tool result to consider
 /// deduping. Below this, the pointer text is comparable to the
@@ -116,14 +110,14 @@ impl ResultDedupMap {
                         (hash_truncated(&bytes), bytes.len())
                     }
                     ToolResultStatus::Error { message } => {
-                        if message.starts_with(DEDUP_MARKER) {
+                        if message.starts_with(INTERNAL_MARKER) {
                             continue;
                         }
                         let bytes = encode_error_response_for_hash(message, &item.output);
                         (hash_truncated(&bytes), bytes.len())
                     }
                     ToolResultStatus::Cancelled { reason } => {
-                        if reason.starts_with(DEDUP_MARKER) {
+                        if reason.starts_with(INTERNAL_MARKER) {
                             continue;
                         }
                         let bytes = encode_error_response_for_hash(reason, &item.output);
@@ -263,7 +257,7 @@ pub(crate) fn build_pointer_value(
     tool_name: &tau_proto::ToolName,
 ) -> CborValue {
     CborValue::Text(format!(
-        "{DEDUP_MARKER} same as {} {}",
+        "{INTERNAL_MARKER} same as {} {}",
         tool_name.as_str(),
         original_call_id
     ))
@@ -281,17 +275,17 @@ pub(crate) fn build_pointer_error_message(
     tool_name: &tau_proto::ToolName,
 ) -> String {
     format!(
-        "{DEDUP_MARKER} same as {} {}",
+        "{INTERNAL_MARKER} same as {} {}",
         tool_name.as_str(),
         original_call_id
     )
 }
 
 /// True when `value` is a previously-emitted dedup pointer rather
-/// than a real tool result. Recognized by the [`DEDUP_MARKER`] prefix
+/// than a real tool result. Recognized by the [`INTERNAL_MARKER`] marker
 /// on a `CborValue::Text` payload; any other shape is real content.
 pub(crate) fn is_dedup_pointer_value(value: &tau_proto::ToolResponse) -> bool {
-    value.body.starts_with(DEDUP_MARKER)
+    value.body.starts_with(INTERNAL_MARKER)
 }
 
 #[cfg(test)]
@@ -336,9 +330,7 @@ mod tests {
     #[test]
     fn rebuild_skips_dedup_pointers() {
         let big = "z".repeat(1024);
-        let pointer = format!(
-            "{DEDUP_MARKER} identical to result of `read` call_id `call_x` — see that earlier output"
-        );
+        let pointer = format!("{INTERNAL_MARKER} same as read call_x");
         let entries = vec![
             result_entry("call_a", &big),
             // A previously-recorded dedup pointer that was already
@@ -395,7 +387,7 @@ mod tests {
         let CborValue::Text(s) = v else {
             panic!("pointer should always be CborValue::Text");
         };
-        assert!(s.starts_with(DEDUP_MARKER), "got: {s}");
+        assert!(s.starts_with(INTERNAL_MARKER), "got: {s}");
         assert!(is_dedup_pointer_value(&tau_proto::ToolResponse::from_cbor(
             &CborValue::Text(s),
         )));
@@ -404,7 +396,7 @@ mod tests {
     #[test]
     fn pointer_error_message_starts_with_marker() {
         let m = build_pointer_error_message(&ToolCallId::from("call_xyz"), &ToolName::new("shell"));
-        assert!(m.starts_with(DEDUP_MARKER), "got: {m}");
+        assert!(m.starts_with(INTERNAL_MARKER), "got: {m}");
     }
 
     #[test]

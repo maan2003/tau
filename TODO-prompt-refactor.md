@@ -222,7 +222,7 @@ Current working directory: {{cwd}}
 
 Use Handlebars whitespace control (`~`) where needed. Keep section prose in fragment templates rather than special-case Rust string composition.
 
-`[tau-dedup]` should be hardcoded in the template, not passed as context.
+Dedup pointer text should use the shared `[tau-internal]` marker in the template, not a separate marker passed as context.
 
 ## Handlebars helpers
 

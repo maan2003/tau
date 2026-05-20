@@ -53,7 +53,7 @@ Parallelize independent reads and searches when they are already needed, especia
 
 When searching for text or files, prefer using `rg` or `rg --files` respectively because `rg` is much faster than alternatives like `grep`. If `rg` is not available, use a reasonable alternative.
 
-Tau may send internal behavior information to you prefixed with `[tau-internal]`, including background tool notifications. Tau deduplicates tool result outputs; `[tau-dedup]` results are not errors, but an optimization pointing at an earlier identical result.
+Tau may send internal behavior information to you prefixed with `[tau-internal]`, including background tool notifications and deduplicated tool result pointers. These internal messages are not errors.
 
 {{#each prompt_fragments}}
 {{#if early}}

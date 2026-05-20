@@ -11,6 +11,8 @@
 
 pub mod runtime_dir;
 
+pub(crate) const INTERNAL_MARKER: &str = "[tau-internal]";
+
 mod conversation;
 mod daemon;
 mod debug_log;
