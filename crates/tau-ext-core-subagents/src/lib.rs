@@ -880,7 +880,7 @@ fn wait_tool_spec() -> ToolSpec {
         name: tau_proto::ToolName::new(WAIT_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Wait for a tool call by `tool_call_id` and return its completed result. Intended for backgrounded calls, but also supports in-flight foreground calls if you already have their id. Prefer responding to the user that you will wait for background completion instead of calling `wait` immediately; Tau will wake you when the background tool is done. Only call `wait` when you need the exact result in the current turn."
+            "Wait for a tool call by `tool_call_id` and return its completed result. Tau will notify you via marked internal messages about tool calls running in the background, and when they complete. Invoke only for calls you know are complete already."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -1206,8 +1206,8 @@ mod tests {
         assert_eq!(spec.name.as_str(), WAIT_TOOL_NAME);
         assert_eq!(spec.background_support, Some(BackgroundSupport::Never));
         let description = spec.description.expect("description");
-        assert!(description.contains("responding to the user that you will wait"));
-        assert!(description.contains("instead of calling `wait` immediately"));
+        assert!(description.contains("marked internal messages"));
+        assert!(description.contains("Invoke only for calls you know are complete already"));
     }
 
     /// Unknown call ids fail immediately so the model can recover instead of
