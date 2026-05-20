@@ -2961,6 +2961,18 @@ fn run_grep_counts_matches_across_directory() {
 }
 
 #[test]
+fn run_grep_no_matches_uses_plain_ok_status() {
+    let tempdir = TempDir::new().expect("tempdir");
+    fs::write(tempdir.path().join("a.txt"), "alpha\n").expect("write a");
+
+    let args = grep_args("beta", &tempdir.path().display().to_string(), vec![]);
+    let output = run_grep(&args).expect("grep");
+
+    assert_eq!(output.display.status_text, "ok");
+    assert_eq!(output.display.stats.matches, Some(0));
+}
+
+#[test]
 fn run_grep_counts_matches_in_single_file() {
     // Regression: when `path` is a single file, rg drops the
     // `PATH:` prefix from each line. Without `--with-filename` the
