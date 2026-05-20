@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use dialoguer::Input;
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    ClientKind, ConfigError, ContentPart, ContextItem, ContextRole, Event, EventName, Frame,
+    Ack, ClientKind, ConfigError, ContentPart, ContextItem, ContextRole, Event, EventName, Frame,
     FrameReader, FrameWriter, Message, ModelId, ModelName, ProviderBackend, ProviderBackendKind,
     ProviderBackendTransport, ProviderModelInfo, ProviderModelsUpdated, ProviderName,
     ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
@@ -360,7 +360,8 @@ fn handle_frame<W: Write>(
     auth: &mut ChatCompletionsAuth,
     auth_file_auth: &ChatCompletionsAuth,
 ) -> Result<bool, Box<dyn Error>> {
-    match frame {
+    let (log_id, inner) = frame.peel_log();
+    match inner {
         Frame::Message(Message::Configure(msg)) => {
             handle_configure(msg, writer, auth, auth_file_auth)?;
         }
@@ -369,6 +370,10 @@ fn handle_frame<W: Write>(
         }
         Frame::Message(Message::Disconnect(_)) => return Ok(true),
         _ => {}
+    }
+    if let Some(id) = log_id {
+        writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
+        writer.flush()?;
     }
     Ok(false)
 }
@@ -411,6 +416,7 @@ fn handle_prompt<W: Write>(
             originator: prompt.originator.clone(),
         },
     )))?;
+    writer.flush()?;
     let finished = match prompt
         .model
         .as_ref()
@@ -1077,6 +1083,73 @@ mod tests {
 
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id.to_string(), "openai/gpt-4o");
+    }
+
+    #[test]
+    fn handles_logged_prompt_created_and_acks_it() {
+        // The harness delivers subscribed events through LogEvent envelopes.
+        // Providers must peel the envelope, process the prompt, and ack the log
+        // id so durable event replay can advance.
+        let prompt = tau_proto::SessionPromptCreated {
+            session_prompt_id: "sp-logged".into(),
+            session_id: "s1".into(),
+            system_prompt: "sys".to_owned(),
+            context_items: Vec::new(),
+            tools: Vec::new(),
+            tools_ref: None,
+            model: Some("missing/model".into()),
+            model_params: Default::default(),
+            tool_choice: ToolChoice::Auto,
+            originator: tau_proto::PromptOriginator::User,
+            share_user_cache_key: false,
+            ctx_id: None,
+            previous_response_candidate: None,
+        };
+        let mut auth = ChatCompletionsAuth::default();
+        let auth_file_auth = ChatCompletionsAuth::default();
+        let mut output = Vec::new();
+        let mut writer = FrameWriter::new(&mut output);
+
+        let disconnected = handle_frame(
+            Frame::Message(Message::LogEvent(tau_proto::LogEvent {
+                id: tau_proto::LogEventId::new(7),
+                recorded_at: tau_proto::UnixMicros::default(),
+                event: Box::new(Event::SessionPromptCreated(prompt)),
+            })),
+            &mut writer,
+            &mut auth,
+            &auth_file_auth,
+        )
+        .expect("handle logged prompt");
+
+        assert!(!disconnected);
+        let mut reader = FrameReader::new(std::io::Cursor::new(output));
+        let submitted = reader
+            .read_frame()
+            .expect("read submitted")
+            .expect("submitted frame");
+        assert!(matches!(
+            submitted,
+            Frame::Event(Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
+                session_prompt_id,
+                ..
+            })) if session_prompt_id.as_str() == "sp-logged"
+        ));
+        assert!(matches!(
+            reader
+                .read_frame()
+                .expect("read finished")
+                .expect("finished frame"),
+            Frame::Event(Event::ProviderResponseFinished(ProviderResponseFinished {
+                session_prompt_id,
+                ..
+            })) if session_prompt_id.as_str() == "sp-logged"
+        ));
+        assert!(matches!(
+            reader.read_frame().expect("read ack").expect("ack frame"),
+            Frame::Message(Message::Ack(Ack { up_to })) if up_to.get() == 7
+        ));
+        assert!(reader.read_frame().expect("read eof").is_none());
     }
 
     #[test]
