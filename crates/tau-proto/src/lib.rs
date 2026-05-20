@@ -34,6 +34,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// are still in progress.
 pub const PROGRESS_INDICATOR_TEXT: &str = "…";
 
+/// Header name used to mark model-visible internal Tau messages.
+pub const TAU_INTERNAL_HEADER_NAME: &str = "tau_internal";
+
 macro_rules! string_newtype {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*

@@ -3,7 +3,8 @@ use std::sync::Once;
 
 use tau_proto::{
     ContentPart, ContextItem, ContextRole, Event, FrameReader, FrameWriter, MessageItem,
-    ProviderResponseFinished, ProviderStopReason, ToolCallItem, UiPromptSubmitted,
+    ProviderResponseFinished, ProviderStopReason, ToolBackgroundResult, ToolCallItem, ToolResult,
+    UiPromptSubmitted,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -155,6 +156,35 @@ fn assistant_finished_response(
     }
 }
 
+fn tool_background_placeholder(
+    call_id: &str,
+    originator: tau_proto::PromptOriginator,
+) -> ToolResult {
+    ToolResult {
+        call_id: call_id.into(),
+        tool_name: tau_proto::ToolName::new("shell"),
+        tool_type: tau_proto::ToolType::Function,
+        result: tau_proto::CborValue::Text("running in background".into()),
+        kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+        display: None,
+        originator,
+    }
+}
+
+fn tool_background_result(
+    call_id: &str,
+    originator: tau_proto::PromptOriginator,
+) -> ToolBackgroundResult {
+    ToolBackgroundResult {
+        call_id: call_id.into(),
+        tool_name: tau_proto::ToolName::new("shell"),
+        tool_type: tau_proto::ToolType::Function,
+        result: tau_proto::CborValue::Text("done".into()),
+        display: None,
+        originator,
+    }
+}
+
 fn tool_call_finished_response(
     session_prompt_id: &str,
     tool_call: ToolCallItem,
@@ -289,6 +319,153 @@ fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
         next.is_none(),
         "no further OSC events expected after mid-turn finish, got {next:?}",
     );
+}
+
+#[test]
+fn final_response_waits_for_background_tools_before_end_sound() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "run slow thing".into(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }))
+        .expect("write");
+    writer
+        .write_event(&Event::ToolResult(tool_background_placeholder(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write");
+    writer
+        .write_event(&Event::ToolBackgroundResult(tool_background_result(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+
+    let start = reader.read_event().expect("read").expect("start");
+    let Event::Osc1337SetUserVar(osc) = start else {
+        panic!("expected start OSC, got {start:?}");
+    };
+    assert_eq!(osc.value, VALUE_AGENT_START);
+
+    let end = reader.read_event().expect("read").expect("end");
+    let Event::Osc1337SetUserVar(osc) = end else {
+        panic!("expected deferred end OSC, got {end:?}");
+    };
+    assert_eq!(osc.value, VALUE_AGENT_END);
+    assert!(reader.read_event().expect("read eof").is_none());
+}
+
+#[test]
+fn new_prompt_does_not_forget_previous_background_tool() {
+    // Regression: starting another user prompt while a prior final response was
+    // waiting on background tools must not clear those tools. Otherwise prompt 2
+    // can emit the end sound before prompt 1's background work is done.
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    for (text, spid) in [("run slow thing", "sp-0"), ("next prompt", "sp-1")] {
+        writer
+            .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+                session_id: "s1".into(),
+                text: text.into(),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            }))
+            .expect("write");
+        if spid == "sp-0" {
+            writer
+                .write_event(&Event::ToolResult(tool_background_placeholder(
+                    "call-bg",
+                    tau_proto::PromptOriginator::User,
+                )))
+                .expect("write");
+        }
+        writer
+            .write_event(&Event::ProviderResponseFinished(
+                assistant_finished_response(spid, "done", tau_proto::PromptOriginator::User),
+            ))
+            .expect("write");
+    }
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+
+    let mut values = Vec::new();
+    while let Some(event) = reader.read_event().expect("read") {
+        if let Event::Osc1337SetUserVar(osc) = event {
+            values.push(osc.value);
+        }
+    }
+    assert_eq!(
+        values,
+        vec![VALUE_AGENT_START, VALUE_AGENT_START],
+        "end sound must wait until the old background tool completes",
+    );
+}
+
+#[test]
+fn final_response_without_background_completion_does_not_emit_end_sound() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "run slow thing".into(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }))
+        .expect("write");
+    writer
+        .write_event(&Event::ToolResult(tool_background_placeholder(
+            "call-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("write");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+
+    let start = reader.read_event().expect("read").expect("start");
+    let Event::Osc1337SetUserVar(osc) = start else {
+        panic!("expected start OSC, got {start:?}");
+    };
+    assert_eq!(osc.value, VALUE_AGENT_START);
+    assert!(reader.read_event().expect("read eof").is_none());
 }
 
 /// After ProviderResponseFinished we should see the end-sound OSC

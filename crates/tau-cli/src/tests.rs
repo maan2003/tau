@@ -1869,7 +1869,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
 }
 
 #[test]
-fn backgrounded_tool_stays_visibly_running_until_background_result() {
+fn backgrounded_tool_removes_foreground_block_until_background_result() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1909,8 +1909,22 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
     );
     sync(&handle);
     assert!(in_progress.load(std::sync::atomic::Ordering::Relaxed));
-    assert!(vt.screen_contains(80, "shell sleep 10 0s …"));
+    assert!(!vt.screen_contains(80, "shell sleep 10 0s …"));
     assert!(!vt.screen_contains(80, "shell 1s ok"));
+    assert!(vt.screen_contains(80, "0/1"));
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-final",
+        vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "done for now".into(),
+            }],
+            phase: None,
+        })],
+    )));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "0/1"));
 
     renderer.handle_recorded_at(
         &Event::ToolBackgroundResult(ToolBackgroundResult {
@@ -1931,10 +1945,11 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
     sync(&handle);
     assert!(!in_progress.load(std::sync::atomic::Ordering::Relaxed));
     assert!(vt.screen_contains(80, "shell sleep 10 3s ok"));
+    assert!(vt.screen_contains(80, "1/1"));
 }
 
 #[test]
-fn finished_response_preserves_message_and_tool_item_order() {
+fn finished_tool_result_preserves_message_and_tool_item_order() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1958,6 +1973,20 @@ fn finished_response_preserves_message_and_tool_item_order() {
             assistant_message_item("after tool"),
         ],
     )));
+    renderer.handle(&Event::ToolResult(ToolResult {
+        call_id: "call-1".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Null,
+        kind: tau_proto::ToolResultKind::Final,
+        display: Some(tau_proto::ToolDisplay {
+            args: "src/main.rs".into(),
+            status: tau_proto::ToolDisplayStatus::Success,
+            status_text: "ok".into(),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }));
     sync(&handle);
 
     let lines = vt.screen_text(100);
@@ -1977,6 +2006,52 @@ fn finished_response_preserves_message_and_tool_item_order() {
         before < tool && tool < after,
         "output_items order should be preserved; lines: {lines:?}",
     );
+}
+
+#[test]
+fn live_tool_timer_updates_do_not_mutate_scrolled_history() {
+    // Running tool calls live in the fixed active-tools area above the prompt.
+    // Timer ticks should therefore repaint that visible area only, not trigger a
+    // hidden-prefix full redraw of old transcript rows that have moved to
+    // scrollback.
+    let (_term, handle, vt) = setup(80, 5);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-history",
+        (0..10)
+            .map(|i| assistant_message_item(format!("history line {i}")))
+            .collect(),
+    )));
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-tool",
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-1".into(),
+            name: tau_proto::ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("path".into()),
+                CborValue::Text("src/main.rs".into()),
+            )]),
+        })],
+    )));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "read src/main.rs"));
+
+    let full_renders_before = handle.full_render_count();
+    renderer.handle_tool_timer_tick();
+    sync(&handle);
+
+    assert_eq!(
+        handle.full_render_count(),
+        full_renders_before,
+        "live timer ticks must not full-redraw hidden transcript rows",
+    );
+    assert!(vt.screen_contains(80, "read src/main.rs"));
 }
 
 #[test]

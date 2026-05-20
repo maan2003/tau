@@ -121,9 +121,12 @@ pub(crate) struct EventRenderer {
     /// in the status bar alongside [`Self::main_tools_total`].
     main_tools_completed: u64,
     /// Main-agent tool calls requested for the current user task. Sub-agent
-    /// calls are excluded because they roll up under their `delegate`
-    /// parent.
+    /// calls are excluded because they roll up under their `delegate` parent.
     main_tools_total: u64,
+    /// Main-agent tool call ids whose foreground placeholder has returned, but
+    /// whose real background result is still pending. These keep the status-bar
+    /// tool chip visible and incomplete.
+    main_backgrounded_tools: HashSet<String>,
     /// Whether the currently active prompt/agent lifecycle belongs to the
     /// user-facing main agent. Side conversations temporarily make this
     /// false while preserving the main task's counters.
@@ -149,6 +152,11 @@ pub(crate) struct EventRenderer {
     /// active user prompt. Reused across the follow-up agent turns the
     /// harness creates while feeding tool results back to the model.
     prompt_tool_summary: Option<tau_cli_term::BlockId>,
+    /// Whether [`Self::prompt_tool_summary`] currently lives in the bottom
+    /// active-tools area. In `summarize-prompt` mode the summary stays sticky
+    /// across tool follow-up turns, then moves to history when the assistant
+    /// finishes without requesting more tools.
+    prompt_tool_summary_active: bool,
     /// Snapshot of persisted CLI settings, kept in sync with the four
     /// `show_*` fields above by [`Self::save_cli_state`]. The input
     /// loop captures this handle in the `/set` name-completion
@@ -523,10 +531,15 @@ struct PromptState {
 /// `ToolResult`/`ToolError`.
 #[derive(Default)]
 struct ToolCallState {
-    /// Live tool-call block. `None` for sub-agent tool calls whose UI
-    /// is suppressed (their progress is rolled up into the parent
-    /// `delegate` block via `DelegateProgress` instead).
+    /// Live tool-call block in the active-tools area. `None` for sub-agent
+    /// tool calls whose UI is suppressed (their progress is rolled up into the
+    /// parent `delegate` block via `DelegateProgress` instead).
     block_id: Option<tau_cli_term::BlockId>,
+    /// Empty history placeholder allocated at the tool call's logical
+    /// transcript position. Final results fill this block so live progress
+    /// can update the bottom active-tools area without mutating old
+    /// transcript rows.
+    history_block_id: Option<tau_cli_term::BlockId>,
     /// Latest live display for the block, used when `/set show-tools`
     /// flips while the call is still running.
     live_display: Option<ToolCallDisplay>,
@@ -801,6 +814,7 @@ impl EventRenderer {
             show_tools: state.show_tools,
             tool_summaries: HashMap::new(),
             prompt_tool_summary: None,
+            prompt_tool_summary_active: false,
             cli_state_mirror,
             thinking_history: Vec::new(),
             token_stats_history: Vec::new(),
@@ -816,6 +830,7 @@ impl EventRenderer {
             current_context_window: None,
             main_tools_completed: 0,
             main_tools_total: 0,
+            main_backgrounded_tools: HashSet::new(),
             main_agent_turn_active: false,
             main_tools_visible: false,
             redraw_counter: state.redraw_counter,
@@ -1246,6 +1261,10 @@ impl EventRenderer {
             .get(&block_id)
             .is_some_and(|summary| summary.completed == summary.total);
         if finished {
+            if self.prompt_tool_summary == Some(block_id) && self.prompt_tool_summary_active {
+                self.update_tool_summary_block(block_id);
+                return;
+            }
             let Some(summary) = self.tool_summaries.remove(&block_id) else {
                 return;
             };
@@ -1253,9 +1272,6 @@ impl EventRenderer {
             let new_block_id = self
                 .handle
                 .print_output("tool-summary", self.render_summary_block(&summary));
-            if self.prompt_tool_summary == Some(block_id) {
-                self.prompt_tool_summary = Some(new_block_id);
-            }
             self.tool_summaries.insert(new_block_id, summary);
         } else {
             self.update_tool_summary_block(block_id);
@@ -1324,6 +1340,7 @@ impl EventRenderer {
         self.tool_history.clear();
         self.tool_summaries.clear();
         self.prompt_tool_summary = None;
+        self.prompt_tool_summary_active = false;
         // Model selection and effort are harness-global, not
         // session-scoped. `/new` only causes a SessionStarted event;
         // the harness does not re-emit HarnessRoleSelected for the
@@ -1333,6 +1350,7 @@ impl EventRenderer {
         self.current_context_input_tokens = None;
         self.main_tools_completed = 0;
         self.main_tools_total = 0;
+        self.main_backgrounded_tools.clear();
         self.main_agent_turn_active = false;
         self.main_tools_visible = false;
         self.cumulative_agent_latency = Duration::ZERO;
@@ -1536,7 +1554,8 @@ impl EventRenderer {
     }
 
     fn main_tools_status_chip(&self) -> Option<String> {
-        (self.main_tools_visible && self.main_tools_total != 0)
+        ((self.main_tools_visible || !self.main_backgrounded_tools.is_empty())
+            && self.main_tools_total != 0)
             .then(|| format!("{}/{}", self.main_tools_completed, self.main_tools_total))
     }
 
@@ -1639,13 +1658,20 @@ impl EventRenderer {
     }
 
     fn reset_main_tool_usage(&mut self) {
-        if self.main_tools_completed == 0 && self.main_tools_total == 0 && !self.main_tools_visible
+        if self.main_tools_completed == 0
+            && self.main_tools_total == 0
+            && !self.main_tools_visible
+            && self.main_backgrounded_tools.is_empty()
         {
             return;
         }
-        self.main_tools_completed = 0;
-        self.main_tools_total = 0;
-        self.main_tools_visible = false;
+        if self.main_backgrounded_tools.is_empty() {
+            self.main_tools_completed = 0;
+            self.main_tools_total = 0;
+            self.main_tools_visible = false;
+        } else {
+            self.main_tools_visible = true;
+        }
         if self.model_status_block.is_some() {
             self.render_model_status();
         }
@@ -1681,6 +1707,26 @@ impl EventRenderer {
         use tau_themes::names;
         self.agent_activity.clear();
         self.agent_in_progress.store(false, Ordering::Relaxed);
+        let mut summary_blocks = HashSet::new();
+        for state in self.tool_calls.values() {
+            if let Some(block_id) = state.block_id {
+                self.handle.remove_block(block_id);
+            }
+            if let Some(block_id) = state.summary_block_id {
+                summary_blocks.insert(block_id);
+            }
+        }
+        for block_id in summary_blocks {
+            self.handle.remove_block(block_id);
+            self.tool_summaries.remove(&block_id);
+            if self.prompt_tool_summary == Some(block_id) {
+                self.prompt_tool_summary = None;
+                self.prompt_tool_summary_active = false;
+            }
+        }
+        if self.prompt_tool_summary_active {
+            self.finish_prompt_tool_summary();
+        }
         self.tool_calls.clear();
         if let Some(timer) = &self.tool_timer {
             timer.clear_active();
@@ -2226,7 +2272,7 @@ impl EventRenderer {
         tool_calls: &[ToolCallItem],
     ) -> Option<tau_cli_term::BlockId> {
         if tool_calls.is_empty() {
-            self.prompt_tool_summary = None;
+            self.finish_prompt_tool_summary();
             return None;
         }
         if matches!(
@@ -2243,19 +2289,45 @@ impl EventRenderer {
             if let Some(summary) = self.tool_summaries.get_mut(&id) {
                 summary.total += total_delta;
             }
-            self.update_tool_summary_block(id);
-            return id;
+            if self.prompt_tool_summary_active {
+                self.update_tool_summary_block(id);
+                return id;
+            }
+            if let Some(summary) = self.tool_summaries.remove(&id) {
+                return self.create_prompt_tool_summary(summary);
+            }
         }
         let summary = ToolSummaryDisplay {
             total: total_delta,
             ..ToolSummaryDisplay::default()
         };
+        self.create_prompt_tool_summary(summary)
+    }
+
+    fn create_prompt_tool_summary(&mut self, summary: ToolSummaryDisplay) -> tau_cli_term::BlockId {
         let block = self.render_summary_block(&summary);
         let id = self.handle.new_block("tool-summary:prompt", block);
-        self.handle.push_above_active(id);
+        self.handle.push_above_sticky(id);
         self.tool_summaries.insert(id, summary);
         self.prompt_tool_summary = Some(id);
+        self.prompt_tool_summary_active = true;
         id
+    }
+
+    fn finish_prompt_tool_summary(&mut self) {
+        let Some(block_id) = self.prompt_tool_summary.take() else {
+            self.prompt_tool_summary_active = false;
+            return;
+        };
+        self.prompt_tool_summary_active = false;
+        let Some(summary) = self.tool_summaries.remove(&block_id) else {
+            return;
+        };
+        self.handle.remove_block(block_id);
+        let new_block_id = self
+            .handle
+            .print_output("tool-summary", self.render_summary_block(&summary));
+        self.tool_summaries.insert(new_block_id, summary);
     }
 
     fn create_turn_tool_summary(&mut self, total: u64) -> tau_cli_term::BlockId {
@@ -2265,7 +2337,7 @@ impl EventRenderer {
         };
         let block = self.render_summary_block(&summary);
         let id = self.handle.new_block("tool-summary:turn", block);
-        self.handle.push_above_active(id);
+        self.handle.push_above_sticky(id);
         self.tool_summaries.insert(id, summary);
         id
     }
@@ -2304,15 +2376,22 @@ impl EventRenderer {
         let display_payload = tool_display_from_call(call);
         let mut display = format_tool_call(call.name.as_str(), Some(&display_payload));
         Self::upsert_tool_duration_suffix(&mut display, Duration::ZERO);
-        let block = self.render_tool_history_block(&display);
-        let id = self
-            .handle
-            .new_block(format!("tool-call:{}:{}", call.name, call.call_id), block);
-        self.handle.push_history(id);
+        let live_block = self.render_tool_history_block(&display);
+        let live_id = self.handle.new_block(
+            format!("tool-call-live:{}:{}", call.name, call.call_id),
+            live_block,
+        );
+        self.handle.push_above_sticky(live_id);
+        let history_id = self.handle.new_block(
+            format!("tool-call-history:{}:{}", call.name, call.call_id),
+            Self::empty_block(),
+        );
+        self.handle.push_history(history_id);
         self.tool_calls.insert(
             call.call_id.to_string(),
             ToolCallState {
-                block_id: Some(id),
+                block_id: Some(live_id),
+                history_block_id: Some(history_id),
                 live_display: Some(display),
                 started_at: Some(Instant::now()),
                 recorded_started_at: Some(recorded_at),
@@ -2496,14 +2575,16 @@ impl EventRenderer {
         if prior.is_sub_agent {
             return None;
         }
-        if prior.block_id.is_some()
-            && let Some(timer) = &self.tool_timer
-        {
-            timer.tool_finished(call_id);
+        if let Some(block_id) = prior.block_id {
+            if let Some(timer) = &self.tool_timer {
+                timer.tool_finished(call_id);
+            }
+            self.handle.remove_block(block_id);
         }
         if known_main_tool {
+            self.main_backgrounded_tools.remove(call_id);
             self.record_main_tool_completed();
-            if self.main_agent_turn_active {
+            if self.main_agent_turn_active || !self.main_backgrounded_tools.is_empty() {
                 self.main_tools_visible = true;
             }
         }
@@ -2513,6 +2594,7 @@ impl EventRenderer {
     fn handle_tool_result(&mut self, result: &tau_proto::ToolResult, recorded_at: UnixMicros) {
         let call_id = result.call_id.as_str();
         if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
+            self.handle_tool_background_placeholder(call_id);
             return;
         }
         // Sub-agent tool activity stays out of the user's transcript — its
@@ -2534,8 +2616,28 @@ impl EventRenderer {
             diff.as_ref(),
             false,
         );
-        self.record_tool_result_block(prior.block_id, display, diff);
+        self.record_tool_result_block(prior.history_block_id, display, diff);
         self.render_model_status_after_tool_completion(known_main_tool);
+    }
+
+    fn handle_tool_background_placeholder(&mut self, call_id: &str) {
+        let Some(state) = self.tool_calls.get_mut(call_id) else {
+            return;
+        };
+        if state.is_sub_agent {
+            return;
+        }
+        let block_id = state.block_id.take();
+        self.main_backgrounded_tools.insert(call_id.to_owned());
+        self.main_tools_visible = true;
+        self.render_model_status();
+        if let Some(block_id) = block_id {
+            if let Some(timer) = &self.tool_timer {
+                timer.tool_finished(call_id);
+            }
+            self.handle.remove_block(block_id);
+            self.handle.redraw();
+        }
     }
 
     fn handle_tool_background_result(
@@ -2568,7 +2670,7 @@ impl EventRenderer {
             diff.as_ref(),
             false,
         );
-        self.record_tool_result_block(prior.block_id, display, diff);
+        self.record_tool_result_block(prior.history_block_id, display, diff);
         self.render_model_status_after_tool_completion(known_main_tool);
     }
 
@@ -2649,7 +2751,7 @@ impl EventRenderer {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
         self.record_tool_summary_result(prior.summary_block_id, error.display.as_ref(), None, true);
-        self.record_plain_finished_tool_block(prior.block_id, display, "tool-error");
+        self.record_plain_finished_tool_block(prior.history_block_id, display, "tool-error");
         self.render_model_status_after_tool_completion(known_main_tool);
     }
 
@@ -2677,7 +2779,7 @@ impl EventRenderer {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
         self.record_tool_summary_result(prior.summary_block_id, error.display.as_ref(), None, true);
-        self.record_plain_finished_tool_block(prior.block_id, display, "tool-error");
+        self.record_plain_finished_tool_block(prior.history_block_id, display, "tool-error");
         self.render_model_status_after_tool_completion(known_main_tool);
     }
 
@@ -2721,7 +2823,7 @@ impl EventRenderer {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
         self.record_tool_summary_result(prior.summary_block_id, None, None, true);
-        self.record_plain_finished_tool_block(prior.block_id, display, "tool-cancelled");
+        self.record_plain_finished_tool_block(prior.history_block_id, display, "tool-cancelled");
         self.render_model_status_after_tool_completion(known_main_tool);
     }
 

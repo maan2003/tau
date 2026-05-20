@@ -1,4 +1,4 @@
-use tau_proto::ToolBackgroundNotificationSuppress;
+use tau_proto::{ToolBackgroundNotificationSuppress, ToolBackgroundNotificationUnsuppress};
 
 use super::*;
 use crate::conversation::{Conversation, ConversationId, PendingPrompt};
@@ -3732,6 +3732,149 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+/// If a wait is interrupted before the background call finishes, unsuppressing
+/// first should let the later completion queue the normal internal prompt.
+#[test]
+fn background_notification_unsuppress_before_completion_allows_later_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+    let call_id: ToolCallId = "bg-unsuppress-before".into();
+
+    h.handle_extension_event_inner(
+        "conn-wait",
+        Event::ToolBackgroundNotificationSuppress(ToolBackgroundNotificationSuppress {
+            call_id: call_id.clone(),
+        }),
+    )
+    .expect("suppress background prompt");
+    h.handle_extension_event_inner(
+        "conn-wait",
+        Event::ToolBackgroundNotificationUnsuppress(ToolBackgroundNotificationUnsuppress {
+            call_id: call_id.clone(),
+        }),
+    )
+    .expect("unsuppress background prompt");
+
+    h.conversations
+        .get_mut(&cid)
+        .expect("default conversation remains live")
+        .turn_state = ConversationTurnState::ToolsRunning {
+        remaining_calls: Vec::new(),
+    };
+    h.background_completion_targets
+        .insert(call_id.clone(), cid.clone());
+    h.queue_background_completion_prompt(&cid, &call_id);
+
+    let conv = h
+        .conversations
+        .get(&cid)
+        .expect("default conversation remains live");
+    assert!(conv.pending_prompts.iter().any(|prompt| {
+        prompt.text == background_completion_prompt(&call_id) && prompt.is_internal()
+    }));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// If the real background completion arrives while suppressed, unsuppressing
+/// later should restore the completion prompt from the recorded target map.
+#[test]
+fn background_notification_unsuppress_after_suppressed_completion_queues_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+    let call_id: ToolCallId = "bg-unsuppress-after".into();
+
+    h.suppress_background_completion_prompt(call_id.clone());
+    h.background_completion_targets
+        .insert(call_id.clone(), cid.clone());
+    h.queue_background_completion_prompt(&cid, &call_id);
+    assert!(
+        h.conversations
+            .get(&cid)
+            .expect("default conversation remains live")
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != background_completion_prompt(&call_id))
+    );
+
+    h.conversations
+        .get_mut(&cid)
+        .expect("default conversation remains live")
+        .turn_state = ConversationTurnState::ToolsRunning {
+        remaining_calls: Vec::new(),
+    };
+    h.handle_extension_event_inner(
+        "conn-wait",
+        Event::ToolBackgroundNotificationUnsuppress(ToolBackgroundNotificationUnsuppress {
+            call_id: call_id.clone(),
+        }),
+    )
+    .expect("unsuppress background prompt");
+
+    let conv = h
+        .conversations
+        .get(&cid)
+        .expect("default conversation remains live");
+    assert!(conv.pending_prompts.iter().any(|prompt| {
+        prompt.text == background_completion_prompt(&call_id) && prompt.is_internal()
+    }));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Completed background calls remain in the target map so repeated wait cycles
+/// can remove and then re-add the queued internal completion prompt.
+#[test]
+fn background_notification_repeated_suppress_unsuppress_after_completion_requeues_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+    let call_id: ToolCallId = "bg-repeat".into();
+
+    h.background_completion_targets
+        .insert(call_id.clone(), cid.clone());
+    h.queue_background_completion_prompt(&cid, &call_id);
+    h.suppress_background_completion_prompt(call_id.clone());
+    assert!(
+        h.conversations
+            .get(&cid)
+            .expect("default conversation remains live")
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != background_completion_prompt(&call_id))
+    );
+
+    h.unsuppress_background_completion_prompt(call_id.clone());
+    h.suppress_background_completion_prompt(call_id.clone());
+    assert!(
+        h.conversations
+            .get(&cid)
+            .expect("default conversation remains live")
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != background_completion_prompt(&call_id))
+    );
+
+    h.unsuppress_background_completion_prompt(call_id.clone());
+    let conv = h
+        .conversations
+        .get(&cid)
+        .expect("default conversation remains live");
+    let prompt_count = conv
+        .pending_prompts
+        .iter()
+        .filter(|prompt| prompt.text == background_completion_prompt(&call_id))
+        .count();
+    assert_eq!(prompt_count, 1);
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Late progress for a backgrounded tool must not be published. The foreground
 /// tool result has already closed the visible tool block, so orphan progress
 /// would render as confusing standalone text like `shell: running shell
@@ -5665,6 +5808,60 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         tool_uses.is_empty(),
         "leaf prompt must not inherit unresolved ancestor tool calls; got: {tool_uses:?}",
     );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression: a delayed response for an older prompt in the same conversation
+/// must not be allowed to append fresh tool calls after a newer prompt is
+/// already in flight. That creates orphan `function_call` items with no
+/// matching output in later full replays, which OpenAI rejects with `No tool
+/// output found for function call …`.
+#[test]
+fn stale_same_conversation_tool_call_response_is_ignored() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let cid = h.default_conversation_id.clone();
+    let old_spid: SessionPromptId = "sp-old".into();
+    let new_spid: SessionPromptId = "sp-new".into();
+    h.prompt_conversations.insert(old_spid.clone(), cid.clone());
+    h.prompt_conversations.insert(new_spid.clone(), cid.clone());
+    {
+        let conv = h.conversations.get_mut(&cid).expect("default conversation");
+        conv.in_flight_prompt = Some(new_spid.clone());
+        conv.last_prompt_id = Some(new_spid.clone());
+    }
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: old_spid.clone(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "stale-call".into(),
+            name: ToolName::new("wait"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("stale response ignored");
+
+    assert!(
+        !event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::ToolRequest(request) if request.call_id.as_str() == "stale-call"
+        )),
+        "stale tool call must not be dispatched",
+    );
+    assert!(!h.prompt_conversations.contains_key(old_spid.as_str()));
+    let conv = h.conversations.get(&cid).expect("default conversation");
+    assert_eq!(conv.in_flight_prompt.as_ref(), Some(&new_spid));
+    assert!(matches!(conv.turn_state, ConversationTurnState::Idle));
 
     h.shutdown().expect("shutdown");
 }

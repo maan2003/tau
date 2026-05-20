@@ -13,9 +13,9 @@ use tau_proto::{
     Ack, BackgroundSupport, CborValue, Event, ExtAgentQuery, ExtSessionContextPublish,
     ExtensionContextReady, Frame, FrameReader, FrameWriter, HarnessRolesAvailable, LogEventId,
     Message, SessionContextKey, SessionContextValue, SessionStarted, ToolBackgroundError,
-    ToolBackgroundNotificationSuppress, ToolBackgroundResult, ToolCallId, ToolDisplay,
-    ToolDisplayStats, ToolError, ToolExecutionMode, ToolInvoke, ToolName, ToolResult,
-    ToolResultKind, ToolSpec,
+    ToolBackgroundNotificationSuppress, ToolBackgroundNotificationUnsuppress, ToolBackgroundResult,
+    ToolCallId, ToolDisplay, ToolDisplayStats, ToolError, ToolExecutionMode, ToolInvoke, ToolName,
+    ToolResult, ToolResultKind, ToolSpec,
 };
 
 pub const LOG_TARGET: &str = "core-subagents";
@@ -47,6 +47,7 @@ where
             tau_proto::EventName::TOOL_BACKGROUND_RESULT,
             tau_proto::EventName::TOOL_BACKGROUND_ERROR,
             tau_proto::EventName::TOOL_BACKGROUND_NOTIFICATION_SUPPRESS,
+            tau_proto::EventName::SESSION_PROMPT_QUEUED,
             tau_proto::EventName::EXTENSION_AGENT_QUERY_RESULT,
             tau_proto::EventName::SESSION_STARTED,
             tau_proto::EventName::HARNESS_ROLES_AVAILABLE,
@@ -140,6 +141,12 @@ fn handle_event<W: Write>(
         }
         Event::HarnessRolesAvailable(HarnessRolesAvailable { roles }) => {
             handle_roles_available(roles, state, writer)
+        }
+        Event::SessionPromptQueued(queued)
+            if !queued.message_class.is_internal()
+                && state.current_session_id.as_ref() == Some(&queued.session_id) =>
+        {
+            write_wait_replies(state.wait_tracker.interrupt_active_waits(), writer)
         }
         _ => Ok(()),
     }
@@ -411,6 +418,7 @@ struct WaitReply {
     wait_tool_name: ToolName,
     kind: WaitReplyKind,
     suppress_call_id: Option<ToolCallId>,
+    unsuppress_call_id: Option<ToolCallId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -647,6 +655,20 @@ impl WaitTracker {
             _ => Vec::new(),
         }
     }
+
+    fn interrupt_active_waits(&mut self) -> Vec<WaitReply> {
+        let waiters = std::mem::take(&mut self.waiters);
+        waiters
+            .into_iter()
+            .map(|(target, wait)| {
+                let mut reply = wait_interrupted_reply(wait.call_id, wait.tool_name, &target);
+                if self.is_backgrounded(&target) {
+                    reply = reply.with_unsuppress(target);
+                }
+                reply
+            })
+            .collect()
+    }
 }
 
 impl WaitReply {
@@ -659,6 +681,11 @@ impl WaitReply {
 
     fn with_suppress(mut self, call_id: ToolCallId) -> Self {
         self.suppress_call_id = Some(call_id);
+        self
+    }
+
+    fn with_unsuppress(mut self, call_id: ToolCallId) -> Self {
+        self.unsuppress_call_id = Some(call_id);
         self
     }
 }
@@ -697,6 +724,7 @@ fn wait_result_reply(
         wait_tool_name,
         kind: WaitReplyKind::Result { result, display },
         suppress_call_id: None,
+        unsuppress_call_id: None,
     }
 }
 
@@ -715,13 +743,33 @@ fn wait_error_reply(
             display: None,
         },
         suppress_call_id: None,
+        unsuppress_call_id: None,
     }
+}
+
+fn wait_interrupted_reply(
+    wait_call_id: ToolCallId,
+    wait_tool_name: ToolName,
+    target_call_id: &ToolCallId,
+) -> WaitReply {
+    wait_result_reply(
+        wait_call_id,
+        wait_tool_name,
+        CborValue::Text(format!(
+            "{}: true\n\nWaiting for tool call `{target_call_id}` was interrupted because user input is queued. Try again later.",
+            tau_proto::TAU_INTERNAL_HEADER_NAME
+        )),
+        None,
+    )
 }
 
 fn write_wait_reply<W: Write>(
     reply: WaitReply,
     writer: &mut FrameWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
+    if let Some(call_id) = reply.unsuppress_call_id.clone() {
+        write_background_notification_unsuppress(call_id, writer)?;
+    }
     if let Some(call_id) = reply.suppress_call_id.clone() {
         write_background_notification_suppress(call_id, writer)?;
     }
@@ -763,6 +811,17 @@ fn write_background_notification_suppress<W: Write>(
 ) -> Result<(), Box<dyn Error>> {
     writer.write_frame(&Frame::Event(Event::ToolBackgroundNotificationSuppress(
         ToolBackgroundNotificationSuppress { call_id },
+    )))?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_background_notification_unsuppress<W: Write>(
+    call_id: ToolCallId,
+    writer: &mut FrameWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>> {
+    writer.write_frame(&Frame::Event(Event::ToolBackgroundNotificationUnsuppress(
+        ToolBackgroundNotificationUnsuppress { call_id },
     )))?;
     writer.flush()?;
     Ok(())
@@ -1317,6 +1376,139 @@ mod tests {
                 display: None,
             }
         );
+    }
+
+    /// Queued user input must unblock an active wait so the parent agent can
+    /// process the new prompt. For backgrounded calls, the wait had suppressed
+    /// completion prompts, so interruption must unsuppress before returning the
+    /// internal wait result.
+    #[test]
+    fn queued_prompt_interrupts_background_wait_and_keeps_result_for_later_wait() {
+        let mut tracker = WaitTracker::default();
+        tracker.record_tool_invoke(&ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("shell"),
+            arguments: args(&[]),
+            originator: tau_proto::PromptOriginator::User,
+        });
+        assert!(
+            tracker
+                .record_tool_result(background_placeholder("call-1"))
+                .is_empty()
+        );
+        assert_eq!(
+            tracker.start_wait("call-1".into(), wait_request("wait-1")),
+            WaitStart::suppress("call-1".into())
+        );
+
+        let replies = tracker.interrupt_active_waits();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].unsuppress_call_id, Some("call-1".into()));
+        assert!(matches!(
+            &replies[0].kind,
+            WaitReplyKind::Result { result: CborValue::Text(text), .. }
+                if text.starts_with("tau_internal: true\n\n")
+                    && text.contains("Waiting for tool call `call-1` was interrupted")
+        ));
+
+        assert!(
+            tracker
+                .record_background_result(background_result("call-1", text("real")))
+                .is_empty()
+        );
+        let later = expect_wait_reply(tracker.start_wait("call-1".into(), wait_request("wait-2")));
+        assert_eq!(
+            later.kind,
+            WaitReplyKind::Result {
+                result: text("real"),
+                display: None,
+            }
+        );
+    }
+
+    /// Interruption must be delivered as an unsuppress control event followed
+    /// by the wait ToolResult. The order lets the harness restore any
+    /// completion prompt that was suppressed before the wait result reaches
+    /// the model.
+    #[test]
+    fn interrupted_wait_writes_unsuppress_before_tool_result() {
+        let reply = wait_interrupted_reply(
+            "wait-1".into(),
+            ToolName::new(WAIT_TOOL_NAME),
+            &"call-1".into(),
+        )
+        .with_unsuppress("call-1".into());
+        let mut output = Vec::new();
+        {
+            let mut writer = FrameWriter::new(BufWriter::new(&mut output));
+            write_wait_reply(reply, &mut writer).expect("write interrupted wait reply");
+        }
+
+        let mut reader = FrameReader::new(BufReader::new(output.as_slice()));
+        let first = reader
+            .read_frame()
+            .expect("read unsuppress frame")
+            .expect("unsuppress frame present");
+        assert!(matches!(
+            first,
+            Frame::Event(Event::ToolBackgroundNotificationUnsuppress(unsuppress))
+                if unsuppress.call_id.as_str() == "call-1"
+        ));
+        let second = reader
+            .read_frame()
+            .expect("read wait result frame")
+            .expect("wait result frame present");
+        assert!(matches!(
+            second,
+            Frame::Event(Event::ToolResult(result))
+                if result.call_id.as_str() == "wait-1"
+                    && result.tool_name.as_str() == WAIT_TOOL_NAME
+                    && matches!(&result.result, CborValue::Text(text) if text.contains("Waiting for tool call `call-1` was interrupted"))
+        ));
+    }
+
+    /// Only user-authored queued prompts for this extension's current session
+    /// interrupt wait. Internal control prompts and stale-session events must
+    /// leave the waiter parked for the real tool completion.
+    #[test]
+    fn queued_prompt_interrupt_ignores_internal_and_other_session_events() {
+        let mut state = RunState {
+            current_session_id: Some("s1".into()),
+            ..RunState::default()
+        };
+        state.wait_tracker.record_tool_invoke(&ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("shell"),
+            arguments: args(&[]),
+            originator: tau_proto::PromptOriginator::User,
+        });
+        assert_wait_pending(
+            state
+                .wait_tracker
+                .start_wait("call-1".into(), wait_request("wait-1")),
+        );
+
+        for (session_id, message_class) in [
+            ("s1", tau_proto::PromptMessageClass::Internal),
+            ("other", tau_proto::PromptMessageClass::User),
+        ] {
+            let mut output = Vec::new();
+            {
+                let mut writer = FrameWriter::new(BufWriter::new(&mut output));
+                handle_event(
+                    Event::SessionPromptQueued(tau_proto::SessionPromptQueued {
+                        session_id: session_id.into(),
+                        text: "queued".to_owned(),
+                        message_class,
+                    }),
+                    &mut state,
+                    &mut writer,
+                )
+                .expect("queued prompt handled");
+            }
+            assert!(output.is_empty());
+            assert!(state.wait_tracker.waiters.contains_key("call-1"));
+        }
     }
 
     /// Background errors are surfaced as wait tool errors and preserve both the

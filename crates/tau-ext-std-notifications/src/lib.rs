@@ -6,7 +6,8 @@
 //! Events emitted (all via `Osc1337SetUserVar`):
 //! - `ui.prompt_submitted` → `user-notification = protoss-probe-ack`
 //! - final `provider.response_finished` (only when `stop_reason` does not
-//!   request tools) → `user-notification = protoss-upgrade-complete`
+//!   request tools and no backgrounded main-agent tools remain active) →
+//!   `user-notification = protoss-upgrade-complete`
 //! - After `idle_seconds` (default 60) of inactivity following a final response
 //!   → `user-text-notification = {"urgency": "normal", "title": "Agent idle:
 //!   <host>:<cwd>", "body": "Waiting for user input", "app_name": "tau"}`. If
@@ -25,6 +26,7 @@
 //! this extension just publishes the user-var change so a UI further
 //! up the stack can forward it to the terminal.
 
+use std::collections::HashSet;
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::sync::mpsc;
@@ -256,6 +258,9 @@ where
             // bumps the idle deadline so the desktop notification
             // doesn't fire while the user is mid-sentence.
             tau_proto::EventName::UI_PROMPT_DRAFT,
+            tau_proto::EventName::TOOL_RESULT,
+            tau_proto::EventName::TOOL_BACKGROUND_RESULT,
+            tau_proto::EventName::TOOL_BACKGROUND_ERROR,
             // Side-query results come back point-to-point from the
             // harness, but we subscribe defensively so the broadcast
             // form (if it ever appears) also reaches us.
@@ -296,6 +301,11 @@ where
     let mut idle: Option<IdleState> = None;
     let mut input_closed = false;
     let mut waiting_for_final_response = false;
+    let mut turn_end_emitted = false;
+    let mut final_response_pending_background_tools = false;
+    let mut pending_final_response_prompt: Option<tau_proto::SessionPromptId> = None;
+    let mut completed_response_prompts: HashSet<tau_proto::SessionPromptId> = HashSet::new();
+    let mut active_background_tools: HashSet<tau_proto::ToolCallId> = HashSet::new();
     let mut next_query_id: u64 = 0;
     loop {
         let recv_result = match (idle.as_ref().map(IdleState::deadline), input_closed) {
@@ -388,12 +398,25 @@ where
                     Event::ProviderPromptSubmitted(_submitted) => {
                         idle = None;
                     }
-                    Event::UiPromptSubmitted(_prompt) => {
+                    Event::UiPromptSubmitted(prompt) => {
                         idle = None;
+                        if prompt.message_class.is_internal() {
+                            tracing::trace!(target: LOG_TARGET, "skipping internal prompt submit");
+                            continue;
+                        }
+                        if final_response_pending_background_tools {
+                            final_response_pending_background_tools = false;
+                            if let Some(prompt_id) = pending_final_response_prompt.take() {
+                                completed_response_prompts.insert(prompt_id);
+                            }
+                            waiting_for_final_response = false;
+                            turn_end_emitted = false;
+                        }
                         if !waiting_for_final_response {
                             writer.write_frame(&Frame::Event(sound_event(VALUE_AGENT_START)))?;
                             writer.flush()?;
                             waiting_for_final_response = true;
+                            turn_end_emitted = false;
                         }
                     }
                     Event::UiPromptDraft(_) => {
@@ -423,9 +446,9 @@ where
                         // isn't actually done yet. Only fire the
                         // end-of-turn sound + idle timer when the
                         // agent returned a final answer with no
-                        // pending tool work. (Sub-agent finishes are
-                        // already filtered out at the top of the
-                        // dispatch loop.)
+                        // pending foreground or background tool work.
+                        // (Sub-agent finishes are already filtered out
+                        // at the top of the dispatch loop.)
                         if finished.stop_reason.requests_tool_calls() {
                             tracing::trace!(
                                 target: LOG_TARGET,
@@ -434,17 +457,82 @@ where
                             );
                             continue;
                         }
-                        writer.write_frame(&Frame::Event(sound_event(VALUE_AGENT_END)))?;
-                        writer.flush()?;
-                        waiting_for_final_response = false;
-                        idle = Some(IdleState::WaitingIdle {
-                            deadline: Instant::now() + idle_duration,
-                        });
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            seconds = idle_duration.as_secs(),
-                            "idle deadline armed",
-                        );
+                        if completed_response_prompts.contains(&finished.session_prompt_id) {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                session_prompt_id = %finished.session_prompt_id,
+                                "skipping already-completed response",
+                            );
+                            continue;
+                        }
+                        if turn_end_emitted {
+                            tracing::trace!(target: LOG_TARGET, "skipping already-completed turn");
+                            continue;
+                        }
+                        if active_background_tools.is_empty() {
+                            emit_agent_end(
+                                &mut writer,
+                                &mut waiting_for_final_response,
+                                &mut turn_end_emitted,
+                                &mut idle,
+                                idle_duration,
+                            )?;
+                            completed_response_prompts.insert(finished.session_prompt_id);
+                        } else {
+                            final_response_pending_background_tools = true;
+                            pending_final_response_prompt = Some(finished.session_prompt_id);
+                            tracing::debug!(
+                                target: LOG_TARGET,
+                                active_background_tools = active_background_tools.len(),
+                                "deferring end notification until background tools complete",
+                            );
+                        }
+                    }
+                    Event::ToolResult(result) => {
+                        if result.originator.is_user()
+                            && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+                        {
+                            active_background_tools.insert(result.call_id);
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                active_background_tools = active_background_tools.len(),
+                                "background tool started",
+                            );
+                        }
+                    }
+                    Event::ToolBackgroundResult(result) => {
+                        if result.originator.is_user() {
+                            active_background_tools.remove(&result.call_id);
+                            if maybe_emit_deferred_agent_end(
+                                &mut writer,
+                                &mut waiting_for_final_response,
+                                &mut turn_end_emitted,
+                                &mut final_response_pending_background_tools,
+                                &mut idle,
+                                idle_duration,
+                                &active_background_tools,
+                            )? && let Some(prompt_id) = pending_final_response_prompt.take()
+                            {
+                                completed_response_prompts.insert(prompt_id);
+                            }
+                        }
+                    }
+                    Event::ToolBackgroundError(error) => {
+                        if error.originator.is_user() {
+                            active_background_tools.remove(&error.call_id);
+                            if maybe_emit_deferred_agent_end(
+                                &mut writer,
+                                &mut waiting_for_final_response,
+                                &mut turn_end_emitted,
+                                &mut final_response_pending_background_tools,
+                                &mut idle,
+                                idle_duration,
+                                &active_background_tools,
+                            )? && let Some(prompt_id) = pending_final_response_prompt.take()
+                            {
+                                completed_response_prompts.insert(prompt_id);
+                            }
+                        }
                     }
                     Event::ExtAgentQueryResult(result) => {
                         tracing::debug!(
@@ -570,6 +658,51 @@ where
     }
 
     Ok(())
+}
+
+fn emit_agent_end<W: Write>(
+    writer: &mut FrameWriter<BufWriter<W>>,
+    waiting_for_final_response: &mut bool,
+    turn_end_emitted: &mut bool,
+    idle: &mut Option<IdleState>,
+    idle_duration: Duration,
+) -> Result<(), Box<dyn Error>> {
+    writer.write_frame(&Frame::Event(sound_event(VALUE_AGENT_END)))?;
+    writer.flush()?;
+    *waiting_for_final_response = false;
+    *turn_end_emitted = true;
+    *idle = Some(IdleState::WaitingIdle {
+        deadline: Instant::now() + idle_duration,
+    });
+    tracing::debug!(
+        target: LOG_TARGET,
+        seconds = idle_duration.as_secs(),
+        "idle deadline armed",
+    );
+    Ok(())
+}
+
+fn maybe_emit_deferred_agent_end<W: Write>(
+    writer: &mut FrameWriter<BufWriter<W>>,
+    waiting_for_final_response: &mut bool,
+    turn_end_emitted: &mut bool,
+    final_response_pending_background_tools: &mut bool,
+    idle: &mut Option<IdleState>,
+    idle_duration: Duration,
+    active_background_tools: &HashSet<tau_proto::ToolCallId>,
+) -> Result<bool, Box<dyn Error>> {
+    if *final_response_pending_background_tools && active_background_tools.is_empty() {
+        *final_response_pending_background_tools = false;
+        emit_agent_end(
+            writer,
+            waiting_for_final_response,
+            turn_end_emitted,
+            idle,
+            idle_duration,
+        )?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn sound_event(value: &str) -> Event {

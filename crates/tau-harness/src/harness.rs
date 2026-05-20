@@ -19,9 +19,10 @@ use tau_proto::{
     ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderResponseFinished, ProviderStopReason,
     ProviderTokenUsage, SessionCompactionRequested, SessionId, SessionPromptCreated,
     SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, SessionPromptRecalled,
-    TokenUsageStats, ToolBackgroundError, ToolBackgroundNotificationSuppress, ToolBackgroundResult,
-    ToolCallId, ToolCallItem, ToolCancelled, ToolChoice, ToolDefinition, ToolError, ToolName,
-    ToolRequest, ToolResult, ToolResultKind, ToolType, UiCancelPrompt,
+    TokenUsageStats, ToolBackgroundError, ToolBackgroundNotificationSuppress,
+    ToolBackgroundNotificationUnsuppress, ToolBackgroundResult, ToolCallId, ToolCallItem,
+    ToolCancelled, ToolChoice, ToolDefinition, ToolError, ToolName, ToolRequest, ToolResult,
+    ToolResultKind, ToolType, UiCancelPrompt,
 };
 
 use crate::conversation::{
@@ -683,6 +684,10 @@ pub(crate) struct Harness {
     /// model-visible steering prompt. The real result/error event is still
     /// published normally.
     pub(crate) suppressed_background_completion_prompts: HashSet<ToolCallId>,
+    /// Owning conversations for background calls that have delivered their real
+    /// completion. Kept so suppression can remove and later restore queued
+    /// completion prompts across repeated wait/interrupt cycles.
+    pub(crate) background_completion_targets: HashMap<ToolCallId, ConversationId>,
     /// Prompt ids canceled by `/cancel`. Late agent events for these
     /// prompts are ignored and never folded into session state.
     pub(crate) canceled_prompts: std::collections::HashSet<SessionPromptId>,
@@ -1093,6 +1098,7 @@ impl Harness {
             completed_prompts: std::collections::HashSet::new(),
             tool_turn: ToolTurnMachine::default(),
             suppressed_background_completion_prompts: HashSet::new(),
+            background_completion_targets: HashMap::new(),
             canceled_prompts: std::collections::HashSet::new(),
             pending_compactions: std::collections::HashMap::new(),
             pending_ext_agent_queries: VecDeque::new(),
@@ -1307,6 +1313,7 @@ impl Harness {
             completed_prompts: std::collections::HashSet::new(),
             tool_turn: ToolTurnMachine::default(),
             suppressed_background_completion_prompts: HashSet::new(),
+            background_completion_targets: HashMap::new(),
             canceled_prompts: std::collections::HashSet::new(),
             pending_compactions: std::collections::HashMap::new(),
             pending_ext_agent_queries: VecDeque::new(),
@@ -1923,6 +1930,9 @@ impl Harness {
             Event::ToolBackgroundNotificationSuppress(suppress) => {
                 self.session_id_for_tool_call(&suppress.call_id)
             }
+            Event::ToolBackgroundNotificationUnsuppress(unsuppress) => {
+                self.session_id_for_tool_call(&unsuppress.call_id)
+            }
             Event::ToolCancelled(cancelled) => self.session_id_for_tool_call(&cancelled.call_id),
             Event::ToolProgress(progress) => self.session_id_for_tool_call(&progress.call_id),
             Event::ShellCommandFinished(finished) => Some(finished.session_id.clone()),
@@ -2386,6 +2396,11 @@ impl Harness {
                 call_id,
             }) => {
                 self.suppress_background_completion_prompt(call_id);
+            }
+            Event::ToolBackgroundNotificationUnsuppress(ToolBackgroundNotificationUnsuppress {
+                call_id,
+            }) => {
+                self.unsuppress_background_completion_prompt(call_id);
             }
             Event::ToolError(mut error) => {
                 if self.tool_turn.is_backgrounded(&error.call_id) {
@@ -5531,6 +5546,32 @@ impl Harness {
             ));
             return Ok(());
         };
+        let stale_behind_newer_prompt = self.conversations.get(&cid).is_some_and(|conv| {
+            conv.last_prompt_id
+                .as_ref()
+                .is_some_and(|last| last != &response.session_prompt_id)
+                || conv
+                    .in_flight_prompt
+                    .as_ref()
+                    .is_some_and(|in_flight| in_flight != &response.session_prompt_id)
+        });
+        if stale_behind_newer_prompt {
+            self.emit_info(&format!(
+                "discarding stale agent response for session_prompt_id={}",
+                response.session_prompt_id
+            ));
+            self.prompt_conversations
+                .remove(response.session_prompt_id.as_str());
+            self.pending_provider_prompts
+                .remove(&response.session_prompt_id);
+            self.prompt_models.remove(&response.session_prompt_id);
+            self.prompt_fingerprints.remove(&response.session_prompt_id);
+            self.prompt_cache_diagnostics
+                .remove(&response.session_prompt_id);
+            self.completed_prompts
+                .insert(response.session_prompt_id.clone());
+            return Ok(());
+        }
         // Save the model that ran this turn before the
         // `prompt_models` entry is consumed below — we'll need it
         // again to anchor the stateful-chain state, and re-reading
@@ -5968,8 +6009,10 @@ impl Harness {
         let Some(tool) = self.pending_tools.get(call_id).cloned() else {
             return;
         };
-        let content =
-            format!("tau_internal: true\n\nTool call `{call_id}` is running in the background.");
+        let content = format!(
+            "{}: true\n\nTool call `{call_id}` is running in the background.",
+            tau_proto::TAU_INTERNAL_HEADER_NAME
+        );
         self.publish_for_conversation(
             &cid,
             Event::ToolResult(ToolResult {
@@ -5993,11 +6036,6 @@ impl Harness {
 
     fn on_tool_call_foreground_complete(&mut self, call_id: &str) {
         let owner = self.tool_conversations.get(call_id).cloned();
-        if let Some(cid) = owner.as_ref()
-            && let Some(conv) = self.conversations.get_mut(cid)
-        {
-            conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
-        }
         if let Some(cid) = owner {
             self.emit_delegate_progress(&cid);
         }
@@ -6018,6 +6056,10 @@ impl Harness {
             result.tool_type = tool.tool_type;
         }
         self.tool_turn.mark_complete(&call_id);
+        if let Some(conv) = self.conversations.get_mut(&cid) {
+            conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
+        }
+        self.emit_delegate_progress(&cid);
         self.publish_for_conversation_from(
             &cid,
             Some(source_id),
@@ -6030,6 +6072,8 @@ impl Harness {
                 originator: result.originator,
             }),
         );
+        self.background_completion_targets
+            .insert(call_id.clone(), cid.clone());
         self.queue_background_completion_prompt(&cid, &call_id);
         self.clear_tool_call_tracking(call_id.as_str());
     }
@@ -6044,6 +6088,10 @@ impl Harness {
             error.tool_type = tool.tool_type;
         }
         self.tool_turn.mark_complete(&call_id);
+        if let Some(conv) = self.conversations.get_mut(&cid) {
+            conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
+        }
+        self.emit_delegate_progress(&cid);
         self.publish_for_conversation_from(
             &cid,
             Some(source_id),
@@ -6057,6 +6105,8 @@ impl Harness {
                 originator: error.originator,
             }),
         );
+        self.background_completion_targets
+            .insert(call_id.clone(), cid.clone());
         self.queue_background_completion_prompt(&cid, &call_id);
         self.clear_tool_call_tracking(call_id.as_str());
     }
@@ -6068,11 +6118,17 @@ impl Harness {
         {
             return;
         }
+        let prompt = background_completion_prompt(call_id);
         if let Some(conv) = self.conversations.get_mut(cid) {
+            if conv
+                .pending_prompts
+                .iter()
+                .any(|pending| pending.text == prompt)
+            {
+                return;
+            }
             conv.pending_prompts
-                .push_back(PendingPrompt::internal(background_completion_prompt(
-                    call_id,
-                )));
+                .push_back(PendingPrompt::internal(prompt));
         }
         self.try_advance_queue();
     }
@@ -6087,6 +6143,14 @@ impl Harness {
         }
     }
 
+    fn unsuppress_background_completion_prompt(&mut self, call_id: ToolCallId) {
+        self.suppressed_background_completion_prompts
+            .remove(&call_id);
+        if let Some(cid) = self.background_completion_targets.get(&call_id).cloned() {
+            self.queue_background_completion_prompt(&cid, &call_id);
+        }
+    }
+
     fn transfer_background_completion_target_before_teardown(&mut self, cid: &ConversationId) {
         let backgrounded_calls = self.tool_turn.backgrounded_calls_for(cid);
         if backgrounded_calls.is_empty() {
@@ -6097,7 +6161,12 @@ impl Harness {
         };
         for call_id in backgrounded_calls {
             if self.tool_conversations.get(&call_id) == Some(cid) {
-                self.tool_conversations.insert(call_id, target_cid.clone());
+                self.tool_conversations
+                    .insert(call_id.clone(), target_cid.clone());
+            }
+            if self.background_completion_targets.get(&call_id) == Some(cid) {
+                self.background_completion_targets
+                    .insert(call_id, target_cid.clone());
             }
         }
     }
@@ -6858,6 +6927,9 @@ fn stamp_tool_event_originator(event: Event, originator: tau_proto::PromptOrigin
         }
         Event::ToolBackgroundNotificationSuppress(e) => {
             Event::ToolBackgroundNotificationSuppress(e)
+        }
+        Event::ToolBackgroundNotificationUnsuppress(e) => {
+            Event::ToolBackgroundNotificationUnsuppress(e)
         }
         other => other,
     }

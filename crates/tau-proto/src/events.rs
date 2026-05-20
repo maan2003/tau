@@ -200,6 +200,8 @@ impl EventName {
         Self::from_static(EventCategory::Tool, "background_error");
     pub const TOOL_BACKGROUND_NOTIFICATION_SUPPRESS: Self =
         Self::from_static(EventCategory::Tool, "background_notification_suppress");
+    pub const TOOL_BACKGROUND_NOTIFICATION_UNSUPPRESS: Self =
+        Self::from_static(EventCategory::Tool, "background_notification_unsuppress");
     pub const TOOL_PROGRESS: Self = Self::from_static(EventCategory::Tool, "progress");
     pub const TOOL_CANCEL: Self = Self::from_static(EventCategory::Tool, "cancel");
     pub const TOOL_CANCELLED: Self = Self::from_static(EventCategory::Tool, "cancelled");
@@ -1483,6 +1485,13 @@ pub struct ToolBackgroundError {
 /// tool call. The real background result/error event is still emitted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolBackgroundNotificationSuppress {
+    pub call_id: ToolCallId,
+}
+
+/// Cancels a prior background completion prompt suppression for a tool call.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolBackgroundNotificationUnsuppress {
+    /// Tool call whose background completion prompt may be delivered again.
     pub call_id: ToolCallId,
 }
 
@@ -3089,6 +3098,8 @@ pub enum Event {
     ToolBackgroundError(ToolBackgroundError),
     #[serde(rename = "tool.background_notification_suppress")]
     ToolBackgroundNotificationSuppress(ToolBackgroundNotificationSuppress),
+    #[serde(rename = "tool.background_notification_unsuppress")]
+    ToolBackgroundNotificationUnsuppress(ToolBackgroundNotificationUnsuppress),
     #[serde(rename = "tool.progress")]
     ToolProgress(ToolProgress),
     #[serde(rename = "tool.cancel")]
@@ -3244,6 +3255,9 @@ impl Event {
             Self::ToolBackgroundError(_) => EventName::TOOL_BACKGROUND_ERROR,
             Self::ToolBackgroundNotificationSuppress(_) => {
                 EventName::TOOL_BACKGROUND_NOTIFICATION_SUPPRESS
+            }
+            Self::ToolBackgroundNotificationUnsuppress(_) => {
+                EventName::TOOL_BACKGROUND_NOTIFICATION_UNSUPPRESS
             }
             Self::ToolProgress(_) => EventName::TOOL_PROGRESS,
             Self::ToolCancel(_) => EventName::TOOL_CANCEL,
