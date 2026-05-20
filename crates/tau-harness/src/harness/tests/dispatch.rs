@@ -3735,6 +3735,83 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+/// Late progress for a backgrounded tool must not be published. The foreground
+/// tool result has already closed the visible tool block, so orphan progress
+/// would render as confusing standalone text like `shell: running shell
+/// command`.
+#[test]
+fn backgrounded_tool_progress_is_not_published() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _ = connect_test_tool(&mut h, "conn-slow");
+    h.registry.register(
+        "conn-slow",
+        ToolSpec {
+            name: ToolName::new("slow"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            execution_mode: ToolExecutionMode::Shared,
+            background_support: Some(tau_proto::BackgroundSupport::Instant),
+        },
+    );
+
+    let cid = h.default_conversation_id.clone();
+    let spid: SessionPromptId = "sp-bg-progress".into();
+    seed_agent_thinking(&mut h, &cid, "sp-bg-progress");
+    h.prompt_conversations.insert(spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "run slow".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "slow-call".into(),
+            name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("background tool call");
+
+    h.handle_extension_event_inner(
+        "conn-slow",
+        Event::ToolProgress(tau_proto::ToolProgress {
+            call_id: "slow-call".into(),
+            tool_name: ToolName::new("slow"),
+            message: Some("running shell command".to_owned()),
+            progress: None,
+        }),
+    )
+    .expect("late progress");
+
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolProgress(progress) if progress.call_id.as_str() == "slow-call"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Suppression can arrive after a background completion prompt was queued but
 /// before the agent saw it; in that case the queued internal prompt is removed.
 #[test]

@@ -2409,7 +2409,9 @@ impl Harness {
                 }
             }
             Event::ToolProgress(progress) => {
-                self.publish_event(Some(source_id), Event::ToolProgress(progress));
+                if !self.tool_turn.is_backgrounded(&progress.call_id) {
+                    self.publish_event(Some(source_id), Event::ToolProgress(progress));
+                }
             }
             Event::ShellCommandProgress(progress) => {
                 // Pass-through: the UI renders chunks as they arrive.
