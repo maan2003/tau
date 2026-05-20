@@ -131,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::Notice(message) => {
                 handle.print_output("demo-notice", message);
             }
-            Event::BackTab | Event::ExternalEditor | Event::Binding(_) => {}
+            Event::BackTab | Event::Escape | Event::ExternalEditor | Event::Binding(_) => {}
         }
     }
 

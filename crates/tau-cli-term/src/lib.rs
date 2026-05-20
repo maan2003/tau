@@ -44,6 +44,8 @@ pub enum Event {
     BufferChanged,
     /// Shift+Tab pressed outside an open completion menu.
     BackTab,
+    /// Escape pressed outside an open completion menu.
+    Escape,
     /// A binding requested Fast mode toggle without touching the prompt draft.
     FastToggle,
     /// A binding requested cycling to the next agent role.
@@ -208,6 +210,8 @@ impl HighTerm {
                 }
 
                 RawEvent::BackTab => return Ok(Event::BackTab),
+
+                RawEvent::Escape => return Ok(Event::Escape),
 
                 RawEvent::Line(line) => {
                     if !line.is_empty() {

@@ -267,6 +267,8 @@ impl EventName {
     pub const UI_COMPACT_REQUEST: Self = Self::from_static(EventCategory::Ui, "compact_request");
     pub const UI_PROMPT_DRAFT: Self = Self::from_static(EventCategory::Ui, "prompt_draft");
     pub const UI_CANCEL_PROMPT: Self = Self::from_static(EventCategory::Ui, "cancel_prompt");
+    pub const UI_RECALL_QUEUED_PROMPT: Self =
+        Self::from_static(EventCategory::Ui, "recall_queued_prompt");
 
     pub const TERM_OSC1337_SET_USER_VAR: Self =
         Self::from_static(EventCategory::Term, "osc1337_set_user_var");
@@ -278,6 +280,8 @@ impl EventName {
 
     pub const SESSION_PROMPT_QUEUED: Self =
         Self::from_static(EventCategory::Session, "prompt_queued");
+    pub const SESSION_PROMPT_RECALLED: Self =
+        Self::from_static(EventCategory::Session, "prompt_recalled");
     pub const SESSION_PROMPT_STEERED: Self =
         Self::from_static(EventCategory::Session, "prompt_steered");
     pub const SESSION_STARTED: Self = Self::from_static(EventCategory::Session, "started");
@@ -1995,10 +1999,19 @@ pub struct UiCompactRequest {
 ///   channel) is harmless — it just falls through with no in-flight match.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiCancelPrompt {
+    /// Session whose active or queued prompt should be cancelled.
     pub session_id: SessionId,
     /// Optional target. See struct doc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_prompt_id: Option<SessionPromptId>,
+}
+
+/// Request that the harness remove and return the most recently queued user
+/// prompt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiRecallQueuedPrompt {
+    /// Session whose default conversation queue should be recalled from.
+    pub session_id: SessionId,
 }
 
 /// Which stream a [`ShellCommandProgress`] chunk came from.
@@ -2087,7 +2100,18 @@ pub struct Osc1337SetUserVar {
 /// The harness queued a user prompt because the agent is busy.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionPromptQueued {
+    /// Session that owns the queued prompt.
     pub session_id: SessionId,
+    /// Queued prompt text.
+    pub text: String,
+}
+
+/// The harness recalled a previously queued user prompt for editing.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionPromptRecalled {
+    /// Session that owns the recalled prompt.
+    pub session_id: SessionId,
+    /// Recalled prompt text.
     pub text: String,
 }
 
@@ -3016,6 +3040,8 @@ pub enum Event {
     UiCompactRequest(UiCompactRequest),
     #[serde(rename = "ui.cancel_prompt")]
     UiCancelPrompt(UiCancelPrompt),
+    #[serde(rename = "ui.recall_queued_prompt")]
+    UiRecallQueuedPrompt(UiRecallQueuedPrompt),
 
     // Term (terminal-output side effects)
     #[serde(rename = "term.osc1337_set_user_var")]
@@ -3030,6 +3056,8 @@ pub enum Event {
     // Session
     #[serde(rename = "session.prompt_queued")]
     SessionPromptQueued(SessionPromptQueued),
+    #[serde(rename = "session.prompt_recalled")]
+    SessionPromptRecalled(SessionPromptRecalled),
     #[serde(rename = "session.prompt_steered")]
     SessionPromptSteered(SessionPromptSteered),
     #[serde(rename = "session.started")]
@@ -3117,10 +3145,12 @@ impl Event {
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
             Self::UiCompactRequest(_) => EventName::UI_COMPACT_REQUEST,
             Self::UiCancelPrompt(_) => EventName::UI_CANCEL_PROMPT,
+            Self::UiRecallQueuedPrompt(_) => EventName::UI_RECALL_QUEUED_PROMPT,
             Self::Osc1337SetUserVar(_) => EventName::TERM_OSC1337_SET_USER_VAR,
             Self::ShellCommandProgress(_) => EventName::SHELL_COMMAND_PROGRESS,
             Self::ShellCommandFinished(_) => EventName::SHELL_COMMAND_FINISHED,
             Self::SessionPromptQueued(_) => EventName::SESSION_PROMPT_QUEUED,
+            Self::SessionPromptRecalled(_) => EventName::SESSION_PROMPT_RECALLED,
             Self::SessionPromptSteered(_) => EventName::SESSION_PROMPT_STEERED,
             Self::SessionStarted(_) => EventName::SESSION_STARTED,
             Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
@@ -3153,6 +3183,7 @@ impl Event {
                 | Self::ToolDelegateProgress(_)
                 | Self::ShellCommandProgress(_)
                 | Self::SessionPromptQueued(_)
+                | Self::SessionPromptRecalled(_)
                 | Self::SessionCompactionStarted(_)
                 | Self::SessionCompactionFinished(_)
                 | Self::SessionCompactionRequested(_)

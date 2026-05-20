@@ -478,6 +478,18 @@ impl SharedState {
         true
     }
 
+    fn recall_prompt_before_current(&mut self, text: String) {
+        let previous = self.current_draft();
+        let mut entries = self.input_history.clone();
+        entries.push(PromptDraft::submitted(text));
+        entries.push(previous);
+        let index = entries.len() - 2;
+        self.load_draft(entries[index].clone());
+        self.write_cursor(self.buffer.len());
+        self.history_nav = Some(HistoryNav { entries, index });
+        self.completion = None;
+    }
+
     /// Steps within an already-active history navigation. Going past
     /// the WIP slot (Down at the latest entry) pushes the WIP buffer
     /// onto history and returns to a fresh prompt, mirroring Down
@@ -577,6 +589,8 @@ pub enum Event {
     /// The user pressed Shift-Tab outside an open completion menu.
     /// Inside a menu it cycles backwards and is consumed internally.
     BackTab,
+    /// The user pressed Escape outside an open completion menu.
+    Escape,
     /// The user activated a configured key binding.
     Binding(String),
     /// A local prompt notice should be printed above the prompt.
@@ -854,6 +868,14 @@ impl TermHandle {
         st.current_undo.clear();
         st.current_redo.clear();
         st.write_cursor(new_cursor);
+    }
+
+    /// Recalls a queued prompt before the current draft, matching
+    /// prompt-history navigation so pressing Down restores the draft that
+    /// was present at recall time.
+    pub fn recall_prompt_before_current(&self, text: String) {
+        let mut st = self.lock();
+        st.recall_prompt_before_current(text);
     }
 
     /// Replaces the input buffer and cursor position without clearing
@@ -1683,7 +1705,7 @@ impl Term {
                 if st.dismiss_completion() {
                     return Ok(Some(Event::BufferChanged));
                 }
-                // Esc outside a menu is a no-op.
+                return Ok(Some(Event::Escape));
             }
 
             _ => {}

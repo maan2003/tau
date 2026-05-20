@@ -414,6 +414,52 @@ fn input_history_navigates_submitted_and_draft_entries() {
     assert_eq!(handle.get_buffer(), "draft");
 }
 
+/// Recalling a queued prompt should insert it immediately before the current
+/// draft in history navigation order so one Down restores the interrupted
+/// draft.
+#[test]
+fn recalled_prompt_sits_before_current_draft() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("draft".to_owned(), 5);
+    handle.recall_prompt_before_current("queued".to_owned());
+    assert_eq!(handle.get_buffer(), "queued");
+    assert_eq!(handle.get_cursor(), 6);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("send down");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "draft");
+}
+
+/// Escape outside the completion menu is surfaced so callers can request a
+/// harness-side queued-prompt recall instead of racing local UI state.
+#[test]
+fn escape_outside_completion_surfaces_event() {
+    let buf = SharedBuffer::new();
+    let (term, _handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )))
+        .expect("send esc");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::Escape
+    ));
+}
+
 /// Seeded history from previous sessions should appear before the current draft
 /// when navigating upward.
 #[test]

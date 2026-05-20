@@ -1776,6 +1776,10 @@ impl EventRenderer {
                 self.handle_session_prompt_queued(queued);
                 true
             }
+            Event::SessionPromptRecalled(recalled) => {
+                self.handle_session_prompt_recalled(recalled);
+                true
+            }
             Event::SessionPromptSteered(steered) => {
                 self.handle_session_prompt_steered(steered);
                 true
@@ -1831,6 +1835,16 @@ impl EventRenderer {
         self.handle.redraw();
         self.queued_user_blocks
             .push_back((queued_id, queued.text.clone()));
+    }
+
+    fn handle_session_prompt_recalled(&mut self, recalled: &tau_proto::SessionPromptRecalled) {
+        if let Some((queued_id, _text)) = self.queued_user_blocks.pop_back() {
+            self.handle.remove_above_sticky(queued_id);
+            self.handle.remove_block(queued_id);
+        }
+        self.handle
+            .recall_prompt_before_current(recalled.text.clone());
+        self.handle.redraw();
     }
 
     fn handle_session_prompt_steered(&mut self, steered: &tau_proto::SessionPromptSteered) {

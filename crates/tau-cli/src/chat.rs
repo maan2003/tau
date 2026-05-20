@@ -787,8 +787,18 @@ impl<'a> TerminalInputSession<'a> {
             TermEvent::BufferChanged => self.update_draft(),
             TermEvent::FastToggle => self.toggle_fast_service_tier(),
             TermEvent::RoleCycle => self.cycle_role(),
+            TermEvent::Escape => self.recall_queued_prompt(),
             TermEvent::BackTab | TermEvent::Line(_) | TermEvent::Eof | TermEvent::CancelPrompt => {}
         }
+    }
+
+    fn recall_queued_prompt(&self) {
+        let _ = send_event(
+            self.writer,
+            &Event::UiRecallQueuedPrompt(tau_proto::UiRecallQueuedPrompt {
+                session_id: self.session_id.as_str().into(),
+            }),
+        );
     }
 
     fn handle_line(&mut self, line: &str) -> Result<Option<InputLoopExit>, CliError> {

@@ -18,9 +18,9 @@ use tau_proto::{
     ModelId, PreviousResponseCandidate, PromptFragment, PromptOriginator,
     ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderResponseFinished, ProviderStopReason,
     ProviderTokenUsage, SessionCompactionRequested, SessionId, SessionPromptCreated,
-    SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, TokenUsageStats,
-    ToolCallId, ToolCallItem, ToolCancelled, ToolChoice, ToolDefinition, ToolError, ToolName,
-    ToolRequest, ToolType, UiCancelPrompt,
+    SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, SessionPromptRecalled,
+    TokenUsageStats, ToolCallId, ToolCallItem, ToolCancelled, ToolChoice, ToolDefinition,
+    ToolError, ToolName, ToolRequest, ToolType, UiCancelPrompt,
 };
 
 use crate::conversation::{Conversation, ConversationId, ConversationTurnState, PendingCancel};
@@ -2579,6 +2579,10 @@ impl Harness {
                 self.handle_cancel_prompt(&req.session_id);
                 Ok(true)
             }
+            Event::UiRecallQueuedPrompt(req) => {
+                self.handle_recall_queued_prompt(&req.session_id);
+                Ok(true)
+            }
             other => {
                 self.publish_event(Some(client_id), other);
                 Ok(true)
@@ -2767,6 +2771,26 @@ impl Harness {
         self.publish_event(Some(client_id), Event::UiCompactRequest(req.clone()));
         self.handle_compact_request(req.session_id);
         Ok(true)
+    }
+
+    fn handle_recall_queued_prompt(&mut self, session_id: &SessionId) {
+        if session_id != &self.current_session_id {
+            return;
+        }
+        let Some(text) = self
+            .conversations
+            .get_mut(&self.default_conversation_id)
+            .and_then(|conv| conv.pending_prompts.pop_back())
+        else {
+            return;
+        };
+        self.publish_event(
+            None,
+            Event::SessionPromptRecalled(SessionPromptRecalled {
+                session_id: session_id.clone(),
+                text,
+            }),
+        );
     }
 
     fn handle_cancel_prompt(&mut self, session_id: &SessionId) {
