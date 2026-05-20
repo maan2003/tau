@@ -725,8 +725,14 @@ fn parse_wait_args(arguments: &CborValue) -> Result<ToolCallId, String> {
         let CborValue::Text(name) = k else { continue };
         if name == "tool_call_id" {
             return match v {
-                CborValue::Text(text) if !text.trim().is_empty() => Ok(text.clone().into()),
-                CborValue::Text(_) => Err("`tool_call_id` must not be empty".to_owned()),
+                CborValue::Text(text) => {
+                    let text = text.trim();
+                    if text.is_empty() {
+                        Err("`tool_call_id` must not be empty".to_owned())
+                    } else {
+                        Ok(text.to_owned().into())
+                    }
+                }
                 _ => Err("`tool_call_id` must be a string".to_owned()),
             };
         }
@@ -823,7 +829,7 @@ fn wait_tool_spec() -> ToolSpec {
         name: tau_proto::ToolName::new(WAIT_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Wait for a tool call by `tool_call_id` and return its completed result. For background tool calls, prefer responding to the user that you will wait for completion instead of calling `wait` immediately; Tau will wake you when the background tool is done. Only call `wait` when you need the exact result in the current turn."
+            "Wait for a backgrounded tool call by `tool_call_id` and return its completed result. Only tool invocations that were put in the background should be waited for. Prefer responding to the user that you will wait for completion instead of calling `wait` immediately; Tau will wake you when the background tool is done. Only call `wait` when you need the exact result in the current turn."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -942,6 +948,16 @@ mod tests {
 
     fn expect_wait_reply(start: WaitStart) -> WaitReply {
         start.reply.expect("wait should reply")
+    }
+
+    #[test]
+    fn parse_wait_args_trims_tool_call_id() {
+        // Model-provided ids can pick up incidental whitespace from copying.
+        // Normalize it before matching against the exact recorded tool call id.
+        assert_eq!(
+            parse_wait_args(&args(&[("tool_call_id", text(" call-1 \n"))])),
+            Ok(ToolCallId::from("call-1"))
+        );
     }
 
     fn assert_wait_pending(start: WaitStart) {

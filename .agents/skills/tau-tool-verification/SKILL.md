@@ -114,9 +114,11 @@ When the real tool finishes, Tau injects an internal, UI-hidden prompt saying:
 [tau-internal] Tool call `<tool_call_id>` is complete.
 ```
 
-The agent can then call `wait` with `tool_call_id` to collect the real result. Prefer telling the user that you will wait for background completion instead of calling `wait` immediately; Tau will wake the agent when the tool is done anyway. If `wait` is used for a backgrounded call, Tau suppresses that internal completion prompt while still emitting the real background result/error event.
+The agent can then call `wait` with `tool_call_id` to collect the real result. Only tool invocations that were put in the background should be waited for. Prefer telling the user that you will wait for background completion instead of calling `wait` immediately; Tau will wake the agent when the tool is done anyway. If `wait` is used for a backgrounded call, Tau suppresses that internal completion prompt while still emitting the real background result/error event.
 
 Current background timing: most tools background after about 5 seconds, `delegate` backgrounds instantly, and `wait` itself never backgrounds. This may change; when verifying, report if observed behavior differs.
+
+A completed background result is consumed by the first successful `wait`. Later waits for the same id should fail with an already-consumed error. Parallel duplicate waits on the same id race; at most one should receive the result, and the rest should receive either an in-progress duplicate-wait error or an already-consumed error.
 
 When verifying this behavior, check that the synthetic foreground result is visible to the model, the completion notification is delivered to the model but hidden from UI unless `wait` suppressed it, and `wait` returns a completed result once and only once.
 
