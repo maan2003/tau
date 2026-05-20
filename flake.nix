@@ -452,6 +452,7 @@
           components = flakeboxLib.config.toolchain.components ++ [
             "rustc-codegen-cranelift-preview"
           ];
+          NEXTEST_SHOW_PROGRESS = "none";
           packages = [
             cargoCrap
             mq
