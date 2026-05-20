@@ -1,0 +1,88 @@
+---
+name: tau-tool-verification
+description: Use when asked to verify Tau skills
+---
+
+# Tau Tool Verification
+
+Use when asked to verify Tau skills.
+
+If not explicitly stated, assume the user means `read`, `write`, `edit` and `shell` tools.
+
+## Goal
+
+Your goal is to verify if basic Tau harness tools still work as expected,
+and conform to our standards and guidelines.
+
+## Guidelines
+
+### Tool result output structure
+All tools should return a HTTP-protocol-like structure:
+
+```
+header-1: value-1
+header-2: value-2
+...
+header-n: value-n
+
+multi-line-payload
+```
+
+With a single empty line separating headers from the main payload.
+
+`multi-line-payload` can be arbitrary, but line-oriented output typically uses
+`<prefix>(optional-per-line-flags) <line-content>` structure. If that's the case
+the tool description should mention it.
+
+Many headers are optional, and skipped for their default most natural values
+for token efficiency.
+
+### Common patterns
+
+Range operations should use `<start-line>` and `<line-number>` (optional)
+approach to range selection.
+
+Newlines are assumed to be `\n`, but other styles are supported
+and displayed as `crlf` (`\r\n`), `cr` (`\r`) or `no_nl` (missing trailing newline).
+
+Lines containing invalid UTF-8 characters are skipped, and a `invalid-utf8` is displayed,
+and line content is skipped to avoid mistakes and force fallback to more appropriate tools.
+In similar way, lines which are too long show `truncated` flag and have content skipped.
+
+Total outputs that are too long are truncated; `truncated: true`, `lines: {lines}` and `bytes: {bytes}` headers are added.
+
+When output is truncated due to line number limit, first and last 1000 lines should be shown with `...` line separating them, instead of usual line prefix.
+
+
+### Tool descriptions
+
+Tool description should be short but informative. They should mention the line prefix meaning, if used in the tool. They should mention line and byte limits.
+
+
+### Tool-specific guidelines
+
+The output of `read` and `shell` is intentionally similar, and should support
+the same semantics. The meaning of the line prefix is different: line number vs stdout/stderr information
+
+`shell` tool will add `duration_seconds: {number}` header for commands that took longer
+than 5s to execute.
+
+`shell` tool should reliably timeout operations that take longer than timeout argument,
+but currently 100% reliable child process termination is not implemented and will
+require advanced techniques to implement in the future (e.g. cgroups).
+
+Other commands should adhere to pre-existing conventions and naming used in
+standard tools.
+
+### Verification procedure
+
+Create a scratch directory in `/tmp` for your experiments and always avoid dangerous or disruptive actions during testing.
+
+For every tool thoroughly consider all corner cases, including ones which are not covered
+in this document.
+
+Report back:
+
+* discrepancies between this document and actual usage,
+* things that are wrong, confusing, inconsistent or unclear in both this document and actual tool output
+* ideas for improvements both in the tool behavior and this document

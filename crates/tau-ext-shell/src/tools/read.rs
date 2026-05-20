@@ -314,7 +314,7 @@ impl SliceState {
 fn render_read_line(line: &ReadLine, default_ending: Option<LineEndingKind>) -> String {
     let mut markers = Vec::new();
     if line.content.is_none() {
-        markers.push("non-utf-8");
+        markers.push("invalid-utf8");
     }
     if line.ending.is_none() || line.ending != default_ending {
         markers.push(match line.ending {

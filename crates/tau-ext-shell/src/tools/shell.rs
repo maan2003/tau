@@ -48,7 +48,7 @@ pub(crate) fn run_command(
                     status: None,
                     signal: None,
                     timed_out: false,
-                    total_seconds: None,
+                    duration_seconds: None,
                     termination_reason: "start_error",
                     output: String::new(),
                     truncated: false,
@@ -59,7 +59,7 @@ pub(crate) fn run_command(
     let started = std::time::Instant::now();
     let wait = wait_with_timeout(child, timeout);
     let elapsed = started.elapsed();
-    let total_seconds =
+    let duration_seconds =
         if std::time::Duration::from_secs(SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS) < elapsed {
             Some(elapsed.as_secs_f64().ceil() as u64)
         } else {
@@ -81,7 +81,7 @@ pub(crate) fn run_command(
         status: status_code,
         signal,
         timed_out: wait.timed_out,
-        total_seconds,
+        duration_seconds,
         termination_reason: wait.termination_reason,
         output: output_trunc.content,
         truncated: output_trunc.was_truncated,
@@ -917,7 +917,7 @@ pub(crate) struct CommandDetails {
     pub(crate) status: Option<i32>,
     pub(crate) signal: Option<i32>,
     pub(crate) timed_out: bool,
-    pub(crate) total_seconds: Option<u64>,
+    pub(crate) duration_seconds: Option<u64>,
     pub(crate) termination_reason: &'static str,
     pub(crate) output: String,
     pub(crate) truncated: bool,
@@ -929,7 +929,7 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
         status,
         signal,
         timed_out,
-        total_seconds,
+        duration_seconds,
         termination_reason,
         output,
         truncated,
@@ -975,10 +975,10 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
             CborValue::Integer(signal.into()),
         ));
     }
-    if let Some(total_seconds) = total_seconds {
+    if let Some(duration_seconds) = duration_seconds {
         entries.push((
-            CborValue::Text("total_seconds".to_owned()),
-            CborValue::Integer((total_seconds as i64).into()),
+            CborValue::Text("duration_seconds".to_owned()),
+            CborValue::Integer((duration_seconds as i64).into()),
         ));
     }
     CborValue::Map(entries)

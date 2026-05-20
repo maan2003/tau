@@ -2675,7 +2675,7 @@ fn command_details_value_records_combined_output_stats() {
         status: Some(0),
         signal: None,
         timed_out: false,
-        total_seconds: None,
+        duration_seconds: None,
         termination_reason: "exit",
         output: "1 hi\n2 oops".to_owned(),
         truncated: false,
@@ -2688,7 +2688,7 @@ fn command_details_value_records_combined_output_stats() {
     assert!(cbor_map_field(&details, "timed_out").is_none());
     assert!(cbor_map_field(&details, "termination_reason").is_none());
     assert!(cbor_map_field(&details, "truncated").is_none());
-    assert!(cbor_map_field(&details, "total_seconds").is_none());
+    assert!(cbor_map_field(&details, "duration_seconds").is_none());
 }
 
 #[test]
@@ -2697,14 +2697,14 @@ fn command_details_value_records_slow_command_exec_time() {
         status: Some(0),
         signal: None,
         timed_out: false,
-        total_seconds: Some(6),
+        duration_seconds: Some(6),
         termination_reason: "exit",
         output: String::new(),
         truncated: false,
         valid_utf8: true,
     });
 
-    assert_eq!(cbor_int_field(&details, "total_seconds"), Some(6));
+    assert_eq!(cbor_int_field(&details, "duration_seconds"), Some(6));
 }
 
 #[test]
@@ -3189,7 +3189,7 @@ fn read_file_handles_invalid_utf8_per_line() {
 
     assert_eq!(
         cbor_map_text(&result, "line-numbered content"),
-        Some("1(non-utf-8)\n2 second")
+        Some("1(invalid-utf8)\n2 second")
     );
     assert!(cbor_map_field(&result, "line_count").is_none());
     assert_eq!(cbor_bool_field(&result, "valid_utf8"), Some(false));
