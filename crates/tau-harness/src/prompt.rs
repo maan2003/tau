@@ -455,7 +455,9 @@ pub(crate) fn cbor_to_text(v: &tau_proto::CborValue) -> String {
                     other => cbor_to_text(other),
                 };
                 let value = cbor_to_text(val);
-                if value.contains('\n') || key == "line-numbered content" {
+                if key == "output" {
+                    parts.push(value);
+                } else if value.contains('\n') || key == "line-numbered content" {
                     parts.push(format!("{key}:\n{value}"));
                 } else {
                     parts.push(format!("{key}: {value}"));
@@ -894,6 +896,22 @@ alpha middle zeta "
         let with_empty_hook = build_system_prompt(&skills, &empty_fragments);
 
         assert_eq!(with_empty_hook, without_hook);
+    }
+
+    #[test]
+    fn cbor_to_text_puts_output_body_on_next_line_without_label() {
+        let text = cbor_to_text(&CborValue::Map(vec![
+            (
+                CborValue::Text("status".to_owned()),
+                CborValue::Integer(0.into()),
+            ),
+            (
+                CborValue::Text("output".to_owned()),
+                CborValue::Text("1 only".to_owned()),
+            ),
+        ]));
+
+        assert_eq!(text, "status: 0\n1 only");
     }
 
     #[test]

@@ -2744,7 +2744,9 @@ impl ToolResponse {
         for (key, value) in entries {
             let key = cbor_tool_response_text(key);
             let value = cbor_tool_response_text(value);
-            if value.contains('\n') || key == "line-numbered content" || key == "output" {
+            if key == "output" {
+                body_parts.push(value);
+            } else if value.contains('\n') || key == "line-numbered content" {
                 body_parts.push(format!("{key}:\n{value}"));
             } else {
                 headers.push(ToolResponseHeader { key, value });

@@ -908,6 +908,22 @@ fn tool_response_renders_headers_blank_line_and_body() {
 }
 
 #[test]
+fn tool_response_renders_output_field_as_body_without_label() {
+    let response = ToolResponse::from_cbor(&CborValue::Map(vec![
+        (
+            CborValue::Text("status".to_owned()),
+            CborValue::Integer(0.into()),
+        ),
+        (
+            CborValue::Text("output".to_owned()),
+            CborValue::Text("1 stdout\n2 stderr".to_owned()),
+        ),
+    ]));
+
+    assert_eq!(response.render(), "status: 0\n\n1 stdout\n2 stderr");
+}
+
+#[test]
 fn tool_response_leaves_plain_text_as_body_only() {
     let response = ToolResponse::from_cbor(&CborValue::Text("done".to_owned()));
 
