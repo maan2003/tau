@@ -72,7 +72,14 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     assert_eq!(cf.action, "shell-prompt-edit");
     assert_eq!(cf.command.as_deref(), Some("pick"));
     // ...and other built-in chords survive the merge.
-    assert!(s.bind.contains_key("C-r"));
+    let cr = s.bind.get("C-r").expect("C-r");
+    assert_eq!(cr.action, "prompt-history-search");
+    assert!(cr.trim);
+    assert!(
+        cr.command
+            .as_deref()
+            .is_some_and(|command| command.contains("fzf"))
+    );
     assert!(s.bind.contains_key("C-t"));
     assert!(s.bind.contains_key("C-o"));
 }
