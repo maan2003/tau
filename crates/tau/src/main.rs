@@ -11,8 +11,8 @@ fn main() -> std::process::ExitCode {
             logging: tau_cli::ComponentLogging::CliStderr,
         },
         tau_cli::Component {
-            name: "ext-core-delegate",
-            runner: tau_ext_core_delegate::run_stdio,
+            name: "ext-core-subagents",
+            runner: tau_ext_core_subagents::run_stdio,
             logging: tau_cli::ComponentLogging::RunnerManaged,
         },
         tau_cli::Component {

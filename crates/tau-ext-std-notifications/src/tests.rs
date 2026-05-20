@@ -884,7 +884,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
         .write_event(&Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
             session_prompt_id: "sp-side".into(),
             originator: tau_proto::PromptOriginator::Extension {
-                name: "core-delegate".into(),
+                name: "core-subagents".into(),
                 query_id: "q1".into(),
             },
         }))
@@ -894,7 +894,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
             session_id: "s1".into(),
             text: "side instruction".into(),
             originator: tau_proto::PromptOriginator::Extension {
-                name: "core-delegate".into(),
+                name: "core-subagents".into(),
                 query_id: "q1".into(),
             },
             ctx_id: None,
@@ -906,7 +906,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
                 "sp-side",
                 "delegated answer",
                 tau_proto::PromptOriginator::Extension {
-                    name: "core-delegate".into(),
+                    name: "core-subagents".into(),
                     query_id: "q1".into(),
                 },
             ),

@@ -456,7 +456,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         })],
         stop_reason: ProviderStopReason::ToolCalls,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q1".to_owned(),
         },
         usage: None,
@@ -505,7 +505,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         result: CborValue::Text("side result".into()),
         display: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q1".to_owned(),
         },
     }));
@@ -531,7 +531,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     // visible because it is model/session state, not per-turn tool usage.
     renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q2".to_owned(),
         },
         ..session_prompt_created("side-sp-2", "s1")
@@ -714,7 +714,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     // still in progress.
     renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q1".to_owned(),
         },
         ..session_prompt_created("side-sp", "s1")
@@ -724,7 +724,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         text: "working".into(),
         thinking: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q1".to_owned(),
         },
     }));
@@ -744,7 +744,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     }));
     renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q2".to_owned(),
         },
         ..session_prompt_created("later-side-sp", "s1")
@@ -1678,7 +1678,7 @@ fn side_conversation_compaction_is_hidden_from_main_transcript() {
         tau_themes::Theme::builtin(),
     );
     let originator = tau_proto::PromptOriginator::Extension {
-        name: "core-delegate".into(),
+        name: "core-subagents".into(),
         query_id: "delegate-1".to_owned(),
     };
 

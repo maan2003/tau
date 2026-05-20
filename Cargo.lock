@@ -1718,7 +1718,7 @@ name = "tau"
 version = "0.1.0"
 dependencies = [
  "tau-cli",
- "tau-ext-core-delegate",
+ "tau-ext-core-subagents",
  "tau-ext-provider-chat-completions",
  "tau-ext-provider-openai",
  "tau-ext-shell",
@@ -1821,7 +1821,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tau-ext-core-delegate"
+name = "tau-ext-core-subagents"
 version = "0.1.0"
 dependencies = [
  "serde_json",

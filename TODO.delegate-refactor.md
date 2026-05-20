@@ -1,8 +1,8 @@
-# TODO: move delegate status reporting fully into `tau-ext-core-delegate`
+# TODO: move delegate status reporting fully into `tau-ext-core-subagents`
 
 ## Goal
 
-Have `tau-ext-core-delegate` own end-to-end status reporting for the
+Have `tau-ext-core-subagents` own end-to-end status reporting for the
 `delegate` tool — progress + final completion display — without the
 harness or CLI carrying delegate-specific code. Generalizes to any
 future "supervisor" extension that spawns and oversees sub-conversations
@@ -15,7 +15,7 @@ The delegate tool's status pipeline straddles three crates:
 | Crate                       | Responsibility today                                              |
 |-----------------------------|-------------------------------------------------------------------|
 | `tau-harness`               | Runs the sub-conversation; owns `context_percent_used`, `tools_in_flight`, `tools_total`; emits `Event::ToolDelegateProgress` with a fully-rendered `ToolDisplay` (`build_delegate_progress_display`). |
-| `tau-ext-core-delegate`     | Receives the final sub-conversation result text from the harness via IPC; emits the terminal `ToolResult` / `ToolError` with `display: None`. |
+| `tau-ext-core-subagents`     | Receives the final sub-conversation result text from the harness via IPC; emits the terminal `ToolResult` / `ToolError` with `display: None`. |
 | `tau-cli`                   | Caches the latest `DelegateProgress.display` per call-id (`ToolCallState::delegate_last_progress`); on `ToolResult`/`ToolError` for `tool_name == "delegate"`, calls `build_delegate_completion_display` to merge the cached progress with response stats + status. |
 
 Three places where the CLI still special-cases `tool_name == "delegate"`:
@@ -86,7 +86,7 @@ Concretely the existing harness paths that call `emit_delegate_progress`
 (`process_tool_complete`, `apply_token_usage`, ...) instead would forward
 those state changes to the spawning extension as `SubConversationEvent`s.
 `emit_delegate_progress` and `build_delegate_progress_display` move into
-`tau-ext-core-delegate`.
+`tau-ext-core-subagents`.
 
 ## Migration phases
 
@@ -106,7 +106,7 @@ those state changes to the spawning extension as `SubConversationEvent`s.
 
 - **P3 (medium):** move `emit_delegate_progress` /
   `build_delegate_progress_display` from `tau-harness` into
-  `tau-ext-core-delegate`, driven by the P2 event stream. Harness
+  `tau-ext-core-subagents`, driven by the P2 event stream. Harness
   publishes nothing delegate-specific.
 
 - **P4 (cleanup):** delete harness fields `parent_tool_call_id`,

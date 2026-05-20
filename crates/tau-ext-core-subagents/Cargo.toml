@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-core-delegate"
+name = "tau-ext-core-subagents"
 version.workspace = true
 edition.workspace = true
 description.workspace = true

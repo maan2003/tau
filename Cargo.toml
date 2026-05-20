@@ -8,7 +8,7 @@ members = [
   "crates/tau-cli-term-raw",
   "crates/tau-config",
   "crates/tau-core",
-  "crates/tau-ext-core-delegate",
+  "crates/tau-ext-core-subagents",
   "crates/tau-ext-provider-chat-completions",
   "crates/tau-ext-provider-openai",
   "crates/tau-ext-shell",
@@ -60,7 +60,7 @@ tau-cli-term = { path = "crates/tau-cli-term" }
 tau-cli-term-raw = { path = "crates/tau-cli-term-raw" }
 tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
-tau-ext-core-delegate = { path = "crates/tau-ext-core-delegate" }
+tau-ext-core-subagents = { path = "crates/tau-ext-core-subagents" }
 tau-ext-provider-chat-completions = { path = "crates/tau-ext-provider-chat-completions" }
 tau-ext-provider-openai = { path = "crates/tau-ext-provider-openai" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
@@ -182,8 +182,8 @@ inherits = "dev"
 lto = "off"
 
 [profile.release]
+codegen-units = 1
 debug = false
 lto = "fat"
-codegen-units = 1
 panic = "abort"
 strip = "symbols"

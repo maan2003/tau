@@ -2401,9 +2401,9 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
     let mut h = echo_harness(&sp).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
 
-    let side_cid = ConversationId::new("extq-core-delegate-delegate-1");
+    let side_cid = ConversationId::new("extq-core-subagents-delegate-1");
     let originator = tau_proto::PromptOriginator::Extension {
-        name: "core-delegate".into(),
+        name: "core-subagents".into(),
         query_id: "delegate-1".to_owned(),
     };
     let mut side_conv = Conversation::new(
@@ -2439,7 +2439,7 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
     assert!(matches!(
         summary_prompt.originator,
         tau_proto::PromptOriginator::Extension { ref name, ref query_id }
-            if name.as_str() == HARNESS_CONNECTION_ID && query_id == "auto-compact-extq-core-delegate-delegate-1"
+            if name.as_str() == HARNESS_CONNECTION_ID && query_id == "auto-compact-extq-core-subagents-delegate-1"
     ));
 
     let mut cursor = baseline_seq;
@@ -2467,12 +2467,12 @@ fn side_conversation_auto_compaction_ignores_default_context_signal() {
     let mut h = echo_harness(&sp).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
 
-    let side_cid = ConversationId::new("extq-core-delegate-delegate-1");
+    let side_cid = ConversationId::new("extq-core-subagents-delegate-1");
     let mut side_conv = Conversation::new(
         side_cid.clone(),
         "s1".into(),
         tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "delegate-1".to_owned(),
         },
         None,
@@ -3419,7 +3419,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q1".to_owned(),
         },
 
@@ -3547,7 +3547,7 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q-bg".to_owned(),
         },
         backend: None,
@@ -3584,7 +3584,7 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q-bg".to_owned(),
         },
         backend: None,
@@ -4224,7 +4224,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q-A".to_owned(),
         },
         backend: None,
@@ -4243,7 +4243,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q-B".to_owned(),
         },
         backend: None,
@@ -4416,7 +4416,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q1".to_owned(),
         },
 
@@ -4878,7 +4878,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q-outer".to_owned(),
         },
 
@@ -4939,7 +4939,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q-nested".to_owned(),
         },
 
@@ -5114,7 +5114,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q-outer".to_owned(),
         },
 
@@ -5272,7 +5272,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q-outer".to_owned(),
         },
 
@@ -5418,7 +5418,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q-top".to_owned(),
         },
 
@@ -5748,7 +5748,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q-A".to_owned(),
         },
 
@@ -5900,7 +5900,7 @@ fn tool_events_carry_owning_conversation_originator() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-delegate".into(),
+            name: "core-subagents".into(),
             query_id: "q-sub".to_owned(),
         },
 

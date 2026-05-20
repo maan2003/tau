@@ -31,7 +31,7 @@ pub struct PromptPayload<'a> {
     /// the upstream call.
     pub previous_response: Option<PreviousResponse<'a>>,
     /// Who originated this prompt — the interactive user, or an
-    /// extension-side sub-agent query (most notably `core-delegate`).
+    /// extension-side sub-agent query (most notably `core-subagents`).
     /// Folded into the wire `prompt_cache_key` so concurrent
     /// delegated turns don't share a routing bucket with the user's
     /// own turns (OpenAI's deployment checklist warns that >15 RPM
@@ -486,7 +486,7 @@ pub fn prompt_cache_key_for(base_url: &str, session_id: &SessionId) -> String {
 ///
 /// User turns pass `base` through unchanged so a single interactive
 /// session's successive turns keep landing on the same cache machine.
-/// Extension-originated turns (e.g. `core-delegate` sub-agents) get a
+/// Extension-originated turns (e.g. `core-subagents` sub-agents) get a
 /// distinct key derived from the extension's *name* so:
 ///   - sub-agent traffic doesn't pile onto the user's provider routing bucket —
 ///     OpenAI's deployment checklist warns that >15 RPM per `(prefix,

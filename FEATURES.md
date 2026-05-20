@@ -133,7 +133,7 @@ of the bar to keep it compact.
 For providers that support it, Tau emits stable `prompt_cache_key` routing
 keys (derived from base URL and session id) so cache hits survive restarts
 within a session, and sets `prompt_cache_retention` where
-available. Extension-originated turns (e.g. `core-delegate` sub-agents) get a
+available. Extension-originated turns (e.g. `core-subagents` sub-agents) get a
 distinct key so parallel delegations don't pile onto the user agent's routing
 bucket and trip OpenAI's `>15 RPM`-per-key overflow heuristic. Provider
 compatibility flags live next to the model entry (`supports_prompt_cache_key`,
@@ -239,7 +239,7 @@ when a long task finishes while you're in another window. Set
 `config.idle_agent_summary: true` to restore the old behavior that asks the
 agent for a one-sentence idle summary before notifying.
 
-### `core-delegate` — sub-task delegation
+### `core-subagents` — sub-task delegation
 
 Exposes a `delegate` tool that spawns a side conversation and returns its result
 to the caller. Unless the tool call supplies `role`, delegated sub-agents default

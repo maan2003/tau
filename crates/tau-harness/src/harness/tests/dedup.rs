@@ -423,7 +423,7 @@ fn dedup_is_scoped_to_a_single_branch() {
             side_cid.clone(),
             "s1".into(),
             tau_proto::PromptOriginator::Extension {
-                name: "core-delegate".into(),
+                name: "core-subagents".into(),
                 query_id: "q-test".to_owned(),
             },
             None, // explicit-root: no inherited head

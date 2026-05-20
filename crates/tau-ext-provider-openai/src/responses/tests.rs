@@ -364,7 +364,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
         ..chain_test_config()
     };
     let ext = tau_proto::PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("core-delegate"),
+        name: tau_proto::ExtensionName::new("core-subagents"),
         query_id: "delegate-1".into(),
     };
     let user_request = PromptPayload {

@@ -32,8 +32,8 @@
         config: {},
     },
     {
-        name: "core-delegate",
-        suffix: ["ext", "ext-core-delegate"],
+        name: "core-subagents",
+        suffix: ["ext", "ext-core-subagents"],
         role: "tool",
         enable: true,
         config: {},

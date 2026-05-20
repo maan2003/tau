@@ -10,10 +10,10 @@
 //! it once and lets each extension declare only what differs.
 //!
 //! ```ignore
-//! tau_extension::Handshake::tool("tau-ext-core-delegate")
+//! tau_extension::Handshake::tool("tau-ext-core-subagents")
 //!     .subscribe([EventName::TOOL_INVOKE, EventName::EXTENSION_AGENT_QUERY_RESULT])
 //!     .register_tool(tool_spec())
-//!     .ready_message("core-delegate ready")
+//!     .ready_message("core-subagents ready")
 //!     .run(&mut writer)?;
 //! ```
 //!

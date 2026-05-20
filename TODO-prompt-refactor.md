@@ -157,7 +157,7 @@ Example final Handlebars context shape:
     ],
     "delegate_roles": [
       {
-        "extension_name": "core-delegate",
+        "extension_name": "core-subagents",
         "value": [{ "name": "smart", "description": "...", "model": "openai/gpt-..." }]
       }
     ]

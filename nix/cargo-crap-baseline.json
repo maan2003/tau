@@ -57,13 +57,13 @@
       "crate": "tau-provider-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-core-delegate/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-core-subagents/src/lib.rs",
       "function": "run",
       "line": 26,
       "cyclomatic": 16.0,
       "coverage": 0.0,
       "crap": 272.0,
-      "crate": "tau-ext-core-delegate"
+      "crate": "tau-ext-core-subagents"
     },
     {
       "file": "/build/source/crates/tau-cli-term-raw/src/lib.rs",
@@ -372,13 +372,13 @@
       "crate": "tau-supervisor"
     },
     {
-      "file": "/build/source/crates/tau-ext-core-delegate/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-core-subagents/src/lib.rs",
       "function": "handle_tool_invoke",
       "line": 121,
       "cyclomatic": 10.0,
       "coverage": 0.0,
       "crap": 110.0,
-      "crate": "tau-ext-core-delegate"
+      "crate": "tau-ext-core-subagents"
     },
     {
       "file": "/build/source/crates/tau-proto/src/events.rs",
@@ -1209,13 +1209,13 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-core-delegate/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-core-subagents/src/lib.rs",
       "function": "parse_args",
       "line": 255,
       "cyclomatic": 24.0,
       "coverage": 91.48936170212765,
       "crap": 24.355065833196885,
-      "crate": "tau-ext-core-delegate"
+      "crate": "tau-ext-core-subagents"
     },
     {
       "file": "/build/source/crates/tau-harness/src/prompt.rs",
@@ -2478,13 +2478,13 @@
       "crate": "tau-provider-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-core-delegate/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-core-subagents/src/lib.rs",
       "function": "ack_log_event",
       "line": 197,
       "cyclomatic": 3.0,
       "coverage": 0.0,
       "crap": 12.0,
-      "crate": "tau-ext-core-delegate"
+      "crate": "tau-ext-core-subagents"
     },
     {
       "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
@@ -10866,22 +10866,22 @@
       "crate": "tau-provider-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-core-delegate/src/main.rs",
+      "file": "/build/source/crates/tau-ext-core-subagents/src/main.rs",
       "function": "main",
       "line": 1,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
-      "crate": "tau-ext-core-delegate"
+      "crate": "tau-ext-core-subagents"
     },
     {
-      "file": "/build/source/crates/tau-ext-core-delegate/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-core-subagents/src/lib.rs",
       "function": "run_stdio",
       "line": 21,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
-      "crate": "tau-ext-core-delegate"
+      "crate": "tau-ext-core-subagents"
     },
     {
       "file": "/build/source/crates/tau-ext-std-notifications/src/lib.rs",
@@ -16932,13 +16932,13 @@
       "crate": "tau-provider-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-core-delegate/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-core-subagents/src/lib.rs",
       "function": "tool_spec",
       "line": 206,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-core-delegate"
+      "crate": "tau-ext-core-subagents"
     },
     {
       "file": "/build/source/crates/tau-ext-std-notifications/src/tests.rs",

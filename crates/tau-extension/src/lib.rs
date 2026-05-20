@@ -86,14 +86,14 @@ pub fn init_logging() {
 /// Passing it here makes the convention legible at the call site:
 ///
 /// ```ignore
-/// pub const LOG_TARGET: &str = "core-delegate";
+/// pub const LOG_TARGET: &str = "core-subagents";
 /// tau_extension::init_logging_for(LOG_TARGET);
 /// ```
 ///
 /// The default filter keeps the extension's own info logs visible
 /// while pinning everything else (transitive deps, reqwest, hyper,
 /// etc.) to `warn`. Users can still override with
-/// `TAU_LOG=core-delegate=trace,debug` etc.
+/// `TAU_LOG=core-subagents=trace,debug` etc.
 pub fn init_logging_for(log_target: &'static str) {
     // `EnvFilter` directive syntax: `<target>=<level>,<level>` —
     // first directive sets the named target, trailing bare level is

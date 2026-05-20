@@ -8,7 +8,7 @@
 - `crates/tau-cli-term-raw` — raw terminal rendering/input layer
 - `crates/tau-config` — user and project configuration loading
 - `crates/tau-core` — event bus, routing, state, sessions, policy, and tool registry
-- `crates/tau-ext-core-delegate` — built-in delegate/sub-agent extension
+- `crates/tau-ext-core-subagents` — built-in delegate/sub-agent extension
 - `crates/tau-ext-std-notifications` — built-in notification extension
 - `crates/tau-ext-shell` — shell- and filesystem-oriented extension
 - `crates/tau-ext-test-dummy` — test-only dummy extension
