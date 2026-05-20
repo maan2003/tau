@@ -330,12 +330,53 @@
           mkdir -p $out/share/tau-agent-site
           cp -r ${./site}/* $out/share/tau-agent-site/
         '';
+
+        release-archives =
+          pkgs.runCommand "${projectName}-release-archives"
+            {
+              nativeBuildInputs = [
+                pkgs.gnutar
+                pkgs.gzip
+              ];
+            }
+            ''
+              mkdir -p $out
+
+              archive_dir=${projectName}-${multiBuild.x86_64-linux.release.tau.version}-x86_64-unknown-linux-gnu
+              mkdir -p "$archive_dir"
+              cp ${multiBuild.x86_64-linux.release.tau}/bin/tau "$archive_dir/tau"
+              chmod 755 "$archive_dir/tau"
+              tar --sort=name \
+                --mtime='@1' \
+                --owner=0 \
+                --group=0 \
+                --numeric-owner \
+                -czf $out/$archive_dir.tar.gz \
+                "$archive_dir"
+
+              archive_dir=${projectName}-${multiBuild.aarch64-linux.release.tau.version}-aarch64-unknown-linux-gnu
+              mkdir -p "$archive_dir"
+              cp ${multiBuild.aarch64-linux.release.tau}/bin/tau "$archive_dir/tau"
+              chmod 755 "$archive_dir/tau"
+              tar --sort=name \
+                --mtime='@1' \
+                --owner=0 \
+                --group=0 \
+                --numeric-owner \
+                -czf $out/$archive_dir.tar.gz \
+                "$archive_dir"
+            '';
       in
       {
-        packages.default = multiBuild.tau;
-        packages.tau = multiBuild.tau;
-        packages.site = site;
-        packages."cargo-crap" = cargoCrap;
+        packages = {
+          default = multiBuild.tau;
+          tau = multiBuild.tau;
+          site = site;
+          "cargo-crap" = cargoCrap;
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          inherit release-archives;
+        };
 
         ci = {
           inherit (multiBuild)
