@@ -1753,50 +1753,56 @@ fn running_tool_call_shows_ellipsis_until_result() {
         tau_themes::Theme::builtin(),
     );
 
-    renderer.handle(&Event::ProviderResponseFinished(finished_response(
-        "sp-0",
-        vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "call-1".into(),
-            name: tau_proto::ToolName::new("read"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("path".into()),
-                CborValue::Text("src/main.rs".into()),
-            )]),
-        })],
-    )));
+    renderer.handle_recorded_at(
+        &Event::ProviderResponseFinished(finished_response(
+            "sp-0",
+            vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-1".into(),
+                name: tau_proto::ToolName::new("read"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".into()),
+                    CborValue::Text("src/main.rs".into()),
+                )]),
+            })],
+        )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
     sync(&handle);
-    assert!(vt.screen_contains(80, "read src/main.rs …"));
+    assert!(vt.screen_contains(80, "read src/main.rs … 0s"));
 
-    renderer.handle(&Event::ToolResult(ToolResult {
-        call_id: "call-1".into(),
-        tool_name: tau_proto::ToolName::new("read"),
-        tool_type: tau_proto::ToolType::Function,
-        result: CborValue::Map(vec![
-            (
-                CborValue::Text("path".into()),
-                CborValue::Text("src/main.rs".into()),
-            ),
-            (
-                CborValue::Text("content".into()),
-                CborValue::Text("fn main() {}\n".into()),
-            ),
-        ]),
-        display: Some(tau_proto::ToolDisplay {
-            args: "src/main.rs".into(),
-            stats: tau_proto::ToolDisplayStats {
-                matches: None,
-                lines: Some(1),
-                bytes: Some(13),
-            },
-            status: tau_proto::ToolDisplayStatus::Success,
-            status_text: "ok".into(),
-            ..Default::default()
+    renderer.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
+            call_id: "call-1".into(),
+            tool_name: tau_proto::ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Map(vec![
+                (
+                    CborValue::Text("path".into()),
+                    CborValue::Text("src/main.rs".into()),
+                ),
+                (
+                    CborValue::Text("content".into()),
+                    CborValue::Text("fn main() {}\n".into()),
+                ),
+            ]),
+            display: Some(tau_proto::ToolDisplay {
+                args: "src/main.rs".into(),
+                stats: tau_proto::ToolDisplayStats {
+                    matches: None,
+                    lines: Some(1),
+                    bytes: Some(13),
+                },
+                status: tau_proto::ToolDisplayStatus::Success,
+                status_text: "ok".into(),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
         }),
-        originator: tau_proto::PromptOriginator::User,
-    }));
+        tau_proto::UnixMicros::new(3_000_000),
+    );
     sync(&handle);
-    assert!(vt.screen_contains(80, "read src/main.rs (1L, 13B) ok"));
+    assert!(vt.screen_contains(80, "read src/main.rs (1L, 13B) ok 2s"));
     assert!(!vt.screen_contains(80, "read src/main.rs …"));
 }
 

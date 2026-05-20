@@ -246,6 +246,7 @@ pub(crate) enum ToolStatus {
     Role,
     Context,
     Tools,
+    Time,
 }
 
 /// Status variants for session compaction lifecycle lines. Kept
@@ -422,6 +423,14 @@ pub(crate) fn streaming_block(
         block = block.bg(convert_color(bg));
     }
     block
+}
+
+pub(crate) fn tool_duration_suffix(duration: Duration) -> ToolSuffixSegment {
+    tool_suffix(format_tool_duration(duration), ToolStatus::Time)
+}
+
+pub(crate) fn format_tool_duration(duration: Duration) -> String {
+    format!("{}s", duration.as_secs())
 }
 
 fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
@@ -779,6 +788,7 @@ pub(crate) fn render_tool_block(
             ToolStatus::Role => names::STATUS_ROLE,
             ToolStatus::Context => names::STATUS_CONTEXT,
             ToolStatus::Tools => names::STATUS_TOOLS,
+            ToolStatus::Time => names::TOOL_STATUS_TIME,
         };
         let status = themed.add_style(status_name);
         if !suffix.no_leading_space && !suffix.text.starts_with(':') {

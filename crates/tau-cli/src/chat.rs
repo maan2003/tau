@@ -10,11 +10,11 @@ use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
     ClientKind, Disconnect, Event, EventSelector, Frame, FrameReader, FrameWriter, Hello, Message,
-    PROTOCOL_VERSION, Subscribe, UiPromptDraft, UiPromptSubmitted,
+    PROTOCOL_VERSION, Subscribe, UiPromptDraft, UiPromptSubmitted, UnixMicros,
 };
 
 use crate::daemon::{daemon_output_for_session, resolve_daemon};
-use crate::event_renderer::EventRenderer;
+use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState};
 use crate::prompt_history::PromptHistoryStore;
 use crate::tool_render::ui_dir_block;
 use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
@@ -40,6 +40,19 @@ fn send_frame(writer: &WriterHandle, frame: &Frame) -> io::Result<()> {
 /// Convenience wrapper around [`send_frame`] for [`Event`] payloads.
 fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
     send_frame(writer, &Frame::Event(event.clone()))
+}
+
+fn peel_log_with_timestamp(
+    frame: Frame,
+) -> (Option<tau_proto::LogEventId>, Option<UnixMicros>, Frame) {
+    match frame {
+        Frame::Message(Message::LogEvent(env)) => (
+            Some(env.id),
+            Some(env.recorded_at),
+            Frame::Event(*env.event),
+        ),
+        other => (None, None, other),
+    }
 }
 
 fn current_role_name(
@@ -364,9 +377,12 @@ pub(crate) fn run_chat(
                     // Peel the LogEvent wrapper so downstream renderers
                     // see the inner payload directly. The UI is a
                     // best-effort consumer and does not ack.
-                    let (_log_id, inner) = frame.peel_log();
+                    let (_log_id, log_recorded_at, inner) = peel_log_with_timestamp(frame);
                     let cmd = match inner {
-                        Frame::Event(event) => RendererCmd::Remote(Box::new(event)),
+                        Frame::Event(event) => RendererCmd::Remote {
+                            event: Box::new(event),
+                            recorded_at: log_recorded_at.unwrap_or_else(UnixMicros::now),
+                        },
                         Frame::Message(Message::Disconnect(d)) => {
                             RendererCmd::RemoteDisconnect(d.reason)
                         }
@@ -474,7 +490,7 @@ pub(crate) fn run_chat(
     // survive restarts.
     let cli_state =
         tau_config::settings::CliState::load_with_default(&dirs, settings.default_state());
-    let renderer = EventRenderer::new_with_state(
+    let mut renderer = EventRenderer::new_with_state(
         renderer_handle,
         completion_data.clone(),
         theme.clone(),
@@ -482,6 +498,11 @@ pub(crate) fn run_chat(
         dirs.clone(),
         settings.submitted_prompt_symbol,
     );
+    let tool_timer = ToolTimerNotifier::new();
+    renderer.set_tool_timer(tool_timer.clone());
+    let timer_tx = event_tx.clone();
+    let timer_state = tool_timer.inner();
+    let timer_thread = std::thread::spawn(move || tool_timer_loop(timer_state, timer_tx));
     // Register `/set`'s context-aware arg completer. The first-arg
     // menu shows each setting's *current* value (read through the
     // renderer's shared mirror), and the second-arg menu shows
@@ -500,9 +521,12 @@ pub(crate) fn run_chat(
         let mut renderer = renderer;
         while let Ok(cmd) = renderer_rx.recv() {
             match cmd {
-                RendererCmd::Remote(event) => renderer.handle(&event),
+                RendererCmd::Remote { event, recorded_at } => {
+                    renderer.handle_recorded_at(&event, recorded_at);
+                }
                 RendererCmd::RemoteDisconnect(reason) => renderer.handle_disconnect(reason),
                 RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
+                RendererCmd::ToolTimerTick => renderer.handle_tool_timer_tick(),
             }
         }
     });
@@ -541,6 +565,9 @@ pub(crate) fn run_chat(
             prompt_history,
         },
     )?;
+
+    tool_timer.stop();
+    let _ = timer_thread.join();
 
     // Tell the debounce thread to exit and wait for it so we don't
     // race with the disconnect below (the thread might otherwise
@@ -596,6 +623,35 @@ enum InputLoopExit {
     Detach,
 }
 
+fn tool_timer_loop(
+    state: Arc<(Mutex<ToolTimerState>, Condvar)>,
+    renderer_tx: mpsc::Sender<RendererCmd>,
+) {
+    let (mutex, cv) = &*state;
+    let mut guard = locked(mutex);
+    loop {
+        while guard.active_tool_ids.is_empty() && !guard.done {
+            guard = cv.wait(guard).expect(MUTEX_POISONED);
+        }
+        if guard.done {
+            return;
+        }
+        let (next_guard, timeout) = cv
+            .wait_timeout(guard, Duration::from_secs(1))
+            .expect(MUTEX_POISONED);
+        guard = next_guard;
+        if guard.done {
+            return;
+        }
+        if !guard.active_tool_ids.is_empty()
+            && timeout.timed_out()
+            && renderer_tx.send(RendererCmd::ToolTimerTick).is_err()
+        {
+            return;
+        }
+    }
+}
+
 /// Commands the renderer thread drains from a single ordered channel.
 /// The socket reader pushes `Remote(event)`; the input loop pushes
 /// local UI commands like `Set`. Keeping it one channel
@@ -606,7 +662,11 @@ enum RendererCmd {
         name: String,
         value: String,
     },
-    Remote(Box<Event>),
+    Remote {
+        event: Box<Event>,
+        recorded_at: UnixMicros,
+    },
+    ToolTimerTick,
     /// The harness sent a `Disconnect` message over the wire.
     RemoteDisconnect(Option<String>),
 }

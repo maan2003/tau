@@ -24,6 +24,7 @@ pub const TOOL_ARGS: &str = "tool.args";
 pub const TOOL_STATUS_SUCCESS: &str = "tool.status.success";
 pub const TOOL_STATUS_ERROR: &str = "tool.status.error";
 pub const TOOL_STATUS_INFO: &str = "tool.status.info";
+pub const TOOL_STATUS_TIME: &str = "tool.status.time";
 pub const SHELL_OUTPUT: &str = "shell.output";
 
 /// Streaming-`…` indicator appended to in-progress agent responses,

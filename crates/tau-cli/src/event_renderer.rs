@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem, ToolCallItem,
+    CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem, ToolCallItem, UnixMicros,
 };
 
 use crate::build_banner;
@@ -18,7 +18,8 @@ use crate::tool_render::{
     format_token_count, format_tool_call, render_compaction_block, render_delegate_display,
     render_diff_tool_block, render_harness_info, render_shell_block, render_token_stats_block,
     render_tool_block, render_tool_display, session_status_block, streaming_block,
-    synthesize_fallback_display, system_loaded_block, system_status_block, ui_dir_block,
+    synthesize_fallback_display, system_loaded_block, system_status_block, tool_duration_suffix,
+    ui_dir_block,
 };
 
 pub(crate) struct EventRenderer {
@@ -51,6 +52,8 @@ pub(crate) struct EventRenderer {
     /// which case the UI suppresses its progress and result events).
     /// Entries are removed on `ToolResult`/`ToolError`.
     tool_calls: HashMap<String, ToolCallState>,
+    /// Wakes the timer thread whenever visible tool activity starts or stops.
+    tool_timer: Option<ToolTimerNotifier>,
     /// Live user-shell blocks (from `!`/`!!`) keyed by command_id.
     /// Updated in place as progress chunks arrive, finalized on
     /// `ShellCommandFinished`.
@@ -191,6 +194,66 @@ struct DiffBlockEntry {
     block_id: tau_cli_term::BlockId,
     display: ToolCallDisplay,
     diff: tau_proto::DiffSummary,
+}
+
+#[derive(Clone)]
+pub(crate) struct ToolTimerNotifier {
+    inner: Arc<(std::sync::Mutex<ToolTimerState>, std::sync::Condvar)>,
+}
+
+pub(crate) struct ToolTimerState {
+    pub(crate) active_tool_ids: HashSet<String>,
+    pub(crate) done: bool,
+}
+
+impl ToolTimerNotifier {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new((
+                std::sync::Mutex::new(ToolTimerState {
+                    active_tool_ids: HashSet::new(),
+                    done: false,
+                }),
+                std::sync::Condvar::new(),
+            )),
+        }
+    }
+
+    pub(crate) fn inner(&self) -> Arc<(std::sync::Mutex<ToolTimerState>, std::sync::Condvar)> {
+        self.inner.clone()
+    }
+
+    fn tool_started(&self, call_id: &str) {
+        let (mutex, cv) = &*self.inner;
+        if let Ok(mut state) = mutex.lock() {
+            state.active_tool_ids.insert(call_id.to_owned());
+            cv.notify_all();
+        }
+    }
+
+    fn tool_finished(&self, call_id: &str) {
+        let (mutex, cv) = &*self.inner;
+        if let Ok(mut state) = mutex.lock() {
+            state.active_tool_ids.remove(call_id);
+            cv.notify_all();
+        }
+    }
+
+    fn clear_active(&self) {
+        let (mutex, cv) = &*self.inner;
+        if let Ok(mut state) = mutex.lock() {
+            state.active_tool_ids.clear();
+            cv.notify_all();
+        }
+    }
+
+    pub(crate) fn stop(&self) {
+        let (mutex, cv) = &*self.inner;
+        if let Ok(mut state) = mutex.lock() {
+            state.done = true;
+            cv.notify_all();
+        }
+    }
 }
 
 struct ToolBlockEntry {
@@ -467,6 +530,10 @@ struct ToolCallState {
     /// Latest live display for the block, used when `/set show-tools`
     /// flips while the call is still running.
     live_display: Option<ToolCallDisplay>,
+    /// Monotonic start time for live duration updates.
+    started_at: Option<Instant>,
+    /// Harness log timestamp for final duration chips.
+    recorded_started_at: Option<UnixMicros>,
     /// Summary block for the assistant tool batch this call belongs
     /// to. `None` for stray events without a preceding tool-call
     /// announcement.
@@ -705,6 +772,7 @@ impl EventRenderer {
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
             tool_calls: HashMap::new(),
+            tool_timer: None,
             shell_blocks: HashMap::new(),
             extension_blocks: HashMap::new(),
             ready_extensions: HashSet::new(),
@@ -757,6 +825,10 @@ impl EventRenderer {
             agent_in_progress: Arc::new(AtomicBool::new(false)),
             agent_activity: AgentActivity::default(),
         }
+    }
+
+    pub(crate) fn set_tool_timer(&mut self, timer: ToolTimerNotifier) {
+        self.tool_timer = Some(timer);
     }
 
     fn save_cli_state(&self) {
@@ -1224,6 +1296,9 @@ impl EventRenderer {
         self.last_user_block = None;
         self.queued_user_blocks.clear();
         self.tool_calls.clear();
+        if let Some(timer) = &self.tool_timer {
+            timer.clear_active();
+        }
         self.shell_blocks.clear();
         self.extension_blocks.clear();
         self.model_status_block = None;
@@ -1575,6 +1650,10 @@ impl EventRenderer {
         use tau_themes::names;
         self.agent_activity.clear();
         self.agent_in_progress.store(false, Ordering::Relaxed);
+        self.tool_calls.clear();
+        if let Some(timer) = &self.tool_timer {
+            timer.clear_active();
+        }
         let reason = reason.as_deref().unwrap_or("disconnected");
         self.handle.print_output(
             "system-disconnect",
@@ -1600,7 +1679,12 @@ impl EventRenderer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn handle(&mut self, event: &Event) {
+        self.handle_recorded_at(event, UnixMicros::now());
+    }
+
+    pub(crate) fn handle_recorded_at(&mut self, event: &Event, recorded_at: UnixMicros) {
         self.sync_agent_activity_for_lifecycle(event);
 
         if self.handle_compaction_event(event) {
@@ -1628,8 +1712,8 @@ impl EventRenderer {
 
         if self.handle_session_events(event)
             || self.handle_prompt_events(event)
-            || self.handle_provider_response_events(event)
-            || self.handle_tool_events(event)
+            || self.handle_provider_response_events(event, recorded_at)
+            || self.handle_tool_events(event, recorded_at)
             || self.handle_shell_events(event)
             || self.handle_extension_events(event)
             || self.handle_harness_status_events(event)
@@ -1833,7 +1917,7 @@ impl EventRenderer {
             .response_block_id = Some(id);
     }
 
-    fn handle_provider_response_events(&mut self, event: &Event) -> bool {
+    fn handle_provider_response_events(&mut self, event: &Event, recorded_at: UnixMicros) -> bool {
         match event {
             Event::ProviderPromptSubmitted(submitted) => {
                 self.handle_provider_prompt_submitted(submitted);
@@ -1844,7 +1928,7 @@ impl EventRenderer {
                 true
             }
             Event::ProviderResponseFinished(finished) => {
-                self.handle_provider_response_finished(finished);
+                self.handle_provider_response_finished(finished, recorded_at);
                 true
             }
             _ => false,
@@ -1940,6 +2024,7 @@ impl EventRenderer {
     fn handle_provider_response_finished(
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
+        recorded_at: UnixMicros,
     ) {
         let (prompt_state, turn_latency) = self.take_finished_prompt_state(finished);
         self.finalize_finished_thinking_block(
@@ -1951,7 +2036,7 @@ impl EventRenderer {
         let full_assistant_text = assistant_text_from_output_items(&finished.output_items);
         self.record_finished_assistant_context(finished, full_assistant_text.as_deref());
         self.record_finished_token_stats(finished, turn_latency);
-        self.render_user_provider_response_items(finished);
+        self.render_user_provider_response_items(finished, recorded_at);
         self.render_model_status();
     }
 
@@ -2057,6 +2142,7 @@ impl EventRenderer {
     fn render_user_provider_response_items(
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
+        recorded_at: UnixMicros,
     ) {
         if !finished.originator.is_user() {
             return;
@@ -2071,7 +2157,7 @@ impl EventRenderer {
         self.set_main_tools_visible(!tool_calls.is_empty());
         let summary_block_id = self.prepare_tool_summary_for_finished_calls(&tool_calls);
         for item in &finished.output_items {
-            self.render_finished_context_item(item, summary_block_id);
+            self.render_finished_context_item(item, summary_block_id, recorded_at);
         }
         if !finished.output_items.is_empty() {
             self.handle.redraw();
@@ -2131,6 +2217,7 @@ impl EventRenderer {
         &mut self,
         item: &ContextItem,
         summary_block_id: Option<tau_cli_term::BlockId>,
+        recorded_at: UnixMicros,
     ) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
@@ -2144,7 +2231,9 @@ impl EventRenderer {
                     );
                 }
             }
-            ContextItem::ToolCall(call) => self.render_finished_tool_call(call, summary_block_id),
+            ContextItem::ToolCall(call) => {
+                self.render_finished_tool_call(call, summary_block_id, recorded_at);
+            }
             _ => {}
         }
     }
@@ -2153,9 +2242,11 @@ impl EventRenderer {
         &mut self,
         call: &ToolCallItem,
         summary_block_id: Option<tau_cli_term::BlockId>,
+        recorded_at: UnixMicros,
     ) {
         let display_payload = tool_display_from_call(call);
-        let display = format_tool_call(call.name.as_str(), Some(&display_payload));
+        let mut display = format_tool_call(call.name.as_str(), Some(&display_payload));
+        Self::upsert_tool_duration_suffix(&mut display, Duration::ZERO);
         let block = self.render_tool_history_block(&display);
         let id = self
             .handle
@@ -2166,14 +2257,19 @@ impl EventRenderer {
             ToolCallState {
                 block_id: Some(id),
                 live_display: Some(display),
+                started_at: Some(Instant::now()),
+                recorded_started_at: Some(recorded_at),
                 summary_block_id,
                 is_main_delegate: call.name.as_str() == "delegate",
                 ..ToolCallState::default()
             },
         );
+        if let Some(timer) = &self.tool_timer {
+            timer.tool_started(call.call_id.as_str());
+        }
     }
 
-    fn handle_tool_events(&mut self, event: &Event) -> bool {
+    fn handle_tool_events(&mut self, event: &Event, recorded_at: UnixMicros) -> bool {
         match event {
             Event::ToolProgress(progress) => {
                 self.handle_tool_progress(progress);
@@ -2184,15 +2280,15 @@ impl EventRenderer {
                 true
             }
             Event::ToolResult(result) => {
-                self.handle_tool_result(result);
+                self.handle_tool_result(result, recorded_at);
                 true
             }
             Event::ToolError(error) => {
-                self.handle_tool_error(error);
+                self.handle_tool_error(error, recorded_at);
                 true
             }
             Event::ToolCancelled(cancelled) => {
-                self.handle_tool_cancelled(cancelled);
+                self.handle_tool_cancelled(cancelled, recorded_at);
                 true
             }
             _ => false,
@@ -2216,6 +2312,57 @@ impl EventRenderer {
         }
     }
 
+    pub(crate) fn handle_tool_timer_tick(&mut self) {
+        let mut changed = false;
+        let mut updates = Vec::new();
+        for (call_id, state) in &self.tool_calls {
+            let (Some(block_id), Some(display)) = (state.block_id, state.live_display.as_ref())
+            else {
+                continue;
+            };
+            let Some(duration) = Self::live_tool_duration(state) else {
+                continue;
+            };
+            let mut display = display.clone();
+            Self::upsert_tool_duration_suffix(&mut display, duration);
+            updates.push((call_id.clone(), block_id, display));
+        }
+        for (call_id, block_id, display) in updates {
+            if let Some(state) = self.tool_calls.get_mut(&call_id) {
+                state.live_display = Some(display.clone());
+            }
+            let block = self.render_tool_history_block(&display);
+            self.handle.set_block(block_id, block);
+            changed = true;
+        }
+        if changed {
+            self.handle.redraw();
+        }
+    }
+
+    fn live_tool_duration(state: &ToolCallState) -> Option<Duration> {
+        if let Some(recorded_started_at) = state.recorded_started_at {
+            let elapsed_micros = UnixMicros::now()
+                .get()
+                .checked_sub(recorded_started_at.get())?;
+            return Some(Duration::from_micros(elapsed_micros));
+        }
+        state.started_at.map(|started_at| started_at.elapsed())
+    }
+
+    fn upsert_tool_duration_suffix(display: &mut ToolCallDisplay, duration: Duration) {
+        let suffix = tool_duration_suffix(duration);
+        if let Some(existing) = display
+            .suffixes
+            .iter_mut()
+            .find(|suffix| matches!(suffix.status, crate::tool_render::ToolStatus::Time))
+        {
+            *existing = suffix;
+            return;
+        }
+        display.suffixes.push(suffix);
+    }
+
     fn handle_tool_delegate_progress(&mut self, progress: &tau_proto::DelegateProgress) {
         let call_id = progress.call_id.as_str();
         // Snapshot the latest counters and ctx info regardless of whether the
@@ -2228,13 +2375,16 @@ impl EventRenderer {
             // nothing to update.
             return;
         };
-        let display = match &progress.display {
+        let mut display = match &progress.display {
             Some(descriptor) => render_delegate_display(descriptor, progress.role.as_deref()),
             None => render_delegate_display(
                 &synthesize_fallback_display("delegate", None),
                 progress.role.as_deref(),
             ),
         };
+        if let Some(duration) = Self::live_tool_duration(state) {
+            Self::upsert_tool_duration_suffix(&mut display, duration);
+        }
         state.live_display = Some(display.clone());
         let block = self.render_tool_history_block(&display);
         self.handle.set_block(bid, block);
@@ -2254,6 +2404,11 @@ impl EventRenderer {
         if prior.is_sub_agent {
             return None;
         }
+        if prior.block_id.is_some()
+            && let Some(timer) = &self.tool_timer
+        {
+            timer.tool_finished(call_id);
+        }
         if known_main_tool {
             self.record_main_tool_completed();
             if self.main_agent_turn_active {
@@ -2263,7 +2418,7 @@ impl EventRenderer {
         Some((prior, known_main_tool))
     }
 
-    fn handle_tool_result(&mut self, result: &tau_proto::ToolResult) {
+    fn handle_tool_result(&mut self, result: &tau_proto::ToolResult, recorded_at: UnixMicros) {
         let call_id = result.call_id.as_str();
         // Sub-agent tool activity stays out of the user's transcript — its
         // progress is rolled up under the parent's `delegate` block by
@@ -2273,7 +2428,10 @@ impl EventRenderer {
         else {
             return;
         };
-        let display = Self::tool_result_display(result, prior.delegate_last_progress.as_ref());
+        let mut display = Self::tool_result_display(result, prior.delegate_last_progress.as_ref());
+        if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
+            Self::upsert_tool_duration_suffix(&mut display, duration);
+        }
         let diff = Self::tool_result_diff(result);
         self.record_tool_summary_result(
             prior.summary_block_id,
@@ -2305,6 +2463,12 @@ impl EventRenderer {
                 &synthesize_fallback_display(&result.tool_name, None),
             )
         }
+    }
+
+    fn finished_tool_duration(prior: &ToolCallState, finished_at: UnixMicros) -> Option<Duration> {
+        let started_at = prior.recorded_started_at?;
+        let elapsed_micros = finished_at.get().checked_sub(started_at.get())?;
+        Some(Duration::from_micros(elapsed_micros))
     }
 
     fn tool_result_diff(result: &tau_proto::ToolResult) -> Option<tau_proto::DiffSummary> {
@@ -2344,14 +2508,17 @@ impl EventRenderer {
         }
     }
 
-    fn handle_tool_error(&mut self, error: &tau_proto::ToolError) {
+    fn handle_tool_error(&mut self, error: &tau_proto::ToolError, recorded_at: UnixMicros) {
         let call_id = error.call_id.as_str();
         let Some((prior, known_main_tool)) =
             self.take_finished_tool_call(call_id, error.originator.is_user())
         else {
             return;
         };
-        let display = Self::tool_error_display(error, prior.delegate_last_progress.as_ref());
+        let mut display = Self::tool_error_display(error, prior.delegate_last_progress.as_ref());
+        if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
+            Self::upsert_tool_duration_suffix(&mut display, duration);
+        }
         self.record_tool_summary_result(prior.summary_block_id, error.display.as_ref(), None, true);
         self.record_plain_finished_tool_block(prior.block_id, display, "tool-error");
         self.render_model_status_after_tool_completion(known_main_tool);
@@ -2380,15 +2547,22 @@ impl EventRenderer {
         }
     }
 
-    fn handle_tool_cancelled(&mut self, cancelled: &tau_proto::ToolCancelled) {
+    fn handle_tool_cancelled(
+        &mut self,
+        cancelled: &tau_proto::ToolCancelled,
+        recorded_at: UnixMicros,
+    ) {
         let call_id = cancelled.call_id.as_str();
         let Some((prior, known_main_tool)) = self.take_finished_tool_call(call_id, true) else {
             return;
         };
-        let display = render_tool_display(
+        let mut display = render_tool_display(
             &cancelled.tool_name,
             &synthesize_fallback_display(&cancelled.tool_name, Some("cancelled")),
         );
+        if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
+            Self::upsert_tool_duration_suffix(&mut display, duration);
+        }
         self.record_tool_summary_result(prior.summary_block_id, None, None, true);
         self.record_plain_finished_tool_block(prior.block_id, display, "tool-cancelled");
         self.render_model_status_after_tool_completion(known_main_tool);
