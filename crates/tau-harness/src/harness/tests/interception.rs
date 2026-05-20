@@ -102,6 +102,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
             instruction: "side instruction".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("main-call".into()),
             task_name: Some("side".to_owned()),
         },

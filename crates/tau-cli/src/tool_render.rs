@@ -327,15 +327,7 @@ pub(crate) fn build_delegate_completion_display(
         args: String::new(),
         ..Default::default()
     });
-    if !response_text.is_empty() {
-        let lines = response_text.lines().count() as u64;
-        let bytes = response_text.len() as u64;
-        display.stats = tau_proto::ToolDisplayStats {
-            matches: None,
-            lines: Some(lines),
-            bytes: Some(bytes),
-        };
-    }
+    display.stats = tau_proto::ToolDisplayStats::for_text(response_text);
     match error {
         Some(msg) if !msg.is_empty() => {
             display.status = ToolDisplayStatus::Error;
@@ -476,6 +468,23 @@ pub(crate) fn render_delegate_display(
     role: Option<&str>,
 ) -> ToolCallDisplay {
     let mut rendered = render_tool_display("delegate", display);
+    let stats_chip = format_tool_display_stats(&display.stats);
+    if !stats_chip.is_empty() {
+        let marker = match display.status {
+            ToolDisplayStatus::InProgress => "↘︎",
+            ToolDisplayStatus::Success | ToolDisplayStatus::Warning | ToolDisplayStatus::Error => {
+                "↖︎"
+            }
+        };
+        if let Some(suffix) = rendered
+            .suffixes
+            .iter_mut()
+            .find(|suffix| suffix.text == stats_chip)
+        {
+            suffix.text = format!("{marker} {}", suffix.text);
+        }
+    }
+
     let Some(role) = role.filter(|role| !role.is_empty()) else {
         return rendered;
     };

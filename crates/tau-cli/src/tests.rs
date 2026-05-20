@@ -17,10 +17,10 @@ use tau_proto::{
 use super::chat::{DraftSlot, is_local_slash_command, should_send_draft_snapshot};
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
-    CompactionStatus, ToolStatus, build_osc1337_set_user_var, cache_hit_percent,
-    format_token_stats_line, render_compaction_block, render_delegate_display, render_shell_block,
-    render_token_stats_block, render_tool_block, render_tool_display, streaming_block,
-    synthesize_fallback_display,
+    CompactionStatus, ToolStatus, build_delegate_completion_display, build_osc1337_set_user_var,
+    cache_hit_percent, format_token_stats_line, render_compaction_block, render_delegate_display,
+    render_shell_block, render_token_stats_block, render_tool_block, render_tool_display,
+    streaming_block, synthesize_fallback_display,
 };
 
 #[test]
@@ -2021,41 +2021,47 @@ fn show_tools_compact_hides_payload_body() {
     );
     renderer.apply_setting("show-tools", "compact");
 
-    renderer.handle(&Event::ProviderResponseFinished(finished_response(
-        "sp-0",
-        vec![ContextItem::ToolCall(ToolCallItem {
+    renderer.handle_recorded_at(
+        &Event::ProviderResponseFinished(finished_response(
+            "sp-0",
+            vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-1".into(),
+                name: tau_proto::ToolName::new("read"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".into()),
+                    CborValue::Text("src/main.rs".into()),
+                )]),
+            })],
+        )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
             call_id: "call-1".into(),
-            name: tau_proto::ToolName::new("read"),
+            tool_name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("path".into()),
-                CborValue::Text("src/main.rs".into()),
-            )]),
-        })],
-    )));
-    renderer.handle(&Event::ToolResult(ToolResult {
-        call_id: "call-1".into(),
-        tool_name: tau_proto::ToolName::new("read"),
-        tool_type: tau_proto::ToolType::Function,
-        result: CborValue::Null,
-        display: Some(tau_proto::ToolDisplay {
-            args: "src/main.rs".into(),
-            stats: tau_proto::ToolDisplayStats {
-                matches: None,
-                lines: Some(1),
-                bytes: Some(13),
-            },
-            status: tau_proto::ToolDisplayStatus::Success,
-            status_text: "ok".into(),
-            payload: Some(tau_proto::ToolDisplayPayload::Text {
-                text: "fn main() {}\n".into(),
+            result: CborValue::Null,
+            display: Some(tau_proto::ToolDisplay {
+                args: "src/main.rs".into(),
+                stats: tau_proto::ToolDisplayStats {
+                    matches: None,
+                    lines: Some(1),
+                    bytes: Some(13),
+                },
+                status: tau_proto::ToolDisplayStatus::Success,
+                status_text: "ok".into(),
+                payload: Some(tau_proto::ToolDisplayPayload::Text {
+                    text: "fn main() {}\n".into(),
+                }),
+                ..Default::default()
             }),
-            ..Default::default()
+            originator: tau_proto::PromptOriginator::User,
         }),
-        originator: tau_proto::PromptOriginator::User,
-    }));
+        tau_proto::UnixMicros::new(1_000_000),
+    );
     sync(&handle);
-    assert!(vt.screen_contains(80, "read src/main.rs (1L, 13B) ok"));
+    assert!(vt.screen_contains(80, "read src/main.rs (1L, 13B) 0s ok"));
     assert!(!vt.screen_contains(80, "fn main()"));
 }
 
@@ -2250,6 +2256,44 @@ fn render_delegate_display_pulls_legacy_role_args_into_first_suffix() {
 }
 
 #[test]
+fn render_delegate_display_marks_input_and_output_stats() {
+    use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
+
+    let input = ToolDisplay {
+        args: "[audit]".into(),
+        stats: ToolDisplayStats {
+            matches: None,
+            lines: Some(2),
+            bytes: Some(12),
+        },
+        status: ToolDisplayStatus::InProgress,
+        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
+        ..Default::default()
+    };
+    let rendered = render_delegate_display(&input, None);
+    let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["↘︎ (2L, 12B)", tau_proto::PROGRESS_INDICATOR_TEXT]
+    );
+
+    let output = ToolDisplay {
+        args: "[audit]".into(),
+        stats: ToolDisplayStats {
+            matches: None,
+            lines: Some(3),
+            bytes: Some(24),
+        },
+        status: ToolDisplayStatus::Success,
+        status_text: "ok".into(),
+        ..Default::default()
+    };
+    let rendered = render_delegate_display(&output, None);
+    let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(texts, vec!["↖︎ (3L, 24B)", "ok"]);
+}
+
+#[test]
 fn render_delegate_display_styles_role_like_status_bar() {
     use tau_proto::{ToolDisplay, ToolDisplayStatus};
 
@@ -2276,6 +2320,55 @@ fn render_delegate_display_styles_role_like_status_bar() {
         role_span.style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::STATUS_ROLE)
     );
+}
+
+#[test]
+fn delegate_completion_replaces_input_stats_with_output_stats() {
+    use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
+
+    let cached = ToolDisplay {
+        args: "[audit]".into(),
+        stats: ToolDisplayStats {
+            matches: None,
+            lines: Some(10),
+            bytes: Some(200),
+        },
+        status: ToolDisplayStatus::InProgress,
+        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
+        ..Default::default()
+    };
+
+    let display =
+        build_delegate_completion_display(Some(&cached), &CborValue::Text("ok\nmore".into()), None);
+
+    assert_eq!(display.args, "[audit]");
+    assert_eq!(display.stats, ToolDisplayStats::for_text("ok\nmore"));
+    assert_eq!(display.status, ToolDisplayStatus::Success);
+    assert_eq!(display.status_text, "ok");
+}
+
+#[test]
+fn delegate_completion_clears_input_stats_for_empty_output() {
+    use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
+
+    let cached = ToolDisplay {
+        args: "[audit]".into(),
+        stats: ToolDisplayStats {
+            matches: None,
+            lines: Some(10),
+            bytes: Some(200),
+        },
+        status: ToolDisplayStatus::InProgress,
+        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
+        ..Default::default()
+    };
+
+    let display =
+        build_delegate_completion_display(Some(&cached), &CborValue::Text(String::new()), None);
+
+    assert_eq!(display.stats, ToolDisplayStats::default());
+    assert_eq!(display.status, ToolDisplayStatus::Success);
+    assert_eq!(display.status_text, "ok");
 }
 
 #[test]

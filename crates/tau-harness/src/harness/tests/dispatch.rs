@@ -28,6 +28,17 @@ fn assert_delegate_tools_counter(
     assert_eq!(counter.total, total);
 }
 
+fn assert_delegate_input_stats(
+    progress: &tau_proto::DelegateProgress,
+    expected: tau_proto::ToolDisplayStats,
+) {
+    let display = progress
+        .display
+        .as_ref()
+        .expect("delegate progress display");
+    assert_eq!(display.stats, expected);
+}
+
 fn assert_delegate_counter_order(progress: &tau_proto::DelegateProgress, labels: &[&str]) {
     let display = progress
         .display
@@ -149,6 +160,7 @@ fn ext_query(query_id: &str, execution_mode: ToolExecutionMode) -> ExtAgentQuery
         instruction: format!("instruction {query_id}"),
         role: None,
         execution_mode,
+        input_stats: tau_proto::ToolDisplayStats::default(),
         tool_call_id: None,
         task_name: None,
     }
@@ -2610,6 +2622,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("delegate-call".into()),
             task_name: None,
         },
@@ -2767,6 +2780,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("delegate-call".into()),
             task_name: None,
         },
@@ -2909,6 +2923,7 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: None,
             task_name: None,
         },
@@ -3053,6 +3068,7 @@ fn non_tool_ext_agent_query_preserves_chain_anchor_and_tool_choice() {
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: None,
             task_name: None,
         },
@@ -3162,6 +3178,7 @@ fn delegate_ext_agent_query_keeps_tool_choice_auto() {
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("delegate-call".into()),
             task_name: None,
         },
@@ -3211,6 +3228,7 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: None,
             task_name: None,
         },
@@ -3352,6 +3370,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("delegate-call".into()),
             task_name: None,
         },
@@ -3852,6 +3871,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
             instruction: "side task A".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("delegate-A".into()),
             task_name: Some("A".to_owned()),
         },
@@ -3864,6 +3884,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
             instruction: "side task B".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("delegate-B".into()),
             task_name: Some("B".to_owned()),
         },
@@ -4053,6 +4074,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     .expect("main response");
 
     let sink = collect_event_sink(&mut h);
+    let input_stats = tau_proto::ToolDisplayStats::for_text("prompt\nbody");
     h.handle_ext_agent_query(
         "conn-delegate",
         ExtAgentQuery {
@@ -4060,6 +4082,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats,
             tool_call_id: Some("delegate-call".into()),
             task_name: Some("look it up".to_owned()),
         },
@@ -4075,6 +4098,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     assert_eq!(initial.tools_in_flight, 0);
     assert_eq!(initial.tools_total, 0);
     assert_delegate_tools_counter(&initial, Some(0), Some(0));
+    assert_delegate_input_stats(&initial, input_stats);
     assert_delegate_counter_order(&initial, &["tools"]);
 
     let side_spid = h
@@ -4265,6 +4289,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
             instruction: "side task".to_owned(),
             role: Some("worker".to_owned()),
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("delegate-call".into()),
             task_name: Some("use worker".to_owned()),
         },
@@ -4381,6 +4406,7 @@ fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
                 instruction: "side task".to_owned(),
                 role: Some(role.to_owned()),
                 execution_mode: ToolExecutionMode::Shared,
+                input_stats: tau_proto::ToolDisplayStats::default(),
                 tool_call_id: Some(format!("delegate-{query_id}").into()),
                 task_name: Some(query_id.to_owned()),
             },
@@ -4419,6 +4445,7 @@ fn delegate_missing_default_engineer_errors_when_engineer_unavailable() {
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("delegate-call".into()),
             task_name: Some("default".to_owned()),
         },
@@ -4521,6 +4548,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             instruction: "outer task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("outer-call".into()),
             task_name: Some("outer".to_owned()),
         },
@@ -4573,6 +4601,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             instruction: "nested task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("nested-call".into()),
             task_name: Some("nested".to_owned()),
         },
@@ -4759,6 +4788,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
             instruction: "outer task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("outer-call".into()),
             task_name: Some("outer".to_owned()),
         },
@@ -4807,6 +4837,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
             instruction: "nested task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("nested-call".into()),
             task_name: Some("nested".to_owned()),
         },
@@ -4910,6 +4941,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
             instruction: "outer task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("outer-call".into()),
             task_name: Some("outer".to_owned()),
         },
@@ -5058,6 +5090,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
             instruction: "TOP: delegate exactly two more subtasks".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("top-call".into()),
             task_name: Some("top".to_owned()),
         },
@@ -5106,6 +5139,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
             instruction: "LEAF: do one terminal search only".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("leaf-call".into()),
             task_name: Some("leaf".to_owned()),
         },
@@ -5333,6 +5367,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
             instruction: "instr A".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("main-A".into()),
             task_name: Some("A".to_owned()),
         },
@@ -5345,6 +5380,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
             instruction: "instr B".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("main-B".into()),
             task_name: Some("B".to_owned()),
         },
@@ -5534,6 +5570,7 @@ fn tool_events_carry_owning_conversation_originator() {
             instruction: "sub task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
             tool_call_id: Some("main-call".into()),
             task_name: Some("sub".to_owned()),
         },

@@ -11,8 +11,8 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use tau_proto::{
     Ack, CborValue, Event, ExtAgentQuery, ExtSessionContextPublish, ExtensionContextReady, Frame,
     FrameReader, FrameWriter, HarnessRolesAvailable, LogEventId, Message, SessionContextKey,
-    SessionContextValue, SessionStarted, ToolError, ToolExecutionMode, ToolInvoke, ToolResult,
-    ToolSpec,
+    SessionContextValue, SessionStarted, ToolDisplayStats, ToolError, ToolExecutionMode,
+    ToolInvoke, ToolResult, ToolSpec,
 };
 
 pub const LOG_TARGET: &str = "core-delegate";
@@ -212,6 +212,7 @@ fn handle_tool_invoke<W: Write>(
         instruction: format!("{DELEGATE_PREFIX}{}", parsed.prompt),
         role: parsed.role,
         execution_mode: parsed.execution_mode,
+        input_stats: ToolDisplayStats::for_text(&parsed.prompt),
         // Hand the parent call_id and the agent-supplied task name to
         // the harness so it can route sub-agent progress
         // (`DelegateProgress`) under this tool block and the CLI can
@@ -475,6 +476,47 @@ mod tests {
         assert!(properties.contains_key("role"));
         assert!(!properties.contains_key("read_only"));
         assert_eq!(spec.execution_mode, ToolExecutionMode::Shared);
+    }
+
+    /// Delegate progress should show the size of the user-provided prompt,
+    /// not the private prefix inserted before the sub-agent sees it.
+    #[test]
+    fn tool_invoke_reports_input_stats_for_user_prompt_only() {
+        let prompt = "first\nsecond";
+        let mut pending = HashMap::new();
+        let mut next_query_id = 0;
+        let mut output = Vec::new();
+        {
+            let mut writer = FrameWriter::new(BufWriter::new(&mut output));
+            handle_tool_invoke(
+                ToolInvoke {
+                    call_id: "call-1".into(),
+                    tool_name: tau_proto::ToolName::new(TOOL_NAME),
+                    arguments: args(&[("task_name", text("audit")), ("prompt", text(prompt))]),
+                    originator: tau_proto::PromptOriginator::User,
+                },
+                &mut pending,
+                &mut next_query_id,
+                &mut writer,
+            )
+            .expect("delegate invocation handled");
+        }
+
+        let mut reader = FrameReader::new(BufReader::new(output.as_slice()));
+        let frame = reader
+            .read_frame()
+            .expect("read query frame")
+            .expect("query frame present");
+        let Frame::Event(Event::ExtAgentQuery(query)) = frame else {
+            panic!("expected ExtAgentQuery, got {frame:?}");
+        };
+        assert!(query.instruction.starts_with(DELEGATE_PREFIX));
+        assert!(query.instruction.ends_with(prompt));
+        assert_eq!(query.input_stats, ToolDisplayStats::for_text(prompt));
+        assert_ne!(
+            query.input_stats,
+            ToolDisplayStats::for_text(&query.instruction)
+        );
     }
 
     /// Regression coverage for the 9c3088c "don't special case foreman"

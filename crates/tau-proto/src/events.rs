@@ -1505,6 +1505,19 @@ impl ToolDisplayStats {
     pub fn is_empty(&self) -> bool {
         self.matches.is_none() && self.lines.is_none() && self.bytes.is_none()
     }
+
+    /// Build line and byte statistics for non-empty text.
+    #[must_use]
+    pub fn for_text(text: &str) -> Self {
+        if text.is_empty() {
+            return Self::default();
+        }
+        Self {
+            matches: None,
+            lines: Some(text.lines().count() as u64),
+            bytes: Some(text.len() as u64),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -1738,6 +1751,10 @@ pub struct ExtAgentQuery {
     /// not declare global scheduling needs.
     #[serde(default = "default_ext_agent_query_execution_mode")]
     pub execution_mode: ToolExecutionMode,
+    /// Input stats for the extension-provided instruction, excluding
+    /// any private prefix the extension may have added.
+    #[serde(default, skip_serializing_if = "ToolDisplayStats::is_empty")]
+    pub input_stats: ToolDisplayStats,
     /// `ToolCallId` of the tool invocation that triggered this query,
     /// when the extension is implementing a tool whose live progress
     /// the harness should attribute back to that call. Used by the

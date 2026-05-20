@@ -3727,6 +3727,7 @@ impl Harness {
         // that tool block via `DelegateProgress`.
         conv.parent_tool_call_id = parent_call_id;
         conv.task_name = task_name;
+        conv.delegate_input_stats = query.input_stats;
         conv.role = conversation_role;
         conv.chain_anchor = initial_chain_anchor;
         self.conversations.insert(cid.clone(), conv);
@@ -3812,6 +3813,7 @@ impl Harness {
             ctx_window,
             conv.tools_in_flight,
             conv.tools_total,
+            conv.delegate_input_stats,
         );
         let progress = tau_proto::DelegateProgress {
             call_id,
@@ -6591,6 +6593,7 @@ fn build_delegate_progress_display(
     ctx_window: Option<u64>,
     tools_in_flight: u32,
     tools_total: u32,
+    input_stats: tau_proto::ToolDisplayStats,
 ) -> tau_proto::ToolDisplay {
     use tau_proto::{ProgressCounter, ProgressUnit, ToolDisplayStatus};
 
@@ -6618,6 +6621,7 @@ fn build_delegate_progress_display(
     }
     tau_proto::ToolDisplay {
         args: format!("[{task_name}]"),
+        stats: input_stats,
         progress_counters: counters,
         status: ToolDisplayStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
@@ -6651,6 +6655,27 @@ pub(crate) fn selector_matches_event(selectors: &[EventSelector], event: &Event)
         EventSelector::Exact(expected) => *expected == target_name,
         EventSelector::Prefix(prefix) => target_name.matches_prefix(prefix),
     })
+}
+
+#[cfg(test)]
+mod delegate_display_tests {
+    use super::*;
+
+    /// Live delegate progress carries prompt size stats so users see the
+    /// delegate input volume immediately, before the sub-agent finishes.
+    #[test]
+    fn progress_display_includes_delegate_input_stats() {
+        let input_stats = tau_proto::ToolDisplayStats {
+            matches: None,
+            lines: Some(2),
+            bytes: Some(12),
+        };
+        let display = build_delegate_progress_display("audit", None, None, None, 0, 0, input_stats);
+
+        assert_eq!(display.args, "[audit]");
+        assert_eq!(display.stats, input_stats);
+        assert_eq!(display.status, tau_proto::ToolDisplayStatus::InProgress);
+    }
 }
 
 #[cfg(test)]
