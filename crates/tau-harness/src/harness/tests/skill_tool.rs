@@ -1192,6 +1192,7 @@ fn prompt_fragments_include_only_tools_enabled_for_current_role() {
                 format: None,
                 enabled_by_default: true,
                 execution_mode: ToolExecutionMode::Shared,
+                background_support: None,
             },
             prompt_fragment: Some(tau_proto::PromptFragment::new(
                 "prompt_enabled.instructions",
@@ -1212,6 +1213,7 @@ fn prompt_fragments_include_only_tools_enabled_for_current_role() {
                 format: None,
                 enabled_by_default: false,
                 execution_mode: ToolExecutionMode::Shared,
+                background_support: None,
             },
             prompt_fragment: Some(tau_proto::PromptFragment::new(
                 "prompt_disabled.instructions",
@@ -1279,6 +1281,7 @@ fn extension_and_tool_prompt_fragments_sort_together_by_priority_source_name() {
                 format: None,
                 enabled_by_default: true,
                 execution_mode: ToolExecutionMode::Shared,
+                background_support: None,
             },
             prompt_fragment: Some(tau_proto::PromptFragment::new(
                 "z",
@@ -1340,6 +1343,7 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
             format: None,
             enabled_by_default: false,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
 

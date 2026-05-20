@@ -233,6 +233,7 @@ fn tool_spec() -> ToolSpec {
         format: None,
         enabled_by_default: true,
         execution_mode: ToolExecutionMode::Shared,
+        background_support: None,
     }
 }
 

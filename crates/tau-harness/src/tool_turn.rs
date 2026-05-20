@@ -2,11 +2,15 @@
 //!
 //! The harness owns side effects (publishing, routing, and follow-up prompts).
 //! This module only decides which queued tool invocation can dispatch next and
-//! tracks calls that have been selected but not completed yet.
+//! tracks calls that have been selected but not completed yet. Background
+//! deadlines are measured from the dispatch instant recorded here, not from the
+//! start of the agent turn, so queued calls do not spend their foreground
+//! budget before they have actually started.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
-use tau_proto::{ToolCallId, ToolExecutionMode, ToolName, ToolType};
+use tau_proto::{BackgroundSupport, ToolCallId, ToolExecutionMode, ToolName, ToolType};
 
 use crate::conversation::ConversationId;
 use crate::harness::AgentToolCall;
@@ -20,6 +24,8 @@ pub(crate) struct PendingToolInvocation {
     pub(crate) invocation: AgentToolCall,
     /// Shared/exclusive mode resolved at enqueue time.
     pub(crate) execution_mode: ToolExecutionMode,
+    /// Foreground/background support resolved at enqueue time.
+    pub(crate) background_support: BackgroundSupport,
 }
 
 /// Pure queue and in-flight state for tool dispatch during agent turns.
@@ -27,14 +33,25 @@ pub(crate) struct PendingToolInvocation {
 pub(crate) struct ToolTurnMachine {
     /// Tool invocations waiting for dispatch.
     pending_tool_invocations: VecDeque<PendingToolInvocation>,
-    /// Tool calls selected for dispatch but not completed yet.
+    /// Tool calls selected for dispatch and still actually running.
     in_flight_tool_execution_modes: HashMap<ToolCallId, InFlightToolInvocation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ForegroundAction {
+    /// Nothing should be published to close the foreground yet.
+    None,
+    /// Publish a synthetic terminal tool result for this call.
+    Background { call_id: ToolCallId },
 }
 
 #[derive(Clone, Debug)]
 struct InFlightToolInvocation {
     conversation_id: ConversationId,
     execution_mode: ToolExecutionMode,
+    foreground_pending: bool,
+    backgrounded: bool,
+    foreground_deadline: Option<Instant>,
 }
 
 impl ToolTurnMachine {
@@ -44,24 +61,29 @@ impl ToolTurnMachine {
         conversation_id: ConversationId,
         invocation: AgentToolCall,
         execution_mode: ToolExecutionMode,
+        background_support: BackgroundSupport,
     ) {
         self.pending_tool_invocations
             .push_back(PendingToolInvocation {
                 conversation_id,
                 invocation,
                 execution_mode,
+                background_support,
             });
     }
 
     /// Select the next dispatchable invocation and mark it in flight.
-    pub(crate) fn pop_dispatchable(&mut self) -> Option<PendingToolInvocation> {
+    pub(crate) fn pop_dispatchable(
+        &mut self,
+        now: Instant,
+    ) -> Option<(PendingToolInvocation, ForegroundAction)> {
         let idx = self.next_dispatchable_index()?;
         let pending = self
             .pending_tool_invocations
             .remove(idx)
             .expect("index just located");
-        self.record_in_flight(&pending);
-        Some(pending)
+        let action = self.record_in_flight(&pending, now);
+        Some((pending, action))
     }
 
     /// Mark an invocation as in flight without queueing it first.
@@ -77,11 +99,14 @@ impl ToolTurnMachine {
             InFlightToolInvocation {
                 conversation_id,
                 execution_mode,
+                foreground_pending: true,
+                backgrounded: false,
+                foreground_deadline: None,
             },
         );
     }
 
-    /// Remove a call from the in-flight set.
+    /// Remove a call from the in-flight set after its real result arrives.
     pub(crate) fn mark_complete(&mut self, call_id: &ToolCallId) -> Option<ToolExecutionMode> {
         self.in_flight_tool_execution_modes
             .remove(call_id)
@@ -91,6 +116,71 @@ impl ToolTurnMachine {
     /// Roll back an in-flight mark after synchronous dispatch failure.
     pub(crate) fn rollback_dispatch(&mut self, call_id: &ToolCallId) -> Option<ToolExecutionMode> {
         self.mark_complete(call_id)
+    }
+
+    /// Mark one running call as completed in the foreground by the synthetic
+    /// background placeholder. The real call remains actual-running.
+    pub(crate) fn mark_backgrounded(&mut self, call_id: &ToolCallId) -> bool {
+        let Some(in_flight) = self.in_flight_tool_execution_modes.get_mut(call_id) else {
+            return false;
+        };
+        if !in_flight.foreground_pending {
+            return false;
+        }
+        in_flight.foreground_pending = false;
+        in_flight.backgrounded = true;
+        in_flight.foreground_deadline = None;
+        true
+    }
+
+    /// True when this call has already been completed in the foreground but is
+    /// still actually running.
+    pub(crate) fn is_backgrounded(&self, call_id: &ToolCallId) -> bool {
+        self.in_flight_tool_execution_modes
+            .get(call_id)
+            .is_some_and(|in_flight| in_flight.backgrounded)
+    }
+
+    /// Backgrounded calls still actually running for `conversation_id`.
+    pub(crate) fn backgrounded_calls_for(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> Vec<ToolCallId> {
+        self.in_flight_tool_execution_modes
+            .iter()
+            .filter_map(|(call_id, in_flight)| {
+                (&in_flight.conversation_id == conversation_id && in_flight.backgrounded)
+                    .then_some(call_id.clone())
+            })
+            .collect()
+    }
+
+    /// Return and mark any calls whose foreground deadline has expired.
+    pub(crate) fn background_due(&mut self, now: Instant) -> Vec<ToolCallId> {
+        let due: Vec<_> = self
+            .in_flight_tool_execution_modes
+            .iter()
+            .filter_map(|(call_id, in_flight)| {
+                (in_flight.foreground_pending
+                    && in_flight
+                        .foreground_deadline
+                        .is_some_and(|deadline| deadline <= now))
+                .then_some(call_id.clone())
+            })
+            .collect();
+        for call_id in &due {
+            self.mark_backgrounded(call_id);
+        }
+        due
+    }
+
+    /// Earliest foreground background deadline that still needs a wakeup.
+    pub(crate) fn next_background_deadline(&self) -> Option<Instant> {
+        self.in_flight_tool_execution_modes
+            .values()
+            .filter(|in_flight| in_flight.foreground_pending)
+            .filter_map(|in_flight| in_flight.foreground_deadline)
+            .min()
     }
 
     /// Remove all queued invocations for `conversation_id` whose call id is in
@@ -178,17 +268,45 @@ impl ToolTurnMachine {
     pub(crate) fn any_in_flight_for(&self, conversation_id: &ConversationId) -> bool {
         self.in_flight_tool_execution_modes
             .values()
-            .any(|in_flight| &in_flight.conversation_id == conversation_id)
+            .any(|in_flight| {
+                &in_flight.conversation_id == conversation_id && in_flight.foreground_pending
+            })
     }
 
-    fn record_in_flight(&mut self, pending: &PendingToolInvocation) {
+    fn record_in_flight(
+        &mut self,
+        pending: &PendingToolInvocation,
+        now: Instant,
+    ) -> ForegroundAction {
+        let (foreground_pending, backgrounded, foreground_deadline, action) =
+            match pending.background_support {
+                BackgroundSupport::Instant => (
+                    false,
+                    true,
+                    None,
+                    ForegroundAction::Background {
+                        call_id: pending.invocation.id.clone(),
+                    },
+                ),
+                BackgroundSupport::MinForegroundSeconds(seconds) => (
+                    true,
+                    false,
+                    Some(now + std::time::Duration::from_secs(seconds)),
+                    ForegroundAction::None,
+                ),
+                BackgroundSupport::Never => (true, false, None, ForegroundAction::None),
+            };
         self.in_flight_tool_execution_modes.insert(
             pending.invocation.id.clone(),
             InFlightToolInvocation {
                 conversation_id: pending.conversation_id.clone(),
                 execution_mode: pending.execution_mode,
+                foreground_pending,
+                backgrounded,
+                foreground_deadline,
             },
         );
+        action
     }
 
     fn next_dispatchable_index(&self) -> Option<usize> {
@@ -216,6 +334,7 @@ impl ToolTurnMachine {
             .values()
             .any(|in_flight| {
                 &in_flight.conversation_id == conversation_id
+                    && in_flight.foreground_pending
                     && matches!(in_flight.execution_mode, ToolExecutionMode::Exclusive)
             })
     }
@@ -223,7 +342,7 @@ impl ToolTurnMachine {
 
 #[cfg(test)]
 mod tests {
-    use tau_proto::{CborValue, ToolExecutionMode};
+    use tau_proto::{BackgroundSupport, CborValue, ToolExecutionMode};
 
     use super::*;
 
@@ -247,13 +366,13 @@ mod tests {
         id: &str,
         mode: ToolExecutionMode,
     ) {
-        machine.push(cid.clone(), call(id), mode);
+        machine.push(cid.clone(), call(id), mode, BackgroundSupport::Never);
     }
 
     fn pop_id(machine: &mut ToolTurnMachine) -> Option<String> {
         machine
-            .pop_dispatchable()
-            .map(|pending| pending.invocation.id.as_str().to_owned())
+            .pop_dispatchable(Instant::now())
+            .map(|(pending, _)| pending.invocation.id.as_str().to_owned())
     }
 
     #[test]
@@ -407,5 +526,110 @@ mod tests {
         assert_eq!(pop_id(&mut machine), None);
         machine.mark_complete(&ToolCallId::from("shared-b"));
         assert_eq!(pop_id(&mut machine).as_deref(), Some("exclusive"));
+    }
+
+    /// Instant background support closes the foreground at dispatch time while
+    /// keeping the actual tool call tracked until its real result arrives.
+    #[test]
+    fn instant_background_completes_foreground_but_remains_running() {
+        let mut machine = ToolTurnMachine::default();
+        let conv = cid("conv");
+        machine.push(
+            conv.clone(),
+            call("bg"),
+            ToolExecutionMode::Exclusive,
+            BackgroundSupport::Instant,
+        );
+
+        let (pending, action) = machine.pop_dispatchable(Instant::now()).expect("dispatch");
+        assert_eq!(pending.invocation.id.as_str(), "bg");
+        assert_eq!(
+            action,
+            ForegroundAction::Background {
+                call_id: "bg".into()
+            }
+        );
+        assert!(machine.is_backgrounded(&"bg".into()));
+        assert!(!machine.any_in_flight_for(&conv));
+        assert_eq!(machine.in_flight_len(), 1);
+    }
+
+    /// MinForegroundSeconds uses the dispatch instant as the start time. The
+    /// harness event loop can sleep until `next_background_deadline` instead of
+    /// polling.
+    #[test]
+    fn min_foreground_deadline_backgrounds_once_when_due() {
+        let mut machine = ToolTurnMachine::default();
+        let conv = cid("conv");
+        let start = Instant::now();
+        machine.push(
+            conv,
+            call("slow"),
+            ToolExecutionMode::Shared,
+            BackgroundSupport::MinForegroundSeconds(5),
+        );
+        let (_, action) = machine.pop_dispatchable(start).expect("dispatch");
+        assert_eq!(action, ForegroundAction::None);
+        assert_eq!(
+            machine.background_due(start + std::time::Duration::from_secs(4)),
+            Vec::<ToolCallId>::new()
+        );
+
+        assert_eq!(
+            machine.background_due(start + std::time::Duration::from_secs(5)),
+            vec![ToolCallId::from("slow")]
+        );
+        assert_eq!(
+            machine.background_due(start + std::time::Duration::from_secs(6)),
+            Vec::<ToolCallId>::new()
+        );
+        assert!(machine.is_backgrounded(&"slow".into()));
+    }
+
+    /// Never preserves old foreground behavior: no deadline is armed and the
+    /// call blocks same-conversation exclusive dispatch until the real result.
+    #[test]
+    fn never_background_has_no_deadline() {
+        let mut machine = ToolTurnMachine::default();
+        let conv = cid("conv");
+        machine.push(
+            conv.clone(),
+            call("never"),
+            ToolExecutionMode::Exclusive,
+            BackgroundSupport::Never,
+        );
+        machine.push(
+            conv,
+            call("behind"),
+            ToolExecutionMode::Shared,
+            BackgroundSupport::Never,
+        );
+        let (_, action) = machine.pop_dispatchable(Instant::now()).expect("dispatch");
+        assert_eq!(action, ForegroundAction::None);
+        assert!(machine.next_background_deadline().is_none());
+        assert_eq!(pop_id(&mut machine), None);
+    }
+
+    /// A late real result removes actual-running state exactly once after the
+    /// foreground was already closed by the synthetic background placeholder.
+    #[test]
+    fn late_background_completion_clears_actual_running_once() {
+        let mut machine = ToolTurnMachine::default();
+        let conv = cid("conv");
+        machine.push(
+            conv,
+            call("late"),
+            ToolExecutionMode::Shared,
+            BackgroundSupport::Instant,
+        );
+        machine.pop_dispatchable(Instant::now()).expect("dispatch");
+        assert!(machine.is_backgrounded(&"late".into()));
+
+        assert_eq!(
+            machine.mark_complete(&"late".into()),
+            Some(ToolExecutionMode::Shared)
+        );
+        assert_eq!(machine.mark_complete(&"late".into()), None);
+        assert!(!machine.is_backgrounded(&"late".into()));
     }
 }

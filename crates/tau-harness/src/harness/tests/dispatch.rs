@@ -154,6 +154,17 @@ fn event_log_contains(h: &Harness, source: &str, matches_event: impl Fn(&Event) 
     false
 }
 
+fn event_log_contains_any_source(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> bool {
+    let mut seq = 0;
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq + 1;
+        if matches_event(&entry.event) {
+            return true;
+        }
+    }
+    false
+}
+
 fn ext_query(query_id: &str, execution_mode: ToolExecutionMode) -> ExtAgentQuery {
     ExtAgentQuery {
         query_id: query_id.to_owned(),
@@ -1564,6 +1575,7 @@ fn tools_drift_invalidates_chain_anchor() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
 
@@ -2560,6 +2572,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
     let cid = h.default_conversation_id.clone();
@@ -2727,6 +2740,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
     let cid = h.default_conversation_id.clone();
@@ -3124,6 +3138,7 @@ fn delegate_ext_agent_query_keeps_tool_choice_auto() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
 
@@ -3298,6 +3313,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
     let websearch_events = connect_test_tool(&mut h, "conn-websearch");
@@ -3312,6 +3328,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
 
@@ -3435,6 +3452,274 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     h.shutdown().expect("shutdown");
 }
 
+/// Background tool completion must survive side-conversation teardown. A
+/// sub-agent can finish after its foreground receives the synthetic background
+/// placeholder while the real tool is still running; the late completion prompt
+/// is transferred to the live parent agent conversation instead of being lost
+/// with the removed side conversation.
+#[test]
+fn background_completion_from_removed_side_conversation_queues_on_parent() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _ = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: ToolName::new("delegate"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
+        },
+    );
+    let _ = connect_test_tool(&mut h, "conn-slow");
+    h.registry.register(
+        "conn-slow",
+        ToolSpec {
+            name: ToolName::new("slow"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            execution_mode: ToolExecutionMode::Shared,
+            background_support: Some(tau_proto::BackgroundSupport::Instant),
+        },
+    );
+
+    let parent_cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &parent_cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), parent_cid.clone());
+    h.publish_for_conversation(
+        &parent_cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "delegate slow work".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: main_spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "delegate-call".into(),
+            name: ToolName::new("delegate"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("main delegate call");
+
+    let mut query = ext_query("q-bg", ToolExecutionMode::Shared);
+    query.tool_call_id = Some("delegate-call".into());
+    h.handle_ext_agent_query("conn-delegate", query)
+        .expect("side query");
+    let side_cid = ext_query_cid(&h, "q-bg").expect("side conversation");
+    let side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
+        .expect("side prompt id");
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: side_spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "slow-call".into(),
+            name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q-bg".to_owned(),
+        },
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("side tool call");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id.as_str() == "slow-call"
+                && matches!(
+                    &result.result,
+                    CborValue::Text(text)
+                        if text == "Tool call `slow-call` is running in the background."
+                )
+    )));
+
+    let followup_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
+        .expect("side follow-up prompt id");
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: followup_spid,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "side answer".to_owned(),
+            }],
+            phase: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q-bg".to_owned(),
+        },
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("finish side conversation");
+    assert!(!h.conversations.contains_key(&side_cid));
+    assert_eq!(h.tool_conversations.get("slow-call"), Some(&parent_cid));
+
+    h.handle_extension_event_inner(
+        "conn-slow",
+        Event::ToolResult(ToolResult {
+            call_id: "slow-call".into(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("real output".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    )
+    .expect("late tool result");
+
+    assert!(event_log_contains(&h, "conn-slow", |event| matches!(
+        event,
+        Event::ToolBackgroundResult(result)
+            if result.call_id.as_str() == "slow-call"
+                && matches!(&result.result, CborValue::Text(text) if text == "real output")
+    )));
+    let parent = h
+        .conversations
+        .get(&parent_cid)
+        .expect("parent conversation remains live");
+    assert!(
+        parent
+            .pending_prompts
+            .iter()
+            .any(|prompt| prompt == "Tool call `slow-call` is complete.")
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A real error arriving after the foreground background placeholder is a
+/// background terminal event, not a second normal tool error. The completion
+/// steering prompt uses the exact agent-visible text promised by the protocol.
+#[test]
+fn background_late_error_is_background_error_and_queues_exact_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _ = connect_test_tool(&mut h, "conn-fail");
+    h.registry.register(
+        "conn-fail",
+        ToolSpec {
+            name: ToolName::new("fail"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            execution_mode: ToolExecutionMode::Shared,
+            background_support: Some(tau_proto::BackgroundSupport::Instant),
+        },
+    );
+
+    let cid = h.default_conversation_id.clone();
+    let spid: SessionPromptId = "sp-bg-error".into();
+    seed_agent_thinking(&mut h, &cid, "sp-bg-error");
+    h.prompt_conversations.insert(spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "run fail".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "fail-call".into(),
+            name: ToolName::new("fail"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("background tool call");
+
+    h.handle_extension_event_inner(
+        "conn-fail",
+        Event::ToolError(tau_proto::ToolError {
+            call_id: "fail-call".into(),
+            tool_name: ToolName::new("fail"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "late failure".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    )
+    .expect("late tool error");
+
+    assert!(event_log_contains(&h, "conn-fail", |event| matches!(
+        event,
+        Event::ToolBackgroundError(error)
+            if error.call_id.as_str() == "fail-call" && error.message == "late failure"
+    )));
+    assert!(!event_log_contains(&h, "conn-fail", |event| matches!(
+        event,
+        Event::ToolError(error) if error.call_id.as_str() == "fail-call"
+    )));
+    let conv = h
+        .conversations
+        .get(&cid)
+        .expect("conversation remains live");
+    assert!(
+        conv.pending_prompts
+            .iter()
+            .any(|prompt| prompt == "Tool call `fail-call` is complete.")
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Mixed-mode `delegate` calls issued in the same agent turn must still
 /// dispatch to the delegate extension concurrently. The call argument
 /// `execution_mode: "exclusive"` belongs to the `ExtAgentQuery` emitted by the
@@ -3462,6 +3747,7 @@ fn mixed_mode_delegate_calls_dispatch_concurrently_to_ext_scheduler() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
 
@@ -3751,6 +4037,7 @@ fn legacy_read_only_delegate_argument_maps_to_shared_execution_mode() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
 
@@ -3799,6 +4086,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
     let _ = connect_test_tool(&mut h, "conn-mutate");
@@ -3813,6 +4101,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
 
@@ -4014,6 +4303,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
     let _websearch_events = connect_test_tool(&mut h, "conn-websearch");
@@ -4028,6 +4318,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
 
@@ -4250,6 +4541,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
                 format: None,
                 enabled_by_default: false,
                 execution_mode: ToolExecutionMode::Shared,
+                background_support: None,
             },
             prompt_fragment: Some(tau_proto::PromptFragment::new(
                 "allowed_tool.instructions",
@@ -4270,6 +4562,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
                 format: None,
                 enabled_by_default: true,
                 execution_mode: ToolExecutionMode::Shared,
+                background_support: None,
             },
             prompt_fragment: Some(tau_proto::PromptFragment::new(
                 "denied_tool.instructions",
@@ -4494,6 +4787,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
 
@@ -4736,6 +5030,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
 
@@ -4890,6 +5185,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
 
@@ -5038,6 +5334,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
 
@@ -5229,6 +5526,7 @@ fn tool_call_response_preserves_assistant_text_items() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
 
@@ -5307,6 +5605,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
 
@@ -5505,6 +5804,7 @@ fn tool_events_carry_owning_conversation_originator() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
 

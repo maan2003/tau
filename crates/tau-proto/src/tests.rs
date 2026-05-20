@@ -22,6 +22,7 @@ fn representative_events() -> Vec<Event> {
                 format: None,
                 enabled_by_default: true,
                 execution_mode: ToolExecutionMode::Shared,
+                background_support: None,
             },
             prompt_fragment: None,
         }),
@@ -660,6 +661,20 @@ fn tool_spec_defaults_and_execution_mode_compatibility() {
         serde_json::Value::String("shared".to_owned())
     );
     assert!(serialized.get("side_effects").is_none());
+    assert!(serialized.get("background_support").is_none());
+    assert_eq!(parsed.background_support, None);
+
+    let backgrounded: ToolSpec = serde_json::from_value(serde_json::json!({
+        "name": "delegate",
+        "tool_type": "function",
+        "execution_mode": "shared",
+        "background_support": "instant"
+    }))
+    .expect("deserialize background support");
+    assert_eq!(
+        backgrounded.background_support,
+        Some(BackgroundSupport::Instant)
+    );
 
     let disabled = ToolSpec {
         name: ToolName::new("echo"),
@@ -670,6 +685,7 @@ fn tool_spec_defaults_and_execution_mode_compatibility() {
         format: None,
         enabled_by_default: false,
         execution_mode: ToolExecutionMode::Shared,
+        background_support: None,
     };
     let serialized = serde_json::to_value(&disabled).expect("serialize disabled tool spec");
     assert_eq!(
@@ -710,6 +726,7 @@ fn echo_tool_spec() -> ToolSpec {
         format: None,
         enabled_by_default: true,
         execution_mode: ToolExecutionMode::Shared,
+        background_support: None,
     }
 }
 

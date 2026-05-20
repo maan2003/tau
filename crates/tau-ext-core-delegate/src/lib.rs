@@ -9,10 +9,10 @@ use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 
 use tau_proto::{
-    Ack, CborValue, Event, ExtAgentQuery, ExtSessionContextPublish, ExtensionContextReady, Frame,
-    FrameReader, FrameWriter, HarnessRolesAvailable, LogEventId, Message, SessionContextKey,
-    SessionContextValue, SessionStarted, ToolDisplayStats, ToolError, ToolExecutionMode,
-    ToolInvoke, ToolResult, ToolSpec,
+    Ack, BackgroundSupport, CborValue, Event, ExtAgentQuery, ExtSessionContextPublish,
+    ExtensionContextReady, Frame, FrameReader, FrameWriter, HarnessRolesAvailable, LogEventId,
+    Message, SessionContextKey, SessionContextValue, SessionStarted, ToolDisplayStats, ToolError,
+    ToolExecutionMode, ToolInvoke, ToolResult, ToolSpec,
 };
 
 pub const LOG_TARGET: &str = "core-delegate";
@@ -304,6 +304,7 @@ fn tool_spec() -> ToolSpec {
         // tools in the parent conversation; the `ExtAgentQuery` global
         // scheduler below enforces per-delegation exclusivity.
         execution_mode: ToolExecutionMode::Shared,
+        background_support: Some(BackgroundSupport::Instant),
     }
 }
 
@@ -476,6 +477,7 @@ mod tests {
         assert!(properties.contains_key("role"));
         assert!(!properties.contains_key("read_only"));
         assert_eq!(spec.execution_mode, ToolExecutionMode::Shared);
+        assert_eq!(spec.background_support, Some(BackgroundSupport::Instant));
     }
 
     /// Delegate progress should show the size of the user-provided prompt,

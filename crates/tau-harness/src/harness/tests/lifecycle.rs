@@ -526,6 +526,7 @@ fn empty_tool_call_id_rejects_response_before_commit() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     );
     let cid = h.default_conversation_id.clone();

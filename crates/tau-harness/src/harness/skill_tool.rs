@@ -67,6 +67,7 @@ impl Harness {
                 format: None,
                 enabled_by_default: true,
                 execution_mode: tau_proto::ToolExecutionMode::Shared,
+                background_support: None,
             },
         );
     }

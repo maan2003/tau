@@ -74,6 +74,7 @@ where
         format: None,
         enabled_by_default: true,
         execution_mode: ToolExecutionMode::Shared,
+        background_support: None,
     });
     #[cfg(not(any(test, feature = "echo-agent")))]
     let echo_tool: Option<ToolSpec> = None;
@@ -117,6 +118,7 @@ where
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
         ToolSpec {
             name: tau_proto::ToolName::new(WRITE_TOOL_NAME),
@@ -147,6 +149,7 @@ where
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
         ToolSpec {
             name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
@@ -207,6 +210,7 @@ where
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
         ToolSpec {
             name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
@@ -223,6 +227,7 @@ where
             }),
             enabled_by_default: false,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
         ToolSpec {
             name: tau_proto::ToolName::new(GREP_TOOL_NAME),
@@ -272,6 +277,7 @@ where
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
         ToolSpec {
             name: tau_proto::ToolName::new(FIND_TOOL_NAME),
@@ -305,6 +311,7 @@ where
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
         ToolSpec {
             name: tau_proto::ToolName::new(LS_TOOL_NAME),
@@ -331,6 +338,7 @@ where
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
         ToolSpec {
             name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
@@ -371,6 +379,7 @@ where
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
         ToolSpec {
             name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
@@ -409,6 +418,7 @@ where
             format: None,
             enabled_by_default: false,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         },
     ]);
 

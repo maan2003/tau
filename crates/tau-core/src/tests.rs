@@ -313,6 +313,7 @@ fn provider_can_register_tool_and_receive_invocations() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
     assert!(register_report.warnings.is_empty());
@@ -367,6 +368,7 @@ fn duplicate_tool_registrations_warn_but_remain_available() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
     assert!(first_report.warnings.is_empty());
@@ -382,6 +384,7 @@ fn duplicate_tool_registrations_warn_but_remain_available() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
     assert_eq!(second_report.warnings.len(), 1);
@@ -420,6 +423,7 @@ fn disconnect_cleanup_removes_stale_tool_providers() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
     registry.register(
@@ -433,6 +437,7 @@ fn disconnect_cleanup_removes_stale_tool_providers() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
     registry.register(
@@ -446,6 +451,7 @@ fn disconnect_cleanup_removes_stale_tool_providers() {
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
         },
     );
 
@@ -481,6 +487,7 @@ fn re_registering_tool_without_fragment_clears_previous_prompt_fragment() {
         format: None,
         enabled_by_default: true,
         execution_mode: ToolExecutionMode::Shared,
+        background_support: None,
     };
 
     registry.register_with_prompt_fragment(
@@ -532,6 +539,7 @@ fn register_events_map_cleanly_to_registry_state() {
                 format: None,
                 enabled_by_default: true,
                 execution_mode: ToolExecutionMode::Shared,
+                background_support: None,
             },
             prompt_fragment: None,
         }

@@ -194,6 +194,10 @@ impl EventName {
     pub const TOOL_INVOKE: Self = Self::from_static(EventCategory::Tool, "invoke");
     pub const TOOL_RESULT: Self = Self::from_static(EventCategory::Tool, "result");
     pub const TOOL_ERROR: Self = Self::from_static(EventCategory::Tool, "error");
+    pub const TOOL_BACKGROUND_RESULT: Self =
+        Self::from_static(EventCategory::Tool, "background_result");
+    pub const TOOL_BACKGROUND_ERROR: Self =
+        Self::from_static(EventCategory::Tool, "background_error");
     pub const TOOL_PROGRESS: Self = Self::from_static(EventCategory::Tool, "progress");
     pub const TOOL_CANCEL: Self = Self::from_static(EventCategory::Tool, "cancel");
     pub const TOOL_CANCELLED: Self = Self::from_static(EventCategory::Tool, "cancelled");
@@ -1261,6 +1265,12 @@ pub struct ToolSpec {
     /// haven't been updated don't silently lose ordering.
     #[serde(default, alias = "side_effects")]
     pub execution_mode: ToolExecutionMode,
+    /// Whether the harness may close the model-visible foreground turn before
+    /// the real tool process has returned. `None` means the harness applies its
+    /// default policy, currently
+    /// [`BackgroundSupport::MinForegroundSeconds`]`(5)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_support: Option<BackgroundSupport>,
 }
 
 const fn tool_enabled_by_default() -> bool {
@@ -1292,6 +1302,26 @@ pub enum ToolExecutionMode {
 /// Backward-compatible name for [`ToolExecutionMode`].
 #[deprecated(note = "use ToolExecutionMode")]
 pub type ToolSideEffects = ToolExecutionMode;
+
+/// Foreground/background policy for a tool call after dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundSupport {
+    /// Close the foreground as soon as the tool is dispatched.
+    Instant,
+    /// Keep the call in the foreground for at least this many seconds.
+    MinForegroundSeconds(u64),
+    /// Never synthesize foreground completion before the real result arrives.
+    Never,
+}
+
+impl BackgroundSupport {
+    /// Effective background support when a tool registration omits the field.
+    #[must_use]
+    pub const fn default_effective() -> Self {
+        Self::MinForegroundSeconds(5)
+    }
+}
 
 /// Per-prompt knob telling the provider whether the model is allowed
 /// to call tools on this turn. Stamped onto every
@@ -1403,6 +1433,36 @@ pub struct ToolError {
     pub display: Option<ToolDisplay>,
     /// Echo of the originating [`ToolRequest::originator`]; see
     /// [`ToolResult::originator`].
+    #[serde(default)]
+    pub originator: PromptOriginator,
+}
+
+/// Real success result for a tool call whose foreground was already completed
+/// with a synthetic background placeholder.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolBackgroundResult {
+    pub call_id: ToolCallId,
+    pub tool_name: ToolName,
+    pub tool_type: ToolType,
+    pub result: CborValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ToolDisplay>,
+    #[serde(default)]
+    pub originator: PromptOriginator,
+}
+
+/// Real error result for a tool call whose foreground was already completed
+/// with a synthetic background placeholder.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolBackgroundError {
+    pub call_id: ToolCallId,
+    pub tool_name: ToolName,
+    pub tool_type: ToolType,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<CborValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ToolDisplay>,
     #[serde(default)]
     pub originator: PromptOriginator,
 }
@@ -2967,6 +3027,10 @@ pub enum Event {
     ToolResult(ToolResult),
     #[serde(rename = "tool.error")]
     ToolError(ToolError),
+    #[serde(rename = "tool.background_result")]
+    ToolBackgroundResult(ToolBackgroundResult),
+    #[serde(rename = "tool.background_error")]
+    ToolBackgroundError(ToolBackgroundError),
     #[serde(rename = "tool.progress")]
     ToolProgress(ToolProgress),
     #[serde(rename = "tool.cancel")]
@@ -3118,6 +3182,8 @@ impl Event {
             Self::ToolInvoke(_) => EventName::TOOL_INVOKE,
             Self::ToolResult(_) => EventName::TOOL_RESULT,
             Self::ToolError(_) => EventName::TOOL_ERROR,
+            Self::ToolBackgroundResult(_) => EventName::TOOL_BACKGROUND_RESULT,
+            Self::ToolBackgroundError(_) => EventName::TOOL_BACKGROUND_ERROR,
             Self::ToolProgress(_) => EventName::TOOL_PROGRESS,
             Self::ToolCancel(_) => EventName::TOOL_CANCEL,
             Self::ToolCancelled(_) => EventName::TOOL_CANCELLED,

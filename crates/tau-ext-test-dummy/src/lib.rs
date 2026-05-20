@@ -104,6 +104,7 @@ where
             format: None,
             enabled_by_default: true,
             execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
         })
         .ready_message("test dummy tools ready")
         .run(&mut writer)?;

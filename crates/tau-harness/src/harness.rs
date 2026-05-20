@@ -13,14 +13,15 @@ use tau_core::{
     PolicyStore, RouteError, SessionStore, SessionStoreError, ToolRegistry, ToolRouteError,
 };
 use tau_proto::{
-    CborValue, ClientKind, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector,
-    ExtensionName, Frame, HarnessContextUsageChanged, HarnessRoleSelected, Message, MessageItem,
-    ModelId, PreviousResponseCandidate, PromptFragment, PromptOriginator,
+    BackgroundSupport, CborValue, ClientKind, ContentPart, ContextItem, ContextRole, Disconnect,
+    Event, EventSelector, ExtensionName, Frame, HarnessContextUsageChanged, HarnessRoleSelected,
+    Message, MessageItem, ModelId, PreviousResponseCandidate, PromptFragment, PromptOriginator,
     ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderResponseFinished, ProviderStopReason,
     ProviderTokenUsage, SessionCompactionRequested, SessionId, SessionPromptCreated,
     SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, SessionPromptRecalled,
-    TokenUsageStats, ToolCallId, ToolCallItem, ToolCancelled, ToolChoice, ToolDefinition,
-    ToolError, ToolName, ToolRequest, ToolType, UiCancelPrompt,
+    TokenUsageStats, ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem,
+    ToolCancelled, ToolChoice, ToolDefinition, ToolError, ToolName, ToolRequest, ToolResult,
+    ToolType, UiCancelPrompt,
 };
 
 use crate::conversation::{Conversation, ConversationId, ConversationTurnState, PendingCancel};
@@ -58,7 +59,7 @@ use crate::prompt::{
     built_in_system_prompt_templates, cbor_map_bool, render_agents_context_message,
 };
 use crate::settings::{Config, load_harness_settings_or_warn};
-use crate::tool_turn::{PendingToolInvocation, ToolTurnMachine};
+use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
 use crate::turn::{PromptSubmission, TurnState};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1902,6 +1903,8 @@ impl Harness {
             Event::ToolRequest(request) => self.session_id_for_tool_call(&request.call_id),
             Event::ToolResult(result) => self.session_id_for_tool_call(&result.call_id),
             Event::ToolError(error) => self.session_id_for_tool_call(&error.call_id),
+            Event::ToolBackgroundResult(result) => self.session_id_for_tool_call(&result.call_id),
+            Event::ToolBackgroundError(error) => self.session_id_for_tool_call(&error.call_id),
             Event::ToolCancelled(cancelled) => self.session_id_for_tool_call(&cancelled.call_id),
             Event::ToolProgress(progress) => self.session_id_for_tool_call(&progress.call_id),
             Event::ShellCommandFinished(finished) => Some(finished.session_id.clone()),
@@ -2028,8 +2031,22 @@ impl Harness {
             if exit_on_disconnect && ever_attached && self.client_writers.is_empty() {
                 break;
             }
-            let Ok(harness_evt) = self.rx.recv() else {
-                break;
+            self.process_background_deadlines();
+            let harness_evt = if let Some(deadline) = self.tool_turn.next_background_deadline() {
+                let timeout = deadline.saturating_duration_since(Instant::now());
+                match self.rx.recv_timeout(timeout) {
+                    Ok(event) => event,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        self.process_background_deadlines();
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                let Ok(event) = self.rx.recv() else {
+                    break;
+                };
+                event
             };
             self.log_event(&harness_evt);
             match harness_evt {
@@ -2313,7 +2330,9 @@ impl Harness {
                 }
             }
             Event::ToolResult(mut result) => {
-                if let Some(cid) = self.tool_conversations.get(&result.call_id).cloned() {
+                if self.tool_turn.is_backgrounded(&result.call_id) {
+                    self.handle_background_tool_result(source_id, result);
+                } else if let Some(cid) = self.tool_conversations.get(&result.call_id).cloned() {
                     let call_id = result.call_id.to_string();
                     if let Some(tool) = self.pending_tools.get(&result.call_id) {
                         result.tool_name = tool.name.clone();
@@ -2346,7 +2365,9 @@ impl Harness {
                 }
             }
             Event::ToolError(mut error) => {
-                if let Some(cid) = self.tool_conversations.get(&error.call_id).cloned() {
+                if self.tool_turn.is_backgrounded(&error.call_id) {
+                    self.handle_background_tool_error(source_id, error);
+                } else if let Some(cid) = self.tool_conversations.get(&error.call_id).cloned() {
                     let call_id = error.call_id.to_string();
                     if let Some(tool) = self.pending_tools.get(&error.call_id) {
                         error.tool_name = tool.name.clone();
@@ -3018,6 +3039,29 @@ impl Harness {
                 display: None,
                 originator: tau_proto::PromptOriginator::User,
             };
+            if self.tool_turn.is_backgrounded(&call_id) {
+                if let Some(cid) = self.tool_conversations.get(call_id.as_str()).cloned() {
+                    self.tool_turn.mark_complete(&call_id);
+                    self.publish_for_conversation(
+                        &cid,
+                        Event::ToolBackgroundError(ToolBackgroundError {
+                            call_id: error.call_id,
+                            tool_name: error.tool_name,
+                            tool_type: error.tool_type,
+                            message: error.message,
+                            details: error.details,
+                            display: error.display,
+                            originator: error.originator,
+                        }),
+                    );
+                    self.queue_background_completion_prompt(&cid, &call_id);
+                } else {
+                    self.publish_event(None, Event::ToolError(error));
+                }
+                self.clear_tool_call_tracking(call_id.as_str());
+                continue;
+            }
+
             // Publish on the owning conversation's branch so the
             // synthesized failure folds onto the right node. Without
             // the snap, sibling side conversations could leave
@@ -5511,14 +5555,20 @@ impl Harness {
             ) && conv.parent_tool_call_id.is_none()
         });
 
-        let mut normalized_calls: Vec<(AgentToolCall, tau_proto::ToolExecutionMode)> = Vec::new();
+        let mut normalized_calls: Vec<(
+            AgentToolCall,
+            tau_proto::ToolExecutionMode,
+            BackgroundSupport,
+        )> = Vec::new();
         if requested_tool_calls {
             normalized_calls = tool_calls
                 .iter()
                 .map(|call| {
                     let call = call.clone();
                     let mode = self.resolve_tool_execution_mode_for_call(&call);
-                    (call, mode)
+                    let background_support =
+                        self.resolve_tool_background_support(call.name.as_str());
+                    (call, mode, background_support)
                 })
                 .collect();
             let mut normalized_calls_iter = normalized_calls.iter();
@@ -5527,7 +5577,7 @@ impl Harness {
                 .into_iter()
                 .map(|item| match item {
                     ContextItem::ToolCall(_) => {
-                        let (call, _) = normalized_calls_iter
+                        let (call, _, _) = normalized_calls_iter
                             .next()
                             .expect("tool-call normalization count should match output items");
                         ContextItem::ToolCall(ToolCallItem {
@@ -5542,7 +5592,7 @@ impl Harness {
                 .collect();
             tool_calls = normalized_calls
                 .iter()
-                .map(|(call, _)| call.clone())
+                .map(|(call, _, _)| call.clone())
                 .collect();
         }
 
@@ -5654,6 +5704,7 @@ impl Harness {
             // local head so the user's next interactive prompt
             // continues on the main branch instead of the side branch.
             self.snap_to_default_conversation();
+            self.transfer_background_completion_target_before_teardown(&cid);
             self.conversations.remove(&cid);
             self.release_ext_agent_query(&cid);
             self.try_advance_queue();
@@ -5678,9 +5729,9 @@ impl Harness {
             // `input[N].call_id: empty string`. Fix it at the boundary.
             let remaining_calls: Vec<ToolCallId> = normalized_calls
                 .iter()
-                .map(|(call, _)| call.id.clone())
+                .map(|(call, _, _)| call.id.clone())
                 .collect();
-            for (call, _) in &normalized_calls {
+            for (call, _, _) in &normalized_calls {
                 self.pending_tools.insert(
                     call.id.clone(),
                     PendingTool {
@@ -5703,8 +5754,9 @@ impl Harness {
             // Enqueue in the order the agent emitted them. Dispatch is
             // done by `drain_pending_tool_invocations`, which respects
             // the shared/exclusive ordering rule.
-            for (call, mode) in normalized_calls {
-                self.tool_turn.push(cid.clone(), call, mode);
+            for (call, mode, background_support) in normalized_calls {
+                self.tool_turn
+                    .push(cid.clone(), call, mode, background_support);
             }
             self.drain_pending_tool_invocations()?;
         } else {
@@ -5808,6 +5860,16 @@ impl Harness {
             .unwrap_or(tau_proto::ToolExecutionMode::Exclusive)
     }
 
+    /// Returns the effective foreground/background support for a tool name.
+    /// Missing registration metadata uses the protocol default of
+    /// `MinForegroundSeconds(5)`.
+    fn resolve_tool_background_support(&self, name: &str) -> BackgroundSupport {
+        self.registry
+            .resolve_provider(name)
+            .and_then(|provider| provider.tool.background_support)
+            .unwrap_or_else(BackgroundSupport::default_effective)
+    }
+
     /// Same as [`resolve_tool_execution_mode`] but keeps legacy per-call
     /// compatibility where needed.
     ///
@@ -5832,11 +5894,15 @@ impl Harness {
 
     /// Drain scheduler-selected tool invocations into harness side effects.
     fn drain_pending_tool_invocations(&mut self) -> Result<(), HarnessError> {
-        while let Some(PendingToolInvocation {
-            conversation_id,
-            invocation,
-            execution_mode: _,
-        }) = self.tool_turn.pop_dispatchable()
+        while let Some((
+            PendingToolInvocation {
+                conversation_id,
+                invocation,
+                execution_mode: _,
+                background_support: _,
+            },
+            foreground_action,
+        )) = self.tool_turn.pop_dispatchable(Instant::now())
         {
             let call_id = invocation.id.clone();
             // If dispatch fails synchronously, roll back the in-flight
@@ -5846,8 +5912,167 @@ impl Harness {
                 self.tool_turn.rollback_dispatch(&call_id);
                 return Err(error);
             }
+            self.apply_foreground_action(foreground_action);
         }
         Ok(())
+    }
+
+    fn apply_foreground_action(&mut self, action: ForegroundAction) {
+        match action {
+            ForegroundAction::None => {}
+            ForegroundAction::Background { call_id } => {
+                self.publish_synthetic_background_result(&call_id);
+                self.on_tool_call_foreground_complete(call_id.as_str());
+            }
+        }
+    }
+
+    fn publish_synthetic_background_result(&mut self, call_id: &ToolCallId) {
+        let Some(cid) = self.tool_conversations.get(call_id).cloned() else {
+            return;
+        };
+        let Some(tool) = self.pending_tools.get(call_id).cloned() else {
+            return;
+        };
+        let content = format!("Tool call `{call_id}` is running in the background.");
+        self.publish_for_conversation(
+            &cid,
+            Event::ToolResult(ToolResult {
+                call_id: call_id.clone(),
+                tool_name: tool.name,
+                tool_type: tool.tool_type,
+                result: CborValue::Text(content),
+                display: None,
+                originator: PromptOriginator::User,
+            }),
+        );
+    }
+
+    fn process_background_deadlines(&mut self) {
+        for call_id in self.tool_turn.background_due(Instant::now()) {
+            self.publish_synthetic_background_result(&call_id);
+            self.on_tool_call_foreground_complete(call_id.as_str());
+        }
+    }
+
+    fn on_tool_call_foreground_complete(&mut self, call_id: &str) {
+        let owner = self.tool_conversations.get(call_id).cloned();
+        if let Some(cid) = owner.as_ref()
+            && let Some(conv) = self.conversations.get_mut(cid)
+        {
+            conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
+        }
+        if let Some(cid) = owner {
+            self.emit_delegate_progress(&cid);
+        }
+        if let Err(error) = self.drain_pending_tool_invocations() {
+            self.emit_info(&format!("queued tool dispatch failed: {error}"));
+        }
+        self.maybe_complete_agent_turn(call_id);
+        self.try_advance_queue();
+    }
+
+    fn handle_background_tool_result(&mut self, source_id: &str, mut result: ToolResult) {
+        let Some(cid) = self.tool_conversations.get(&result.call_id).cloned() else {
+            return;
+        };
+        let call_id = result.call_id.clone();
+        if let Some(tool) = self.pending_tools.get(&result.call_id) {
+            result.tool_name = tool.name.clone();
+            result.tool_type = tool.tool_type;
+        }
+        self.tool_turn.mark_complete(&call_id);
+        self.publish_for_conversation_from(
+            &cid,
+            Some(source_id),
+            Event::ToolBackgroundResult(ToolBackgroundResult {
+                call_id: result.call_id,
+                tool_name: result.tool_name,
+                tool_type: result.tool_type,
+                result: result.result,
+                display: result.display,
+                originator: result.originator,
+            }),
+        );
+        self.queue_background_completion_prompt(&cid, &call_id);
+        self.clear_tool_call_tracking(call_id.as_str());
+    }
+
+    fn handle_background_tool_error(&mut self, source_id: &str, mut error: ToolError) {
+        let Some(cid) = self.tool_conversations.get(&error.call_id).cloned() else {
+            return;
+        };
+        let call_id = error.call_id.clone();
+        if let Some(tool) = self.pending_tools.get(&error.call_id) {
+            error.tool_name = tool.name.clone();
+            error.tool_type = tool.tool_type;
+        }
+        self.tool_turn.mark_complete(&call_id);
+        self.publish_for_conversation_from(
+            &cid,
+            Some(source_id),
+            Event::ToolBackgroundError(ToolBackgroundError {
+                call_id: error.call_id,
+                tool_name: error.tool_name,
+                tool_type: error.tool_type,
+                message: error.message,
+                details: error.details,
+                display: error.display,
+                originator: error.originator,
+            }),
+        );
+        self.queue_background_completion_prompt(&cid, &call_id);
+        self.clear_tool_call_tracking(call_id.as_str());
+    }
+
+    fn queue_background_completion_prompt(&mut self, cid: &ConversationId, call_id: &ToolCallId) {
+        if let Some(conv) = self.conversations.get_mut(cid) {
+            conv.pending_prompts
+                .push_back(format!("Tool call `{call_id}` is complete."));
+        }
+        self.try_advance_queue();
+    }
+
+    fn transfer_background_completion_target_before_teardown(&mut self, cid: &ConversationId) {
+        let backgrounded_calls = self.tool_turn.backgrounded_calls_for(cid);
+        if backgrounded_calls.is_empty() {
+            return;
+        }
+        let Some(target_cid) = self.background_completion_teardown_target(cid) else {
+            return;
+        };
+        for call_id in backgrounded_calls {
+            if self.tool_conversations.get(&call_id) == Some(cid) {
+                self.tool_conversations.insert(call_id, target_cid.clone());
+            }
+        }
+    }
+
+    fn background_completion_teardown_target(
+        &self,
+        cid: &ConversationId,
+    ) -> Option<ConversationId> {
+        let conv = self.conversations.get(cid)?;
+        if let Some(parent_call_id) = &conv.parent_tool_call_id
+            && let Some(parent_cid) = self.tool_conversations.get(parent_call_id)
+            && parent_cid != cid
+            && self.conversations.contains_key(parent_cid)
+        {
+            return Some(parent_cid.clone());
+        }
+        if self.default_conversation_id != *cid
+            && self
+                .conversations
+                .contains_key(&self.default_conversation_id)
+        {
+            return Some(self.default_conversation_id.clone());
+        }
+        self.conversations
+            .iter()
+            .find_map(|(candidate_cid, candidate)| {
+                (candidate_cid != cid && candidate.session_id == conv.session_id)
+                    .then_some(candidate_cid.clone())
+            })
     }
 
     /// Hook called whenever a tool call has finished (result, error,
@@ -6104,13 +6329,30 @@ impl Harness {
         let started_at = Instant::now();
         let mut progress_messages = Vec::new();
         loop {
+            self.process_background_deadlines();
             let remaining = RESPONSE_TIMEOUT
                 .checked_sub(started_at.elapsed())
                 .unwrap_or(Duration::ZERO);
-            let harness_evt = self
-                .rx
-                .recv_timeout(remaining)
-                .map_err(|_| HarnessError::ResponseTimeout)?;
+            let wait = self
+                .tool_turn
+                .next_background_deadline()
+                .map(|deadline| {
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(remaining)
+                })
+                .unwrap_or(remaining);
+            let harness_evt = match self.rx.recv_timeout(wait) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if started_at.elapsed() < RESPONSE_TIMEOUT
+                        && self.tool_turn.next_background_deadline().is_some() =>
+                {
+                    self.process_background_deadlines();
+                    continue;
+                }
+                Err(_) => return Err(HarnessError::ResponseTimeout),
+            };
             self.log_event(&harness_evt);
             match harness_evt {
                 HarnessEvent::FromConnection {
@@ -6549,6 +6791,14 @@ fn stamp_tool_event_originator(event: Event, originator: tau_proto::PromptOrigin
         Event::ToolError(mut e) => {
             e.originator = originator;
             Event::ToolError(e)
+        }
+        Event::ToolBackgroundResult(mut e) => {
+            e.originator = originator;
+            Event::ToolBackgroundResult(e)
+        }
+        Event::ToolBackgroundError(mut e) => {
+            e.originator = originator;
+            Event::ToolBackgroundError(e)
         }
         other => other,
     }
