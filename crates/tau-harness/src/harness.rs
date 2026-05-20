@@ -5965,7 +5965,8 @@ impl Harness {
         let Some(tool) = self.pending_tools.get(call_id).cloned() else {
             return;
         };
-        let content = format!("Tool call `{call_id}` is running in the background.");
+        let content =
+            format!("tau_internal: true\n\nTool call `{call_id}` is running in the background.");
         self.publish_for_conversation(
             &cid,
             Event::ToolResult(ToolResult {

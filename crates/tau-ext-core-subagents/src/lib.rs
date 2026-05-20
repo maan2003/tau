@@ -824,7 +824,7 @@ fn wait_tool_spec() -> ToolSpec {
         name: tau_proto::ToolName::new(WAIT_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Wait for a backgrounded tool call by `tool_call_id` and return its completed result. Only tool invocations that were put in the background should be waited for. Prefer responding to the user that you will wait for completion instead of calling `wait` immediately; Tau will wake you when the background tool is done. Only call `wait` when you need the exact result in the current turn."
+            "Wait for a tool call by `tool_call_id` and return its completed result. Intended for backgrounded calls, but also supports in-flight foreground calls if you already have their id. Prefer responding to the user that you will wait for background completion instead of calling `wait` immediately; Tau will wake you when the background tool is done. Only call `wait` when you need the exact result in the current turn."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,

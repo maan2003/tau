@@ -75,11 +75,14 @@ the same semantics. The meaning of the line prefix is different: line number vs 
 
 `shell` tool will add `duration_seconds: {number}` header for commands that took longer
 than 5s to execute. Whole-second precision is acceptable; finer precision is
-not needed.
+not needed. Reported durations are approximate, and can include overheads and
+latencies of internal components.
 
-`shell` tool should reliably timeout operations that take longer than timeout argument,
-but currently 100% reliable child process termination is not implemented and will
-require advanced techniques to implement in the future (e.g. cgroups).
+`shell` tool should return non-zero exits and timeouts as structured command
+results with output details, not as tool invocation errors. It should reliably
+timeout operations that take longer than timeout argument, but currently 100%
+reliable child process termination is not implemented and will require advanced
+techniques to implement in the future (e.g. cgroups).
 
 `edit` tool produces unified-diff like output for edits made in the payload, and
 allows at most 100 replacements per call, to limit amount of output it produces.
@@ -105,6 +108,8 @@ standard tools.
 Some tools can run in the background. The agent first receives a synthetic tool result with `kind: background_placeholder` saying:
 
 ```
+tau_internal: true
+
 Tool call `<tool_call_id>` is running in the background.
 ```
 
@@ -114,7 +119,7 @@ When the real tool finishes, Tau injects an internal, UI-hidden prompt saying:
 [tau-internal] Tool call `<tool_call_id>` is complete.
 ```
 
-The agent can then call `wait` with `tool_call_id` to collect the real result. Only tool invocations that were put in the background should be waited for. Prefer telling the user that you will wait for background completion instead of calling `wait` immediately; Tau will wake the agent when the tool is done anyway. If `wait` is used for a backgrounded call, Tau suppresses that internal completion prompt while still emitting the real background result/error event.
+The agent can then call `wait` with `tool_call_id` to collect the real result. `wait` is intended for backgrounded calls, but can also wait on a foreground call that is still in flight if the agent already has its call id. Do not call `wait` for such foreground calls in normal use; it wastes tokens compared to letting the tool call finish normally. Prefer telling the user that you will wait for background completion instead of calling `wait` immediately; Tau will wake the agent when the tool is done anyway. If `wait` is used for a backgrounded call, Tau suppresses that internal completion prompt while still emitting the real background result/error event.
 
 Current background timing: most tools background after about 5 seconds, `delegate` backgrounds instantly, and `wait` itself never backgrounds. This may change; when verifying, report if observed behavior differs.
 

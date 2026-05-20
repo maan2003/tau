@@ -385,14 +385,15 @@ where
             name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
             model_visible_name: Some(tau_proto::ToolName::new("shell_command")),
             description: Some(
-                "Run a shell command. Non-zero exits and timeouts are tool errors \
-                 with output details. Output is capped at 2000 lines / 50 KB; truncated \
-                 output keeps the first 1000 and last 1000 lines separated by `...`. \
+                "Run a shell command. Non-zero exits and timeouts are returned as structured \
+                 command results with output details. Output is capped at 2000 lines / 50 KB; \
+                 truncated output keeps the first 1000 and last 1000 lines separated by `...`. \
                  Output lines are prefixed with `out ` for stdout or `err ` for stderr; missing \
                  trailing newlines are marked with `(no_nl)`. Invalid UTF-8 and lines that \
                  would exceed the 50 KB output budget are marker-only. Truncated results \
                  include `truncated: true`, `total_lines`, and `total_bytes`. Commands taking \
-                 longer than 5 seconds include duration metadata. For file changes, prefer apply_patch."
+                 longer than 5 seconds include approximate duration metadata. For file changes, \
+                 prefer apply_patch."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
