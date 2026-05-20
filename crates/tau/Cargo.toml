@@ -1,5 +1,6 @@
 [package]
 name = "tau"
+default-run = "tau"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
