@@ -73,19 +73,13 @@ impl Harness {
                 ctx_id: None,
             }),
         );
-        if self.pending_intercept.is_some() || !self.deferred_publishes.is_empty() {
-            // Publish parked in interception (or queued behind one
-            // that is). Defer the agent dispatch until the user-
-            // prompt event actually commits — see
-            // `react_to_committed_event` for the drain.
-            self.pending_user_prompt_dispatches.push_back(cid.clone());
-        } else {
-            // Publish committed inline. Safe to dispatch the agent
-            // prompt now: the SessionTree already reflects the new
-            // user message, so the message list assembled inside
-            // `send_prompt_to_agent_for` will include it.
-            self.send_prompt_to_agent_for(cid);
-        }
+        // If the publish parked in interception (or queued behind one
+        // that is), defer the agent dispatch until this user-prompt
+        // event actually commits. If it committed inline, the helper
+        // dispatches now: the SessionTree already reflects the new
+        // user message, so the message list assembled inside
+        // `send_prompt_to_agent_for` will include it.
+        self.dispatch_prompt_after_user_message_publish(cid);
         Ok(())
     }
 
@@ -142,9 +136,10 @@ impl Harness {
     pub(crate) fn next_runnable_conversation(&self) -> Option<ConversationId> {
         self.conversations
             .iter()
-            .find(|(_, conv)| {
+            .find(|(cid, conv)| {
                 !conv.pending_prompts.is_empty()
                     && matches!(conv.turn_state, ConversationTurnState::Idle)
+                    && !self.has_deferred_prompt_dispatch_for(cid)
             })
             .map(|(cid, _)| cid.clone())
     }
@@ -153,8 +148,9 @@ impl Harness {
     /// immediately. Two layers of gating:
     /// - global: selected role has no resolved model, harness mid-init,
     ///   extensions not yet `Ready`;
-    /// - per-conversation: that conversation already has a prompt in flight or
-    ///   is waiting on tool results.
+    /// - per-conversation: that conversation already has a prompt in flight, is
+    ///   waiting on tool results, or has a latent dispatch parked behind
+    ///   interception.
     pub(crate) fn dispatch_blocked_for(&self, cid: &ConversationId) -> bool {
         if self.selected_model.is_none()
             || !self.turn_state.is_idle()
@@ -163,7 +159,10 @@ impl Harness {
             return true;
         }
         match self.conversations.get(cid) {
-            Some(conv) => !matches!(conv.turn_state, ConversationTurnState::Idle),
+            Some(conv) => {
+                !matches!(conv.turn_state, ConversationTurnState::Idle)
+                    || self.has_deferred_prompt_dispatch_for(cid)
+            }
             None => true,
         }
     }

@@ -2389,6 +2389,77 @@ fn manual_compact_forces_compaction_without_followup_turn() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression for the deferred-dispatch gate: `SessionCompactionStarted`
+/// is not a user-message event, so a compaction summary prompt parked
+/// behind interception must wait for publish-idle, not for the next
+/// user-message fold that may never come.
+#[test]
+fn intercepted_compaction_started_dispatches_summary_after_publish_idle() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+
+    let _interceptor_events = connect_test_tool(&mut h, "conn-interceptor");
+    h.interceptors.replace_for_connection(
+        "conn-interceptor",
+        tau_proto::ExtensionName::from("test-interceptor"),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::SESSION_COMPACTION_STARTED,
+        )],
+        InterceptionPriority::new(0),
+    );
+
+    let cid = h.default_conversation_id.clone();
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "earlier question".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    h.current_session_state.context_input_tokens = Some(950);
+    h.current_session_state.context_percent_used = Some(95);
+
+    h.dispatch_user_prompt("s1".into(), "new question".to_owned())
+        .expect("dispatch");
+
+    assert_eq!(h.pending_compactions.len(), 1);
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert!(
+        h.prompt_conversations.is_empty(),
+        "summary prompt must not dispatch until the intercepted start event commits",
+    );
+
+    h.handle_intercept_reply(
+        "conn-interceptor",
+        InterceptReply {
+            action: InterceptAction::Pass(None),
+        },
+    );
+
+    assert!(h.pending_user_prompt_dispatches.is_empty());
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    let (summary_cid, summary_spid) = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| {
+            (prompt_cid != &cid).then_some((prompt_cid.clone(), spid.clone()))
+        })
+        .expect("compaction prompt");
+    assert!(h.pending_compactions.contains_key(&summary_cid));
+    let summary_prompt = read_compaction_requested(&h, &summary_spid);
+    assert!(matches!(
+        summary_prompt.originator,
+        tau_proto::PromptOriginator::Extension { ref query_id, .. } if query_id == "auto-compact-default"
+    ));
+
+    h.shutdown().expect("shutdown");
+}
+
 fn enable_remote_compaction_for_test_model(h: &mut Harness) {
     h.selected_model = Some("test/model".into());
     h.provider_model_info.insert(

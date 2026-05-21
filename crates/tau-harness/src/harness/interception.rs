@@ -26,6 +26,15 @@ use tau_proto::{
 use crate::conversation::ConversationId;
 use crate::harness::Harness;
 
+/// Condition that must become true before a parked prompt dispatch is safe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromptDispatchGate {
+    /// The publish that carries this prompt's own user message must commit.
+    UserMessageCommit,
+    /// All currently deferred publishes must drain before the prompt is sent.
+    PublishIdle,
+}
+
 /// Snapshot of a publish that's currently waiting on an interceptor's
 /// reply. The harness stops draining further publishes while one of
 /// these is alive so the persisted log order matches publish order.
@@ -232,6 +241,64 @@ impl InterceptorRegistry {
 }
 
 impl Harness {
+    /// True when no event is parked in interception and no publish is
+    /// queued behind one.
+    fn publish_chain_is_idle(&self) -> bool {
+        self.pending_intercept.is_none() && self.deferred_publishes.is_empty()
+    }
+
+    /// True when `cid` already has a prompt dispatch waiting for a
+    /// publish/interception condition.
+    pub(crate) fn has_deferred_prompt_dispatch_for(&self, cid: &ConversationId) -> bool {
+        self.pending_user_prompt_dispatches
+            .iter()
+            .any(|queued| queued == cid)
+            || self
+                .pending_publish_idle_dispatches
+                .iter()
+                .any(|queued| queued == cid)
+    }
+
+    /// Send `cid`'s prompt now if the just-published user-message event
+    /// committed inline; otherwise park it until that event commits.
+    pub(crate) fn dispatch_prompt_after_user_message_publish(&mut self, cid: &ConversationId) {
+        self.dispatch_or_defer_prompt(cid, PromptDispatchGate::UserMessageCommit);
+    }
+
+    /// Send `cid`'s prompt now if the publish chain is idle; otherwise
+    /// park it until interception and deferred publishes fully drain.
+    pub(crate) fn dispatch_prompt_after_publish_idle(&mut self, cid: &ConversationId) {
+        self.dispatch_or_defer_prompt(cid, PromptDispatchGate::PublishIdle);
+    }
+
+    fn dispatch_or_defer_prompt(&mut self, cid: &ConversationId, gate: PromptDispatchGate) {
+        if self.publish_chain_is_idle() {
+            self.send_prompt_to_agent_for(cid);
+            return;
+        }
+        self.defer_prompt_dispatch(cid.clone(), gate);
+    }
+
+    fn defer_prompt_dispatch(&mut self, cid: ConversationId, gate: PromptDispatchGate) {
+        if self.has_deferred_prompt_dispatch_for(&cid) {
+            tracing::debug!(
+                target: "tau_harness::interception",
+                conversation_id = %cid,
+                ?gate,
+                "prompt dispatch already deferred; skipping duplicate",
+            );
+            return;
+        }
+        match gate {
+            PromptDispatchGate::UserMessageCommit => {
+                self.pending_user_prompt_dispatches.push_back(cid);
+            }
+            PromptDispatchGate::PublishIdle => {
+                self.pending_publish_idle_dispatches.push_back(cid);
+            }
+        }
+    }
+
     /// Entry point for any publish call. Defers if interception is
     /// in flight; otherwise drives the publish through the
     /// interception chain and into the bus.
@@ -449,7 +516,7 @@ impl Harness {
     }
 
     fn drain_publish_idle_dispatches(&mut self) {
-        while self.pending_intercept.is_none() && self.deferred_publishes.is_empty() {
+        while self.publish_chain_is_idle() {
             let Some(cid) = self.pending_publish_idle_dispatches.pop_front() else {
                 break;
             };

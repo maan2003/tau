@@ -612,12 +612,14 @@ pub(crate) struct Harness {
     /// user-message-bearing event commits — that's when the
     /// `SessionTree` reflects the prompt and the assembled message
     /// list will actually contain it. Without this, the agent
-    /// receives a stale message list (the "Ready" loop bug).
+    /// receives a stale message list (the "Ready" loop bug). Owned by
+    /// the defer/dispatch helpers in `harness::interception`.
     pub(crate) pending_user_prompt_dispatches: VecDeque<ConversationId>,
     /// Conversations whose next agent prompt is ready except that an
     /// unrelated publish is still parked in the interception chain.
     /// These do not wait for another user-message fold; they drain
-    /// once interception and deferred publishes are idle.
+    /// once interception and deferred publishes are idle. Owned by the
+    /// defer/dispatch helpers in `harness::interception`.
     pub(crate) pending_publish_idle_dispatches: VecDeque<ConversationId>,
     /// All available models.
     pub(crate) available_models: Vec<ModelId>,
@@ -3882,10 +3884,8 @@ impl Harness {
         // interceptor replies — running `send_prompt_to_agent_for`
         // synchronously then would assemble messages from a still-`None`
         // `conv.head` and the agent would call the provider with an
-        // empty `input`. Mirror `dispatch_prompt_for_conversation`'s
-        // pattern: when the publish defers, queue the side conversation
-        // on `pending_user_prompt_dispatches` so `react_to_committed_event`
-        // dispatches it after the UserMessage actually folds.
+        // empty `input`. Use the user-message gate so dispatch happens
+        // only after this side conversation's instruction actually folds.
         self.publish_for_conversation(
             &cid,
             Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
@@ -3899,11 +3899,7 @@ impl Harness {
                 ctx_id: None,
             }),
         );
-        if self.pending_intercept.is_some() || !self.deferred_publishes.is_empty() {
-            self.pending_user_prompt_dispatches.push_back(cid);
-        } else {
-            self.send_prompt_to_agent_for(&cid);
-        }
+        self.dispatch_prompt_after_user_message_publish(&cid);
         Ok(())
     }
 
@@ -4376,11 +4372,7 @@ impl Harness {
                 original_input_tokens,
             }),
         );
-        if self.pending_intercept.is_some() || !self.deferred_publishes.is_empty() {
-            self.pending_user_prompt_dispatches.push_back(summary_cid);
-        } else {
-            self.send_prompt_to_agent_for(&summary_cid);
-        }
+        self.dispatch_prompt_after_publish_idle(&summary_cid);
     }
 
     /// Queue a prompt when it cannot be sent directly yet, or dispatch
@@ -6335,17 +6327,10 @@ impl Harness {
             // If folding the steered prompts parked any of them in
             // interception (e.g. an extension intercepting
             // `session.prompt_steered`), defer the agent dispatch
-            // until they commit — same pattern as
-            // `dispatch_prompt_for_conversation`. Without this, the
-            // next-round `SessionPromptCreated` would assemble its
-            // message list from a stale `c.head`. When no
-            // interceptor matched, the publishes committed inline
-            // and we can dispatch immediately.
-            if self.pending_intercept.is_some() || !self.deferred_publishes.is_empty() {
-                self.pending_publish_idle_dispatches.push_back(cid.clone());
-            } else {
-                self.send_prompt_to_agent_for(&cid);
-            }
+            // until the whole publish chain drains. Waiting for only
+            // one user-message commit is not enough when several
+            // steered prompts are queued behind one interceptor.
+            self.dispatch_prompt_after_publish_idle(&cid);
         }
     }
 

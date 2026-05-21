@@ -240,6 +240,27 @@ fn intercepted_harness_delegate_dispatches_side_before_parent_followup() {
         "no follow-up prompt should dispatch while the side prompt is intercepted",
     );
 
+    // While the parent follow-up is parked behind the side prompt's
+    // interception, the parent conversation must not look dispatchable.
+    // A fresh user prompt should queue behind the latent parent follow-up
+    // instead of creating a second in-flight default prompt.
+    let submission = h
+        .submit_user_prompt("s1".into(), "queued behind follow-up".to_owned())
+        .expect("submit while parent follow-up deferred");
+    assert_eq!(submission, PromptSubmission::Queued);
+    assert!(
+        h.conversations[&cid]
+            .pending_prompts
+            .iter()
+            .any(|prompt| prompt == "queued behind follow-up")
+    );
+    assert!(
+        h.prompt_conversations
+            .iter()
+            .all(|(_, prompt_cid)| prompt_cid == &cid),
+        "queued user prompt must not dispatch before the latent follow-up",
+    );
+
     h.handle_intercept_reply(
         "conn-interceptor",
         InterceptReply {
@@ -261,6 +282,8 @@ fn intercepted_harness_delegate_dispatches_side_before_parent_followup() {
         side_prompt.originator,
         tau_proto::PromptOriginator::Extension { ref query_id, .. } if query_id == "delegate-0"
     ));
+    assert!(h.pending_user_prompt_dispatches.is_empty());
+    assert!(h.pending_publish_idle_dispatches.is_empty());
 
     h.shutdown().expect("shutdown");
 }
