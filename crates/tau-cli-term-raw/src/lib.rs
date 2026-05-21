@@ -574,8 +574,8 @@ fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
 
 /// High-level events surfaced to the downstream event loop.
 pub enum Event {
-    /// The user submitted a line with Ctrl-Enter outside the
-    /// completion menu, or with no candidate selected.
+    /// The user submitted a line with Ctrl-Enter or `submit-prompt`
+    /// outside the completion menu, or with no candidate selected.
     Line(String),
     /// The user signalled EOF (Ctrl-D on empty line).
     Eof,
@@ -1353,6 +1353,23 @@ impl Term {
     pub fn record_prompt_undo(&self) {
         let mut st = self.handle.lock();
         st.record_undo();
+    }
+
+    /// Programmatically inserts a newline into the prompt.
+    ///
+    /// This is the same editing operation as unbound `Enter`,
+    /// `Shift-Enter`, or `Alt-Enter`.
+    pub fn trigger_insert_newline(&self) -> Event {
+        self.insert_newline()
+    }
+
+    /// Programmatically submits the prompt or accepts a completion preview.
+    ///
+    /// This is the same operation as unbound `Ctrl-Enter`: if a
+    /// completion candidate is previewed, it is accepted without
+    /// submitting; otherwise the current prompt is submitted.
+    pub fn trigger_submit_or_accept_completion(&self) -> Event {
+        self.submit_or_accept_completion()
     }
 
     /// Programmatically triggers a history step (the same operation

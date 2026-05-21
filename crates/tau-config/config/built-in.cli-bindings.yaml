@@ -2,8 +2,11 @@
 # `cli.yaml` so unmentioned keys stay bound to these defaults.
 # Keep docs/cli-keybindings.md in sync when changing defaults/actions.
 #
-# `command` is optional — navigation actions like `prompt-previous`
-# and `prompt-next` don't shell out, so they omit it entirely.
+# `command` is optional — prompt actions like `submit-prompt`,
+# `prompt-previous`, and `prompt-next` don't shell out, so they omit
+# it entirely.
+C-Enter:
+  action: submit-prompt
 C-f:
   action: shell-prompt-insert
   command: >-

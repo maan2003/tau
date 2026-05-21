@@ -2,8 +2,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::*;
 
-fn new_test_term_with_data(
+fn new_test_term_with_data_and_bindings(
     commands: Vec<SlashCommand>,
+    bindings: impl IntoIterator<Item = (String, String)>,
 ) -> (
     HighTerm,
     TermHandle,
@@ -22,9 +23,20 @@ fn new_test_term_with_data(
         handle.clone(),
         commands,
         Theme::builtin(),
-        std::iter::empty::<(String, String)>(),
+        bindings,
     );
     (term, handle, completion_data, input_tx)
+}
+
+fn new_test_term_with_data(
+    commands: Vec<SlashCommand>,
+) -> (
+    HighTerm,
+    TermHandle,
+    CompletionData,
+    std::sync::mpsc::Sender<TestRawEvent>,
+) {
+    new_test_term_with_data_and_bindings(commands, std::iter::empty::<(String, String)>())
 }
 
 fn new_test_term(
@@ -443,6 +455,74 @@ fn editing_after_preview_commits_it_as_the_new_original_buffer() {
     assert_eq!(handle.get_buffer(), "/mode");
 }
 
+#[test]
+fn submit_prompt_binding_submits_line() {
+    // The built-in C-Enter binding routes through the configurable
+    // action path, but it must still behave like raw Ctrl-Enter.
+    let (mut term, handle, _completion_data, input_tx) = new_test_term_with_data_and_bindings(
+        Vec::new(),
+        vec![("C-Enter".to_owned(), "submit-prompt".to_owned())],
+    );
+
+    handle.set_buffer("hello".to_owned(), "hello".len());
+    send_submit(&input_tx);
+
+    assert!(matches!(
+        term.get_next_event().expect("submit prompt action"),
+        Event::Line(line) if line == "hello"
+    ));
+    assert_eq!(handle.get_buffer(), "");
+}
+
+#[test]
+fn submit_prompt_binding_accepts_completion_before_submit() {
+    // With a completion preview active, submit-prompt accepts the
+    // preview and keeps the user in the prompt. A second press then
+    // submits the accepted text, matching raw Ctrl-Enter.
+    let (mut term, handle, _completion_data, input_tx) = new_test_term_with_data_and_bindings(
+        vec![
+            SlashCommand::new("/model", "Switch model"),
+            SlashCommand::new("/quit", "Exit"),
+        ],
+        vec![("C-Enter".to_owned(), "submit-prompt".to_owned())],
+    );
+
+    type_text(&mut term, &input_tx, "/");
+    send_key(&input_tx, KeyCode::Down);
+    assert!(matches!(
+        term.get_next_event().expect("preview first completion"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "/model");
+
+    send_submit(&input_tx);
+    send_submit(&input_tx);
+    assert!(matches!(
+        term.get_next_event().expect("accept then submit"),
+        Event::Line(line) if line == "/model"
+    ));
+}
+
+#[test]
+fn insert_newline_binding_inserts_newline() {
+    // Users can bind any supported key spelling to insert-newline;
+    // here plain Enter is bound explicitly instead of relying on the
+    // raw fallback.
+    let (mut term, handle, _completion_data, input_tx) = new_test_term_with_data_and_bindings(
+        Vec::new(),
+        vec![("Enter".to_owned(), "insert-newline".to_owned())],
+    );
+
+    handle.set_buffer("line one".to_owned(), "line one".len());
+    send_key(&input_tx, KeyCode::Enter);
+
+    assert!(matches!(
+        term.get_next_event().expect("insert newline action"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "line one\n");
+}
+
 mod trailer {
     use std::sync::{Arc, Mutex};
 
@@ -793,6 +873,18 @@ mod prompt_action_parse {
         assert!(matches!(
             PromptShellAction::parse("prompt-redo"),
             Some(PromptShellAction::PromptRedo)
+        ));
+    }
+
+    #[test]
+    fn parses_prompt_submit_and_newline_actions() {
+        assert!(matches!(
+            PromptShellAction::parse("submit-prompt"),
+            Some(PromptShellAction::SubmitPrompt)
+        ));
+        assert!(matches!(
+            PromptShellAction::parse("insert-newline"),
+            Some(PromptShellAction::InsertNewline)
         ));
     }
 

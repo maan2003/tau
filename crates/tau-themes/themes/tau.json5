@@ -69,7 +69,7 @@
 
     // -- Prompt --
     "prompt.marker":           { bold: true },
-    "prompt.cwd":              { fg: "blue" },
+    "prompt.cwd":              { fg: "dark_grey" },
     "prompt.marker.engineer":  { fg: "cyan", bold: true },
     "prompt.marker.assistant": { fg: "red", bold: true },
     "prompt.marker.manager":   { fg: "dark_yellow", bold: true },

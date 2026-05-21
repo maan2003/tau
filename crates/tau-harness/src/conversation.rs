@@ -216,6 +216,11 @@ pub(crate) struct Conversation {
     /// sub-agent runs. `None` for the default conversation and for
     /// non-tool ext-queries (e.g. notifications' idle summary).
     pub(crate) parent_tool_call_id: Option<ToolCallId>,
+    /// Direct parent conversation resolved when this side conversation is
+    /// spawned. Kept alongside `parent_tool_call_id` because the tool-call
+    /// routing map can be cleared before teardown needs to hand background
+    /// completions back to the parent.
+    pub(crate) parent_conversation_id: Option<ConversationId>,
     /// Display name supplied by the parent agent for the delegated
     /// task, surfaced in the UI alongside `parent_tool_call_id`. Only
     /// set when `parent_tool_call_id` is.
@@ -367,6 +372,7 @@ impl Conversation {
             next_ctx_id: None,
             turn_state: ConversationTurnState::Idle,
             parent_tool_call_id: None,
+            parent_conversation_id: None,
             task_name: None,
             delegate_input_stats: ToolDisplayStats::default(),
             role: None,

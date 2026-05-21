@@ -667,6 +667,8 @@ fn originator_of(event: &Event) -> tau_proto::PromptOriginator {
         Event::ProviderPromptSubmitted(s) => s.originator.clone(),
         Event::ProviderResponseUpdated(u) => u.originator.clone(),
         Event::ProviderResponseFinished(f) => f.originator.clone(),
+        Event::ProviderToolResult(result) => result.originator.clone(),
+        Event::ProviderToolError(error) => error.originator.clone(),
         Event::SessionCompactionStarted(started) => started.originator.clone(),
         Event::SessionCompactionFinished(finished) => finished.originator.clone(),
         Event::SessionCompacted(compacted) => compacted.originator.clone(),
@@ -1583,9 +1585,60 @@ impl EventRenderer {
     }
 
     fn main_tools_status_chip(&self) -> Option<String> {
-        ((self.main_tools_visible || !self.main_backgrounded_tools.is_empty())
-            && self.main_tools_total != 0)
-            .then(|| format!("{}/{}", self.main_tools_completed, self.main_tools_total))
+        self.live_main_delegate_tools_status_chip().or_else(|| {
+            ((self.main_tools_visible || !self.main_backgrounded_tools.is_empty())
+                && self.main_tools_total != 0)
+                .then(|| format!("{}/{}", self.main_tools_completed, self.main_tools_total))
+        })
+    }
+
+    fn live_main_delegate_tools_status_chip(&self) -> Option<String> {
+        self.tool_calls
+            .values()
+            .filter(|state| {
+                state.is_main_delegate && !state.is_sub_agent && state.block_id.is_some()
+            })
+            .filter_map(|state| state.delegate_last_progress.as_ref())
+            .find_map(Self::delegate_progress_tools_status_chip)
+    }
+
+    fn delegate_progress_tools_status_chip(
+        progress: &tau_proto::DelegateProgress,
+    ) -> Option<String> {
+        progress
+            .display
+            .as_ref()
+            .and_then(|display| {
+                display
+                    .progress_counters
+                    .iter()
+                    .find_map(Self::tools_progress_counter_status_chip)
+            })
+            .or_else(|| {
+                (progress.tools_total != 0).then(|| {
+                    format!(
+                        "{}/{}",
+                        progress
+                            .tools_total
+                            .saturating_sub(progress.tools_in_flight),
+                        progress.tools_total
+                    )
+                })
+            })
+    }
+
+    fn tools_progress_counter_status_chip(counter: &tau_proto::ProgressCounter) -> Option<String> {
+        if counter.label.as_deref() != Some("tools")
+            || counter.unit != tau_proto::ProgressUnit::Count
+        {
+            return None;
+        }
+        Some(match (counter.complete, counter.total) {
+            (Some(complete), Some(total)) => format!("{complete}/{total}"),
+            (Some(complete), None) => complete.to_string(),
+            (None, Some(total)) => format!("?/{total}"),
+            (None, None) => "?".to_owned(),
+        })
     }
 
     fn record_main_tool_completed(&mut self) {
@@ -1638,14 +1691,18 @@ impl EventRenderer {
             }
             Event::ToolRequest(request) => self.agent_activity.start_tool(&request.call_id),
             Event::ToolInvoke(invoke) => self.agent_activity.start_tool(&invoke.call_id),
-            Event::ToolResult(result) => {
+            Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
                     self.agent_activity.background_tool(&result.call_id);
-                } else {
+                } else if matches!(event, Event::ToolResult(_)) {
                     self.agent_activity.finish_tool(&result.call_id);
                 }
             }
-            Event::ToolError(error) => self.agent_activity.finish_tool(&error.call_id),
+            Event::ToolError(error) | Event::ProviderToolError(error) => {
+                if matches!(event, Event::ToolError(_)) {
+                    self.agent_activity.finish_tool(&error.call_id);
+                }
+            }
             Event::ToolBackgroundResult(result) => {
                 self.agent_activity.finish_background_tool(&result.call_id);
             }
@@ -2482,6 +2539,12 @@ impl EventRenderer {
                 self.handle_tool_delegate_progress(progress);
                 true
             }
+            Event::ProviderToolResult(result)
+                if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder =>
+            {
+                self.handle_tool_background_placeholder(result.call_id.as_str());
+                true
+            }
             Event::ToolResult(result) => {
                 self.handle_tool_result(result, recorded_at);
                 true
@@ -2603,30 +2666,37 @@ impl EventRenderer {
 
     fn handle_tool_delegate_progress(&mut self, progress: &tau_proto::DelegateProgress) {
         let call_id = progress.call_id.as_str();
-        // Snapshot the latest counters and ctx info regardless of whether the
-        // block is still live; the `ToolResult` handler reuses them on the
-        // completion line.
-        let state = self.tool_calls.entry(call_id.to_owned()).or_default();
-        state.delegate_last_progress = Some(progress.clone());
-        let Some(bid) = state.block_id else {
-            // Block already torn down (delegate finished or never rendered) —
-            // nothing to update.
-            return;
+        let (bid, display) = {
+            // Snapshot the latest counters and ctx info regardless of whether the
+            // block is still live; the `ToolResult` handler reuses them on the
+            // completion line.
+            let state = self.tool_calls.entry(call_id.to_owned()).or_default();
+            state.delegate_last_progress = Some(progress.clone());
+            let Some(bid) = state.block_id else {
+                // Block already torn down (delegate finished or never rendered) —
+                // nothing to update.
+                return;
+            };
+            let mut display = match &progress.display {
+                Some(descriptor) => render_delegate_display(descriptor, progress.role.as_deref()),
+                None => render_delegate_display(
+                    &synthesize_fallback_display("delegate", None),
+                    progress.role.as_deref(),
+                ),
+            };
+            if let Some(duration) = Self::live_tool_duration(state) {
+                Self::upsert_tool_duration_suffix(&mut display, duration);
+            }
+            state.live_display = Some(display.clone());
+            (bid, display)
         };
-        let mut display = match &progress.display {
-            Some(descriptor) => render_delegate_display(descriptor, progress.role.as_deref()),
-            None => render_delegate_display(
-                &synthesize_fallback_display("delegate", None),
-                progress.role.as_deref(),
-            ),
-        };
-        if let Some(duration) = Self::live_tool_duration(state) {
-            Self::upsert_tool_duration_suffix(&mut display, duration);
-        }
-        state.live_display = Some(display.clone());
         let block = self.render_tool_history_block(&display);
         self.handle.set_block(bid, block);
-        self.handle.redraw();
+        if self.model_status_block.is_some() {
+            self.render_model_status();
+        } else {
+            self.handle.redraw();
+        }
     }
 
     fn take_finished_tool_call(

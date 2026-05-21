@@ -1,6 +1,6 @@
 //! Harness-owned `delegate` and `wait` tools.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
@@ -124,6 +124,14 @@ impl Harness {
         self.publish_wait_replies(replies);
     }
 
+    pub(crate) fn record_wait_tool_cancelled(&mut self, call_ids: &HashSet<ToolCallId>) {
+        let cancelled = self.subagents.wait_tracker.record_tool_cancelled(call_ids);
+        for call_id in cancelled.unsuppress_call_ids {
+            self.unsuppress_background_completion_prompt(call_id);
+        }
+        self.publish_wait_replies(cancelled.replies);
+    }
+
     /// Handle the harness-owned `delegate` tool call inline.
     pub(crate) fn handle_delegate_tool_call(
         &mut self,
@@ -226,7 +234,7 @@ impl Harness {
                 originator: tau_proto::PromptOriginator::User,
             };
             if self.tool_turn.is_backgrounded(&call_id) {
-                self.handle_background_tool_error(HARNESS_CONNECTION_ID, event);
+                self.handle_background_tool_error(Some(HARNESS_CONNECTION_ID), event);
             } else {
                 self.publish_terminal_tool_error(Some(&owner_cid), None, event);
                 self.on_tool_call_complete(call_id.as_str());
@@ -541,6 +549,12 @@ struct WaitStart {
     suppress_call_id: Option<ToolCallId>,
 }
 
+#[derive(Clone, Debug, PartialEq, Default)]
+struct WaitCancel {
+    replies: Vec<WaitReply>,
+    unsuppress_call_ids: Vec<ToolCallId>,
+}
+
 #[derive(Default)]
 struct WaitTracker {
     calls: HashMap<ToolCallId, WaitCallState>,
@@ -725,6 +739,47 @@ impl WaitTracker {
             ],
             _ => Vec::new(),
         }
+    }
+
+    fn record_tool_cancelled(&mut self, call_ids: &HashSet<ToolCallId>) -> WaitCancel {
+        if call_ids.is_empty() {
+            return WaitCancel::default();
+        }
+
+        let mut cancelled = WaitCancel::default();
+        let waiters = std::mem::take(&mut self.waiters);
+        for (target, wait) in waiters {
+            let target_cancelled = call_ids.contains(&target);
+            let wait_cancelled = call_ids.contains(&wait.call_id);
+            let target_was_backgrounded = self.is_backgrounded(&target);
+
+            if wait_cancelled {
+                if target_was_backgrounded {
+                    cancelled.unsuppress_call_ids.push(target.clone());
+                }
+                continue;
+            }
+            if target_cancelled {
+                let mut reply = wait_error_reply(
+                    wait.call_id,
+                    wait.tool_name,
+                    format!("Tool call `{target}` was cancelled"),
+                    None,
+                );
+                if target_was_backgrounded {
+                    reply = reply.with_unsuppress(target.clone());
+                }
+                cancelled.replies.push(reply);
+            } else {
+                self.waiters.insert(target, wait);
+            }
+        }
+
+        for call_id in call_ids {
+            self.calls.insert(call_id.clone(), WaitCallState::Consumed);
+        }
+
+        cancelled
     }
 
     fn interrupt_active_waits(&mut self) -> Vec<WaitReply> {

@@ -30,7 +30,8 @@ const PROMPT_TRAILER_MARKER: &str =
 
 /// High-level events surfaced to the caller.
 pub enum Event {
-    /// The user submitted a line (pressed Ctrl-Enter, no completion preview).
+    /// The user submitted a line (pressed Ctrl-Enter or ran `submit-prompt`
+    /// with no completion preview).
     Line(String),
     /// The user signalled EOF (Ctrl-D on empty line).
     Eof,
@@ -248,22 +249,28 @@ impl HighTerm {
 
                 RawEvent::ExternalEditor => {
                     self.sync_menu_block();
-                    self.run_prompt_action(PromptShellAction::Edit(PromptShellCommand {
-                        command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"".to_owned(),
-                        trim: false,
-                    }));
+                    let outcome =
+                        self.run_prompt_action(PromptShellAction::Edit(PromptShellCommand {
+                            command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"".to_owned(),
+                            trim: false,
+                        }));
                     self.handle.redraw_sync();
-                    return Ok(Event::BufferChanged);
+                    match outcome {
+                        PromptActionOutcome::BufferChanged => return Ok(Event::BufferChanged),
+                        PromptActionOutcome::Continue => continue,
+                        PromptActionOutcome::Return(event) => return Ok(event),
+                    }
                 }
 
                 RawEvent::Binding(action) => {
                     self.sync_menu_block();
-                    if let Some(event) = self.run_binding(&action) {
-                        self.handle.redraw_sync();
-                        return Ok(event);
-                    }
+                    let outcome = self.run_binding(&action);
                     self.handle.redraw_sync();
-                    return Ok(Event::BufferChanged);
+                    match outcome {
+                        PromptActionOutcome::BufferChanged => return Ok(Event::BufferChanged),
+                        PromptActionOutcome::Continue => continue,
+                        PromptActionOutcome::Return(event) => return Ok(event),
+                    }
                 }
             }
         }
@@ -297,11 +304,11 @@ impl HighTerm {
         }
     }
 
-    fn run_binding(&self, action: &str) -> Option<Event> {
+    fn run_binding(&mut self, action: &str) -> PromptActionOutcome {
         tracing::trace!(target: "tau_cli::input", action, "running prompt binding");
         let Some(action) = PromptShellAction::parse(action) else {
             self.print_local(&format!("binding: unknown action `{action}`"));
-            return None;
+            return PromptActionOutcome::BufferChanged;
         };
         self.run_prompt_action(action)
     }
@@ -309,7 +316,7 @@ impl HighTerm {
     /// Runs a [`PromptShellAction`] and applies its result to the
     /// input buffer. Errors (spawn failure, bad utf-8, no editor)
     /// surface as a themed info line above the prompt.
-    fn run_prompt_action(&self, action: PromptShellAction) -> Option<Event> {
+    fn run_prompt_action(&mut self, action: PromptShellAction) -> PromptActionOutcome {
         match run_prompt_shell_action(
             &self.term,
             &self.handle,
@@ -321,32 +328,73 @@ impl HighTerm {
             Ok(Some(PromptShellResult::Replace(new_text))) => {
                 let cursor = new_text.len();
                 self.handle.set_buffer(new_text, cursor);
+                self.sync_menu_block();
             }
             Ok(Some(PromptShellResult::ReplacePreservingUndo(new_text))) => {
                 let cursor = new_text.len();
                 self.handle.set_buffer_preserving_undo(new_text, cursor);
+                self.sync_menu_block();
             }
             Ok(Some(PromptShellResult::Insert(text))) => {
                 let mut buffer = self.handle.get_buffer();
                 let cursor = self.handle.get_cursor();
                 buffer.insert_str(cursor, &text);
                 self.handle.set_buffer(buffer, cursor + text.len());
+                self.sync_menu_block();
             }
-            Ok(Some(PromptShellResult::FastToggle)) => return Some(Event::FastToggle),
-            Ok(Some(PromptShellResult::RoleCycle)) => return Some(Event::RoleCycle),
+            Ok(Some(PromptShellResult::FastToggle)) => {
+                return PromptActionOutcome::Return(Event::FastToggle);
+            }
+            Ok(Some(PromptShellResult::RoleCycle)) => {
+                return PromptActionOutcome::Return(Event::RoleCycle);
+            }
             Ok(Some(PromptShellResult::History(delta))) => {
                 self.term.trigger_history_step(delta);
+                self.sync_menu_block();
             }
             Ok(Some(PromptShellResult::Undo)) => {
                 self.term.trigger_undo();
+                self.sync_menu_block();
             }
             Ok(Some(PromptShellResult::Redo)) => {
                 self.term.trigger_redo();
+                self.sync_menu_block();
+            }
+            Ok(Some(PromptShellResult::RawEvent(raw))) => {
+                return self.apply_raw_prompt_event(raw);
             }
             Ok(None) => {} // shell exited non-zero or no output applies.
             Err(msg) => self.print_local(&format!("prompt action: {msg}")),
         }
-        None
+        PromptActionOutcome::BufferChanged
+    }
+
+    fn apply_raw_prompt_event(&mut self, raw: RawEvent) -> PromptActionOutcome {
+        match raw {
+            RawEvent::BufferChanged => {
+                self.sync_menu_block();
+                PromptActionOutcome::BufferChanged
+            }
+            RawEvent::CompletionAccept => {
+                self.sync_menu_block();
+                PromptActionOutcome::Continue
+            }
+            RawEvent::Line(line) => {
+                if !line.is_empty() {
+                    self.prompt_history.push(line.clone());
+                }
+                self.sync_menu_block();
+                PromptActionOutcome::Return(Event::Line(line))
+            }
+            RawEvent::Eof
+            | RawEvent::CancelPrompt
+            | RawEvent::Resize { .. }
+            | RawEvent::BackTab
+            | RawEvent::Escape
+            | RawEvent::Binding(_)
+            | RawEvent::Notice(_)
+            | RawEvent::ExternalEditor => unreachable!("unsupported prompt action event"),
+        }
     }
 
     fn print_local(&self, message: &str) {
@@ -384,6 +432,8 @@ enum PromptShellAction {
     PromptPrevious,
     PromptUndo,
     PromptRedo,
+    SubmitPrompt,
+    InsertNewline,
 }
 
 #[derive(Clone, Default)]
@@ -402,10 +452,17 @@ enum PromptShellResult {
     History(isize),
     Undo,
     Redo,
+    RawEvent(RawEvent),
+}
+
+enum PromptActionOutcome {
+    BufferChanged,
+    Continue,
+    Return(Event),
 }
 
 impl PromptShellAction {
-    // Keep this action list, built-in.cli-bindings.json5, and
+    // Keep this action list, built-in.cli-bindings.yaml, and
     // docs/cli-keybindings.md in sync.
     fn parse(action: &str) -> Option<Self> {
         match action {
@@ -415,6 +472,8 @@ impl PromptShellAction {
             "prompt-previous" => return Some(Self::PromptPrevious),
             "prompt-undo" => return Some(Self::PromptUndo),
             "prompt-redo" => return Some(Self::PromptRedo),
+            "submit-prompt" => return Some(Self::SubmitPrompt),
+            "insert-newline" => return Some(Self::InsertNewline),
             _ => {}
         }
         let mut parts = action.splitn(3, ':');
@@ -449,6 +508,16 @@ fn run_prompt_shell_action(
         PromptShellAction::PromptRedo => return Ok(Some(PromptShellResult::Redo)),
         PromptShellAction::FastToggle => return Ok(Some(PromptShellResult::FastToggle)),
         PromptShellAction::RoleCycle => return Ok(Some(PromptShellResult::RoleCycle)),
+        PromptShellAction::SubmitPrompt => {
+            return Ok(Some(PromptShellResult::RawEvent(
+                term.trigger_submit_or_accept_completion(),
+            )));
+        }
+        PromptShellAction::InsertNewline => {
+            return Ok(Some(PromptShellResult::RawEvent(
+                term.trigger_insert_newline(),
+            )));
+        }
         PromptShellAction::Insert(shell)
         | PromptShellAction::Edit(shell)
         | PromptShellAction::HistorySearch(shell) => shell,
@@ -468,7 +537,9 @@ fn run_prompt_shell_action(
         | PromptShellAction::PromptNext
         | PromptShellAction::PromptPrevious
         | PromptShellAction::PromptUndo
-        | PromptShellAction::PromptRedo => unreachable!(),
+        | PromptShellAction::PromptRedo
+        | PromptShellAction::SubmitPrompt
+        | PromptShellAction::InsertNewline => unreachable!(),
     };
     std::fs::write(tmp.path(), file_text.as_bytes())
         .map_err(|e| format!("could not write tempfile: {e}"))?;
@@ -590,7 +661,9 @@ fn run_prompt_shell_action(
         | PromptShellAction::PromptNext
         | PromptShellAction::PromptPrevious
         | PromptShellAction::PromptUndo
-        | PromptShellAction::PromptRedo => unreachable!(),
+        | PromptShellAction::PromptRedo
+        | PromptShellAction::SubmitPrompt
+        | PromptShellAction::InsertNewline => unreachable!(),
     }
 }
 

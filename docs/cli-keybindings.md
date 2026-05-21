@@ -7,6 +7,7 @@ Keep this document in sync with `crates/tau-config/config/built-in.cli-bindings.
 
 | Key | Action | Description |
 | --- | --- | --- |
+| `C-Enter` | `submit-prompt` | Submit the prompt, or accept a previewed completion without submitting. |
 | `C-f` | `shell-prompt-insert` | Pick a file with `fzf` and insert it at the cursor. |
 | `C-r` | `prompt-history-search` | Search past prompts with `fzf`, preview the highlighted prompt, and replace the current prompt with the selected prompt. |
 | `C-t` | `shell-prompt-insert` | Search files with ripgrep through `fzf` and insert the selected path. |
@@ -20,7 +21,7 @@ Keep this document in sync with `crates/tau-config/config/built-in.cli-bindings.
 
 ## Built-in editing keys
 
-These keys are handled by the raw terminal prompt when no configurable binding matches.
+These keys are handled by the raw terminal prompt when no configurable binding matches. The built-in `C-Enter` binding preserves the raw submit fallback.
 
 | Key | Behavior |
 | --- | --- |
@@ -44,6 +45,8 @@ These keys are handled by the raw terminal prompt when no configurable binding m
 
 Bindings live under `cli.bind` in config. The built-in bindings are merged below user bindings, so configuring one key does not remove the rest.
 
+- `submit-prompt` — submit the current prompt, or accept a previewed completion without submitting.
+- `insert-newline` — insert a newline at the cursor.
 - `prompt-previous` — move backward in prompt history.
 - `prompt-next` — move forward in prompt history.
 - `prompt-undo` — undo an edit in the current prompt/history entry.

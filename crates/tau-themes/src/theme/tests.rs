@@ -178,7 +178,7 @@ fn builtin_theme_parses() {
     assert!(progress.bold);
 
     let prompt_cwd = theme.resolve_style(&StyleName::new(crate::names::PROMPT_CWD));
-    assert_eq!(prompt_cwd.fg, Some(Color::Blue));
+    assert_eq!(prompt_cwd.fg, Some(Color::DarkGrey));
 
     let extension_status = theme.resolve_style(&StyleName::new("extension.status"));
     assert_eq!(extension_status, ThemeStyle::default());

@@ -312,8 +312,8 @@ pub(crate) fn format_tool_call(tool_name: &str, display: Option<&ToolDisplay>) -
 /// carrying the cached progress (args + counters from the latest
 /// [`tau_proto::DelegateProgress`]) and replacing the trailing
 /// in-progress chip with output stats + the final `ok`/`err: message`
-/// status. The chip order matches the running line so the only
-/// visible change at completion is the trailing segments.
+/// status. The input stats stay as a marked chip so delegate rendering
+/// can show input first, then output, then progress counters.
 pub(crate) fn build_delegate_completion_display(
     cached: Option<&ToolDisplay>,
     details: &CborValue,
@@ -324,7 +324,13 @@ pub(crate) fn build_delegate_completion_display(
         args: String::new(),
         ..Default::default()
     });
+    let input_stats = display.stats;
     display.stats = tau_proto::ToolDisplayStats::for_text(response_text);
+    if !input_stats.is_empty() {
+        display
+            .info_chips
+            .push(format!("↘︎{}", format_tool_display_stats(&input_stats)));
+    }
     match error {
         Some(msg) if !msg.is_empty() => {
             display.status = ToolDisplayStatus::Error;
@@ -465,8 +471,9 @@ fn abbreviate_inline_text(text: &str) -> String {
 }
 
 /// Render a `delegate` display with the agent role as a dedicated
-/// status-bar-colored suffix, ahead of progress counters and final
-/// status chips. Current descriptors keep the role on
+/// status-bar-colored suffix. Completed delegates show input stats
+/// (`↘︎`) before output stats (`↖︎`), then progress counters and the
+/// final status. Current descriptors keep the role on
 /// [`tau_proto::DelegateProgress`], but legacy cached descriptors may
 /// still have ` +role` embedded in `args`; strip that copy so the line
 /// does not render the role twice.
@@ -488,8 +495,14 @@ pub(crate) fn render_delegate_display(
             .iter_mut()
             .find(|suffix| suffix.text == stats_chip)
         {
-            suffix.text = format!("{marker} {}", suffix.text);
+            suffix.text = format!("{marker}{}", suffix.text);
         }
+    }
+    for suffix in &mut rendered.suffixes {
+        normalize_delegate_input_stats_suffix(suffix);
+    }
+    if !matches!(display.status, ToolDisplayStatus::InProgress) {
+        move_delegate_completion_stats_first(&mut rendered.suffixes, &stats_chip);
     }
 
     let Some(role) = role.filter(|role| !role.is_empty()) else {
@@ -504,6 +517,68 @@ pub(crate) fn render_delegate_display(
         .suffixes
         .insert(0, tool_suffix(format!("+{role}"), ToolStatus::Role));
     rendered
+}
+
+fn normalize_delegate_input_stats_suffix(suffix: &mut ToolSuffixSegment) {
+    if !matches!(suffix.status, ToolStatus::Info) {
+        return;
+    }
+    let normalized = suffix
+        .text
+        .strip_prefix("↘︎ ")
+        .or_else(|| suffix.text.strip_prefix("↘︎"))
+        .filter(|stats| !stats.is_empty())
+        .map(|stats| format!("↘︎{stats}"));
+    if let Some(normalized) = normalized {
+        suffix.text = normalized;
+    }
+}
+
+fn is_delegate_input_stats_suffix(suffix: &ToolSuffixSegment) -> bool {
+    matches!(suffix.status, ToolStatus::Info)
+        && suffix.text.starts_with("↘︎")
+        && suffix.text.len() > "↘︎".len()
+}
+
+fn move_delegate_completion_stats_first(
+    suffixes: &mut Vec<ToolSuffixSegment>,
+    output_stats_chip: &str,
+) {
+    let mut input_stats = Vec::new();
+    let mut rest = Vec::with_capacity(suffixes.len());
+    for suffix in suffixes.drain(..) {
+        if is_delegate_input_stats_suffix(&suffix) {
+            input_stats.push(suffix);
+        } else {
+            rest.push(suffix);
+        }
+    }
+    if input_stats.is_empty() {
+        *suffixes = rest;
+        return;
+    }
+
+    let output_stats_text =
+        (!output_stats_chip.is_empty()).then(|| format!("↖︎{output_stats_chip}"));
+    let insert_at = rest
+        .iter()
+        .position(|suffix| {
+            output_stats_text
+                .as_deref()
+                .is_some_and(|text| suffix.text == text)
+                || matches!(
+                    suffix.status,
+                    ToolStatus::Tools
+                        | ToolStatus::Context
+                        | ToolStatus::Success
+                        | ToolStatus::Warning
+                        | ToolStatus::Error
+                        | ToolStatus::Progress
+                )
+        })
+        .unwrap_or(rest.len());
+    rest.splice(insert_at..insert_at, input_stats);
+    *suffixes = rest;
 }
 
 /// Render a [`ToolDisplay`] descriptor directly to a

@@ -777,6 +777,44 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         .expect("status row during delegate side conversation");
     assert!(status_row.ends_with("%0/1 #12k/200k"));
 
+    // Once the delegated side conversation reports its own tool progress,
+    // the status bar should prefer that live `%complete/total` chip over the
+    // parent aggregate `%0/1`, and the progress event should repaint it.
+    renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
+        call_id: "delegate-call".into(),
+        task_name: "probe".into(),
+        role: Some("engineer".to_owned()),
+        ctx_percent: None,
+        ctx_input_tokens: None,
+        ctx_window: None,
+        tools_in_flight: 2,
+        tools_total: 3,
+        display: Some(tau_proto::ToolDisplay {
+            args: "[probe]".into(),
+            progress_counters: vec![tau_proto::ProgressCounter {
+                label: Some("tools".into()),
+                unit: tau_proto::ProgressUnit::Count,
+                complete: Some(1),
+                total: Some(3),
+            }],
+            status: tau_proto::ToolDisplayStatus::InProgress,
+            status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
+            ..Default::default()
+        }),
+    }));
+    assert!(
+        eventually_screen_contains(&vt, 100, "%1/3 #12k/200k"),
+        "delegate progress should repaint the status bar with sub-agent tool progress: {:?}",
+        vt.screen_text(100)
+    );
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("#12k/200k"))
+        .expect("status row after delegate progress");
+    assert!(status_row.contains("+engineer"));
+    assert!(status_row.ends_with("%1/3 #12k/200k"));
+
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
         call_id: "delegate-call".into(),
         tool_name: tau_proto::ToolName::new("delegate"),
@@ -1927,7 +1965,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
         tau_proto::UnixMicros::new(1_000_000),
     );
     renderer.handle_recorded_at(
-        &Event::ToolResult(ToolResult {
+        &Event::ProviderToolResult(ToolResult {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,
@@ -2572,7 +2610,9 @@ fn render_delegate_display_pulls_legacy_role_args_into_first_suffix() {
 
 #[test]
 fn render_delegate_display_marks_input_and_output_stats() {
-    use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
+    use tau_proto::{
+        ProgressCounter, ProgressUnit, ToolDisplay, ToolDisplayStats, ToolDisplayStatus,
+    };
 
     let input = ToolDisplay {
         args: "[audit]".into(),
@@ -2587,7 +2627,7 @@ fn render_delegate_display_marks_input_and_output_stats() {
     };
     let rendered = render_delegate_display(&input, None);
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(texts, vec!["↘︎ 2L, 12B", tau_proto::PROGRESS_INDICATOR_TEXT]);
+    assert_eq!(texts, vec!["↘︎2L, 12B", tau_proto::PROGRESS_INDICATOR_TEXT]);
 
     let output = ToolDisplay {
         args: "[audit]".into(),
@@ -2596,13 +2636,20 @@ fn render_delegate_display_marks_input_and_output_stats() {
             lines: Some(3),
             bytes: Some(24),
         },
+        progress_counters: vec![ProgressCounter {
+            label: Some("tools".into()),
+            unit: ProgressUnit::Count,
+            complete: Some(2),
+            total: Some(2),
+        }],
         status: ToolDisplayStatus::Success,
         status_text: "ok".into(),
+        info_chips: vec!["↘︎2L, 12B".into()],
         ..Default::default()
     };
     let rendered = render_delegate_display(&output, None);
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(texts, vec!["↖︎ 3L, 24B", "ok"]);
+    assert_eq!(texts, vec!["↘︎2L, 12B", "↖︎3L, 24B", "%2/2", "ok"]);
 }
 
 #[test]
@@ -2635,7 +2682,7 @@ fn render_delegate_display_styles_role_like_status_bar() {
 }
 
 #[test]
-fn delegate_completion_replaces_input_stats_with_output_stats() {
+fn delegate_completion_keeps_input_stats_with_output_stats() {
     use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
 
     let cached = ToolDisplay {
@@ -2655,6 +2702,7 @@ fn delegate_completion_replaces_input_stats_with_output_stats() {
 
     assert_eq!(display.args, "[audit]");
     assert_eq!(display.stats, ToolDisplayStats::for_text("ok\nmore"));
+    assert_eq!(display.info_chips, vec!["↘︎10L, 200B"]);
     assert_eq!(display.status, ToolDisplayStatus::Success);
     assert_eq!(display.status_text, "ok");
 }
@@ -2689,12 +2737,13 @@ fn delegate_completion_uses_output_stats_from_duration_result_map() {
 
     assert_eq!(display.args, "[audit]");
     assert_eq!(display.stats, ToolDisplayStats::for_text("ok\nmore"));
+    assert_eq!(display.info_chips, vec!["↘︎10L, 200B"]);
     assert_eq!(display.status, ToolDisplayStatus::Success);
     assert_eq!(display.status_text, "ok");
 }
 
 #[test]
-fn delegate_completion_clears_input_stats_for_empty_output() {
+fn delegate_completion_keeps_input_stats_for_empty_output() {
     use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
 
     let cached = ToolDisplay {
@@ -2713,6 +2762,7 @@ fn delegate_completion_clears_input_stats_for_empty_output() {
         build_delegate_completion_display(Some(&cached), &CborValue::Text(String::new()), None);
 
     assert_eq!(display.stats, ToolDisplayStats::default());
+    assert_eq!(display.info_chips, vec!["↘︎10L, 200B"]);
     assert_eq!(display.status, ToolDisplayStatus::Success);
     assert_eq!(display.status_text, "ok");
 }

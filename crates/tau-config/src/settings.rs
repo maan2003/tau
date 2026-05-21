@@ -71,7 +71,7 @@ pub struct CliSettings {
     pub show_tools: ShowTools,
     /// Which built-in color theme to use for the terminal UI.
     pub theme: CliTheme,
-    /// Key bindings for prompt-local shell actions. Defaults to an
+    /// Key bindings for prompt-local actions. Defaults to an
     /// empty map at the serde layer; the loader merges
     /// `built-in.cli-bindings.yaml` underneath the user's bindings.
     #[serde(default)]
@@ -145,12 +145,13 @@ impl CliShellCommand {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CliBindingAction {
-    /// Action name, e.g. `shell-prompt-insert`, `shell-prompt-edit`,
-    /// `fast-toggle`, or `role-cycle`.
+    /// Action name, e.g. `submit-prompt`, `insert-newline`,
+    /// `shell-prompt-insert`, `shell-prompt-edit`, `fast-toggle`, or
+    /// `role-cycle`.
     pub action: String,
     /// Shell command to execute. `None` for actions that don't shell
-    /// out (e.g. `prompt-previous`, `prompt-next`, `fast-toggle`,
-    /// `role-cycle`).
+    /// out (e.g. `submit-prompt`, `insert-newline`,
+    /// `prompt-previous`, `prompt-next`, `fast-toggle`, `role-cycle`).
     pub command: Option<String>,
     /// Whether to trim command stdout before insertion.
     pub trim: bool,

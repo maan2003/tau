@@ -20,8 +20,9 @@ use tau_proto::{
     ProviderTokenUsage, SessionCompactionRequested, SessionId, SessionPromptCreated,
     SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, SessionPromptRecalled,
     SessionPromptTerminated, SessionPromptTerminationReason, TokenUsageStats, ToolBackgroundError,
-    ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled, ToolChoice, ToolDefinition,
-    ToolError, ToolName, ToolRequest, ToolResult, ToolResultKind, ToolType, UiCancelPrompt,
+    ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancel, ToolCancelled, ToolChoice,
+    ToolDefinition, ToolError, ToolName, ToolRequest, ToolResult, ToolResultKind, ToolType,
+    UiCancelPrompt,
 };
 
 use crate::conversation::{
@@ -83,6 +84,12 @@ pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
         "{} Tool call `{call_id}` is complete.",
         crate::INTERNAL_MARKER
     )
+}
+
+fn remove_pending_internal_prompt_text(prompts: &mut VecDeque<PendingPrompt>, text: &str) -> bool {
+    let before = prompts.len();
+    prompts.retain(|prompt| !(prompt.is_internal() && prompt.text == text));
+    prompts.len() != before
 }
 
 fn load_system_prompt_templates(config_dir: Option<&Path>) -> HashMap<String, String> {
@@ -2342,7 +2349,13 @@ impl Harness {
                 self.try_advance_queue();
             }
             Message::Emit(emit) => {
-                self.enqueue_publish(Some(source_id), *emit.event, emit.transient, false, None);
+                let event = *emit.event;
+                if event.name().category == tau_proto::EventCategory::Provider
+                    || Self::requires_tool_event_intake(&event)
+                {
+                    return Ok(());
+                }
+                self.enqueue_publish(Some(source_id), event, emit.transient, false, None);
             }
             Message::InterceptReply(reply) => {
                 self.handle_intercept_reply(source_id, reply);
@@ -2427,6 +2440,9 @@ impl Harness {
                 }
             }
             Event::ToolResult(mut result) => {
+                if !self.validate_tool_event_source(&result.call_id, source_id) {
+                    return Ok(());
+                }
                 if self.tool_turn.is_backgrounded(&result.call_id) {
                     self.handle_background_tool_result(source_id, result);
                 } else if let Some(cid) = self.tool_conversations.get(&result.call_id).cloned() {
@@ -2458,8 +2474,11 @@ impl Harness {
                 }
             }
             Event::ToolError(mut error) => {
+                if !self.validate_tool_event_source(&error.call_id, source_id) {
+                    return Ok(());
+                }
                 if self.tool_turn.is_backgrounded(&error.call_id) {
-                    self.handle_background_tool_error(source_id, error);
+                    self.handle_background_tool_error(Some(source_id), error);
                 } else if let Some(cid) = self.tool_conversations.get(&error.call_id).cloned() {
                     let call_id = error.call_id.to_string();
                     if let Some(tool) = self.pending_tools.get(&error.call_id) {
@@ -2478,9 +2497,41 @@ impl Harness {
                 }
             }
             Event::ToolProgress(progress) => {
+                if !self.tool_conversations.contains_key(&progress.call_id)
+                    || !self.validate_tool_event_source(&progress.call_id, source_id)
+                {
+                    return Ok(());
+                }
                 if !self.tool_turn.is_backgrounded(&progress.call_id) {
                     self.publish_event(Some(source_id), Event::ToolProgress(progress));
                 }
+            }
+            Event::ProviderToolResult(_) | Event::ProviderToolError(_) => {
+                return Ok(());
+            }
+            Event::ToolCancelled(mut cancelled) => {
+                if !self.validate_tool_event_source(&cancelled.call_id, source_id) {
+                    return Ok(());
+                }
+                if let Some(cid) = self.tool_conversations.get(&cancelled.call_id).cloned() {
+                    let call_id = cancelled.call_id.to_string();
+                    if let Some(tool) = self.pending_tools.get(&cancelled.call_id) {
+                        cancelled.tool_name = tool.name.clone();
+                        cancelled.tool_type = tool.tool_type;
+                    }
+                    self.publish_for_conversation_from(
+                        &cid,
+                        Some(source_id),
+                        Event::ToolCancelled(cancelled),
+                    );
+                    self.on_tool_call_complete(&call_id);
+                    self.clear_tool_call_tracking(&call_id);
+                }
+            }
+            Event::ToolBackgroundResult(_) | Event::ToolBackgroundError(_)
+                if source_id != HARNESS_CONNECTION_ID =>
+            {
+                return Ok(());
             }
             Event::ShellCommandProgress(progress) => {
                 // Pass-through: the UI renders chunks as they arrive.
@@ -2685,6 +2736,9 @@ impl Harness {
                 Ok(true)
             }
             other => {
+                if Self::requires_tool_event_intake(&other) {
+                    return Ok(true);
+                }
                 self.publish_event(Some(client_id), other);
                 Ok(true)
             }
@@ -2999,7 +3053,23 @@ impl Harness {
             to_cancel.push((call_id, tool.name, tool.tool_type));
         }
 
+        let cancelled_call_ids: std::collections::HashSet<ToolCallId> = to_cancel
+            .iter()
+            .map(|(call_id, _, _)| call_id.clone())
+            .collect();
+        self.record_wait_tool_cancelled(&cancelled_call_ids);
+
         for (call_id, tool_name, tool_type) in to_cancel {
+            if let Some(provider_id) = self.pending_tool_providers.get(&call_id).cloned() {
+                let _ = self.bus.send_to(
+                    provider_id.as_str(),
+                    Some(HARNESS_CONNECTION_ID),
+                    Frame::Event(Event::ToolCancel(ToolCancel {
+                        call_id: call_id.clone(),
+                        tool_name: tool_name.clone(),
+                    })),
+                );
+            }
             self.publish_for_conversation(
                 cid,
                 Event::ToolCancelled(ToolCancelled {
@@ -3146,23 +3216,12 @@ impl Harness {
                 originator: tau_proto::PromptOriginator::User,
             };
             if self.tool_turn.is_backgrounded(&call_id) {
-                if let Some(cid) = self.tool_conversations.get(call_id.as_str()).cloned() {
-                    self.tool_turn.mark_complete(&call_id);
-                    let background = ToolBackgroundError {
-                        call_id: error.call_id,
-                        tool_name: error.tool_name,
-                        tool_type: error.tool_type,
-                        message: error.message,
-                        details: error.details,
-                        display: error.display,
-                        originator: error.originator,
-                    };
-                    self.publish_terminal_background_error(&cid, None, background);
-                    self.queue_background_completion_prompt(&cid, &call_id);
+                if self.tool_conversations.contains_key(call_id.as_str()) {
+                    self.handle_background_tool_error(None, error);
                 } else {
                     self.publish_terminal_tool_error(None, None, error);
+                    self.clear_tool_call_tracking(call_id.as_str());
                 }
-                self.clear_tool_call_tracking(call_id.as_str());
                 continue;
             }
 
@@ -3303,6 +3362,38 @@ impl Harness {
         self.tool_conversations.remove(call_id);
         self.pending_tools.remove(call_id);
         self.pending_tool_providers.remove(call_id);
+    }
+
+    fn validate_tool_event_source(&self, call_id: &ToolCallId, source_id: &str) -> bool {
+        match self.pending_tool_providers.get(call_id) {
+            Some(provider_id) => provider_id.as_str() == source_id,
+            None if self.is_harness_owned_tool_call(call_id) => source_id == HARNESS_CONNECTION_ID,
+            None => true,
+        }
+    }
+
+    fn requires_tool_event_intake(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::ToolResult(_)
+                | Event::ToolError(_)
+                | Event::ProviderToolResult(_)
+                | Event::ProviderToolError(_)
+                | Event::ToolProgress(_)
+                | Event::ToolCancelled(_)
+                | Event::ToolBackgroundResult(_)
+                | Event::ToolBackgroundError(_)
+        )
+    }
+
+    fn is_harness_owned_tool_call(&self, call_id: &ToolCallId) -> bool {
+        self.tool_conversations.contains_key(call_id)
+            && self.pending_tools.get(call_id).is_some_and(|tool| {
+                matches!(
+                    tool.name.as_str(),
+                    "skill" | DELEGATE_TOOL_NAME | WAIT_TOOL_NAME
+                )
+            })
     }
 
     // -----------------------------------------------------------------------
@@ -3696,9 +3787,9 @@ impl Harness {
     /// - Reentrant descendants of an active Exclusive are allowed to pass as
     ///   part of that exclusive subtree. Without this exception, an exclusive
     ///   delegate that asks its own sub-agent to delegate would deadlock behind
-    ///   itself. Descendancy is computed from
-    ///   `Conversation.parent_tool_call_id` through `tool_conversations`, which
-    ///   ties each side conversation to the tool call that spawned it.
+    ///   itself. Descendancy is computed from the side conversation's stored
+    ///   parent conversation, with the older `parent_tool_call_id` mapping as a
+    ///   fallback for manually seeded tests.
     fn drain_pending_ext_agent_queries(&mut self) -> Result<(), HarnessError> {
         loop {
             let Some(idx) = self.next_dispatchable_ext_agent_query_index() else {
@@ -3799,12 +3890,18 @@ impl Harness {
             if !seen.insert(current_cid.clone()) {
                 return false;
             }
-            current = self
-                .conversations
-                .get(&current_cid)
-                .and_then(|conv| conv.parent_tool_call_id.as_ref())
-                .and_then(|call_id| self.tool_conversations.get(call_id))
-                .cloned();
+            current = self.conversations.get(&current_cid).and_then(|conv| {
+                conv.parent_conversation_id
+                    .as_ref()
+                    .filter(|parent_cid| self.conversations.contains_key(*parent_cid))
+                    .cloned()
+                    .or_else(|| {
+                        conv.parent_tool_call_id
+                            .as_ref()
+                            .and_then(|call_id| self.tool_conversations.get(call_id))
+                            .cloned()
+                    })
+            });
         }
         false
     }
@@ -3877,6 +3974,7 @@ impl Harness {
         // sub-agent state changes can be surfaced to the user under
         // that tool block via `DelegateProgress`.
         conv.parent_tool_call_id = parent_call_id;
+        conv.parent_conversation_id = Some(parent_cid.clone());
         conv.task_name = task_name;
         conv.delegate_input_stats = query.input_stats;
         conv.role = conversation_role;
@@ -6184,7 +6282,7 @@ impl Harness {
         self.clear_tool_call_tracking(call_id.as_str());
     }
 
-    fn handle_background_tool_error(&mut self, source_id: &str, mut error: ToolError) {
+    fn handle_background_tool_error(&mut self, source: Option<&str>, mut error: ToolError) {
         let Some(cid) = self.tool_conversations.get(&error.call_id).cloned() else {
             return;
         };
@@ -6207,12 +6305,7 @@ impl Harness {
             display: error.display,
             originator: error.originator,
         };
-        self.publish_for_conversation_from(
-            &cid,
-            Some(source_id),
-            Event::ToolBackgroundError(background.clone()),
-        );
-        self.record_wait_background_error(background);
+        self.publish_terminal_background_error(&cid, source, background);
         self.background_completion_targets
             .insert(call_id.clone(), cid.clone());
         self.queue_background_completion_prompt(&cid, &call_id);
@@ -6260,22 +6353,65 @@ impl Harness {
     }
 
     fn transfer_background_completion_target_before_teardown(&mut self, cid: &ConversationId) {
-        let backgrounded_calls = self.tool_turn.backgrounded_calls_for(cid);
-        if backgrounded_calls.is_empty() {
+        let call_ids = self.background_completion_call_ids_for_teardown(cid);
+        if call_ids.is_empty() {
             return;
         }
         let Some(target_cid) = self.background_completion_teardown_target(cid) else {
             return;
         };
-        for call_id in backgrounded_calls {
-            if self.tool_conversations.get(&call_id) == Some(cid) {
+        for call_id in call_ids {
+            if self.tool_conversations.get(&call_id) == Some(cid)
+                && self.tool_turn.is_backgrounded(&call_id)
+            {
                 self.tool_conversations
                     .insert(call_id.clone(), target_cid.clone());
             }
             if self.background_completion_targets.get(&call_id) == Some(cid) {
                 self.background_completion_targets
-                    .insert(call_id, target_cid.clone());
+                    .insert(call_id.clone(), target_cid.clone());
             }
+            self.transfer_queued_background_completion_prompt(cid, &target_cid, &call_id);
+        }
+    }
+
+    fn background_completion_call_ids_for_teardown(
+        &self,
+        cid: &ConversationId,
+    ) -> HashSet<ToolCallId> {
+        let mut call_ids: HashSet<ToolCallId> = self
+            .tool_turn
+            .backgrounded_calls_for(cid)
+            .into_iter()
+            .collect();
+        call_ids.extend(
+            self.tool_conversations
+                .iter()
+                .filter_map(|(call_id, owner)| {
+                    (owner == cid && self.tool_turn.is_backgrounded(call_id))
+                        .then_some(call_id.clone())
+                }),
+        );
+        call_ids.extend(
+            self.background_completion_targets
+                .iter()
+                .filter_map(|(call_id, owner)| (owner == cid).then_some(call_id.clone())),
+        );
+        call_ids
+    }
+
+    fn transfer_queued_background_completion_prompt(
+        &mut self,
+        source_cid: &ConversationId,
+        target_cid: &ConversationId,
+        call_id: &ToolCallId,
+    ) {
+        let prompt = background_completion_prompt(call_id);
+        let removed = self.conversations.get_mut(source_cid).is_some_and(|conv| {
+            remove_pending_internal_prompt_text(&mut conv.pending_prompts, &prompt)
+        });
+        if removed {
+            self.queue_background_completion_prompt(target_cid, call_id);
         }
     }
 
@@ -6284,6 +6420,12 @@ impl Harness {
         cid: &ConversationId,
     ) -> Option<ConversationId> {
         let conv = self.conversations.get(cid)?;
+        if let Some(parent_cid) = &conv.parent_conversation_id
+            && parent_cid != cid
+            && self.conversations.contains_key(parent_cid)
+        {
+            return Some(parent_cid.clone());
+        }
         if let Some(parent_call_id) = &conv.parent_tool_call_id
             && let Some(parent_cid) = self.tool_conversations.get(parent_call_id)
             && parent_cid != cid

@@ -179,6 +179,9 @@ mod tests {
         );
 
         assert_eq!(prompt.spans()[0].text, "/tmp/project");
-        assert_eq!(prompt.spans()[0].style.fg, Some(tau_cli_term::Color::Blue));
+        assert_eq!(
+            prompt.spans()[0].style.fg,
+            Some(tau_cli_term::Color::DarkGrey)
+        );
     }
 }

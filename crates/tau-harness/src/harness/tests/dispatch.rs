@@ -166,6 +166,95 @@ fn event_log_contains_any_source(h: &Harness, matches_event: impl Fn(&Event) -> 
     false
 }
 
+fn shared_test_tool_spec(name: &str) -> ToolSpec {
+    ToolSpec {
+        name: ToolName::new(name),
+        model_visible_name: None,
+        description: None,
+        parameters: None,
+        tool_type: tau_proto::ToolType::Function,
+        format: None,
+        enabled_by_default: true,
+        execution_mode: ToolExecutionMode::Shared,
+        background_support: None,
+    }
+}
+
+fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (TempDir, Harness) {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _ = connect_test_tool(&mut h, "conn-owner");
+    let _ = connect_test_tool(&mut h, "conn-wrong");
+    h.registry
+        .register("conn-owner", shared_test_tool_spec(tool_name));
+
+    let cid = h.default_conversation_id.clone();
+    let spid: SessionPromptId = format!("sp-{call_id}").into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_conversations.insert(spid.clone(), cid);
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: call_id.into(),
+            name: ToolName::new(tool_name),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("tool call routed");
+    assert_eq!(
+        h.pending_tool_providers
+            .get(call_id)
+            .map(|provider_id| provider_id.as_str()),
+        Some("conn-owner")
+    );
+
+    (td, h)
+}
+
+fn final_tool_result(call_id: &str, tool_name: &str, text: &str) -> ToolResult {
+    ToolResult {
+        call_id: call_id.into(),
+        tool_name: ToolName::new(tool_name),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text(text.to_owned()),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }
+}
+
+fn tool_error(call_id: &str, tool_name: &str, message: &str) -> tau_proto::ToolError {
+    tau_proto::ToolError {
+        call_id: call_id.into(),
+        tool_name: ToolName::new(tool_name),
+        tool_type: tau_proto::ToolType::Function,
+        message: message.to_owned(),
+        details: None,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }
+}
+
+fn tool_progress(call_id: &str, tool_name: &str, message: &str) -> tau_proto::ToolProgress {
+    tau_proto::ToolProgress {
+        call_id: call_id.into(),
+        tool_name: ToolName::new(tool_name),
+        message: Some(message.to_owned()),
+        progress: None,
+    }
+}
+
 fn ext_query(query_id: &str, execution_mode: ToolExecutionMode) -> ExtAgentQuery {
     ExtAgentQuery {
         query_id: query_id.to_owned(),
@@ -245,6 +334,555 @@ fn finish_ext_query(h: &mut Harness, cid: &ConversationId, query_id: &str) {
         ws_pool_delta: None,
     })
     .expect("finish ext query");
+}
+
+/// A tool result from any connection other than the routed provider must not
+/// close the call; otherwise a stale extension can spoof completion and make
+/// the real owner look like a duplicate.
+#[test]
+fn provider_owner_validation_rejects_wrong_tool_result() {
+    let (_td, mut h) = setup_routed_test_tool_call("owner-result-call", "owned_tool");
+
+    h.handle_extension_event_inner(
+        "conn-wrong",
+        Event::ToolResult(final_tool_result(
+            "owner-result-call",
+            "owned_tool",
+            "spoofed output",
+        )),
+    )
+    .expect("wrong result ignored");
+
+    assert!(h.tool_conversations.contains_key("owner-result-call"));
+    assert_eq!(
+        h.pending_tool_providers
+            .get("owner-result-call")
+            .map(|provider_id| provider_id.as_str()),
+        Some("conn-owner")
+    );
+    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+        event,
+        Event::ToolResult(result) if result.call_id.as_str() == "owner-result-call"
+    )));
+
+    h.handle_extension_event_inner(
+        "conn-owner",
+        Event::ToolResult(final_tool_result(
+            "owner-result-call",
+            "owned_tool",
+            "real output",
+        )),
+    )
+    .expect("owner result accepted");
+
+    assert!(!h.tool_conversations.contains_key("owner-result-call"));
+    assert!(!h.pending_tool_providers.contains_key("owner-result-call"));
+    assert!(event_log_contains(&h, "conn-owner", |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id.as_str() == "owner-result-call"
+                && matches!(&result.result, CborValue::Text(text) if text == "real output")
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A tool error from a non-owner is also ignored so it cannot fail the pending
+/// call or remove routing state before the owner reports the real failure.
+#[test]
+fn provider_owner_validation_rejects_wrong_tool_error() {
+    let (_td, mut h) = setup_routed_test_tool_call("owner-error-call", "owned_tool");
+
+    h.handle_extension_event_inner(
+        "conn-wrong",
+        Event::ToolError(tool_error(
+            "owner-error-call",
+            "owned_tool",
+            "spoofed failure",
+        )),
+    )
+    .expect("wrong error ignored");
+
+    assert!(h.tool_conversations.contains_key("owner-error-call"));
+    assert_eq!(
+        h.pending_tool_providers
+            .get("owner-error-call")
+            .map(|provider_id| provider_id.as_str()),
+        Some("conn-owner")
+    );
+    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+        event,
+        Event::ToolError(error) if error.call_id.as_str() == "owner-error-call"
+    )));
+
+    h.handle_extension_event_inner(
+        "conn-owner",
+        Event::ToolError(tool_error("owner-error-call", "owned_tool", "real failure")),
+    )
+    .expect("owner error accepted");
+
+    assert!(!h.tool_conversations.contains_key("owner-error-call"));
+    assert!(!h.pending_tool_providers.contains_key("owner-error-call"));
+    assert!(event_log_contains(&h, "conn-owner", |event| matches!(
+        event,
+        Event::ToolError(error)
+            if error.call_id.as_str() == "owner-error-call" && error.message == "real failure"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Progress is non-terminal, but it still must come from the routed owner so a
+/// wrong extension cannot publish spoofed output into the visible tool block.
+#[test]
+fn provider_owner_validation_rejects_wrong_tool_progress() {
+    let (_td, mut h) = setup_routed_test_tool_call("owner-progress-call", "owned_tool");
+
+    h.handle_extension_event_inner(
+        "conn-wrong",
+        Event::ToolProgress(tool_progress(
+            "owner-progress-call",
+            "owned_tool",
+            "spoofed progress",
+        )),
+    )
+    .expect("wrong progress ignored");
+
+    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+        event,
+        Event::ToolProgress(progress) if progress.call_id.as_str() == "owner-progress-call"
+    )));
+    assert!(h.tool_conversations.contains_key("owner-progress-call"));
+
+    h.handle_extension_event_inner(
+        "conn-owner",
+        Event::ToolProgress(tool_progress(
+            "owner-progress-call",
+            "owned_tool",
+            "real progress",
+        )),
+    )
+    .expect("owner progress accepted");
+
+    assert!(event_log_contains(&h, "conn-owner", |event| matches!(
+        event,
+        Event::ToolProgress(progress)
+            if progress.call_id.as_str() == "owner-progress-call"
+                && progress.message.as_deref() == Some("real progress")
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A terminal cancellation from a non-owner must not poison the tool round
+/// before the routed provider returns the real result.
+#[test]
+fn provider_owner_validation_rejects_wrong_tool_cancelled() {
+    let (_td, mut h) = setup_routed_test_tool_call("owner-cancelled-call", "owned_tool");
+
+    h.handle_extension_event_inner(
+        "conn-wrong",
+        Event::ToolCancelled(tau_proto::ToolCancelled {
+            call_id: "owner-cancelled-call".into(),
+            tool_name: ToolName::new("owned_tool"),
+            tool_type: tau_proto::ToolType::Function,
+        }),
+    )
+    .expect("wrong cancellation ignored");
+
+    assert!(h.tool_conversations.contains_key("owner-cancelled-call"));
+    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "owner-cancelled-call"
+    )));
+
+    h.handle_extension_event_inner(
+        "conn-owner",
+        Event::ToolResult(final_tool_result(
+            "owner-cancelled-call",
+            "owned_tool",
+            "real output",
+        )),
+    )
+    .expect("owner result accepted");
+
+    assert!(!h.tool_conversations.contains_key("owner-cancelled-call"));
+    assert!(event_log_contains(&h, "conn-owner", |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id.as_str() == "owner-cancelled-call"
+                && matches!(&result.result, CborValue::Text(text) if text == "real output")
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Background terminal events are harness-derived records. Extensions must not
+/// be able to inject them directly into the session log.
+#[test]
+fn provider_owner_validation_rejects_external_background_result() {
+    let (_td, mut h) = setup_routed_test_tool_call("owner-background-call", "owned_tool");
+
+    h.handle_extension_event_inner(
+        "conn-wrong",
+        Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+            call_id: "owner-background-call".into(),
+            tool_name: ToolName::new("owned_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("spoofed background".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    )
+    .expect("wrong background result ignored");
+
+    assert!(h.tool_conversations.contains_key("owner-background-call"));
+    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+        event,
+        Event::ToolBackgroundResult(result) if result.call_id.as_str() == "owner-background-call"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn provider_owner_validation_rejects_external_background_error() {
+    let (_td, mut h) = setup_routed_test_tool_call("owner-background-error-call", "owned_tool");
+
+    h.handle_extension_event_inner(
+        "conn-wrong",
+        Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+            call_id: "owner-background-error-call".into(),
+            tool_name: ToolName::new("owned_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "spoofed background error".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    )
+    .expect("wrong background error ignored");
+
+    assert!(
+        h.tool_conversations
+            .contains_key("owner-background-error-call")
+    );
+    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+        event,
+        Event::ToolBackgroundError(error)
+            if error.call_id.as_str() == "owner-background-error-call"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn provider_owner_validation_rejects_external_provider_tool_result() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let _provider = connect_test_client(&mut h, "provider-spoof", tau_proto::ClientKind::Provider);
+
+    h.handle_extension_event_inner(
+        "provider-spoof",
+        Event::ProviderToolResult(final_tool_result(
+            "provider-tool-call",
+            "owned_tool",
+            "spoofed provider result",
+        )),
+    )
+    .expect("provider tool result ignored");
+
+    assert!(!event_log_contains(&h, "provider-spoof", |event| matches!(
+        event,
+        Event::ProviderToolResult(result) if result.call_id.as_str() == "provider-tool-call"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn provider_owner_validation_rejects_tool_event_message_emit() {
+    let (_td, mut h) = setup_routed_test_tool_call("emit-cancelled-call", "owned_tool");
+
+    h.handle_extension_event(
+        "conn-wrong",
+        Frame::Message(Message::Emit(tau_proto::Emit {
+            event: Box::new(Event::ToolCancelled(tau_proto::ToolCancelled {
+                call_id: "emit-cancelled-call".into(),
+                tool_name: ToolName::new("owned_tool"),
+                tool_type: tau_proto::ToolType::Function,
+            })),
+            transient: false,
+        })),
+    )
+    .expect("emitted cancellation ignored");
+
+    assert!(h.tool_conversations.contains_key("emit-cancelled-call"));
+    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "emit-cancelled-call"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn provider_owner_validation_rejects_provider_event_message_emit() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.handle_extension_event(
+        "conn-wrong",
+        Frame::Message(Message::Emit(tau_proto::Emit {
+            event: Box::new(Event::ProviderResponseFinished(ProviderResponseFinished {
+                session_prompt_id: "spoofed-prompt".into(),
+                output_items: Vec::new(),
+                stop_reason: tau_proto::ProviderStopReason::EndTurn,
+                usage: None,
+                originator: tau_proto::PromptOriginator::User,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            })),
+            transient: false,
+        })),
+    )
+    .expect("emitted provider event ignored");
+
+    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+        event,
+        Event::ProviderResponseFinished(response)
+            if response.session_prompt_id.as_str() == "spoofed-prompt"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn provider_owner_validation_rejects_client_tool_event_injection() {
+    let (_td, mut h) = setup_routed_test_tool_call("client-cancelled-call", "owned_tool");
+    let _client = connect_test_client(&mut h, "ui-spoof", tau_proto::ClientKind::Ui);
+
+    h.handle_client_event_inner(
+        "ui-spoof",
+        Event::ToolCancelled(tau_proto::ToolCancelled {
+            call_id: "client-cancelled-call".into(),
+            tool_name: ToolName::new("owned_tool"),
+            tool_type: tau_proto::ToolType::Function,
+        }),
+    )
+    .expect("client cancellation ignored");
+
+    assert!(h.tool_conversations.contains_key("client-cancelled-call"));
+    assert!(!event_log_contains(&h, "ui-spoof", |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "client-cancelled-call"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Active harness-owned tools do not have an external provider owner. External
+/// extensions must not be able to complete those call ids anyway.
+#[test]
+fn provider_owner_validation_rejects_external_result_for_harness_owned_call() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+    let call_id: ToolCallId = "harness-owned-call".into();
+    h.tool_conversations.insert(call_id.clone(), cid);
+    h.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("delegate"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+
+    h.handle_extension_event_inner(
+        "conn-wrong",
+        Event::ToolResult(final_tool_result(
+            call_id.as_str(),
+            "delegate",
+            "spoofed output",
+        )),
+    )
+    .expect("wrong result ignored");
+
+    assert!(h.tool_conversations.contains_key(&call_id));
+    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
+        event,
+        Event::ToolResult(result) if result.call_id == call_id
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Progress for a call after tracking has been cleared is stale and should not
+/// be published as a visible update.
+#[test]
+fn provider_owner_validation_rejects_late_tool_progress_after_completion() {
+    let (_td, mut h) = setup_routed_test_tool_call("late-progress-call", "owned_tool");
+
+    h.handle_extension_event_inner(
+        "conn-owner",
+        Event::ToolResult(final_tool_result(
+            "late-progress-call",
+            "owned_tool",
+            "real output",
+        )),
+    )
+    .expect("owner result accepted");
+    assert!(!h.tool_conversations.contains_key("late-progress-call"));
+
+    h.handle_extension_event_inner(
+        "conn-owner",
+        Event::ToolProgress(tool_progress(
+            "late-progress-call",
+            "owned_tool",
+            "late progress",
+        )),
+    )
+    .expect("late progress ignored");
+
+    assert!(!event_log_contains(&h, "conn-owner", |event| matches!(
+        event,
+        Event::ToolProgress(progress)
+            if progress.call_id.as_str() == "late-progress-call"
+                && progress.message.as_deref() == Some("late progress")
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Cancelling a routed tool must notify the provider owner as well as publish
+/// the local terminal `ToolCancelled` event. Otherwise extensions keep doing
+/// work after the user has cancelled the turn.
+#[test]
+fn cancel_routes_tool_cancel_to_provider_owner() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let owner_events = connect_test_tool(&mut h, "conn-cancel-owner");
+    h.registry
+        .register("conn-cancel-owner", shared_test_tool_spec("cancel_tool"));
+
+    let cid = h.default_conversation_id.clone();
+    let spid: SessionPromptId = "sp-cancel-tool".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_conversations.insert(spid.clone(), cid);
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "cancel-call".into(),
+            name: ToolName::new("cancel_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("tool call routed");
+
+    let session_id: tau_proto::SessionId = "s1".into();
+    h.handle_cancel_prompt(&session_id);
+
+    assert!(
+        owner_events
+            .lock()
+            .expect("owner events")
+            .iter()
+            .any(|routed| {
+                matches!(
+                    &routed.frame,
+                    Frame::Event(Event::ToolCancel(cancel))
+                        if cancel.call_id.as_str() == "cancel-call"
+                            && cancel.tool_name.as_str() == "cancel_tool"
+                )
+            })
+    );
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "cancel-call"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Cancelling a turn while `wait` is blocked must remove the waiter entry. A
+/// later wait for the same target should report the cancelled/consumed target,
+/// not a stale "existing wait" from the aborted wait call.
+#[test]
+fn cancel_clears_active_wait_state() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+    let target_call_id: ToolCallId = "wait-target".into();
+    let wait_call_id: ToolCallId = "wait-call".into();
+
+    h.tool_conversations
+        .insert(target_call_id.clone(), cid.clone());
+    h.pending_tools.insert(
+        target_call_id.clone(),
+        PendingTool {
+            name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.record_wait_tool_request(&target_call_id);
+
+    let wait_call = AgentToolCall {
+        id: wait_call_id.clone(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text(target_call_id.to_string()),
+        )]),
+        display: None,
+    };
+    h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
+        .expect("start wait");
+    seed_tools_running(
+        &mut h,
+        &cid,
+        vec![target_call_id.clone(), wait_call_id.clone()],
+    );
+
+    let session_id: tau_proto::SessionId = "s1".into();
+    h.handle_cancel_prompt(&session_id);
+
+    let second_wait_call = AgentToolCall {
+        id: "wait-call-2".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text(target_call_id.to_string()),
+        )]),
+        display: None,
+    };
+    h.handle_wait_tool_call(&cid, &second_wait_call, ToolName::new("wait"))
+        .expect("second wait");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolError(error)
+            if error.call_id.as_str() == "wait-call-2"
+                && error.message.contains("already consumed")
+    )));
+
+    h.shutdown().expect("shutdown");
 }
 
 #[test]
@@ -3729,6 +4367,215 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
     h.shutdown().expect("shutdown");
 }
 
+/// A completed background call can already have a queued internal completion
+/// prompt when its side conversation tears down. The prompt and the target map
+/// must move to the live parent instead of being lost with the removed child.
+#[test]
+fn completed_background_completion_prompt_transfers_before_side_teardown() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let parent_cid = ConversationId::new("parent-side");
+    let child_cid = ConversationId::new("child-side");
+    let mut parent = Conversation::new(
+        parent_cid.clone(),
+        "s1".into(),
+        tau_proto::PromptOriginator::Extension {
+            name: "parent-ext".into(),
+            query_id: "parent".to_owned(),
+        },
+        None,
+        Some("parent-ext".into()),
+    );
+    parent.turn_state = ConversationTurnState::ToolsRunning {
+        remaining_calls: vec!["keep-parent-busy".into()],
+    };
+    let mut child = Conversation::new(
+        child_cid.clone(),
+        "s1".into(),
+        tau_proto::PromptOriginator::Extension {
+            name: HARNESS_CONNECTION_ID.into(),
+            query_id: "child".to_owned(),
+        },
+        None,
+        Some(HARNESS_CONNECTION_ID.into()),
+    );
+    child.parent_tool_call_id = Some("child-parent-call".into());
+    child.parent_conversation_id = Some(parent_cid.clone());
+    h.conversations.insert(parent_cid.clone(), parent);
+    h.conversations.insert(child_cid.clone(), child);
+
+    let call_id: ToolCallId = "completed-bg".into();
+    h.background_completion_targets
+        .insert(call_id.clone(), child_cid.clone());
+    h.conversations
+        .get_mut(&child_cid)
+        .expect("child conversation")
+        .pending_prompts
+        .push_back(PendingPrompt::internal(background_completion_prompt(
+            &call_id,
+        )));
+
+    h.transfer_background_completion_target_before_teardown(&child_cid);
+
+    assert_eq!(
+        h.background_completion_targets.get(&call_id),
+        Some(&parent_cid)
+    );
+    assert!(
+        h.conversations
+            .get(&child_cid)
+            .expect("child conversation")
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != background_completion_prompt(&call_id))
+    );
+    let parent = h
+        .conversations
+        .get(&parent_cid)
+        .expect("parent conversation");
+    assert!(parent.pending_prompts.iter().any(|prompt| {
+        prompt.text == background_completion_prompt(&call_id) && prompt.is_internal()
+    }));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Nested harness-owned delegates clear the parent delegate call mapping before
+/// side teardown runs. A background child still running under that nested side
+/// must transfer first to the parent side conversation and then onward to the
+/// default conversation if the parent side also tears down before completion.
+#[test]
+fn nested_harness_delegate_background_survives_parent_side_teardown() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _ = connect_test_tool(&mut h, "conn-outer");
+    let _ = connect_test_tool(&mut h, "conn-slow");
+    h.registry.register(
+        "conn-slow",
+        ToolSpec {
+            name: ToolName::new("slow"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            execution_mode: ToolExecutionMode::Shared,
+            background_support: Some(tau_proto::BackgroundSupport::Instant),
+        },
+    );
+
+    let default_cid = h.default_conversation_id.clone();
+    h.tool_conversations
+        .insert("outer-call".into(), default_cid.clone());
+    let mut outer_query = ext_query("q-parent", ToolExecutionMode::Shared);
+    outer_query.tool_call_id = Some("outer-call".into());
+    outer_query.task_name = Some("outer".to_owned());
+    h.handle_ext_agent_query("conn-outer", outer_query)
+        .expect("outer query");
+    let outer_cid = ext_query_cid(&h, "q-parent").expect("outer side conversation");
+    let outer_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid == &outer_cid).then_some(spid.clone()))
+        .expect("outer prompt id");
+    let nested_delegate_args = CborValue::Map(vec![
+        (
+            CborValue::Text("task_name".to_owned()),
+            CborValue::Text("nested".to_owned()),
+        ),
+        (
+            CborValue::Text("prompt".to_owned()),
+            CborValue::Text("run slow work".to_owned()),
+        ),
+    ]);
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: outer_spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "nested-delegate-call".into(),
+            name: ToolName::new("delegate"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: nested_delegate_args,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "conn-outer".into(),
+            query_id: "q-parent".to_owned(),
+        },
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("outer starts nested delegate");
+
+    let nested_cid = ext_query_cid(&h, "delegate-0").expect("nested side conversation");
+    assert_eq!(
+        h.conversations
+            .get(&nested_cid)
+            .expect("nested conversation")
+            .parent_conversation_id
+            .as_ref(),
+        Some(&outer_cid)
+    );
+    let nested_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid == &nested_cid).then_some(spid.clone()))
+        .expect("nested prompt id");
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: nested_spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "slow-call".into(),
+            name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: HARNESS_CONNECTION_ID.into(),
+            query_id: "delegate-0".to_owned(),
+        },
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("nested starts background tool");
+
+    finish_ext_query(&mut h, &nested_cid, "delegate-0");
+    assert!(!h.conversations.contains_key(&nested_cid));
+    assert_eq!(h.tool_conversations.get("slow-call"), Some(&outer_cid));
+
+    finish_ext_query(&mut h, &outer_cid, "q-parent");
+    assert!(!h.conversations.contains_key(&outer_cid));
+    assert_eq!(h.tool_conversations.get("slow-call"), Some(&default_cid));
+
+    h.handle_extension_event_inner(
+        "conn-slow",
+        Event::ToolResult(final_tool_result("slow-call", "slow", "real output")),
+    )
+    .expect("late background result");
+
+    assert_eq!(
+        h.background_completion_targets.get("slow-call"),
+        Some(&default_cid)
+    );
+    assert!(event_log_contains(&h, "conn-slow", |event| matches!(
+        event,
+        Event::ToolBackgroundResult(result)
+            if result.call_id.as_str() == "slow-call"
+                && matches!(&result.result, CborValue::Text(text) if text == "real output")
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// A suppression event removes the internal model steering prompt while keeping
 /// the real late background error event visible to the event log.
 #[test]
@@ -5058,6 +5905,189 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     assert_eq!(after_complete.tools_in_flight, 0);
     assert_eq!(after_complete.tools_total, 1);
     assert_delegate_tools_counter(&after_complete, Some(1), Some(1));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A backgrounded tool inside a delegate must clean up like a normal late
+/// background error when its provider disconnects. Otherwise the delegate UI
+/// can stay stuck at one running tool and a suppressed completion prompt cannot
+/// be restored when `wait` is interrupted.
+#[test]
+fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_target() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = Some("test/model".into());
+    let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: tau_proto::ToolName::new("delegate"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
+        },
+    );
+    let _websearch_events = connect_test_tool(&mut h, "conn-websearch");
+    h.registry.register(
+        "conn-websearch",
+        ToolSpec {
+            name: tau_proto::ToolName::new("websearch"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            execution_mode: ToolExecutionMode::Shared,
+            background_support: Some(tau_proto::BackgroundSupport::Instant),
+        },
+    );
+
+    let parent_cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &parent_cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), parent_cid.clone());
+    h.publish_for_conversation(
+        &parent_cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "delegate something".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: main_spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "delegate-call".into(),
+            name: tau_proto::ToolName::new("delegate"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("main response");
+
+    let sink = collect_event_sink(&mut h);
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-disconnect".to_owned(),
+            instruction: "side task".to_owned(),
+            role: None,
+            execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
+            tool_call_id: Some("delegate-call".into()),
+            task_name: Some("look it up".to_owned()),
+        },
+    )
+    .expect("query");
+    drain_delegate_progress(&sink, "delegate-call");
+
+    let side_cid = ext_query_cid(&h, "q-disconnect").expect("side conversation");
+    let side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
+        .expect("side prompt id");
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: side_spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "websearch-call".into(),
+            name: tau_proto::ToolName::new("websearch"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-subagents".into(),
+            query_id: "q-disconnect".to_owned(),
+        },
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("side response");
+
+    let in_flight = drain_delegate_progress(&sink, "delegate-call")
+        .pop()
+        .expect("progress after sub-tool starts");
+    assert_eq!(in_flight.tools_in_flight, 1);
+    assert_eq!(in_flight.tools_total, 1);
+    assert_delegate_tools_counter(&in_flight, Some(0), Some(1));
+    assert_eq!(
+        h.pending_tool_providers
+            .get("websearch-call")
+            .map(|provider| provider.as_str()),
+        Some("conn-websearch")
+    );
+
+    let call_id: ToolCallId = "websearch-call".into();
+    h.suppress_background_completion_prompt(call_id.clone());
+    h.handle_disconnect("conn-websearch");
+
+    let after_disconnect = drain_delegate_progress(&sink, "delegate-call")
+        .pop()
+        .expect("progress after provider disconnect");
+    assert_eq!(after_disconnect.tools_in_flight, 0);
+    assert_eq!(after_disconnect.tools_total, 1);
+    assert_delegate_tools_counter(&after_disconnect, Some(1), Some(1));
+    assert_eq!(
+        h.conversations
+            .get(&side_cid)
+            .expect("side conversation remains live")
+            .tools_in_flight,
+        0
+    );
+    assert_eq!(
+        h.background_completion_targets.get(&call_id),
+        Some(&side_cid)
+    );
+    assert!(!h.pending_tool_providers.contains_key(&call_id));
+    assert!(!h.tool_conversations.contains_key(&call_id));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolBackgroundError(error)
+            if error.call_id.as_str() == call_id.as_str()
+                && error.message == "tool provider disconnected"
+    )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolError(error) if error.call_id.as_str() == call_id.as_str()
+    )));
+    assert!(
+        h.conversations
+            .get(&side_cid)
+            .expect("side conversation remains live")
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != background_completion_prompt(&call_id))
+    );
+
+    h.unsuppress_background_completion_prompt(call_id.clone());
+    let side = h
+        .conversations
+        .get(&side_cid)
+        .expect("side conversation remains live");
+    assert!(side.pending_prompts.iter().any(|prompt| {
+        prompt.text == background_completion_prompt(&call_id) && prompt.is_internal()
+    }));
 
     h.shutdown().expect("shutdown");
 }

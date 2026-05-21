@@ -328,11 +328,14 @@ Examples:
 ### Customizable key bindings
 
 `cli.yaml` exposes a `bind:` table that maps key chords to prompt-local
-shell actions. Bindings are layered on top of built-ins; user entries with the
+actions. Bindings are layered on top of built-ins; user entries with the
 same key replace the built-in binding.
 
 Supported actions:
 
+- `submit-prompt`: submit the prompt, or accept a previewed completion without
+  submitting.
+- `insert-newline`: insert a newline at the cursor.
 - `shell-prompt-edit`: dump the prompt to `$TAU_PROMPT_PATH`, run the shell
   command, then replace the prompt with the file contents on success.
 - `shell-prompt-insert`: run the shell command and insert its stdout at the
@@ -359,6 +362,7 @@ Default bindings:
 
 ```json5
 bind: {
+  "C-Enter": { action: "submit-prompt" },
   "C-f": {
     action: "shell-prompt-insert",
     command: "rg --files --hidden --glob '!.git' | fzf --height=100%",
