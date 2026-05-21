@@ -1,4 +1,5 @@
 use tau_config::settings::CliTheme;
+use tau_themes::{SpanTree, ThemedText};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TerminalShade {
@@ -7,6 +8,33 @@ enum TerminalShade {
 }
 
 const THEME_ENV: &str = "TAU_THEME";
+
+pub(crate) fn active_prompt_marker(
+    theme: &tau_themes::Theme,
+    prompt_symbol: &str,
+    role: Option<&str>,
+) -> tau_cli_term::StyledText {
+    let mut text = ThemedText::new();
+    let base_style = text.add_style(tau_themes::names::PROMPT_MARKER);
+    let marker = format!("{prompt_symbol} ");
+
+    let marker = if let Some(role) = role {
+        let role_style = text.add_style(prompt_marker_role_style(role));
+        SpanTree::span(
+            base_style,
+            vec![SpanTree::span(role_style, vec![SpanTree::text(marker)])],
+        )
+    } else {
+        SpanTree::span(base_style, vec![SpanTree::text(marker)])
+    };
+
+    text.push_tree(marker);
+    tau_cli_term::resolve::themed_text(theme, &text)
+}
+
+fn prompt_marker_role_style(role: &str) -> String {
+    format!("{}.{}", tau_themes::names::PROMPT_MARKER, role)
+}
 
 pub(crate) fn select_theme(mode: CliTheme) -> tau_themes::Theme {
     let mode = env_theme_override().unwrap_or(mode);

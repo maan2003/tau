@@ -441,8 +441,7 @@ pub(crate) fn run_chat(
     let settings = tau_config::settings::load_cli_settings()
         .map_err(|error| CliError::Participant(format!("cli.yaml failed to parse:\n{error}")))?;
     let theme = crate::theme::select_theme(settings.theme);
-    let prompt_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROMPT_MARKER);
-    let prompt = tau_cli_term::Span::new(format!("{} ", settings.prompt_symbol), prompt_style);
+    let prompt = crate::theme::active_prompt_marker(&theme, &settings.prompt_symbol, None);
     let cursor_shape = if settings.bar_cursor {
         tau_cli_term::CursorShape::Bar
     } else {
@@ -497,6 +496,7 @@ pub(crate) fn run_chat(
         theme.clone(),
         cli_state,
         dirs.clone(),
+        settings.prompt_symbol.clone(),
         settings.submitted_prompt_symbol,
     );
     let tool_timer = ToolTimerNotifier::new();

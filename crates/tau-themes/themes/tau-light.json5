@@ -64,7 +64,11 @@
     "token.stats.metric.latency":   { },
 
     // -- Prompt --
-    "prompt.marker":        { bold: true },
+    "prompt.marker":           { bold: true },
+    "prompt.marker.engineer":  { fg: "dark_cyan", bold: true },
+    "prompt.marker.assistant": { fg: "red", bold: true },
+    "prompt.marker.manager":   { fg: "dark_yellow", bold: true },
+    "prompt.marker.submitted": { bold: true },
 
     // -- Completion menu --
     "completion.label":     { fg: "dark_green" },

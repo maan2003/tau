@@ -78,6 +78,7 @@ pub const COMPLETION_SELECTED: &str = "completion.selected";
 
 // -- Prompt --
 pub const PROMPT_MARKER: &str = "prompt.marker";
+pub const PROMPT_MARKER_SUBMITTED: &str = "prompt.marker.submitted";
 
 // -- Banner --
 pub const BANNER_ACCENT: &str = "banner.accent";

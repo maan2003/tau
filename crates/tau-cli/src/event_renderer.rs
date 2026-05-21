@@ -185,6 +185,8 @@ pub(crate) struct EventRenderer {
     /// rather drop one editor-context update than crash the renderer
     /// thread.
     editor_context: std::sync::Arc<std::sync::Mutex<tau_cli_term::EditorContext>>,
+    /// Symbol shown before the active prompt input.
+    prompt_symbol: String,
     /// Symbol shown before submitted prompts in the transcript.
     submitted_prompt_symbol: String,
     /// Shared flag telling the input loop whether Tau knows about
@@ -780,6 +782,7 @@ impl EventRenderer {
                 state_dir: None,
             },
             ">".to_string(),
+            ">".to_string(),
         )
     }
 
@@ -789,6 +792,7 @@ impl EventRenderer {
         theme: tau_themes::Theme,
         state: tau_config::settings::CliState,
         state_dirs: tau_config::settings::TauDirs,
+        prompt_symbol: String,
         submitted_prompt_symbol: String,
     ) -> Self {
         let cli_state_mirror = std::sync::Arc::new(std::sync::Mutex::new(state.clone()));
@@ -852,6 +856,7 @@ impl EventRenderer {
             editor_context: std::sync::Arc::new(std::sync::Mutex::new(
                 tau_cli_term::EditorContext::default(),
             )),
+            prompt_symbol,
             submitted_prompt_symbol,
             agent_in_progress: Arc::new(AtomicBool::new(false)),
             agent_activity: AgentActivity::default(),
@@ -1698,8 +1703,34 @@ impl EventRenderer {
         }
     }
 
-    fn submitted_prompt_prefix(&self) -> String {
-        format!("{} ", self.submitted_prompt_symbol)
+    fn submitted_prompt_block(
+        &self,
+        body_name: &str,
+        body_text: impl Into<String>,
+    ) -> tau_cli_term::StyledBlock {
+        use tau_cli_term::resolve::{convert_color, themed_text};
+        use tau_themes::{SpanTree, StyleName, ThemedText, names};
+
+        let mut themed = ThemedText::new();
+        let body_style = themed.add_style(body_name);
+        let marker_style = themed.add_style(names::PROMPT_MARKER_SUBMITTED);
+        themed.push_tree(SpanTree::span(
+            body_style,
+            vec![
+                SpanTree::span(
+                    marker_style,
+                    vec![SpanTree::text(format!("{} ", self.submitted_prompt_symbol))],
+                ),
+                SpanTree::text(body_text.into()),
+            ],
+        ));
+
+        let body_ts = self.theme.resolve_style(&StyleName::new(body_name));
+        let mut block = tau_cli_term::StyledBlock::new(themed_text(&self.theme, &themed));
+        if let Some(bg) = body_ts.bg {
+            block = block.bg(convert_color(bg));
+        }
+        block
     }
 
     pub(crate) fn handle_disconnect(&mut self, reason: Option<String>) {
@@ -1874,7 +1905,6 @@ impl EventRenderer {
             return;
         }
 
-        use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
 
         if self
@@ -1885,11 +1915,7 @@ impl EventRenderer {
             return;
         }
         self.reset_main_tool_usage();
-        let block = themed_block(
-            &self.theme,
-            names::USER_PROMPT,
-            format!("{}{}", self.submitted_prompt_prefix(), prompt.text),
-        );
+        let block = self.submitted_prompt_block(names::USER_PROMPT, prompt.text.clone());
         let id = self.handle.print_output("user-prompt", block);
         self.last_user_block = Some((id, prompt.text.clone()));
     }
@@ -1899,7 +1925,6 @@ impl EventRenderer {
             return;
         }
 
-        use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
 
         self.reset_main_tool_usage();
@@ -1910,10 +1935,9 @@ impl EventRenderer {
                 self.last_user_block = Some((id, text));
             }
         }
-        let block = themed_block(
-            &self.theme,
+        let block = self.submitted_prompt_block(
             names::USER_PROMPT_QUEUED,
-            format!("{}{} (queued)", self.submitted_prompt_prefix(), queued.text),
+            format!("{} (queued)", queued.text),
         );
         let queued_id = self.handle.new_block("user-prompt-queued", block);
         self.handle.push_above_sticky(queued_id);
@@ -1937,7 +1961,6 @@ impl EventRenderer {
             return;
         }
 
-        use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
 
         // The harness folded a queued prompt into the current turn's next
@@ -1948,11 +1971,7 @@ impl EventRenderer {
             self.handle.remove_block(queued_id);
             self.handle.print_output(
                 "user-prompt-steered",
-                themed_block(
-                    &self.theme,
-                    names::USER_PROMPT,
-                    format!("{}{text}", self.submitted_prompt_prefix()),
-                ),
+                self.submitted_prompt_block(names::USER_PROMPT, text),
             );
             self.handle.redraw();
         } else {
@@ -1960,11 +1979,7 @@ impl EventRenderer {
             // steered text directly so the user still sees their message land.
             self.handle.print_output(
                 "user-prompt-steered",
-                themed_block(
-                    &self.theme,
-                    names::USER_PROMPT,
-                    format!("{}{}", self.submitted_prompt_prefix(), steered.text),
-                ),
+                self.submitted_prompt_block(names::USER_PROMPT, steered.text.clone()),
             );
             self.handle.redraw();
         }
@@ -1988,19 +2003,12 @@ impl EventRenderer {
     }
 
     fn promote_next_queued_prompt(&mut self, label: &'static str) {
-        use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
 
         if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
             self.handle.remove_block(queued_id);
-            self.handle.print_output(
-                label,
-                themed_block(
-                    &self.theme,
-                    names::USER_PROMPT,
-                    format!("{}{text}", self.submitted_prompt_prefix()),
-                ),
-            );
+            self.handle
+                .print_output(label, self.submitted_prompt_block(names::USER_PROMPT, text));
         }
     }
 
@@ -3154,6 +3162,13 @@ impl EventRenderer {
         if let Ok(mut role) = self.current_role_state.lock() {
             *role = Some(selected.role.clone());
         }
+        let prompt = crate::theme::active_prompt_marker(
+            &self.theme,
+            &self.prompt_symbol,
+            Some(&selected.role),
+        );
+        self.handle.set_left_prompt(prompt);
+        self.handle.redraw();
         self.current_context_window = selected.context_window;
         self.render_model_status();
     }
