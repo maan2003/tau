@@ -281,8 +281,8 @@ impl ToolTurnMachine {
         let (foreground_pending, backgrounded, foreground_deadline, action) =
             match pending.background_support {
                 BackgroundSupport::Instant => (
-                    false,
                     true,
+                    false,
                     None,
                     ForegroundAction::Background {
                         call_id: pending.invocation.id.clone(),
@@ -528,8 +528,9 @@ mod tests {
         assert_eq!(pop_id(&mut machine).as_deref(), Some("exclusive"));
     }
 
-    /// Instant background support closes the foreground at dispatch time while
-    /// keeping the actual tool call tracked until its real result arrives.
+    /// Instant background support asks the harness to close the foreground at
+    /// dispatch time while keeping the actual tool call tracked until its real
+    /// result arrives.
     #[test]
     fn instant_background_completes_foreground_but_remains_running() {
         let mut machine = ToolTurnMachine::default();
@@ -549,6 +550,9 @@ mod tests {
                 call_id: "bg".into()
             }
         );
+        assert!(!machine.is_backgrounded(&"bg".into()));
+        assert!(machine.any_in_flight_for(&conv));
+        assert!(machine.mark_backgrounded(&"bg".into()));
         assert!(machine.is_backgrounded(&"bg".into()));
         assert!(!machine.any_in_flight_for(&conv));
         assert_eq!(machine.in_flight_len(), 1);
@@ -623,6 +627,7 @@ mod tests {
             BackgroundSupport::Instant,
         );
         machine.pop_dispatchable(Instant::now()).expect("dispatch");
+        assert!(machine.mark_backgrounded(&"late".into()));
         assert!(machine.is_backgrounded(&"late".into()));
 
         assert_eq!(

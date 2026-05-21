@@ -4006,6 +4006,94 @@ fn recall_queued_prompt_skips_internal_prompts() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression: `delegate` is an instant-background tool. Its placeholder must
+/// fold into the parent transcript before the harness starts the side prompt;
+/// otherwise the provider can replay a `function_call` without the matching
+/// output and reject the next request.
+#[test]
+fn instant_delegate_placeholder_is_committed_before_side_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = Some("test/model".into());
+    let cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "delegate now".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("task_name".to_owned()),
+            CborValue::Text("race".to_owned()),
+        ),
+        (
+            CborValue::Text("prompt".to_owned()),
+            CborValue::Text("side task".to_owned()),
+        ),
+    ]);
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: main_spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "delegate-call".into(),
+            name: ToolName::new("delegate"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: args,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("main response");
+
+    let mut placeholder_seq = None;
+    let mut placeholder_count = 0;
+    let mut side_prompt_seq = None;
+    let mut seq = 0;
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq + 1;
+        match &entry.event {
+            Event::ToolResult(result)
+                if result.call_id.as_str() == "delegate-call"
+                    && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder =>
+            {
+                placeholder_count += 1;
+                placeholder_seq.get_or_insert(entry.seq);
+            }
+            Event::SessionPromptCreated(prompt)
+                if h.prompt_conversations
+                    .get(&prompt.session_prompt_id)
+                    .is_some_and(|prompt_cid| prompt_cid != &cid) =>
+            {
+                side_prompt_seq.get_or_insert(entry.seq);
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(placeholder_count, 1);
+    assert!(
+        placeholder_seq.expect("delegate placeholder") < side_prompt_seq.expect("side prompt"),
+        "the parent transcript must contain the delegate placeholder before any side prompt is sent",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Mixed-mode `delegate` calls issued in the same agent turn must still
 /// dispatch to the delegate extension concurrently. The call argument
 /// `execution_mode: "exclusive"` belongs to the `ExtAgentQuery` emitted by the

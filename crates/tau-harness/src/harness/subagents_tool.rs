@@ -160,6 +160,9 @@ impl Harness {
                 started_at: Instant::now(),
             },
         );
+        if self.tool_turn.mark_backgrounded(&call_id) {
+            self.publish_synthetic_background_result(&call_id);
+        }
         self.handle_ext_agent_query(
             HARNESS_CONNECTION_ID,
             tau_proto::ExtAgentQuery {

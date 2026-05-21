@@ -6024,7 +6024,9 @@ impl Harness {
         match action {
             ForegroundAction::None => {}
             ForegroundAction::Background { call_id } => {
-                self.publish_synthetic_background_result(&call_id);
+                if self.tool_turn.mark_backgrounded(&call_id) {
+                    self.publish_synthetic_background_result(&call_id);
+                }
                 self.on_tool_call_foreground_complete(call_id.as_str());
             }
         }
