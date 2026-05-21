@@ -1273,7 +1273,7 @@
     },
     {
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
-      "function": "EventRenderer::set_show_token_stats",
+      "function": "EventRenderer::set_show_turn_stats",
       "line": 929,
       "cyclomatic": 4.0,
       "coverage": 0.0,
@@ -5845,7 +5845,7 @@
     },
     {
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
-      "function": "EventRenderer::record_finished_token_stats",
+      "function": "EventRenderer::record_finished_turn_stats",
       "line": 2044,
       "cyclomatic": 2.0,
       "coverage": 33.33333333333333,
@@ -6331,7 +6331,7 @@
     },
     {
       "file": "/build/source/crates/tau-cli/src/tool_render.rs",
-      "function": "token_stats_parts",
+      "function": "turn_stats_parts",
       "line": 64,
       "cyclomatic": 3.0,
       "coverage": 100.0,
@@ -7375,7 +7375,7 @@
     },
     {
       "file": "/build/source/crates/tau-cli/src/tool_render.rs",
-      "function": "render_token_stats_block",
+      "function": "render_turn_stats_block",
       "line": 24,
       "cyclomatic": 2.0,
       "coverage": 100.0,
@@ -11389,7 +11389,7 @@
     },
     {
       "file": "/build/source/crates/tau-cli/src/tool_render.rs",
-      "function": "format_token_stats_line",
+      "function": "format_turn_stats_line",
       "line": 12,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -11398,7 +11398,7 @@
     },
     {
       "file": "/build/source/crates/tau-cli/src/tool_render.rs",
-      "function": "TokenStatsPart::new",
+      "function": "TurnStatsPart::new",
       "line": 56,
       "cyclomatic": 1.0,
       "coverage": 100.0,

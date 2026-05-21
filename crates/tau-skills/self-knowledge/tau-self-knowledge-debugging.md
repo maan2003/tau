@@ -16,7 +16,7 @@ Tau follows the XDG directories:
   - `harness.yaml`, `harness.d/*.yaml` — harness, agent roles/defaults, extension, and session-retention config.
 - State: `~/.local/state/tau/` on Linux.
   - If no XDG state dir is available, inspection defaults may fall back to `.tau/state`.
-  - `cli.json` — persisted CLI runtime toggles such as show-diff, show-thinking, show-tools, token stats.
+  - `cli.json` — persisted CLI runtime toggles such as show-diff, show-thinking, show-tools, turn stats.
   - `policy.cbor` — persisted socket-client policy approvals.
   - `auth.d/<provider>.json` — per-provider credentials.
   - `auth.json` — legacy whole-file credentials, read for backwards compatibility.

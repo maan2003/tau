@@ -9,19 +9,19 @@ use std::time::Duration;
 use tau_proto::{CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus, cbor_field};
 
 #[cfg(test)]
-pub(crate) fn format_token_stats_line(
+pub(crate) fn format_turn_stats_line(
     usage: &tau_proto::ProviderTokenUsage,
     previous_usage: Option<&tau_proto::ProviderTokenUsage>,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> String {
-    token_stats_parts(usage, previous_usage, turn_latency, total_latency)
+    turn_stats_parts(usage, previous_usage, turn_latency, total_latency)
         .into_iter()
         .map(|part| part.text)
         .collect()
 }
 
-pub(crate) fn render_token_stats_block(
+pub(crate) fn render_turn_stats_block(
     theme: &tau_themes::Theme,
     usage: &tau_proto::ProviderTokenUsage,
     previous_usage: Option<&tau_proto::ProviderTokenUsage>,
@@ -34,7 +34,7 @@ pub(crate) fn render_token_stats_block(
     let mut themed = ThemedText::new();
     let root = themed.add_style(names::TOKEN_STATS);
     let mut children = Vec::new();
-    for part in token_stats_parts(usage, previous_usage, turn_latency, total_latency) {
+    for part in turn_stats_parts(usage, previous_usage, turn_latency, total_latency) {
         let style = themed.add_style(part.style_name);
         children.push(SpanTree::span(style, vec![SpanTree::text(part.text)]));
     }
@@ -47,12 +47,12 @@ const CACHE_HIT_WARNING_PERCENT: u8 = 90;
 // the last partial block to miss without flagging the turn.
 const CACHE_GRANULARITY_TOKENS: u64 = 512;
 
-struct TokenStatsPart {
+struct TurnStatsPart {
     text: String,
     style_name: &'static str,
 }
 
-impl TokenStatsPart {
+impl TurnStatsPart {
     fn new(text: impl Into<String>, style_name: &'static str) -> Self {
         Self {
             text: text.into(),
@@ -61,12 +61,12 @@ impl TokenStatsPart {
     }
 }
 
-fn token_stats_parts(
+fn turn_stats_parts(
     usage: &tau_proto::ProviderTokenUsage,
     previous_usage: Option<&tau_proto::ProviderTokenUsage>,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
-) -> Vec<TokenStatsPart> {
+) -> Vec<TurnStatsPart> {
     use tau_themes::names;
 
     let previous_sent_tokens = previous_usage.map_or(0, |usage| usage.prompt_sent_tokens);
@@ -75,10 +75,10 @@ fn token_stats_parts(
     let new_prompt_tokens = usage.prompt_sent_tokens.saturating_sub(turn_cache_possible);
     let mut parts = Vec::new();
 
-    parts.push(TokenStatsPart::new("Δ", names::TOKEN_STATS_DELTA));
+    parts.push(TurnStatsPart::new("Δ", names::TOKEN_STATS_DELTA));
     let turn_cache_hit_percent =
         cache_hit_percent(Some(turn_cache_possible), Some(usage.prompt_cached_tokens)).unwrap_or(0);
-    parts.push(TokenStatsPart::new(
+    parts.push(TurnStatsPart::new(
         format!(
             "{turn_cache_hit_percent}% {}/{}",
             format_token_count(usage.prompt_cached_tokens),
@@ -86,26 +86,26 @@ fn token_stats_parts(
         ),
         cache_hit_style_name(turn_cache_possible, usage.prompt_cached_tokens),
     ));
-    parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
-    parts.push(TokenStatsPart::new(
+    parts.push(TurnStatsPart::new(" ↑", names::TOKEN_STATS_UP));
+    parts.push(TurnStatsPart::new(
         format_token_count(new_prompt_tokens),
         names::TOKEN_STATS_INPUT,
     ));
-    parts.push(TokenStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
-    parts.push(TokenStatsPart::new(
+    parts.push(TurnStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
+    parts.push(TurnStatsPart::new(
         format_token_count(usage.response_received_tokens),
         names::TOKEN_STATS_OUTPUT,
     ));
     if let Some(latency) = turn_latency {
-        parts.push(TokenStatsPart::new(
+        parts.push(TurnStatsPart::new(
             format!(" {}", StatusBarDuration(latency)),
             names::TOKEN_STATS_LATENCY,
         ));
     }
 
-    parts.push(TokenStatsPart::new(" Σ", names::TOKEN_STATS_SIGMA));
-    parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
-    parts.push(TokenStatsPart::new(
+    parts.push(TurnStatsPart::new(" Σ", names::TOKEN_STATS_SIGMA));
+    parts.push(TurnStatsPart::new(" ↑", names::TOKEN_STATS_UP));
+    parts.push(TurnStatsPart::new(
         format!(
             "{}/{}",
             format_token_count(usage.stats.total.cached_tokens),
@@ -113,13 +113,13 @@ fn token_stats_parts(
         ),
         names::TOKEN_STATS_INPUT,
     ));
-    parts.push(TokenStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
-    parts.push(TokenStatsPart::new(
+    parts.push(TurnStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
+    parts.push(TurnStatsPart::new(
         format_token_count(usage.stats.total.received_tokens),
         names::TOKEN_STATS_OUTPUT,
     ));
     if let Some(latency) = total_latency {
-        parts.push(TokenStatsPart::new(
+        parts.push(TurnStatsPart::new(
             format!(" {}", StatusBarDuration(latency)),
             names::TOKEN_STATS_LATENCY,
         ));

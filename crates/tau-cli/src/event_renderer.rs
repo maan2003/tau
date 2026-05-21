@@ -16,8 +16,8 @@ use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
     build_osc1337_set_user_var, build_tool_summary_display, extension_status_block, extract_diff,
     format_token_count, format_tool_call, render_compaction_block, render_delegate_display,
-    render_diff_tool_block, render_harness_info, render_shell_block, render_token_stats_block,
-    render_tool_block, render_tool_display, session_status_block, streaming_block,
+    render_diff_tool_block, render_harness_info, render_shell_block, render_tool_block,
+    render_tool_display, render_turn_stats_block, session_status_block, streaming_block,
     synthesize_fallback_display, system_loaded_block, system_status_block, tool_duration_suffix,
     ui_dir_block,
 };
@@ -84,10 +84,10 @@ pub(crate) struct EventRenderer {
     /// either the full text or removed, so the toggle takes effect
     /// retroactively across the visible transcript.
     thinking_history: Vec<ThinkingBlockEntry>,
-    token_stats_history: Vec<TokenStatsBlockEntry>,
+    turn_stats_history: Vec<TurnStatsBlockEntry>,
     tool_history: Vec<ToolBlockEntry>,
     /// Where to persist `show_diff` / `show_thinking` /
-    /// `show_token_stats` / `show_tools` toggles.
+    /// `show_turn_stats` / `show_tools` toggles.
     state_dirs: tau_config::settings::TauDirs,
     /// Model currently resolved for the selected role. `None` until the first
     /// `HarnessRoleSelected`, or while the selected role has no available
@@ -138,7 +138,7 @@ pub(crate) struct EventRenderer {
     main_tools_visible: bool,
     /// Whether to render per-turn token usage stats below completed
     /// agent responses.
-    show_token_stats: bool,
+    show_turn_stats: bool,
     /// Whether to show a temporary full-redraw counter in the status bar.
     redraw_counter: bool,
     last_full_render_count: u64,
@@ -497,7 +497,7 @@ fn role_command_completions(
     }
 }
 
-struct TokenStatsBlockEntry {
+struct TurnStatsBlockEntry {
     block_id: tau_cli_term::BlockId,
     usage: tau_proto::ProviderTokenUsage,
     turn_latency: Option<Duration>,
@@ -810,14 +810,14 @@ impl EventRenderer {
             diff_blocks: Vec::new(),
             diffs_expanded: state.show_diff,
             show_thinking: state.show_thinking,
-            show_token_stats: state.show_token_stats,
+            show_turn_stats: state.show_turn_stats,
             show_tools: state.show_tools,
             tool_summaries: HashMap::new(),
             prompt_tool_summary: None,
             prompt_tool_summary_active: false,
             cli_state_mirror,
             thinking_history: Vec::new(),
-            token_stats_history: Vec::new(),
+            turn_stats_history: Vec::new(),
             tool_history: Vec::new(),
             state_dirs,
             current_model: None,
@@ -866,7 +866,7 @@ impl EventRenderer {
         let state = tau_config::settings::CliState {
             show_diff: self.diffs_expanded,
             show_thinking: self.show_thinking,
-            show_token_stats: self.show_token_stats,
+            show_turn_stats: self.show_turn_stats,
             redraw_counter: self.redraw_counter,
             show_tools: self.show_tools,
         };
@@ -924,7 +924,7 @@ impl EventRenderer {
         match name {
             "show-diff" => self.set_diffs_expanded(on),
             "show-thinking" => self.set_show_thinking(on),
-            "show-token-stats" => self.set_show_token_stats(on),
+            "show-turn-stats" => self.set_show_turn_stats(on),
             "redraw-counter" => self.set_redraw_counter(on),
             "show-tools" => {
                 if let Some(show_tools) = tau_config::settings::ShowTools::parse(value) {
@@ -1013,18 +1013,18 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
-    fn set_show_token_stats(&mut self, on: bool) {
-        if self.show_token_stats == on {
+    fn set_show_turn_stats(&mut self, on: bool) {
+        if self.show_turn_stats == on {
             return;
         }
-        self.show_token_stats = on;
-        for (index, entry) in self.token_stats_history.iter().enumerate() {
+        self.show_turn_stats = on;
+        for (index, entry) in self.turn_stats_history.iter().enumerate() {
             let previous_usage = index
                 .checked_sub(1)
-                .and_then(|previous_index| self.token_stats_history.get(previous_index))
+                .and_then(|previous_index| self.turn_stats_history.get(previous_index))
                 .map(|previous_entry| &previous_entry.usage);
-            let block = if self.show_token_stats {
-                render_token_stats_block(
+            let block = if self.show_turn_stats {
+                render_turn_stats_block(
                     &self.theme,
                     &entry.usage,
                     previous_usage,
@@ -1336,7 +1336,7 @@ impl EventRenderer {
         self.model_status_block = None;
         self.diff_blocks.clear();
         self.thinking_history.clear();
-        self.token_stats_history.clear();
+        self.turn_stats_history.clear();
         self.tool_history.clear();
         self.tool_summaries.clear();
         self.prompt_tool_summary = None;
@@ -2138,7 +2138,7 @@ impl EventRenderer {
 
         let full_assistant_text = assistant_text_from_output_items(&finished.output_items);
         self.record_finished_assistant_context(finished, full_assistant_text.as_deref());
-        self.record_finished_token_stats(finished, turn_latency);
+        self.record_finished_turn_stats(finished, turn_latency);
         self.render_user_provider_response_items(finished, recorded_at);
         self.render_model_status();
     }
@@ -2213,7 +2213,7 @@ impl EventRenderer {
         }
     }
 
-    fn record_finished_token_stats(
+    fn record_finished_turn_stats(
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
         turn_latency: Option<Duration>,
@@ -2221,9 +2221,9 @@ impl EventRenderer {
         let Some(usage) = finished.usage.clone() else {
             return;
         };
-        let previous_usage = self.token_stats_history.last().map(|entry| &entry.usage);
-        let block = if self.show_token_stats {
-            render_token_stats_block(
+        let previous_usage = self.turn_stats_history.last().map(|entry| &entry.usage);
+        let block = if self.show_turn_stats {
+            render_turn_stats_block(
                 &self.theme,
                 &usage,
                 previous_usage,
@@ -2233,8 +2233,8 @@ impl EventRenderer {
         } else {
             Self::empty_block()
         };
-        let bid = self.handle.print_output("token-stats", block);
-        self.token_stats_history.push(TokenStatsBlockEntry {
+        let bid = self.handle.print_output("turn-stats", block);
+        self.turn_stats_history.push(TurnStatsBlockEntry {
             block_id: bid,
             usage,
             turn_latency,

@@ -5,7 +5,7 @@ prompt_symbol: "◯"
 submitted_prompt_symbol: "⬤"
 show_diff: false
 show_thinking: true
-show_token_stats: false
+show_turn_stats: false
 redraw_counter: false
 show_tools: full
 theme: auto

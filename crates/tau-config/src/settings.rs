@@ -63,7 +63,7 @@ pub struct CliSettings {
     /// Whether to render the agent's reasoning summary by default.
     pub show_thinking: bool,
     /// Whether to render per-turn token usage stats by default.
-    pub show_token_stats: bool,
+    pub show_turn_stats: bool,
     /// Whether to render the full-redraw debug counter in the model
     /// status bar by default.
     pub redraw_counter: bool,
@@ -93,7 +93,7 @@ impl CliSettings {
         CliState {
             show_diff: self.show_diff,
             show_thinking: self.show_thinking,
-            show_token_stats: self.show_token_stats,
+            show_turn_stats: self.show_turn_stats,
             redraw_counter: self.redraw_counter,
             show_tools: self.show_tools,
         }
@@ -194,8 +194,8 @@ pub struct CliState {
     /// `/set show-thinking <true|false>`.
     pub show_thinking: bool,
     /// Whether to render per-turn token usage stats below agent
-    /// responses. Controlled by `/set show-token-stats <true|false>`.
-    pub show_token_stats: bool,
+    /// responses. Controlled by `/set show-turn-stats <true|false>`.
+    pub show_turn_stats: bool,
     /// Whether to render the full-redraw debug counter in the model
     /// status bar. Controlled by `/set redraw-counter <true|false>`.
     pub redraw_counter: bool,
@@ -263,7 +263,7 @@ impl Default for CliState {
         Self {
             show_diff: false,
             show_thinking: true,
-            show_token_stats: false,
+            show_turn_stats: false,
             redraw_counter: false,
             show_tools: ShowTools::Full,
         }

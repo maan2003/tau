@@ -18,8 +18,8 @@ use super::chat::{DraftSlot, is_local_slash_command, should_send_draft_snapshot}
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
     CompactionStatus, ToolStatus, build_delegate_completion_display, build_osc1337_set_user_var,
-    cache_hit_percent, format_token_stats_line, render_compaction_block, render_delegate_display,
-    render_shell_block, render_token_stats_block, render_tool_block, render_tool_display,
+    cache_hit_percent, format_turn_stats_line, render_compaction_block, render_delegate_display,
+    render_shell_block, render_tool_block, render_tool_display, render_turn_stats_block,
     streaming_block, synthesize_fallback_display,
 };
 
@@ -2804,7 +2804,7 @@ fn build_osc1337_set_user_var_encodes_value_and_respects_tmux() {
 }
 
 #[test]
-fn format_token_stats_line_formats_short_latencies_as_millis() {
+fn format_turn_stats_line_formats_short_latencies_as_millis() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 17_341,
         prompt_cached_tokens: 16_896,
@@ -2824,7 +2824,7 @@ fn format_token_stats_line_formats_short_latencies_as_millis() {
         response_received_tokens: 1_341,
         ..Default::default()
     };
-    let line = format_token_stats_line(
+    let line = format_turn_stats_line(
         &usage,
         Some(&previous_usage),
         Some(Duration::from_millis(1_240)),
@@ -2835,7 +2835,7 @@ fn format_token_stats_line_formats_short_latencies_as_millis() {
 }
 
 #[test]
-fn format_token_stats_line_formats_long_latencies_compactly() {
+fn format_turn_stats_line_formats_long_latencies_compactly() {
     let usage = tau_proto::ProviderTokenUsage {
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
@@ -2846,7 +2846,7 @@ fn format_token_stats_line_formats_long_latencies_compactly() {
         },
         ..Default::default()
     };
-    let line = format_token_stats_line(
+    let line = format_turn_stats_line(
         &usage,
         None,
         Some(Duration::from_millis(18_723)),
@@ -2857,7 +2857,7 @@ fn format_token_stats_line_formats_long_latencies_compactly() {
 }
 
 #[test]
-fn format_token_stats_line_uses_previous_turn_for_hit_percent() {
+fn format_turn_stats_line_uses_previous_turn_for_hit_percent() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 20_100,
         prompt_cached_tokens: 19_000,
@@ -2875,13 +2875,13 @@ fn format_token_stats_line_uses_previous_turn_for_hit_percent() {
         prompt_sent_tokens: 20_000,
         ..Default::default()
     };
-    let line = format_token_stats_line(&usage, Some(&previous_usage), None, None);
+    let line = format_turn_stats_line(&usage, Some(&previous_usage), None, None);
 
     assert_eq!(line, "Δ95% 19k/20k ↑100 ↓0 Σ ↑19k/40.1k ↓0");
 }
 
 #[test]
-fn format_token_stats_line_shows_zero_hit_when_nothing_could_be_cached() {
+fn format_turn_stats_line_shows_zero_hit_when_nothing_could_be_cached() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 1_000,
         stats: tau_proto::TokenUsageStats {
@@ -2893,21 +2893,21 @@ fn format_token_stats_line_shows_zero_hit_when_nothing_could_be_cached() {
         },
         ..Default::default()
     };
-    let line = format_token_stats_line(&usage, None, None, None);
+    let line = format_turn_stats_line(&usage, None, None, None);
 
     assert_eq!(line, "Δ0% 0/0 ↑1k ↓0 Σ ↑0/1k ↓0");
 }
 
 #[test]
-fn format_token_stats_line_shows_zero_hit_when_no_prompt_sent() {
+fn format_turn_stats_line_shows_zero_hit_when_no_prompt_sent() {
     let usage = tau_proto::ProviderTokenUsage::default();
-    let line = format_token_stats_line(&usage, None, None, None);
+    let line = format_turn_stats_line(&usage, None, None, None);
 
     assert_eq!(line, "Δ0% 0/0 ↑0 ↓0 Σ ↑0/0 ↓0");
 }
 
 #[test]
-fn render_token_stats_block_uses_dedicated_styles() {
+fn render_turn_stats_block_uses_dedicated_styles() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 1_000,
         prompt_cached_tokens: 900,
@@ -2927,7 +2927,7 @@ fn render_token_stats_block_uses_dedicated_styles() {
         prompt_sent_tokens: 1_000,
         ..Default::default()
     };
-    let block = render_token_stats_block(
+    let block = render_turn_stats_block(
         &tau_themes::Theme::builtin(),
         &usage,
         Some(&previous_usage),
@@ -2951,7 +2951,7 @@ fn render_token_stats_block_uses_dedicated_styles() {
 }
 
 #[test]
-fn render_token_stats_block_greys_cache_hit_within_512_rounding_bucket() {
+fn render_turn_stats_block_greys_cache_hit_within_512_rounding_bucket() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 20_100,
         prompt_cached_tokens: 19_456,
@@ -2969,7 +2969,7 @@ fn render_token_stats_block_greys_cache_hit_within_512_rounding_bucket() {
         prompt_sent_tokens: 19_500,
         ..Default::default()
     };
-    let block = render_token_stats_block(
+    let block = render_turn_stats_block(
         &tau_themes::Theme::builtin(),
         &usage,
         Some(&previous_usage),
@@ -2983,7 +2983,7 @@ fn render_token_stats_block_greys_cache_hit_within_512_rounding_bucket() {
 }
 
 #[test]
-fn render_token_stats_block_warns_cache_hit_above_90_percent() {
+fn render_turn_stats_block_warns_cache_hit_above_90_percent() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 10_100,
         prompt_cached_tokens: 9_100,
@@ -3001,7 +3001,7 @@ fn render_token_stats_block_warns_cache_hit_above_90_percent() {
         prompt_sent_tokens: 10_000,
         ..Default::default()
     };
-    let block = render_token_stats_block(
+    let block = render_turn_stats_block(
         &tau_themes::Theme::builtin(),
         &usage,
         Some(&previous_usage),
@@ -3015,7 +3015,7 @@ fn render_token_stats_block_warns_cache_hit_above_90_percent() {
 }
 
 #[test]
-fn render_token_stats_block_highlights_cache_hit_at_or_below_90_percent() {
+fn render_turn_stats_block_highlights_cache_hit_at_or_below_90_percent() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 10_100,
         prompt_cached_tokens: 9_000,
@@ -3033,7 +3033,7 @@ fn render_token_stats_block_highlights_cache_hit_at_or_below_90_percent() {
         prompt_sent_tokens: 10_000,
         ..Default::default()
     };
-    let block = render_token_stats_block(
+    let block = render_turn_stats_block(
         &tau_themes::Theme::builtin(),
         &usage,
         Some(&previous_usage),

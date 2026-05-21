@@ -28,7 +28,7 @@ pub struct SettingDef {
     /// to show the live value alongside each setting name. Writes go
     /// through the renderer's per-setting repaint dispatch instead of
     /// a generic setter — every setting needs a distinct invalidation
-    /// (re-render diff blocks vs. status bar vs. token-stats blocks)
+    /// (re-render diff blocks vs. status bar vs. turn-stats blocks)
     /// so a `fn(&mut CliState, &str)` here wouldn't actually buy us
     /// anything.
     pub get: fn(&CliState) -> &'static str,
@@ -86,10 +86,10 @@ pub const SETTINGS: &[SettingDef] = &[
         get: |s| bool_str(s.show_thinking),
     },
     SettingDef {
-        name: "show-token-stats",
-        description: "Token usage stats below agent responses",
+        name: "show-turn-stats",
+        description: "Turn stats below agent responses",
         values: BOOL_VALUES,
-        get: |s| bool_str(s.show_token_stats),
+        get: |s| bool_str(s.show_turn_stats),
     },
     SettingDef {
         name: "redraw-counter",
