@@ -29,8 +29,9 @@ pub(crate) struct EventRenderer {
     /// Per-`session_prompt_id` UI state. An entry is created on
     /// `SessionPromptCreated` (or `ProviderPromptSubmitted` for prompts
     /// without an explicit creation event) and torn down on
-    /// `ProviderResponseFinished`. Storing the response block id, thinking
-    /// block id/text, and dispatch timestamp in one place means every
+    /// `ProviderResponseFinished` or `SessionPromptTerminated`. Storing the
+    /// response block id, thinking block id/text, and dispatch timestamp in one
+    /// place means every
     /// per-prompt cleanup is a single `prompts.remove(spid)` instead of
     /// four separate `.remove()` calls easy to forget when extending.
     prompts: HashMap<String, PromptState>,
@@ -508,7 +509,8 @@ struct TurnStatsBlockEntry {
 
 /// Per-prompt UI state held by [`EventRenderer`]. Lives from the first
 /// event observed for the prompt (`SessionPromptCreated` or
-/// `ProviderPromptSubmitted`) through `ProviderResponseFinished`.
+/// `ProviderPromptSubmitted`) through `ProviderResponseFinished` or
+/// `SessionPromptTerminated`.
 #[derive(Default)]
 struct PromptState {
     /// Live agent-response block. `None` until `SessionPromptCreated`
@@ -661,6 +663,7 @@ fn originator_of(event: &Event) -> tau_proto::PromptOriginator {
     match event {
         Event::UiPromptSubmitted(p) => p.originator.clone(),
         Event::SessionPromptCreated(p) => p.originator.clone(),
+        Event::SessionPromptTerminated(t) => t.originator.clone(),
         Event::ProviderPromptSubmitted(s) => s.originator.clone(),
         Event::ProviderResponseUpdated(u) => u.originator.clone(),
         Event::ProviderResponseFinished(f) => f.originator.clone(),
@@ -1629,6 +1632,10 @@ impl EventRenderer {
                 self.agent_activity
                     .finish_prompt(&finished.session_prompt_id, &finished.output_items);
             }
+            Event::SessionPromptTerminated(terminated) => {
+                self.agent_activity
+                    .finish_prompt(&terminated.session_prompt_id, &[]);
+            }
             Event::ToolRequest(request) => self.agent_activity.start_tool(&request.call_id),
             Event::ToolInvoke(invoke) => self.agent_activity.start_tool(&invoke.call_id),
             Event::ToolResult(result) => {
@@ -1676,6 +1683,16 @@ impl EventRenderer {
             }
             Event::ProviderResponseFinished(finished)
                 if !finished.originator.is_user() && !self.has_live_main_delegate_tool_call() =>
+            {
+                self.set_main_agent_turn_active(false);
+            }
+            Event::SessionPromptTerminated(terminated) if terminated.originator.is_user() => {
+                if self.agent_activity.active_prompts.is_empty() {
+                    self.set_main_agent_turn_active(false);
+                }
+            }
+            Event::SessionPromptTerminated(terminated)
+                if !terminated.originator.is_user() && !self.has_live_main_delegate_tool_call() =>
             {
                 self.set_main_agent_turn_active(false);
             }
@@ -1917,6 +1934,10 @@ impl EventRenderer {
                 self.handle_session_prompt_created(prompt);
                 true
             }
+            Event::SessionPromptTerminated(terminated) => {
+                self.handle_session_prompt_terminated(terminated);
+                true
+            }
             _ => false,
         }
     }
@@ -2021,6 +2042,23 @@ impl EventRenderer {
         if is_user_prompt && let Ok(mut context) = self.editor_context.lock() {
             context.active_prompt = None;
         }
+    }
+
+    fn handle_session_prompt_terminated(
+        &mut self,
+        terminated: &tau_proto::SessionPromptTerminated,
+    ) {
+        self.clear_editor_active_prompt_for_user_prompt(terminated.originator.is_user());
+        let Some(prompt_state) = self.prompts.remove(terminated.session_prompt_id.as_str()) else {
+            return;
+        };
+        if let Some(block_id) = prompt_state.thinking_block_id {
+            self.handle.remove_block(block_id);
+        }
+        if let Some(block_id) = prompt_state.response_block_id {
+            self.handle.remove_block(block_id);
+        }
+        self.handle.redraw();
     }
 
     fn promote_next_queued_prompt(&mut self, label: &'static str) {

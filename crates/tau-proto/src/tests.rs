@@ -132,6 +132,12 @@ fn representative_events() -> Vec<Event> {
             previous_response_candidate: None,
             share_user_cache_key: false,
         }),
+        Event::SessionPromptTerminated(SessionPromptTerminated {
+            session_id: "s1".into(),
+            session_prompt_id: "sp-stale".into(),
+            reason: SessionPromptTerminationReason::Stale,
+            originator: PromptOriginator::User,
+        }),
         Event::ProviderResponseFinished(ProviderResponseFinished {
             session_prompt_id: "sp-1".into(),
             output_items: vec![ContextItem::Message(MessageItem {
@@ -610,6 +616,12 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             compacted_input_tokens: None,
             outcome: SessionCompactionOutcome::Succeeded,
             message: None,
+        }),
+        Event::SessionPromptTerminated(SessionPromptTerminated {
+            session_id: "s1".into(),
+            session_prompt_id: "sp-stale".into(),
+            reason: SessionPromptTerminationReason::Stale,
+            originator: PromptOriginator::User,
         }),
     ];
     for event in &transient {

@@ -19,9 +19,9 @@ use tau_proto::{
     ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderResponseFinished, ProviderStopReason,
     ProviderTokenUsage, SessionCompactionRequested, SessionId, SessionPromptCreated,
     SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, SessionPromptRecalled,
-    TokenUsageStats, ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem,
-    ToolCancelled, ToolChoice, ToolDefinition, ToolError, ToolName, ToolRequest, ToolResult,
-    ToolResultKind, ToolType, UiCancelPrompt,
+    SessionPromptTerminated, SessionPromptTerminationReason, TokenUsageStats, ToolBackgroundError,
+    ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled, ToolChoice, ToolDefinition,
+    ToolError, ToolName, ToolRequest, ToolResult, ToolResultKind, ToolType, UiCancelPrompt,
 };
 
 use crate::conversation::{
@@ -1988,6 +1988,7 @@ impl Harness {
                 Some(requested.prompt.session_id.clone())
             }
             Event::SessionPromptCreated(created) => Some(created.session_id.clone()),
+            Event::SessionPromptTerminated(terminated) => Some(terminated.session_id.clone()),
             Event::SessionPromptPrewarmRequested(prewarm) => Some(prewarm.session_id.clone()),
             Event::SessionUserMessageInjected(injected) => Some(injected.session_id.clone()),
             Event::ProviderPromptSubmitted(submitted) => {
@@ -2554,20 +2555,24 @@ impl Harness {
                 self.handle_ext_agent_query(source_id, query)?;
             }
             Event::ProviderPromptSubmitted(submitted) => {
-                if self.provider_prompt_owner_matches(
-                    source_id,
-                    &submitted.session_prompt_id,
-                    tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
-                ) {
+                if !self.canceled_prompts.contains(&submitted.session_prompt_id)
+                    && self.provider_prompt_owner_matches(
+                        source_id,
+                        &submitted.session_prompt_id,
+                        tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
+                    )
+                {
                     self.publish_event(Some(source_id), Event::ProviderPromptSubmitted(submitted));
                 }
             }
             Event::ProviderResponseUpdated(updated) => {
-                if self.provider_prompt_owner_matches(
-                    source_id,
-                    &updated.session_prompt_id,
-                    tau_proto::EventName::PROVIDER_RESPONSE_UPDATED,
-                ) {
+                if !self.canceled_prompts.contains(&updated.session_prompt_id)
+                    && self.provider_prompt_owner_matches(
+                        source_id,
+                        &updated.session_prompt_id,
+                        tau_proto::EventName::PROVIDER_RESPONSE_UPDATED,
+                    )
+                {
                     self.publish_event(Some(source_id), Event::ProviderResponseUpdated(updated));
                 }
             }
@@ -3437,6 +3442,24 @@ impl Harness {
             Event::HarnessInfo(tau_proto::HarnessInfo {
                 message: message.to_owned(),
                 level,
+            }),
+        );
+    }
+
+    fn publish_prompt_terminated(
+        &mut self,
+        session_id: SessionId,
+        session_prompt_id: SessionPromptId,
+        reason: SessionPromptTerminationReason,
+        originator: PromptOriginator,
+    ) {
+        self.publish_event(
+            None,
+            Event::SessionPromptTerminated(SessionPromptTerminated {
+                session_id,
+                session_prompt_id,
+                reason,
+                originator,
             }),
         );
     }
@@ -4429,11 +4452,12 @@ impl Harness {
     ///
     /// Side effects per matching conversation: clear in-flight
     /// state, drop the spid from `prompt_conversations`, mark it
-    /// canceled. A single `UiCancelPrompt` event is then published
-    /// so the agent's retry-sleep wakes and aborts whatever it's
-    /// currently processing.
+    /// canceled, and publish a terminal prompt lifecycle event. A
+    /// targeted `UiCancelPrompt` event is then published so the
+    /// agent's retry-sleep wakes and aborts whatever it's currently
+    /// processing.
     fn preempt_blocking_ext_side_conversations(&mut self, session_id: &SessionId) {
-        let to_cancel: Vec<(ConversationId, SessionPromptId)> = self
+        let to_cancel: Vec<(ConversationId, SessionId, SessionPromptId, PromptOriginator)> = self
             .conversations
             .iter()
             .filter_map(|(cid, conv)| {
@@ -4457,7 +4481,12 @@ impl Harness {
                     return None;
                 }
                 let in_flight = conv.in_flight_prompt.clone()?;
-                Some((cid.clone(), in_flight))
+                Some((
+                    cid.clone(),
+                    conv.session_id.clone(),
+                    in_flight,
+                    conv.originator.clone(),
+                ))
             })
             .collect();
 
@@ -4465,7 +4494,7 @@ impl Harness {
             return;
         }
 
-        for (cid, spid) in &to_cancel {
+        for (cid, prompt_session_id, spid, originator) in &to_cancel {
             self.canceled_prompts.insert(spid.clone());
             self.prompt_conversations.remove(spid);
             if let Some(conv) = self.conversations.get_mut(cid) {
@@ -4474,6 +4503,12 @@ impl Harness {
                 conv.pending_prompts.clear();
             }
             self.release_ext_agent_query(cid);
+            self.publish_prompt_terminated(
+                prompt_session_id.clone(),
+                spid.clone(),
+                SessionPromptTerminationReason::Canceled,
+                originator.clone(),
+            );
             self.emit_info(&format!(
                 "preempting side conv `{cid}` ({spid}) for incoming user prompt",
             ));
@@ -5610,6 +5645,18 @@ impl Harness {
                     .is_some_and(|in_flight| in_flight != &response.session_prompt_id)
         });
         if stale_behind_newer_prompt {
+            if let Some((session_id, originator)) = self
+                .conversations
+                .get(&cid)
+                .map(|conv| (conv.session_id.clone(), conv.originator.clone()))
+            {
+                self.publish_prompt_terminated(
+                    session_id,
+                    response.session_prompt_id.clone(),
+                    SessionPromptTerminationReason::Stale,
+                    originator,
+                );
+            }
             self.emit_info(&format!(
                 "discarding stale agent response for session_prompt_id={}",
                 response.session_prompt_id

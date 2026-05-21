@@ -9,9 +9,10 @@ use tau_proto::{
     ExtensionReady, HarnessContextUsageChanged, HarnessEffortChanged, HarnessRoleInfo,
     HarnessRoleSelected, HarnessRolesAvailable, HarnessVerbosityChanged, MessageItem,
     ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason, ServiceTier,
-    SessionPromptCreated, SessionPromptQueued, SessionPromptSteered, SessionStartReason,
-    SessionStarted, ThinkingSummary, ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolResult,
-    UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
+    SessionPromptCreated, SessionPromptQueued, SessionPromptSteered, SessionPromptTerminated,
+    SessionPromptTerminationReason, SessionStartReason, SessionStarted, ThinkingSummary,
+    ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolResult, UiPromptSubmitted,
+    UiRoleUpdateAction, Verbosity,
 };
 
 use super::chat::{DraftSlot, is_local_slash_command, should_send_draft_snapshot};
@@ -644,6 +645,38 @@ fn agent_in_progress_ignores_completed_replayed_prompt_history() {
     )));
 
     assert!(!in_progress.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[test]
+fn prompt_termination_clears_live_response_and_activity() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    let in_progress = renderer.agent_in_progress_state();
+
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-stale", "s1",
+    )));
+    sync(&handle);
+    assert!(in_progress.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(vt.screen_contains(80, "…"));
+
+    // Regression: if the harness discards a stale provider response, it now
+    // publishes this terminal lifecycle fact instead of leaving the UI's live
+    // response block and Ctrl-D guard stuck forever.
+    renderer.handle(&Event::SessionPromptTerminated(SessionPromptTerminated {
+        session_id: "s1".into(),
+        session_prompt_id: "sp-stale".into(),
+        reason: SessionPromptTerminationReason::Stale,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+
+    assert!(!in_progress.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(!vt.screen_contains(80, "…"));
 }
 
 #[test]

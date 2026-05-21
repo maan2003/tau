@@ -302,6 +302,8 @@ impl EventName {
         Self::from_static(EventCategory::Session, "compaction_requested");
     pub const SESSION_PROMPT_CREATED: Self =
         Self::from_static(EventCategory::Session, "prompt_created");
+    pub const SESSION_PROMPT_TERMINATED: Self =
+        Self::from_static(EventCategory::Session, "prompt_terminated");
     pub const SESSION_PROMPT_PREWARM_REQUESTED: Self =
         Self::from_static(EventCategory::Session, "prompt_prewarm_requested");
     pub const SESSION_USER_MESSAGE_INJECTED: Self =
@@ -2417,6 +2419,33 @@ pub struct SessionPromptCreated {
     pub previous_response_candidate: Option<PreviousResponseCandidate>,
 }
 
+/// Why a prompt ended without a provider response being accepted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPromptTerminationReason {
+    /// A later prompt superseded this response before the harness accepted it.
+    Stale,
+    /// The harness cancelled or preempted the prompt.
+    Canceled,
+}
+
+/// The harness ended a prompt without publishing `provider.response_finished`.
+///
+/// This is a transient lifecycle fact for UIs and other observers that track
+/// in-flight prompts. It does not add assistant content to the session tree.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionPromptTerminated {
+    /// Session that owns the prompt.
+    pub session_id: SessionId,
+    /// Prompt that is no longer in flight.
+    pub session_prompt_id: SessionPromptId,
+    /// Why no provider response will be published for this prompt.
+    pub reason: SessionPromptTerminationReason,
+    /// Who asked for this prompt.
+    #[serde(default)]
+    pub originator: PromptOriginator,
+}
+
 /// The harness assembled a provider-side compaction request and
 /// assigned it an ID.
 ///
@@ -3214,6 +3243,8 @@ pub enum Event {
     SessionCompactionRequested(SessionCompactionRequested),
     #[serde(rename = "session.prompt_created")]
     SessionPromptCreated(SessionPromptCreated),
+    #[serde(rename = "session.prompt_terminated")]
+    SessionPromptTerminated(SessionPromptTerminated),
     #[serde(rename = "session.prompt_prewarm_requested")]
     SessionPromptPrewarmRequested(SessionPromptPrewarmRequested),
     #[serde(rename = "session.user_message_injected")]
@@ -3303,6 +3334,7 @@ impl Event {
             Self::SessionCompacted(_) => EventName::SESSION_COMPACTED,
             Self::SessionCompactionRequested(_) => EventName::SESSION_COMPACTION_REQUESTED,
             Self::SessionPromptCreated(_) => EventName::SESSION_PROMPT_CREATED,
+            Self::SessionPromptTerminated(_) => EventName::SESSION_PROMPT_TERMINATED,
             Self::SessionPromptPrewarmRequested(_) => EventName::SESSION_PROMPT_PREWARM_REQUESTED,
             Self::SessionUserMessageInjected(_) => EventName::SESSION_USER_MESSAGE_INJECTED,
             Self::ProviderPromptSubmitted(_) => EventName::PROVIDER_PROMPT_SUBMITTED,
@@ -3332,6 +3364,7 @@ impl Event {
                 | Self::SessionCompactionFinished(_)
                 | Self::SessionCompactionRequested(_)
                 | Self::SessionPromptCreated(_)
+                | Self::SessionPromptTerminated(_)
                 | Self::SessionPromptPrewarmRequested(_)
                 | Self::UiCompactRequest(_)
                 | Self::UiPromptDraft(_)

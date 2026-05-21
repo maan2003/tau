@@ -3375,6 +3375,15 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
         "side conv's spid must be unrouted so the agent's eventual abort \
          doesn't try to publish a finished event into a stale slot",
     );
+    assert!(
+        event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::SessionPromptTerminated(terminated)
+                if terminated.session_prompt_id.as_str() == side_spid.as_str()
+                    && terminated.reason == tau_proto::SessionPromptTerminationReason::Canceled
+        )),
+        "preempted side prompt must publish a terminal lifecycle event",
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -6124,6 +6133,15 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
             Event::ToolRequest(request) if request.call_id.as_str() == "stale-call"
         )),
         "stale tool call must not be dispatched",
+    );
+    assert!(
+        event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::SessionPromptTerminated(terminated)
+                if terminated.session_prompt_id.as_str() == old_spid.as_str()
+                    && terminated.reason == tau_proto::SessionPromptTerminationReason::Stale
+        )),
+        "stale prompt must publish a terminal lifecycle event",
     );
     assert!(!h.prompt_conversations.contains_key(old_spid.as_str()));
     let conv = h.conversations.get(&cid).expect("default conversation");
