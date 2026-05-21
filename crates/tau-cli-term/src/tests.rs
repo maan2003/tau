@@ -35,9 +35,21 @@ fn new_test_term(
 }
 
 fn send_key(input_tx: &std::sync::mpsc::Sender<TestRawEvent>, code: KeyCode) {
+    send_key_with_modifiers(input_tx, code, KeyModifiers::NONE);
+}
+
+fn send_key_with_modifiers(
+    input_tx: &std::sync::mpsc::Sender<TestRawEvent>,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) {
     input_tx
-        .send(TestRawEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+        .send(TestRawEvent::Key(KeyEvent::new(code, modifiers)))
         .expect("send key");
+}
+
+fn send_submit(input_tx: &std::sync::mpsc::Sender<TestRawEvent>) {
+    send_key_with_modifiers(input_tx, KeyCode::Enter, KeyModifiers::CONTROL);
 }
 
 fn submit(
@@ -47,7 +59,7 @@ fn submit(
     line: &str,
 ) {
     handle.set_buffer(line.to_owned(), line.len());
-    send_key(input_tx, KeyCode::Enter);
+    send_submit(input_tx);
     assert!(matches!(
         term.get_next_event().expect("submit line"),
         Event::Line(submitted) if submitted == line
@@ -66,7 +78,7 @@ fn type_text(term: &mut HighTerm, input_tx: &std::sync::mpsc::Sender<TestRawEven
 
 fn submit_typed(term: &mut HighTerm, input_tx: &std::sync::mpsc::Sender<TestRawEvent>, line: &str) {
     type_text(term, input_tx, line);
-    send_key(input_tx, KeyCode::Enter);
+    send_submit(input_tx);
     assert!(matches!(
         term.get_next_event().expect("submit typed line"),
         Event::Line(submitted) if submitted == line
@@ -120,8 +132,8 @@ fn history_after_accepting_argument_completion_needs_one_up_per_item() {
     ));
     assert_eq!(handle.get_buffer(), "/model openai/gpt-5");
 
-    send_key(&input_tx, KeyCode::Enter);
-    send_key(&input_tx, KeyCode::Enter);
+    send_submit(&input_tx);
+    send_submit(&input_tx);
     assert!(matches!(
         term.get_next_event().expect("accept and submit completion"),
         Event::Line(line) if line == "/model openai/gpt-5"

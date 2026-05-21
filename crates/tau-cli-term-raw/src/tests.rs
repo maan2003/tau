@@ -343,7 +343,7 @@ fn input_history_navigates_submitted_and_draft_entries() {
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
-            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
         )))
         .expect("send enter");
     assert!(matches!(
@@ -355,7 +355,7 @@ fn input_history_navigates_submitted_and_draft_entries() {
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
-            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
         )))
         .expect("send enter");
     assert!(matches!(
@@ -544,7 +544,7 @@ fn up_lands_at_last_row_same_col_in_previous_entry() {
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
-            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
         )))
         .expect("enter");
     let _ = term.get_next_event().expect("event");
@@ -578,7 +578,7 @@ fn down_lands_at_first_row_same_col_in_next_entry() {
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
-            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
         )))
         .expect("enter");
     let _ = term.get_next_event().expect("event");
@@ -587,7 +587,7 @@ fn down_lands_at_first_row_same_col_in_next_entry() {
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
-            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
         )))
         .expect("enter");
     let _ = term.get_next_event().expect("event");
@@ -719,9 +719,9 @@ fn step_history_preserves_sticky_column_across_short_entry() {
         input_tx
             .send(RawEvent::Key(KeyEvent::new(
                 KeyCode::Enter,
-                KeyModifiers::NONE,
+                KeyModifiers::CONTROL,
             )))
-            .expect("enter");
+            .expect("ctrl+enter");
         let _ = term.get_next_event().expect("event");
     }
 
@@ -805,7 +805,7 @@ fn sticky_column_carries_from_buffer_into_history() {
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
-            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
         )))
         .expect("enter");
     let _ = term.get_next_event().expect("event");
@@ -987,7 +987,7 @@ fn ctrl_up_jumps_to_history_with_column_preserved() {
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
-            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
         )))
         .expect("enter");
     let _ = term.get_next_event().expect("event");
@@ -1021,7 +1021,7 @@ fn ctrl_k_steps_history_back_with_column_preserved() {
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
-            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
         )))
         .expect("enter");
     let _ = term.get_next_event().expect("event");
@@ -1179,7 +1179,7 @@ fn undo_state_follows_history_entry() {
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
-            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
         )))
         .expect("enter");
     let _ = term.get_next_event().expect("event");
@@ -1370,7 +1370,7 @@ fn down_from_empty_prompt_does_not_create_history_entry() {
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
-            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
         )))
         .expect("send enter");
     assert!(matches!(
@@ -3520,13 +3520,12 @@ fn terminal_scrollback_matches_known_lines_model_across_visible_churn() {
     );
 }
 
-/// Shift+Enter and Alt+Enter both insert a `\n` at the cursor
-/// without submitting the line, while plain Enter still submits.
-/// Mirrors the affordance users expect from chat UIs. Shift+Enter
-/// covers terminals that speak the kitty keyboard protocol;
-/// Alt+Enter (the `\e\r` byte sequence) is the universal fallback
-/// for terminals that don't.
-/// A buffer ending in `\n` (as produced by Shift+Enter / Alt+Enter)
+/// Enter, Shift+Enter, and Alt+Enter all insert a `\n` at the cursor
+/// without submitting the line. Mirrors the affordance users expect
+/// from chat UIs. Shift+Enter covers terminals that speak the kitty
+/// keyboard protocol; Alt+Enter (the `\e\r` byte sequence) is the
+/// universal fallback for terminals that don't.
+/// A buffer ending in `\n` (as produced by Enter / Shift+Enter / Alt+Enter)
 /// must render with an extra blank row so the cursor visibly lands
 /// on a new line — otherwise the prompt height doesn't grow until
 /// the next character is typed.
@@ -3567,16 +3566,30 @@ fn exact_width_prompt_end_grows_prompt_height_for_cursor() {
     assert_eq!(parser.screen().cursor_position(), (2, 0));
 }
 
-/// Shift-Enter and Alt-Enter should insert newlines for multiline prompts,
-/// while plain Enter still submits.
+/// Enter, Shift-Enter, and Alt-Enter should insert newlines for multiline
+/// prompts, while Ctrl-Enter submits.
 #[test]
-fn shift_or_alt_enter_inserts_newline_without_submitting() {
+fn enter_variants_insert_newline_and_ctrl_enter_submits() {
     let buf = SharedBuffer::new();
     let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
 
     handle.set_buffer("line one".to_owned(), "line one".len());
 
-    // Shift+Enter: stay on the line, surface BufferChanged.
+    // Plain Enter: stay on the line, surface BufferChanged.
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .expect("send enter");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "line one\n");
+
+    // Shift+Enter: same behavior as plain Enter.
+    handle.set_buffer("line one".to_owned(), "line one".len());
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
@@ -3604,9 +3617,34 @@ fn shift_or_alt_enter_inserts_newline_without_submitting() {
     ));
     assert_eq!(handle.get_buffer(), "line one\n\n");
 
-    // Type more, then plain Enter to submit the whole multi-line
+    // Type more, then Ctrl+Enter to submit the whole multi-line
     // buffer as one Line event.
     handle.set_buffer("line one\nline two".to_owned(), "line one\nline two".len());
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )))
+        .expect("send ctrl+enter");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::Line(line) if line == "line one\nline two"
+    ));
+}
+
+/// Enter and Ctrl-Enter can be bound explicitly; those bindings take precedence
+/// over the default newline and submit behavior.
+#[test]
+fn enter_bindings_override_default_newline_and_submit() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.set_bindings(vec![
+        ("Enter".to_owned(), "plain-enter".to_owned()),
+        ("C-Enter".to_owned(), "ctrl-enter".to_owned()),
+    ]);
+
+    handle.set_buffer("draft".to_owned(), "draft".len());
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
@@ -3615,8 +3653,21 @@ fn shift_or_alt_enter_inserts_newline_without_submitting() {
         .expect("send enter");
     assert!(matches!(
         term.get_next_event().expect("event"),
-        Event::Line(line) if line == "line one\nline two"
+        Event::Binding(action) if action == "plain-enter"
     ));
+    assert_eq!(handle.get_buffer(), "draft");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )))
+        .expect("send ctrl+enter");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::Binding(action) if action == "ctrl-enter"
+    ));
+    assert_eq!(handle.get_buffer(), "draft");
 }
 
 /// If the row leaving the viewport changed, the scrolling planner should know

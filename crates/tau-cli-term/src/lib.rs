@@ -30,7 +30,7 @@ const PROMPT_TRAILER_MARKER: &str =
 
 /// High-level events surfaced to the caller.
 pub enum Event {
-    /// The user submitted a line (pressed Enter, no completion preview).
+    /// The user submitted a line (pressed Ctrl-Enter, no completion preview).
     Line(String),
     /// The user signalled EOF (Ctrl-D on empty line).
     Eof,

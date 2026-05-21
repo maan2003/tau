@@ -20,11 +20,12 @@ Keep this document in sync with `crates/tau-config/config/built-in.cli-bindings.
 
 ## Built-in editing keys
 
-These keys are handled by the raw terminal prompt and are not configurable bindings.
+These keys are handled by the raw terminal prompt when no configurable binding matches.
 
 | Key | Behavior |
 | --- | --- |
-| `Enter` | Submit the prompt. |
+| `Enter` | Insert a newline. |
+| `C-Enter` | Submit the prompt. |
 | `Shift-Enter`, `Alt-Enter` | Insert a newline. |
 | `C-d` on an empty prompt | Exit Tau when no agent/session work is in progress; otherwise print a notice to use `/quit` and keep the session running. |
 | `C-c` on an empty prompt | Print `Use Ctrl+D to exit`; does not exit. |

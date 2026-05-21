@@ -535,10 +535,14 @@ fn parse_key_binding(input: &str) -> Option<KeyBinding> {
     if input.eq_ignore_ascii_case("tab") {
         return Some(KeyBinding::Key(KeyCode::Tab));
     }
+    if input.eq_ignore_ascii_case("enter") {
+        return Some(KeyBinding::Key(KeyCode::Enter));
+    }
     let rest = input
         .strip_prefix("C-")
         .or_else(|| input.strip_prefix("c-"))?;
     match rest.to_ascii_lowercase().as_str() {
+        "enter" => return Some(KeyBinding::CtrlKey(KeyCode::Enter)),
         "up" => return Some(KeyBinding::CtrlKey(KeyCode::Up)),
         "down" => return Some(KeyBinding::CtrlKey(KeyCode::Down)),
         _ => {}
@@ -552,12 +556,16 @@ fn parse_key_binding(input: &str) -> Option<KeyBinding> {
 }
 
 fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
+    let plain = key.modifiers.is_empty();
+    let ctrl_only = key.modifiers == KeyModifiers::CONTROL;
     match key.code {
         KeyCode::Char(ch) if ctrl => Some(KeyBinding::Ctrl(ch.to_ascii_lowercase())),
         KeyCode::Char(ch @ '\u{1}'..='\u{1a}') => {
             let letter = (b'a' + ch as u8 - 1) as char;
             Some(KeyBinding::Ctrl(letter))
         }
+        KeyCode::Enter if ctrl_only => Some(KeyBinding::CtrlKey(KeyCode::Enter)),
+        KeyCode::Enter if plain => Some(KeyBinding::Key(KeyCode::Enter)),
         KeyCode::Up | KeyCode::Down if ctrl => Some(KeyBinding::CtrlKey(key.code)),
         KeyCode::Tab => Some(KeyBinding::Key(KeyCode::Tab)),
         _ => None,
@@ -566,8 +574,8 @@ fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
 
 /// High-level events surfaced to the downstream event loop.
 pub enum Event {
-    /// The user submitted a line (pressed Enter outside the
-    /// completion menu, or with no candidate selected).
+    /// The user submitted a line with Ctrl-Enter outside the
+    /// completion menu, or with no candidate selected.
     Line(String),
     /// The user signalled EOF (Ctrl-D on empty line).
     Eof,
@@ -580,10 +588,10 @@ pub enum Event {
     /// open/close/cycle. Caller should re-render anything that
     /// depends on either (typically the menu and the prompt itself).
     BufferChanged,
-    /// The user pressed Enter with a candidate previewed in the
+    /// The user pressed Ctrl-Enter with a candidate previewed in the
     /// menu. The buffer is now the candidate's replacement and the
     /// menu has been closed. The caller should re-render the menu
-    /// area but typically *should not* submit — a second Enter is
+    /// area but typically *should not* submit — a second Ctrl-Enter is
     /// expected to confirm.
     CompletionAccept,
     /// The user pressed Shift-Tab outside an open completion menu.
@@ -1197,6 +1205,9 @@ impl Term {
 
     /// Configures key bindings surfaced as [`Event::Binding`].
     ///
+    /// Supported key spellings include `Tab`, `Enter`, `C-Enter`,
+    /// `C-Up`, `C-Down`, and `C-<letter>`.
+    ///
     /// The following Ctrl chords are reserved built-in editing keys
     /// and cannot be overridden — bindings to them are silently
     /// dropped: `Ctrl-A` (beginning-of-line), `Ctrl-C` (clear /
@@ -1373,6 +1384,49 @@ impl Term {
         Ok(Some(Event::BufferChanged))
     }
 
+    fn binding_action(&self, binding: &Option<KeyBinding>) -> Option<String> {
+        binding
+            .as_ref()
+            .and_then(|key| self.bindings.get(key))
+            .cloned()
+    }
+
+    fn insert_newline(&self) -> Event {
+        {
+            let mut st = self.handle.lock();
+            st.completion = None;
+            st.record_undo();
+            let cursor = st.cursor;
+            st.buffer.insert(cursor, '\n');
+            st.write_cursor(cursor + 1);
+            st.sync_buffer_to_history_nav();
+        }
+        self.refresh_completion();
+        Event::BufferChanged
+    }
+
+    fn submit_or_accept_completion(&self) -> Event {
+        // If a candidate is previewed, accept it but stay on the
+        // line — the buffer already reflects the replacement (cycling
+        // previewed it), so we just close the menu and surface a
+        // distinct event.
+        {
+            let mut st = self.handle.lock();
+            if st.accept_completion() {
+                return Event::CompletionAccept;
+            }
+        }
+        let line = {
+            let mut st = self.handle.lock();
+            st.completion = None;
+            st.history_nav = None;
+            let line = st.buffer.clone();
+            st.push_current_as_history_entry();
+            line
+        };
+        Event::Line(line)
+    }
+
     fn handle_key(&self, key: KeyEvent) -> io::Result<Option<Event>> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -1396,52 +1450,32 @@ impl Term {
 
         match key.code {
             KeyCode::Enter if shift || alt => {
-                // Shift+Enter / Alt+Enter both insert a newline into
-                // the buffer rather than submitting — same affordance
-                // Slack/Discord/ChatGPT use. Shift+Enter only reaches
-                // us when the terminal stack emits CSI-u format (e.g.
-                // `\e[13;2u`): native kitty protocol, fixterms, or
-                // tmux 3.5+ with `extended-keys-format csi-u`.
-                // Crossterm does NOT parse the xterm modifyOtherKeys
-                // CSI-27 form (`\e[27;2;13~`), so tmux configured
-                // with `extended-keys-format xterm` will swallow it.
+                // Shift+Enter / Alt+Enter keep their explicit
+                // newline affordance. This also keeps newline working
+                // when a user binds plain Enter to an action.
+                // Shift+Enter only reaches us when the terminal stack
+                // emits CSI-u format (e.g. `\e[13;2u`): native kitty
+                // protocol, fixterms, or tmux 3.5+ with
+                // `extended-keys-format csi-u`. Crossterm does NOT
+                // parse the xterm modifyOtherKeys CSI-27 form
+                // (`\e[27;2;13~`), so tmux configured with
+                // `extended-keys-format xterm` will swallow it.
                 // Alt+Enter is the universal fallback because every
                 // terminal sends `\e\r` for it regardless of protocol
-                // negotiation. Legacy terminals collapse Shift+Enter
-                // into a bare Enter and fall through to the submit
-                // arm below.
-                {
-                    let mut st = self.handle.lock();
-                    st.completion = None;
-                    st.record_undo();
-                    let cursor = st.cursor;
-                    st.buffer.insert(cursor, '\n');
-                    st.write_cursor(cursor + 1);
-                    st.sync_buffer_to_history_nav();
+                // negotiation.
+                return Ok(Some(self.insert_newline()));
+            }
+            KeyCode::Enter if ctrl => {
+                if let Some(action) = self.binding_action(&binding) {
+                    return Ok(Some(Event::Binding(action)));
                 }
-                self.refresh_completion();
-                return Ok(Some(Event::BufferChanged));
+                return Ok(Some(self.submit_or_accept_completion()));
             }
             KeyCode::Enter => {
-                // If a candidate is previewed, accept it but stay on
-                // the line — the buffer already reflects the
-                // replacement (cycling previewed it), so we just
-                // close the menu and surface a distinct event.
-                {
-                    let mut st = self.handle.lock();
-                    if st.accept_completion() {
-                        return Ok(Some(Event::CompletionAccept));
-                    }
+                if let Some(action) = self.binding_action(&binding) {
+                    return Ok(Some(Event::Binding(action)));
                 }
-                let line = {
-                    let mut st = self.handle.lock();
-                    st.completion = None;
-                    st.history_nav = None;
-                    let line = st.buffer.clone();
-                    st.push_current_as_history_entry();
-                    line
-                };
-                return Ok(Some(Event::Line(line)));
+                return Ok(Some(self.insert_newline()));
             }
 
             KeyCode::Char('d') if ctrl => {
