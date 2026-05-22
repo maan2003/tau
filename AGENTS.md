@@ -11,7 +11,7 @@
 - `crates/tau-ext-std-notifications` — built-in notification extension
 - `crates/tau-ext-shell` — shell- and filesystem-oriented extension
 - `crates/tau-ext-test-dummy` — test-only dummy extension
-- `crates/tau-ext-websearch-exa` — opt-in Exa web search extension
+- `crates/tau-ext-websearch` — built-in generic web search extension (Exa default plus opt-in Parallel.ai tools)
 - `crates/tau-extension` — extension-side protocol/runtime helpers
 - `crates/tau-harness` — harness daemon: extensions, bus, sessions, socket server, harness-owned delegate/wait tools
 - `crates/tau-provider` — provider credential/config library (storage, OAuth helpers, resolver)

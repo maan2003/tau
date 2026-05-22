@@ -39,8 +39,8 @@
         config: { idle_seconds: 60, idle_agent_summary: false },
     },
     {
-        name: "std-websearch-exa",
-        suffix: ["ext", "ext-websearch-exa"],
+        name: "std-websearch",
+        suffix: ["ext", "ext-websearch"],
         role: "tool",
         enable: true,
         config: {},

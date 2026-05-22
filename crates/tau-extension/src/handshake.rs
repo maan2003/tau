@@ -16,7 +16,7 @@
 //! explicit opt-in, not inferred from selectors.
 //!
 //! ```ignore
-//! tau_extension::Handshake::tool("tau-ext-websearch-exa")
+//! tau_extension::Handshake::tool("tau-ext-websearch")
 //!     .subscribe([EventName::TOOL_INVOKE])
 //!     .register_tool(tool_spec())
 //!     .ready_message("websearch ready")

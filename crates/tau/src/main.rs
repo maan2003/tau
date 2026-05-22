@@ -26,8 +26,8 @@ fn main() -> std::process::ExitCode {
             logging: tau_cli::ComponentLogging::RunnerManaged,
         },
         tau_cli::Component {
-            name: "ext-websearch-exa",
-            runner: tau_ext_websearch_exa::run_stdio,
+            name: "ext-websearch",
+            runner: tau_ext_websearch::run_stdio,
             logging: tau_cli::ComponentLogging::RunnerManaged,
         },
     ])

@@ -1587,13 +1587,13 @@
       "crate": "tau-cli"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "run_with_searcher",
       "line": 115,
       "cyclomatic": 14.0,
       "coverage": 74.19354838709677,
       "crap": 17.36853412104327,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-ext-shell/src/tools/apply_patch.rs",
@@ -2487,22 +2487,22 @@
       "crate": "tau-ext-core-subagents"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "HttpSearcher::search",
       "line": 426,
       "cyclomatic": 3.0,
       "coverage": 0.0,
       "crap": 12.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "read_capped",
       "line": 472,
       "cyclomatic": 3.0,
       "coverage": 0.0,
       "crap": 12.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-ext-provider-openai/src/common.rs",
@@ -2568,13 +2568,13 @@
       "crate": "tau-term-screen"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "parse_args",
       "line": 353,
       "cyclomatic": 10.0,
       "coverage": 78.94736842105263,
       "crap": 10.933080623997666,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-proto/src/lib.rs",
@@ -2928,13 +2928,13 @@
       "crate": "tau-ext-provider-openai"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "parse_num_results",
       "line": 378,
       "cyclomatic": 8.0,
       "coverage": 88.23529411764706,
       "crap": 8.104213311622226,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
@@ -3036,13 +3036,13 @@
       "crate": "tau-ext-provider-openai"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "decode_mcp_text_result",
       "line": 493,
       "cyclomatic": 8.0,
       "coverage": 100.0,
       "crap": 8.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-term-screen/src/screen/tests.rs",
@@ -3126,13 +3126,13 @@
       "crate": "tau-socket"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "parse_sse_or_json",
       "line": 529,
       "cyclomatic": 7.0,
       "coverage": 76.19047619047619,
       "crap": 7.661375661375661,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-config/src/settings.rs",
@@ -3225,13 +3225,13 @@
       "crate": "tau-cli-term-raw"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/tests.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "EventReader::read_event",
       "line": 22,
       "cyclomatic": 7.0,
       "coverage": 85.71428571428571,
       "crap": 7.142857142857143,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-ext-provider-openai/src/responses/ws.rs",
@@ -3432,13 +3432,13 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "dispatch_tool_invoke",
       "line": 238,
       "cyclomatic": 6.0,
       "coverage": 77.55102040816327,
       "crap": 6.407279279891882,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-ext-shell/src/argument.rs",
@@ -5277,13 +5277,13 @@
       "crate": "tau-harness"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "exa_ok_display",
       "line": 302,
       "cyclomatic": 4.0,
       "coverage": 96.42857142857143,
       "crap": 4.0007288629737605,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -7158,13 +7158,13 @@
       "crate": "tau-ext-shell"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "Semaphore::acquire",
       "line": 571,
       "cyclomatic": 2.0,
       "coverage": 85.71428571428571,
       "crap": 2.011661807580175,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
@@ -10956,67 +10956,67 @@
       "crate": "tau-ext-test-dummy"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/main.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/main.rs",
       "function": "main",
       "line": 1,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "run_stdio",
       "line": 77,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "run",
       "line": 82,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "ack_log_event",
       "line": 198,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "HttpSearcher::default",
       "line": 410,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "HttpSearcher::new",
       "line": 416,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "HttpSearcher::set_endpoint",
       "line": 464,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-ext-provider-openai/src/lib.rs",
@@ -11307,13 +11307,13 @@
       "crate": "tau-session-inspect"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/tests.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "drain_startup",
       "line": 106,
       "cyclomatic": 1.0,
       "coverage": 91.66666666666666,
       "crap": 1.0005787037037037,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
       "file": "/build/source/crates/tau-cli-term/src/tests.rs",
@@ -17121,112 +17121,112 @@
       "crate": "tau-ext-test-dummy"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/tests.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "EventReader::new",
       "line": 16,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/tests.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "EventWriter::new",
       "line": 41,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/tests.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "EventWriter::write_event",
       "line": 47,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/tests.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "EventWriter::flush",
       "line": 51,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/tests.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "StubSearcher::ok",
       "line": 62,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/tests.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "StubSearcher::err",
       "line": 69,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/tests.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "StubSearcher::search",
       "line": 78,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/tests.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/tests.rs",
       "function": "spawn_extension",
       "line": 87,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "tool_spec",
       "line": 202,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "exa_error_display",
       "line": 338,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "Semaphore::new",
       "line": 564,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     },
     {
-      "file": "/build/source/crates/tau-ext-websearch-exa/src/lib.rs",
+      "file": "/build/source/crates/tau-ext-websearch/src/lib.rs",
       "function": "OwnedPermit::drop",
       "line": 582,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
-      "crate": "tau-ext-websearch-exa"
+      "crate": "tau-ext-websearch"
     }
   ]
 }

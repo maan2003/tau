@@ -257,11 +257,17 @@ putting everything the sub-agent needs into the `prompt`. Live progress (turns,
 current tool) is shown in the parent UI alongside the delegate's task name and
 role.
 
-### `std-websearch-exa` — opt-in web search
+### Web search extensions
 
-Proxies a single Exa-backed search tool, advertised to models as
-`web_search`, to Exa's hosted `web_search_exa` MCP endpoint. Disable in
-`harness.yaml` when not needed; supply an API key via config.
+`std-websearch` proxies web search/fetch tools from one built-in extension. The
+Exa-backed `websearch_exa` tool is enabled by default and advertised to models as
+`web_search`. Parallel.ai tools are registered in the same extension with
+internal names `websearch_parallel_search` / `websearch_parallel_fetch`,
+advertised as `web_search` / `web_fetch`, but disabled by default so roles can
+opt into them without duplicating the default `web_search` tool. Parallel uses
+the default unauthenticated `https://search.parallel.ai/mcp` endpoint; Tau does
+not support or send a Parallel API key. `config.parallel_endpoint` can override
+the Parallel endpoint.
 
 
 ## CLI / UI

@@ -186,7 +186,7 @@ fn mix_originator_distinct_extensions_diverge() {
         query_id: "q-1".into(),
     };
     let websearch = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("websearch-exa"),
+        name: tau_proto::ExtensionName::new("websearch"),
         query_id: "q-2".into(),
     };
     assert_ne!(

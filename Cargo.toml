@@ -13,7 +13,7 @@ members = [
   "crates/tau-ext-shell",
   "crates/tau-ext-std-notifications",
   "crates/tau-ext-test-dummy",
-  "crates/tau-ext-websearch-exa",
+  "crates/tau-ext-websearch",
   "crates/tau-extension",
   "crates/tau-harness",
   "crates/tau-proto",
@@ -64,7 +64,7 @@ tau-ext-provider-openai = { path = "crates/tau-ext-provider-openai" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
 tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }
 tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }
-tau-ext-websearch-exa = { path = "crates/tau-ext-websearch-exa" }
+tau-ext-websearch = { path = "crates/tau-ext-websearch" }
 tau-extension = { path = "crates/tau-extension" }
 tau-harness = { path = "crates/tau-harness" }
 tau-proto = { path = "crates/tau-proto" }

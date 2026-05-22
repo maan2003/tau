@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-websearch-exa"
+name = "tau-ext-websearch"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
