@@ -18,6 +18,8 @@ use crate::harness::{AgentToolCall, HARNESS_CONNECTION_ID, Harness, PendingTool}
 pub(crate) const DELEGATE_TOOL_NAME: &str = "delegate";
 /// Model-visible name of the harness-owned wait tool.
 pub(crate) const WAIT_TOOL_NAME: &str = "wait";
+/// Model-visible name of the harness-owned cancel tool.
+pub(crate) const CANCEL_TOOL_NAME: &str = "cancel";
 
 const DELEGATE_PREFIX: &str = include_str!("prompts/delegate_prefix.md");
 const SLOW_DELEGATE_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
@@ -40,6 +42,10 @@ pub(crate) struct SubagentToolState {
     pub(crate) next_delegate_query_id: u64,
     /// State used by the wait tool to track background completions.
     wait_tracker: WaitTracker,
+    /// Recent delegate tool calls that already received a cancel request.
+    pub(crate) canceled_delegates: HashSet<ToolCallId>,
+    /// Insertion order for pruning `canceled_delegates`.
+    pub(crate) canceled_delegate_order: VecDeque<ToolCallId>,
 }
 
 impl Harness {
@@ -52,6 +58,9 @@ impl Harness {
         let _ = self
             .registry
             .register(HARNESS_CONNECTION_ID, wait_tool_spec());
+        let _ = self
+            .registry
+            .register(HARNESS_CONNECTION_ID, cancel_tool_spec());
     }
 
     pub(crate) fn publish_delegate_roles_context(&mut self) {
@@ -222,6 +231,40 @@ impl Harness {
         )
     }
 
+    /// Handle the harness-owned `cancel` tool call inline.
+    pub(crate) fn handle_cancel_tool_call(
+        &mut self,
+        cid: &ConversationId,
+        call: &AgentToolCall,
+        visible_tool_name: ToolName,
+    ) -> Result<(), HarnessError> {
+        let call_id: ToolCallId = call.id.clone();
+        self.track_harness_owned_tool_request(cid, call, &visible_tool_name);
+        let result = match parse_cancel_args(&call.arguments) {
+            Ok(target_call_id) => self.cancel_harness_delegate_tool_call(&target_call_id),
+            Err(message) => Err(message),
+        };
+        match result {
+            Ok(()) => self.finish_harness_owned_tool_with_result(
+                cid,
+                call_id,
+                visible_tool_name,
+                call.tool_type,
+                "Tool cancelation sent".to_owned(),
+                None,
+            ),
+            Err(message) => self.finish_harness_owned_tool_with_error(
+                cid,
+                call_id,
+                visible_tool_name,
+                call.tool_type,
+                message,
+                Some(call.arguments.clone()),
+            ),
+        }
+        Ok(())
+    }
+
     /// Handle the harness-owned `wait` tool call inline.
     pub(crate) fn handle_wait_tool_call(
         &mut self,
@@ -246,10 +289,21 @@ impl Harness {
 
     pub(crate) fn complete_harness_delegate(
         &mut self,
+        cid: &ConversationId,
+        query_id: &str,
+        text: String,
+        error: Option<String>,
+    ) {
+        self.complete_harness_delegate_inner(cid, query_id, text, error, false);
+    }
+
+    pub(crate) fn complete_harness_delegate_inner(
+        &mut self,
         _cid: &ConversationId,
         query_id: &str,
         text: String,
         error: Option<String>,
+        suppress_background_completion_prompt: bool,
     ) {
         let Some(pending) = self.subagents.pending_delegates.remove(query_id) else {
             return;
@@ -272,7 +326,14 @@ impl Harness {
                 originator: tau_proto::PromptOriginator::User,
             };
             if self.tool_turn.is_backgrounded(&call_id) {
-                self.handle_background_tool_error(Some(HARNESS_CONNECTION_ID), event);
+                if suppress_background_completion_prompt {
+                    self.handle_background_tool_error_without_completion_prompt(
+                        Some(HARNESS_CONNECTION_ID),
+                        event,
+                    );
+                } else {
+                    self.handle_background_tool_error(Some(HARNESS_CONNECTION_ID), event);
+                }
             } else {
                 self.publish_terminal_tool_error(Some(&owner_cid), None, event);
                 self.on_tool_call_complete(call_id.as_str());
@@ -324,6 +385,29 @@ impl Harness {
                 originator: tau_proto::PromptOriginator::User,
             }),
         );
+    }
+
+    fn finish_harness_owned_tool_with_result(
+        &mut self,
+        cid: &ConversationId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        result: String,
+        details: Option<CborValue>,
+    ) {
+        let result = ToolResult {
+            call_id: call_id.clone(),
+            tool_name,
+            tool_type,
+            result: details.unwrap_or(CborValue::Text(result)),
+            kind: ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        };
+        self.publish_terminal_tool_result(Some(cid), None, result);
+        self.on_tool_call_complete(call_id.as_str());
+        self.clear_tool_call_tracking(call_id.as_str());
     }
 
     fn finish_harness_owned_tool_with_error(
@@ -426,6 +510,24 @@ fn delegate_tool_spec() -> ToolSpec {
     }
 }
 
+fn cancel_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: ToolName::new(CANCEL_TOOL_NAME),
+        model_visible_name: None,
+        description: Some("Cancel a running supported background tool call. Requires `tool_call_id`; currently only delegate tool calls can be canceled. Duplicate cancellation requests for the same tool call fail.".to_owned()),
+        tool_type: ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": { "tool_call_id": { "type": "string", "description": "Required id of the running supported tool call to cancel." } },
+            "required": ["tool_call_id"]
+        })),
+        format: None,
+        enabled_by_default: true,
+        execution_mode: ToolExecutionMode::Shared,
+        background_support: Some(BackgroundSupport::Never),
+    }
+}
+
 fn wait_tool_spec() -> ToolSpec {
     ToolSpec {
         name: ToolName::new(WAIT_TOOL_NAME),
@@ -449,6 +551,23 @@ struct DelegateArgs {
     prompt: String,
     execution_mode: ToolExecutionMode,
     role: Option<String>,
+}
+
+fn parse_cancel_args(arguments: &CborValue) -> Result<ToolCallId, String> {
+    let CborValue::Map(entries) = arguments else {
+        return Err("arguments must be an object".to_owned());
+    };
+    for (k, v) in entries {
+        let CborValue::Text(name) = k else { continue };
+        if name == "tool_call_id" {
+            return match v {
+                CborValue::Text(text) if !text.is_empty() => Ok(text.clone().into()),
+                CborValue::Text(_) => Err("`tool_call_id` must not be empty".to_owned()),
+                _ => Err("`tool_call_id` must be a string".to_owned()),
+            };
+        }
+    }
+    Err("`tool_call_id` is required".to_owned())
 }
 
 fn parse_delegate_args(arguments: &CborValue) -> Result<DelegateArgs, String> {

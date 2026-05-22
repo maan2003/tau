@@ -127,6 +127,12 @@ Slow `delegate` calls should include the same `duration_seconds` header semantic
 
 A completed background result is consumed by the first successful `wait`. Later waits for the same id should fail with an already-consumed error. Parallel duplicate waits on the same id race; at most one should receive the result, and the rest should fail. Parallel duplicate no-arg waits in the same conversation should also fail clearly because only one waiter can consume the next completion. The exact error depends on timing: an in-progress duplicate-wait error, an already-consumed error, or another clear race-related error can be acceptable if only one wait receives the result.
 
+### Background tool `cancel`
+
+`cancel` requires `tool_call_id` and never backgrounds. It currently supports only running `delegate` tool calls. A successful cancel request returns `Tool cancelation sent`, emits a harness info event containing `tool call cancelation request`, and targets only the sub-agent spawned by that delegate call. The canceled delegate should complete as a background error so `wait` can observe the cancellation instead of hanging.
+
+Calling `cancel` for an unknown, completed, or unsupported tool call should return a tool error. Calling it twice for the same target should return a tool error like `Tool call already canceled`.
+
 When verifying this behavior, check that the synthetic foreground result is visible to the model, the completion notification is delivered to the model but hidden from UI unless `wait` suppressed it, and `wait` returns a completed result once and only once.
 
 ### Verification procedure

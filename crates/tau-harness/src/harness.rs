@@ -52,7 +52,9 @@ use crate::format::{format_tool_progress, render_entry_preview};
 use crate::harness::interception::{
     ConversationHeadSync, DeferredPublish, InterceptorRegistry, PendingIntercept,
 };
-use crate::harness::subagents_tool::{DELEGATE_TOOL_NAME, SubagentToolState, WAIT_TOOL_NAME};
+use crate::harness::subagents_tool::{
+    CANCEL_TOOL_NAME, DELEGATE_TOOL_NAME, SubagentToolState, WAIT_TOOL_NAME,
+};
 use crate::model::{
     baseline_params_for_selection, clamp_effort, clamp_thinking_summary, clamp_verbosity,
     context_percent_used, context_window_for_model, efforts_for_model, fallback_role, load_roles,
@@ -1203,6 +1205,12 @@ fn instance_id_factory() -> impl FnMut() -> tau_proto::ExtensionInstanceId {
         counter += 1;
         iid
     }
+}
+
+enum BackgroundCompletionPromptMode {
+    QueueAndAdvance,
+    QueueOnly,
+    Suppress,
 }
 
 impl Harness {
@@ -3664,6 +3672,24 @@ impl Harness {
             to_cancel.push((call_id, tool.name, tool.tool_type));
         }
 
+        let delegate_call_ids: Vec<ToolCallId> = to_cancel
+            .iter()
+            .filter_map(|(call_id, tool_name, _)| {
+                let is_pending_delegate = self
+                    .subagents
+                    .pending_delegates
+                    .values()
+                    .any(|pending| &pending.call_id == call_id);
+                (tool_name.as_str() == crate::harness::subagents_tool::DELEGATE_TOOL_NAME
+                    && is_pending_delegate)
+                    .then(|| call_id.clone())
+            })
+            .collect();
+        for call_id in &delegate_call_ids {
+            let _ = self.cancel_harness_delegate_tool_call(call_id);
+        }
+        to_cancel.retain(|(call_id, _, _)| !delegate_call_ids.contains(call_id));
+
         let cancelled_call_ids: std::collections::HashSet<ToolCallId> = to_cancel
             .iter()
             .map(|(call_id, _, _)| call_id.clone())
@@ -3694,6 +3720,139 @@ impl Harness {
         }
         if let Some(conv) = self.conversations.get_mut(cid) {
             conv.tools_in_flight = 0;
+        }
+    }
+
+    pub(crate) fn cancel_harness_delegate_tool_call(
+        &mut self,
+        target_call_id: &ToolCallId,
+    ) -> Result<(), String> {
+        self.cancel_harness_delegate_tool_call_inner(target_call_id, false)
+    }
+
+    fn cancel_harness_delegate_tool_call_without_completion_prompt(
+        &mut self,
+        target_call_id: &ToolCallId,
+    ) -> Result<(), String> {
+        self.cancel_harness_delegate_tool_call_inner(target_call_id, true)
+    }
+
+    fn cancel_harness_delegate_tool_call_inner(
+        &mut self,
+        target_call_id: &ToolCallId,
+        suppress_background_completion_prompt: bool,
+    ) -> Result<(), String> {
+        if self.subagents.canceled_delegates.contains(target_call_id) {
+            return Err("Tool call already canceled".to_owned());
+        }
+        let pending_query_id =
+            self.subagents
+                .pending_delegates
+                .iter()
+                .find_map(|(query_id, pending)| {
+                    if &pending.call_id == target_call_id {
+                        Some(query_id.clone())
+                    } else {
+                        None
+                    }
+                });
+        let Some(query_id) = pending_query_id else {
+            return Err("Tool call is not a running cancellable tool call".to_owned());
+        };
+
+        self.subagents
+            .canceled_delegates
+            .insert(target_call_id.clone());
+        self.subagents
+            .canceled_delegate_order
+            .push_back(target_call_id.clone());
+        while self.subagents.canceled_delegate_order.len() > 1024 {
+            if let Some(old_call_id) = self.subagents.canceled_delegate_order.pop_front() {
+                self.subagents.canceled_delegates.remove(&old_call_id);
+            }
+        }
+        self.pending_ext_agent_queries.retain(|pending| {
+            pending.query.query_id != query_id
+                && pending.query.tool_call_id.as_ref() != Some(target_call_id)
+        });
+        self.emit_info("tool call cancelation request");
+        self.cancel_delegate_side_conversation(target_call_id);
+        self.complete_harness_delegate_inner(
+            &self.default_conversation_id.clone(),
+            &query_id,
+            String::new(),
+            Some("Tool call canceled".to_owned()),
+            suppress_background_completion_prompt,
+        );
+        Ok(())
+    }
+
+    fn cancel_delegate_side_conversation(&mut self, target_call_id: &ToolCallId) {
+        let Some((cid, session_id, spid, turn_state, originator)) =
+            self.conversations.iter().find_map(|(cid, conv)| {
+                if conv.parent_tool_call_id.as_ref() != Some(target_call_id) {
+                    return None;
+                }
+                Some((
+                    cid.clone(),
+                    conv.session_id.clone(),
+                    conv.in_flight_prompt.clone(),
+                    conv.turn_state.clone(),
+                    conv.originator.clone(),
+                ))
+            })
+        else {
+            return;
+        };
+
+        if let ConversationTurnState::ToolsRunning { remaining_calls } = turn_state {
+            self.cancel_remaining_tool_calls(&cid, remaining_calls, "delegate cancel tool");
+        }
+        self.cancel_backgrounded_delegate_tool_calls_for_conversation(&cid);
+        if let Some(spid) = spid {
+            self.canceled_prompts.insert(spid.clone());
+            self.prompt_conversations.remove(&spid);
+            self.publish_prompt_terminated(
+                session_id.clone(),
+                spid.clone(),
+                SessionPromptTerminationReason::Canceled,
+                originator,
+            );
+            self.publish_event(
+                None,
+                Event::UiCancelPrompt(UiCancelPrompt {
+                    session_id,
+                    session_prompt_id: Some(spid),
+                }),
+            );
+        }
+        self.release_ext_agent_query(&cid);
+        self.transfer_background_completion_target_before_teardown(&cid);
+        self.conversations.remove(&cid);
+        self.try_advance_queue();
+    }
+
+    fn cancel_backgrounded_delegate_tool_calls_for_conversation(&mut self, cid: &ConversationId) {
+        let call_ids: Vec<ToolCallId> = self
+            .background_completion_call_ids_for_teardown(cid)
+            .into_iter()
+            .filter(|call_id| {
+                self.tool_turn.is_backgrounded(call_id)
+                    && self
+                        .subagents
+                        .pending_delegates
+                        .values()
+                        .any(|pending| &pending.call_id == call_id)
+            })
+            .collect();
+
+        for call_id in call_ids {
+            let _ = self.cancel_harness_delegate_tool_call_without_completion_prompt(&call_id);
+            self.background_completion_targets.remove(&call_id);
+            let prompt = background_completion_prompt(&call_id);
+            for conv in self.conversations.values_mut() {
+                remove_pending_internal_prompt_text(&mut conv.pending_prompts, &prompt);
+            }
         }
     }
 
@@ -4063,7 +4222,7 @@ impl Harness {
             && self.pending_tools.get(call_id).is_some_and(|tool| {
                 matches!(
                     tool.name.as_str(),
-                    "skill" | DELEGATE_TOOL_NAME | WAIT_TOOL_NAME
+                    "skill" | DELEGATE_TOOL_NAME | WAIT_TOOL_NAME | CANCEL_TOOL_NAME
                 )
             })
     }
@@ -7335,7 +7494,11 @@ impl Harness {
     }
 
     fn handle_background_tool_error(&mut self, source: Option<&str>, error: ToolError) {
-        self.handle_background_tool_error_inner(source, error, true);
+        self.handle_background_tool_error_inner(
+            source,
+            error,
+            BackgroundCompletionPromptMode::QueueAndAdvance,
+        );
     }
 
     fn handle_background_tool_error_without_advancing(
@@ -7343,14 +7506,30 @@ impl Harness {
         source: Option<&str>,
         error: ToolError,
     ) {
-        self.handle_background_tool_error_inner(source, error, false);
+        self.handle_background_tool_error_inner(
+            source,
+            error,
+            BackgroundCompletionPromptMode::QueueOnly,
+        );
+    }
+
+    fn handle_background_tool_error_without_completion_prompt(
+        &mut self,
+        source: Option<&str>,
+        error: ToolError,
+    ) {
+        self.handle_background_tool_error_inner(
+            source,
+            error,
+            BackgroundCompletionPromptMode::Suppress,
+        );
     }
 
     fn handle_background_tool_error_inner(
         &mut self,
         source: Option<&str>,
         mut error: ToolError,
-        advance_after_queue: bool,
+        completion_prompt_mode: BackgroundCompletionPromptMode,
     ) {
         let Some(cid) = self.tool_conversations.get(&error.call_id).cloned() else {
             return;
@@ -7375,16 +7554,26 @@ impl Harness {
             originator: error.originator,
         };
         self.publish_terminal_background_error(&cid, source, background);
-        self.background_completion_targets
-            .insert(call_id.clone(), cid.clone());
-        if advance_after_queue {
-            self.queue_background_completion_prompt(&cid, &call_id);
-            // Keep the completion prompt queued before draining. If an unblocked
-            // queued call closes the tool round, `maybe_complete_agent_turn` can
-            // fold this background notification into that follow-up prompt.
-            self.drain_pending_tool_invocations_or_report();
-        } else {
-            self.queue_background_completion_prompt_without_advancing(&cid, &call_id);
+        match completion_prompt_mode {
+            BackgroundCompletionPromptMode::QueueAndAdvance => {
+                self.background_completion_targets
+                    .insert(call_id.clone(), cid.clone());
+                self.queue_background_completion_prompt(&cid, &call_id);
+                // Keep the completion prompt queued before draining. If an unblocked
+                // queued call closes the tool round, `maybe_complete_agent_turn` can
+                // fold this background notification into that follow-up prompt.
+                self.drain_pending_tool_invocations_or_report();
+            }
+            BackgroundCompletionPromptMode::QueueOnly => {
+                self.background_completion_targets
+                    .insert(call_id.clone(), cid.clone());
+                self.queue_background_completion_prompt_without_advancing(&cid, &call_id);
+            }
+            BackgroundCompletionPromptMode::Suppress => {
+                self.record_wait_tool_cancelled(&std::collections::HashSet::from(
+                    [call_id.clone()],
+                ));
+            }
         }
         self.clear_tool_call_tracking(call_id.as_str());
     }
@@ -7782,6 +7971,9 @@ impl Harness {
         }
         if internal_tool_name.as_str() == WAIT_TOOL_NAME {
             return self.handle_wait_tool_call(cid, call, visible_tool_name);
+        }
+        if internal_tool_name.as_str() == CANCEL_TOOL_NAME {
+            return self.handle_cancel_tool_call(cid, call, visible_tool_name);
         }
 
         let call_id: ToolCallId = call.id.clone();

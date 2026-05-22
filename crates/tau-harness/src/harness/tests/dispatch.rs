@@ -1,7 +1,7 @@
 use super::*;
 use crate::conversation::{Conversation, ConversationId, PendingPrompt};
 use crate::harness::{
-    PendingTool, background_completion_prompt,
+    PendingExtAgentQuery, PendingTool, background_completion_prompt,
     extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
     restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
@@ -6981,6 +6981,107 @@ fn mixed_mode_delegate_calls_dispatch_concurrently_to_ext_scheduler() {
     assert!(h.pending_ext_agent_queries.is_empty());
 }
 
+/// Canceling a delegate that is still queued in the global sub-agent scheduler
+/// must remove the queued `ExtAgentQuery`. Otherwise the cancel succeeds but
+/// the side conversation can still start after the exclusive blocker finishes.
+#[test]
+fn cancel_tool_removes_queued_delegate_before_it_can_start() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.register_harness_tools();
+
+    let parent_cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "main-spid-cancel-queued".into();
+    h.prompt_conversations
+        .insert(main_spid.clone(), parent_cid.clone());
+
+    let exclusive_args = CborValue::Map(vec![
+        (
+            CborValue::Text("task_name".to_owned()),
+            CborValue::Text("exclusive".to_owned()),
+        ),
+        (
+            CborValue::Text("prompt".to_owned()),
+            CborValue::Text("exclusive task".to_owned()),
+        ),
+        (
+            CborValue::Text("execution_mode".to_owned()),
+            CborValue::Text("exclusive".to_owned()),
+        ),
+    ]);
+    let shared_args = CborValue::Map(vec![
+        (
+            CborValue::Text("task_name".to_owned()),
+            CborValue::Text("shared".to_owned()),
+        ),
+        (
+            CborValue::Text("prompt".to_owned()),
+            CborValue::Text("shared task".to_owned()),
+        ),
+        (
+            CborValue::Text("execution_mode".to_owned()),
+            CborValue::Text("shared".to_owned()),
+        ),
+    ]);
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: main_spid,
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "delegate-exclusive".into(),
+                name: ToolName::new("delegate"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: exclusive_args,
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "delegate-shared".into(),
+                name: ToolName::new("delegate"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: shared_args,
+            }),
+        ],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("main response");
+
+    let exclusive_cid = ext_query_cid(&h, "delegate-0").expect("exclusive query started");
+    assert!(ext_query_cid(&h, "delegate-1").is_none());
+    assert_eq!(h.pending_ext_agent_queries.len(), 1);
+
+    let cancel_call = AgentToolCall {
+        id: "cancel-queued".into(),
+        name: ToolName::new("cancel"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text("delegate-shared".to_owned()),
+        )]),
+        display: None,
+    };
+    h.handle_cancel_tool_call(&parent_cid, &cancel_call, ToolName::new("cancel"))
+        .expect("cancel handled");
+
+    assert!(h.pending_ext_agent_queries.is_empty());
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolBackgroundError(error)
+            if error.call_id.as_str() == "delegate-shared"
+                && error.message.contains("canceled")
+    )));
+
+    finish_ext_query(&mut h, &exclusive_cid, "delegate-0");
+    assert!(ext_query_cid(&h, "delegate-1").is_none());
+    assert!(h.pending_ext_agent_queries.is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Global sub-agent scheduling is harness-owned, not a delegate-extension local
 /// concern. Shared `ExtAgentQuery`s from independent extensions should both be
 /// admitted immediately so read/research fan-out can overlap.
@@ -9546,6 +9647,240 @@ fn tool_events_carry_owning_conversation_originator() {
         "sub-agent tool call should be tagged Extension{{query_id=q-sub}}; got {:?}",
         originators_by_call.get("sub-call"),
     );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// The cancel tool is targeted at delegate calls: it must stop the side
+/// conversation, notify the provider for the exact prompt, and complete the
+/// parent background call so waiters do not hang forever. A nested delegate
+/// that has already backgrounded is no longer in `ToolsRunning`; it must still
+/// be canceled instead of being transferred to the parent conversation.
+#[test]
+fn cancel_tool_cancels_delegate_side_conversation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let parent_cid = h.default_conversation_id.clone();
+    let delegate_call_id: ToolCallId = "delegate-call".into();
+    h.subagents.pending_delegates.insert(
+        "delegate-1".to_owned(),
+        crate::harness::subagents_tool::PendingHarnessDelegate {
+            call_id: delegate_call_id.clone(),
+            tool_name: ToolName::new("delegate"),
+            started_at: std::time::Instant::now(),
+        },
+    );
+    h.tool_conversations
+        .insert(delegate_call_id.clone(), parent_cid.clone());
+    h.pending_tools.insert(
+        delegate_call_id.clone(),
+        PendingTool {
+            name: ToolName::new("delegate"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.tool_turn.record_in_flight_for_test(
+        parent_cid.clone(),
+        delegate_call_id.clone(),
+        tau_proto::ToolExecutionMode::Shared,
+    );
+    h.tool_turn.mark_backgrounded(&delegate_call_id);
+    h.record_wait_tool_request(&delegate_call_id);
+
+    let side_cid = ConversationId::new("extq-__harness__-delegate-1");
+    let side_spid: SessionPromptId = "side-spid".into();
+    let mut side_conv = Conversation::new(
+        side_cid.clone(),
+        "s1".into(),
+        tau_proto::PromptOriginator::Extension {
+            name: HARNESS_CONNECTION_ID.into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        None,
+        Some(HARNESS_CONNECTION_ID.into()),
+    );
+    side_conv.parent_tool_call_id = Some(delegate_call_id.clone());
+    side_conv.in_flight_prompt = Some(side_spid.clone());
+    side_conv.turn_state = ConversationTurnState::Idle;
+    h.prompt_conversations
+        .insert(side_spid.clone(), side_cid.clone());
+    h.conversations.insert(side_cid.clone(), side_conv);
+    h.subagents.pending_delegates.insert(
+        "delegate-nested".to_owned(),
+        crate::harness::subagents_tool::PendingHarnessDelegate {
+            call_id: "nested-delegate-call".into(),
+            tool_name: ToolName::new("delegate"),
+            started_at: std::time::Instant::now(),
+        },
+    );
+    h.tool_conversations
+        .insert("nested-delegate-call".into(), side_cid.clone());
+    h.background_completion_targets
+        .insert("nested-delegate-call".into(), side_cid.clone());
+    h.pending_tools.insert(
+        "nested-delegate-call".into(),
+        PendingTool {
+            name: ToolName::new("delegate"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.tool_turn.record_in_flight_for_test(
+        side_cid.clone(),
+        "nested-delegate-call".into(),
+        tau_proto::ToolExecutionMode::Shared,
+    );
+    h.tool_turn
+        .mark_backgrounded(&"nested-delegate-call".into());
+    h.pending_ext_agent_queries.push_back(PendingExtAgentQuery {
+        source_id: HARNESS_CONNECTION_ID.to_owned(),
+        extension_name: "core-subagents".to_owned(),
+        query: ext_query("delegate-nested", tau_proto::ToolExecutionMode::Shared),
+        role: "worker".to_owned(),
+        cid: ConversationId::new("extq-__harness__-delegate-nested"),
+        parent_cid: side_cid.clone(),
+    });
+
+    let cancel_call = AgentToolCall {
+        id: "cancel-call".into(),
+        name: ToolName::new("cancel"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text(delegate_call_id.to_string()),
+        )]),
+        display: None,
+    };
+    h.handle_cancel_tool_call(&parent_cid, &cancel_call, ToolName::new("cancel"))
+        .expect("cancel handled");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id.as_str() == "cancel-call"
+                && result.result == CborValue::Text("Tool cancelation sent".to_owned())
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::UiCancelPrompt(cancel)
+            if cancel.session_prompt_id.as_ref() == Some(&side_spid)
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolBackgroundError(error)
+            if error.call_id.as_str() == "delegate-call"
+                && error.message.contains("canceled")
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolBackgroundError(error)
+            if error.call_id.as_str() == "nested-delegate-call"
+                && error.message.contains("canceled")
+    )));
+    assert!(
+        !h.subagents
+            .pending_delegates
+            .contains_key("delegate-nested")
+    );
+    assert!(
+        !h.pending_ext_agent_queries
+            .iter()
+            .any(|pending| pending.query.query_id == "delegate-nested")
+    );
+    assert!(!h.tool_turn.is_backgrounded(&"nested-delegate-call".into()));
+    assert!(
+        !h.tool_conversations
+            .contains_key(&ToolCallId::from("nested-delegate-call"))
+    );
+    assert!(
+        !h.background_completion_targets
+            .contains_key(&ToolCallId::from("nested-delegate-call"))
+    );
+    let nested_completion_prompt = background_completion_prompt(&"nested-delegate-call".into());
+    assert!(
+        h.conversations.values().all(|conv| conv
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != nested_completion_prompt)),
+        "nested delegate cancellation must not leave a queued completion prompt"
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::SessionPromptSteered(steered) if steered.text == nested_completion_prompt
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::HarnessInfo(info) if info.message.contains("tool call cancelation request")
+    )));
+    assert!(!h.conversations.contains_key(&side_cid));
+    assert!(!h.prompt_conversations.contains_key(&side_spid));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Duplicate cancel requests must be rejected. Without this, agents can race
+/// themselves and treat a second cancel as proof that a new request was sent.
+#[test]
+fn cancel_tool_rejects_duplicate_delegate_cancel() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+    h.subagents
+        .canceled_delegates
+        .insert("delegate-call".into());
+
+    let cancel_call = AgentToolCall {
+        id: "cancel-call".into(),
+        name: ToolName::new("cancel"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text("delegate-call".to_owned()),
+        )]),
+        display: None,
+    };
+    h.handle_cancel_tool_call(&cid, &cancel_call, ToolName::new("cancel"))
+        .expect("cancel handled");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolError(error)
+            if error.call_id.as_str() == "cancel-call"
+                && error.message == "Tool call already canceled"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Only currently running supported tool calls are cancellable. A typo or a
+/// completed/non-delegate call should fail clearly instead of pretending to
+/// have sent cancellation somewhere.
+#[test]
+fn cancel_tool_rejects_unknown_tool_call_id() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+    let cancel_call = AgentToolCall {
+        id: "cancel-call".into(),
+        name: ToolName::new("cancel"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text("missing-call".to_owned()),
+        )]),
+        display: None,
+    };
+    h.handle_cancel_tool_call(&cid, &cancel_call, ToolName::new("cancel"))
+        .expect("cancel handled");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolError(error)
+            if error.call_id.as_str() == "cancel-call"
+                && error.message.contains("not a running cancellable")
+    )));
 
     h.shutdown().expect("shutdown");
 }
