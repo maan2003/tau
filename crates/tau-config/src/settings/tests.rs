@@ -35,7 +35,7 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
     let dir = td.path();
     std::fs::write(
         dir.join("cli.yaml"),
-        r#"{ greeting: false, show_thinking: false, show_tools: "compact" }"#,
+        r#"{ greeting: false, show_thinking: false, show_tools: "compact", show_messages: "self-summary" }"#,
     )
     .expect("write");
 
@@ -43,6 +43,7 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
     assert!(!s.greeting);
     assert!(!s.show_thinking);
     assert_eq!(s.show_tools, ShowTools::Compact);
+    assert_eq!(s.show_messages, ShowMessages::SelfSummary);
     assert_eq!(s.theme, CliTheme::Auto);
 }
 
@@ -111,11 +112,25 @@ fn cli_state_round_trip_through_save_and_load() {
         show_turn_stats: true,
         redraw_counter: true,
         show_tools: crate::settings::ShowTools::SummarizeTurn,
+        show_messages: crate::settings::ShowMessages::AllSummary,
     };
     original.save(&dirs);
     assert!(td.path().join("cli.json").exists());
     let reloaded = CliState::load(&dirs);
     assert_eq!(reloaded, original);
+}
+
+#[test]
+fn cli_state_defaults_missing_show_messages_to_all_full() {
+    let td = TempDir::new().expect("tempdir");
+    let dirs = TauDirs {
+        config_dir: None,
+        state_dir: Some(td.path().to_path_buf()),
+    };
+    std::fs::write(td.path().join("cli.json"), r#"{"show_tools":"compact"}"#).expect("write");
+
+    let loaded = CliState::load(&dirs);
+    assert_eq!(loaded.show_messages, crate::settings::ShowMessages::AllFull);
 }
 
 #[test]
@@ -140,7 +155,7 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
     std::fs::create_dir_all(&state_dir).expect("mkdir state");
     std::fs::write(
         config_dir.join("cli.yaml"),
-        r#"{ show_diff: true, show_thinking: false, show_turn_stats: true, redraw_counter: true, show_tools: "compact" }"#,
+        r#"{ show_diff: true, show_thinking: false, show_turn_stats: true, redraw_counter: true, show_tools: "compact", show_messages: "self-full" }"#,
     )
     .expect("write");
 
@@ -156,6 +171,7 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
             show_turn_stats: true,
             redraw_counter: true,
             show_tools: ShowTools::Compact,
+            show_messages: ShowMessages::SelfFull,
         }
     );
 }

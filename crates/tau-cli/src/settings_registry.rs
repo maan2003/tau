@@ -45,6 +45,29 @@ const BOOL_VALUES: &[SettingValue] = &[
     },
 ];
 
+const SHOW_MESSAGES_VALUES: &[SettingValue] = &[
+    SettingValue {
+        value: "none",
+        description: "hide all messages",
+    },
+    SettingValue {
+        value: "self-summary",
+        description: "summarize messages from or to the user",
+    },
+    SettingValue {
+        value: "self-full",
+        description: "show messages from or to the user",
+    },
+    SettingValue {
+        value: "all-summary",
+        description: "show user messages, summarize agent-agent messages",
+    },
+    SettingValue {
+        value: "all-full",
+        description: "show all messages",
+    },
+];
+
 const SHOW_TOOLS_VALUES: &[SettingValue] = &[
     SettingValue {
         value: "off",
@@ -103,8 +126,36 @@ pub const SETTINGS: &[SettingDef] = &[
         values: SHOW_TOOLS_VALUES,
         get: |s| s.show_tools.as_str(),
     },
+    SettingDef {
+        name: "show-messages",
+        description: "Agent message visibility",
+        values: SHOW_MESSAGES_VALUES,
+        get: |s| s.show_messages.as_str(),
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static SettingDef> {
     SETTINGS.iter().find(|s| s.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    /// `/set show-messages` is registry-driven, so the registry must expose all
+    /// documented modes for parsing and completion.
+    #[test]
+    fn show_messages_values_are_registered() {
+        let setting = super::find("show-messages").expect("show-messages setting");
+        let values: Vec<_> = setting.values.iter().map(|value| value.value).collect();
+
+        assert_eq!(
+            values,
+            vec![
+                "none",
+                "self-summary",
+                "self-full",
+                "all-summary",
+                "all-full"
+            ]
+        );
+    }
 }

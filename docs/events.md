@@ -171,14 +171,14 @@ harness/agent.
 - **`agent.message`** — An agent sends a short text message to another
   agent or to the user. Carries `session_id`, `sender_id`,
   `recipient_id`, and `message`. This is durable transcript state, so
-  late UI subscribers can replay it. UI subscribers display every
-  message as `Message from <sender> to <recipient>:` regardless of the
-  recipient. A `recipient_id` of `user` only displays the message. Any
-  other recipient is resolved to a live or pending agent conversation and
-  delivered as a hidden internal prompt; if that agent is a side/delegate
-  agent about to finish, teardown waits until the message turn has been
-  dispatched and answered. See [agent-messaging.md](agent-messaging.md)
-  for model-facing tool examples.
+  late UI subscribers can replay it. UI subscribers filter, summarize, or
+  fully display messages according to `/set show-messages`. A
+  `recipient_id` of `user` only displays the message. Any other recipient
+  is resolved to a live or pending agent conversation and delivered as a
+  hidden internal prompt; if that agent is a side/delegate agent about to
+  finish, teardown waits until the message turn has been dispatched and
+  answered. See [agent-messaging.md](agent-messaging.md) for model-facing
+  tool examples.
 - **`extension.event`** — Custom extension-defined event with a free-form
   dotted name and CBOR payload. The harness routes it like any other
   event; if `session_id` is set it can be folded into that session's

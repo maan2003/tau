@@ -103,6 +103,22 @@ fn sync(handle: &TermHandle) {
     handle.redraw_sync();
 }
 
+fn agent_message(sender_id: &str, recipient_id: &str, message: &str) -> AgentMessage {
+    AgentMessage {
+        session_id: "s1".into(),
+        sender_id: sender_id.to_owned(),
+        recipient_id: recipient_id.to_owned(),
+        message: message.to_owned(),
+    }
+}
+
+fn visible_lines(vt: &VtWriter, w: u16) -> Vec<String> {
+    vt.screen_text(w)
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect()
+}
+
 fn eventually_screen_contains(vt: &VtWriter, w: u16, needle: &str) -> bool {
     let deadline = Instant::now() + Duration::from_millis(500);
     while Instant::now() < deadline {
@@ -260,12 +276,11 @@ fn agent_messages_render_all_recipients_as_history() {
         tau_themes::Theme::builtin(),
     );
 
-    renderer.handle(&Event::AgentMessage(AgentMessage {
-        session_id: "s1".into(),
-        sender_id: "manager_11111111".to_owned(),
-        recipient_id: "engineer_22222222".to_owned(),
-        message: "hello worker".to_owned(),
-    }));
+    renderer.handle(&Event::AgentMessage(agent_message(
+        "manager_11111111",
+        "engineer_22222222",
+        "hello worker",
+    )));
     sync(&handle);
     assert!(vt.screen_contains(80, "Message from manager_11111111 to engineer_22222222:"));
     assert!(vt.screen_contains(80, "hello worker"));
@@ -281,6 +296,80 @@ fn agent_messages_render_all_recipients_as_history() {
     }
     sync(&handle);
     assert!(!vt.screen_contains(80, "Message from manager_11111111 to engineer_22222222:"));
+}
+
+#[test]
+fn show_messages_none_leaves_no_visible_message_output() {
+    let (_term, handle, vt) = setup(80, 8);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    let before = visible_lines(&vt, 80);
+
+    renderer.apply_setting("show-messages", "none");
+    renderer.handle(&Event::AgentMessage(agent_message(
+        "agent-a",
+        "agent-b",
+        "secret hidden body",
+    )));
+    sync(&handle);
+
+    assert_eq!(visible_lines(&vt, 80), before);
+    assert!(!vt.screen_contains(80, "Message from"));
+    assert!(!vt.screen_contains(80, "secret hidden body"));
+}
+
+#[test]
+fn show_messages_summary_modes_do_not_show_body() {
+    let (_term, handle, vt) = setup(80, 8);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.apply_setting("show-messages", "all-summary");
+    renderer.handle(&Event::AgentMessage(agent_message(
+        "agent-a",
+        "agent-b",
+        "secret summarized body",
+    )));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "Message from agent-a to agent-b"));
+    assert!(!vt.screen_contains(80, "secret summarized body"));
+}
+
+#[test]
+fn show_messages_toggle_retroactively_hides_and_shows_history() {
+    let (_term, handle, vt) = setup(80, 8);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.apply_setting("show-messages", "none");
+    renderer.handle(&Event::AgentMessage(agent_message(
+        "agent-a",
+        "agent-b",
+        "retro body",
+    )));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "Message from agent-a to agent-b"));
+    assert!(!vt.screen_contains(80, "retro body"));
+
+    renderer.apply_setting("show-messages", "all-full");
+    sync(&handle);
+    assert!(vt.screen_contains(80, "Message from agent-a to agent-b:"));
+    assert!(vt.screen_contains(80, "retro body"));
+
+    renderer.apply_setting("show-messages", "none");
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "Message from agent-a to agent-b"));
+    assert!(!vt.screen_contains(80, "retro body"));
 }
 
 #[test]

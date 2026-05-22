@@ -87,6 +87,9 @@ pub(crate) struct EventRenderer {
     thinking_history: Vec<ThinkingBlockEntry>,
     turn_stats_history: Vec<TurnStatsBlockEntry>,
     tool_history: Vec<ToolBlockEntry>,
+    /// Durable message blocks and payloads, kept so `/set show-messages`
+    /// can re-render the current transcript retroactively.
+    message_history: Vec<MessageBlockEntry>,
     /// Where to persist `show_diff` / `show_thinking` /
     /// `show_turn_stats` / `show_tools` toggles.
     state_dirs: tau_config::settings::TauDirs,
@@ -146,6 +149,8 @@ pub(crate) struct EventRenderer {
     last_full_render_at: Option<Instant>,
     /// Tool block visibility mode.
     show_tools: tau_config::settings::ShowTools,
+    /// Agent/user message visibility mode.
+    show_messages: tau_config::settings::ShowMessages,
     /// Tool summary blocks keyed by their block id. Hidden when
     /// `show_tools` is `Full` or `Compact`, rendered in summarize modes.
     tool_summaries: HashMap<tau_cli_term::BlockId, ToolSummaryDisplay>,
@@ -270,6 +275,18 @@ impl ToolTimerNotifier {
 struct ToolBlockEntry {
     block_id: tau_cli_term::BlockId,
     display: ToolCallDisplay,
+}
+
+struct MessageBlockEntry {
+    block_id: tau_cli_term::BlockId,
+    message: tau_proto::AgentMessage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MessageRenderMode {
+    Hidden,
+    Summary,
+    Full,
 }
 
 /// One finished thinking block. Held so `/set show-thinking` can swap
@@ -842,6 +859,7 @@ impl EventRenderer {
             show_thinking: state.show_thinking,
             show_turn_stats: state.show_turn_stats,
             show_tools: state.show_tools,
+            show_messages: state.show_messages,
             tool_summaries: HashMap::new(),
             prompt_tool_summary: None,
             prompt_tool_summary_active: false,
@@ -849,6 +867,7 @@ impl EventRenderer {
             thinking_history: Vec::new(),
             turn_stats_history: Vec::new(),
             tool_history: Vec::new(),
+            message_history: Vec::new(),
             state_dirs,
             current_model: None,
             current_role: None,
@@ -900,6 +919,7 @@ impl EventRenderer {
             show_turn_stats: self.show_turn_stats,
             redraw_counter: self.redraw_counter,
             show_tools: self.show_tools,
+            show_messages: self.show_messages,
         };
         if let Ok(mut mirror) = self.cli_state_mirror.lock() {
             *mirror = state.clone();
@@ -960,6 +980,11 @@ impl EventRenderer {
             "show-tools" => {
                 if let Some(show_tools) = tau_config::settings::ShowTools::parse(value) {
                     self.set_show_tools(show_tools);
+                }
+            }
+            "show-messages" => {
+                if let Some(show_messages) = tau_config::settings::ShowMessages::parse(value) {
+                    self.set_show_messages(show_messages);
                 }
             }
             _ => {}
@@ -1309,6 +1334,21 @@ impl EventRenderer {
         }
     }
 
+    fn set_show_messages(&mut self, show_messages: tau_config::settings::ShowMessages) {
+        if self.show_messages == show_messages {
+            return;
+        }
+        self.show_messages = show_messages;
+        for entry in &self.message_history {
+            self.handle.set_block(
+                entry.block_id,
+                self.render_agent_message_block(&entry.message),
+            );
+        }
+        self.invalidate_for_retroactive_toggle();
+        self.save_cli_state();
+    }
+
     fn set_show_tools(&mut self, show_tools: tau_config::settings::ShowTools) {
         if self.show_tools == show_tools {
             return;
@@ -1369,6 +1409,7 @@ impl EventRenderer {
         self.thinking_history.clear();
         self.turn_stats_history.clear();
         self.tool_history.clear();
+        self.message_history.clear();
         self.tool_summaries.clear();
         self.prompt_tool_summary = None;
         self.prompt_tool_summary_active = false;
@@ -1944,15 +1985,58 @@ impl EventRenderer {
         let Event::AgentMessage(message) = event else {
             return false;
         };
-        let block = self.submitted_prompt_block(
-            tau_themes::names::SYSTEM_INFO,
-            format!(
-                "Message from {} to {}:\n{}",
-                message.sender_id, message.recipient_id, message.message
-            ),
-        );
-        self.handle.print_output("agent-message", block);
+        let block = self.render_agent_message_block(message);
+        let block_id = self.handle.print_output("agent-message", block);
+        self.message_history.push(MessageBlockEntry {
+            block_id,
+            message: message.clone(),
+        });
         true
+    }
+
+    fn render_agent_message_block(
+        &self,
+        message: &tau_proto::AgentMessage,
+    ) -> tau_cli_term::StyledBlock {
+        match Self::message_render_mode(self.show_messages, message) {
+            MessageRenderMode::Hidden => Self::empty_block(),
+            MessageRenderMode::Summary => self.submitted_prompt_block(
+                tau_themes::names::SYSTEM_INFO,
+                Self::agent_message_summary(message),
+            ),
+            MessageRenderMode::Full => self.submitted_prompt_block(
+                tau_themes::names::SYSTEM_INFO,
+                format!(
+                    "{}:\n{}",
+                    Self::agent_message_summary(message),
+                    message.message
+                ),
+            ),
+        }
+    }
+
+    fn agent_message_summary(message: &tau_proto::AgentMessage) -> String {
+        format!(
+            "Message from {} to {}",
+            message.sender_id, message.recipient_id
+        )
+    }
+
+    fn message_render_mode(
+        show_messages: tau_config::settings::ShowMessages,
+        message: &tau_proto::AgentMessage,
+    ) -> MessageRenderMode {
+        let self_msg = message.sender_id == "user" || message.recipient_id == "user";
+        match (show_messages, self_msg) {
+            (tau_config::settings::ShowMessages::None, _) => MessageRenderMode::Hidden,
+            (tau_config::settings::ShowMessages::SelfSummary, true) => MessageRenderMode::Summary,
+            (tau_config::settings::ShowMessages::SelfSummary, false) => MessageRenderMode::Hidden,
+            (tau_config::settings::ShowMessages::SelfFull, true) => MessageRenderMode::Full,
+            (tau_config::settings::ShowMessages::SelfFull, false) => MessageRenderMode::Hidden,
+            (tau_config::settings::ShowMessages::AllSummary, true) => MessageRenderMode::Full,
+            (tau_config::settings::ShowMessages::AllSummary, false) => MessageRenderMode::Summary,
+            (tau_config::settings::ShowMessages::AllFull, _) => MessageRenderMode::Full,
+        }
     }
 
     fn handle_session_events(&mut self, event: &Event) -> bool {
@@ -3406,7 +3490,85 @@ impl EventRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentActivity, RoleCompletionDetails, role_value_completion};
+    use super::{AgentActivity, MessageRenderMode, RoleCompletionDetails, role_value_completion};
+
+    fn agent_message(
+        sender_id: &str,
+        recipient_id: &str,
+        message: &str,
+    ) -> tau_proto::AgentMessage {
+        tau_proto::AgentMessage {
+            session_id: "session".into(),
+            sender_id: sender_id.to_owned(),
+            recipient_id: recipient_id.to_owned(),
+            message: message.to_owned(),
+        }
+    }
+
+    /// `/set show-messages` must hide, summarize, or fully render durable
+    /// message events based on whether they involve the user. This locks the
+    /// privacy modes without needing a terminal renderer fixture.
+    #[test]
+    fn show_messages_modes_map_user_and_agent_messages() {
+        let user_sender_message = agent_message("user", "agent", "visible body");
+        let user_recipient_message = agent_message("agent", "user", "visible body");
+        let agent_message = agent_message("agent-a", "agent-b", "private body");
+
+        let cases = [
+            (
+                tau_config::settings::ShowMessages::None,
+                MessageRenderMode::Hidden,
+                MessageRenderMode::Hidden,
+            ),
+            (
+                tau_config::settings::ShowMessages::SelfSummary,
+                MessageRenderMode::Summary,
+                MessageRenderMode::Hidden,
+            ),
+            (
+                tau_config::settings::ShowMessages::SelfFull,
+                MessageRenderMode::Full,
+                MessageRenderMode::Hidden,
+            ),
+            (
+                tau_config::settings::ShowMessages::AllSummary,
+                MessageRenderMode::Full,
+                MessageRenderMode::Summary,
+            ),
+            (
+                tau_config::settings::ShowMessages::AllFull,
+                MessageRenderMode::Full,
+                MessageRenderMode::Full,
+            ),
+        ];
+
+        for (mode, expected_self, expected_agent) in cases {
+            assert_eq!(
+                super::EventRenderer::message_render_mode(mode, &user_sender_message),
+                expected_self
+            );
+            assert_eq!(
+                super::EventRenderer::message_render_mode(mode, &user_recipient_message),
+                expected_self
+            );
+            assert_eq!(
+                super::EventRenderer::message_render_mode(mode, &agent_message),
+                expected_agent
+            );
+        }
+    }
+
+    /// Summary rendering intentionally carries no message body so private
+    /// content from summarized agent-agent messages cannot leak.
+    #[test]
+    fn agent_message_summary_excludes_body() {
+        let message = agent_message("agent-a", "agent-b", "secret payload");
+
+        let summary = super::EventRenderer::agent_message_summary(&message);
+
+        assert_eq!(summary, "Message from agent-a to agent-b");
+        assert!(!summary.contains("secret payload"));
+    }
 
     fn tool_call(call_id: &str) -> tau_proto::ContextItem {
         tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {

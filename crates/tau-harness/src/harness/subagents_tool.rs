@@ -646,7 +646,7 @@ fn message_tool_spec() -> ToolSpec {
     ToolSpec {
         name: ToolName::new(MESSAGE_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Send an async message to another live or pending agent, or to the user. Use recipient_id `user` to display to the user, or a `sub_agent_id` returned by `delegate`; all messages are shown in the UI. A non-user recipient also receives a hidden prompt. Requires `recipient_id` and `message`.".to_owned()),
+        description: Some("Send an async message to another live or pending agent, or to the user. Use recipient_id `user`, or a `sub_agent_id` returned by `delegate`; UI display depends on `/set show-messages`. A non-user recipient also receives a hidden prompt. Requires `recipient_id` and `message`.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",

@@ -69,6 +69,8 @@ pub struct CliSettings {
     pub redraw_counter: bool,
     /// How tool calls are rendered in the transcript by default.
     pub show_tools: ShowTools,
+    /// How inter-agent and user-agent messages are rendered in the transcript.
+    pub show_messages: ShowMessages,
     /// Which built-in color theme to use for the terminal UI.
     pub theme: CliTheme,
     /// Key bindings for prompt-local actions. Defaults to an
@@ -96,6 +98,7 @@ impl CliSettings {
             show_turn_stats: self.show_turn_stats,
             redraw_counter: self.redraw_counter,
             show_tools: self.show_tools,
+            show_messages: self.show_messages,
         }
     }
 }
@@ -203,6 +206,9 @@ pub struct CliState {
     /// How tool calls are rendered in the transcript. Controlled by
     /// `/set show-tools <off|summarize-turn|summarize-prompt|compact|full>`.
     pub show_tools: ShowTools,
+    /// How messages between the user and agents, or between agents, are
+    /// rendered in the transcript. Controlled by `/set show-messages <mode>`.
+    pub show_messages: ShowMessages,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -259,6 +265,46 @@ impl ShowTools {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ShowMessages {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "self-summary")]
+    SelfSummary,
+    #[serde(rename = "self-full")]
+    SelfFull,
+    #[serde(rename = "all-summary")]
+    AllSummary,
+    #[serde(rename = "all-full")]
+    #[default]
+    AllFull,
+}
+
+impl ShowMessages {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::SelfSummary => "self-summary",
+            Self::SelfFull => "self-full",
+            Self::AllSummary => "all-summary",
+            Self::AllFull => "all-full",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "self-summary" => Some(Self::SelfSummary),
+            "self-full" => Some(Self::SelfFull),
+            "all-summary" => Some(Self::AllSummary),
+            "all-full" => Some(Self::AllFull),
+            _ => None,
+        }
+    }
+}
+
 impl Default for CliState {
     fn default() -> Self {
         Self {
@@ -267,6 +313,7 @@ impl Default for CliState {
             show_turn_stats: false,
             redraw_counter: false,
             show_tools: ShowTools::Full,
+            show_messages: ShowMessages::AllFull,
         }
     }
 }

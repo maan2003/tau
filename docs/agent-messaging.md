@@ -1,11 +1,19 @@
 # Agent messaging tool
 
-The harness-owned `message` tool lets an agent send an asynchronous short text note to the user or to another agent. Every sent message is recorded as an `agent.message` event and shown in the UI as:
+The harness-owned `message` tool lets an agent send an asynchronous short text note to the user or to another agent. Every sent message is recorded as an `agent.message` event. UI display depends on `/set show-messages`; when shown fully it renders as:
 
 ```text
 Message from <sender> to <recipient>:
 <message>
 ```
+
+`/set show-messages` modes are:
+
+- `none`: no UI indication or history of any messages
+- `self-summary`: one-line no-content indication for messages from or to the user; no UI indication for agent-agent messages
+- `self-full`: full content for messages from or to the user only
+- `all-summary`: full content for user messages plus one-line no-content indication for agent-agent messages
+- `all-full`: full content of all messages
 
 ## Send to the user
 
@@ -39,7 +47,7 @@ Use `sub_agent_id` as `recipient_id`:
 message({"recipient_id":"engineer_ab12cd34","message":"Please also inspect crates/tau-cli/src/event_renderer.rs."})
 ```
 
-The UI still displays the message. The recipient agent also receives a hidden internal prompt with the message body XML-escaped inside a `<message>` wrapper.
+The UI may display the message, summarize it, or hide it depending on `/set show-messages`. The recipient agent also receives a hidden internal prompt with the message body XML-escaped inside a `<message>` wrapper.
 
 ## Invalid recipients and arguments
 

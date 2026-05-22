@@ -295,10 +295,12 @@ Type `/` for menu autocompletion. The built-in set:
 | `/tree [id]`        | Print session tree; with `id`, rewind head           |
 | `/set <name> <val>` | Set a UI setting (Tab cycles names + values)         |
 
-Available `/set` names: `show-diff` (expanded vs. compact diffs),
+Available `/set` names include `show-diff` (expanded vs. compact diffs),
 `show-thinking` (agent reasoning summaries), `show-cache-stats`
-(prompt-cache hit stats in status bar), `show-turn-stats` (per-turn
-token usage below responses). All take `true` / `false`. The first-arg
+(prompt-cache hit stats in status bar), and `show-turn-stats` (per-turn
+token usage below responses). These take `true` / `false`.
+`/set show-messages <none|self-summary|self-full|all-summary|all-full>`
+controls how agent/user messages are shown in the transcript. The first-arg
 completion menu shows each setting's current value; the second-arg
 menu shows the meaning of each allowed value. State is persisted to
 `<state_dir>/cli.json`.
