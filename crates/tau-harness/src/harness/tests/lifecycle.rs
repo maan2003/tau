@@ -47,6 +47,29 @@ fn session_prompt_text_count(h: &Harness, text: &str) -> usize {
         .count()
 }
 
+fn event_log_contains_source_event(
+    h: &Harness,
+    source: &str,
+    mut predicate: impl FnMut(&Event) -> bool,
+) -> bool {
+    let mut seq = 0;
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq + 1;
+        if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
+            return true;
+        }
+    }
+    false
+}
+
+fn prompt_context_contains(prompt: &SessionPromptCreated, needle: &str) -> bool {
+    prompt
+        .context_items
+        .iter()
+        .filter_map(context_text)
+        .any(|text| text.contains(needle))
+}
+
 fn shell_tool_spec(h: &Harness) -> ToolSpec {
     h.registry
         .providers_for("shell")
@@ -99,8 +122,39 @@ fn staged_tool_spec(name: &str) -> ToolSpec {
     }
 }
 
-fn connect_handshaking_tool(h: &mut Harness, conn_id: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
-    let sink = connect_test_tool(h, conn_id);
+fn staged_provider_model(id: &str) -> tau_proto::ProviderModelInfo {
+    tau_proto::ProviderModelInfo {
+        id: id.into(),
+        display_name: Some("Staged".to_owned()),
+        default_affinity: 100,
+        context_window: 4_096,
+        efforts: vec![tau_proto::Effort::Medium],
+        verbosities: vec![tau_proto::Verbosity::Medium],
+        thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
+        supports_compaction: false,
+    }
+}
+
+fn clear_quiet_provider_models(h: &mut Harness) {
+    let provider_id = h
+        .extension_connection_id("provider")
+        .expect("provider")
+        .to_owned();
+    h.handle_extension_event(
+        &provider_id,
+        Frame::Event(Event::ProviderModelsUpdated(
+            tau_proto::ProviderModelsUpdated { models: Vec::new() },
+        )),
+    )
+    .expect("clear provider models");
+}
+
+fn connect_handshaking_extension(
+    h: &mut Harness,
+    conn_id: &str,
+    kind: tau_proto::ClientKind,
+) -> Arc<Mutex<Vec<RoutedFrame>>> {
+    let sink = connect_test_client(h, conn_id, kind.clone());
     let connection_id: tau_proto::ConnectionId = conn_id.into();
     h.extensions.insert(
         connection_id.clone(),
@@ -108,7 +162,7 @@ fn connect_handshaking_tool(h: &mut Harness, conn_id: &str) -> Arc<Mutex<Vec<Rou
             name: conn_id.to_owned(),
             instance_id: 42.into(),
             connection_id: connection_id.clone(),
-            kind: tau_proto::ClientKind::Tool,
+            kind,
             pid: None,
             in_process_thread: None,
             supervised_config: None,
@@ -119,6 +173,10 @@ fn connect_handshaking_tool(h: &mut Harness, conn_id: &str) -> Arc<Mutex<Vec<Rou
     );
     h.extension_order.push(connection_id);
     sink
+}
+
+fn connect_handshaking_tool(h: &mut Harness, conn_id: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
+    connect_handshaking_extension(h, conn_id, tau_proto::ClientKind::Tool)
 }
 
 fn sink_has_tool_invoke(sink: &Arc<Mutex<Vec<RoutedFrame>>>, call_id: &str) -> bool {
@@ -388,6 +446,462 @@ fn extension_that_never_sends_ready_never_exposes_staged_tool() {
     assert!(matches!(submission, PromptSubmission::Queued));
     assert!(h.registry.providers_for("never_ready_tool").is_empty());
     assert!(h.prompt_snapshots.is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
+    // Provider model snapshots define both visible model state and prompt
+    // routing. A handshaking provider must not make a queued prompt dispatch
+    // until its Ready message activates the staged snapshot.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    clear_quiet_provider_models(&mut h);
+    assert!(h.selected_model.is_none());
+
+    let conn_id = "conn-staged-provider";
+    let _sink = connect_handshaking_extension(&mut h, conn_id, tau_proto::ClientKind::Provider);
+    let model_name = "staged/provider-model";
+    let model_id: tau_proto::ModelId = model_name.into();
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ProviderModelsUpdated(
+            tau_proto::ProviderModelsUpdated {
+                models: vec![staged_provider_model(model_name)],
+            },
+        )),
+    )
+    .expect("stage provider models");
+
+    let submission = h
+        .submit_user_prompt("s1".into(), "wait for staged model".to_owned())
+        .expect("submit");
+    assert!(matches!(submission, PromptSubmission::Queued));
+    assert!(!h.available_models.contains(&model_id));
+    assert!(!h.provider_model_routes.contains_key(&model_id));
+    assert!(h.prompt_snapshots.is_empty());
+    assert!(!event_log_contains_source_event(&h, conn_id, |event| {
+        matches!(event, Event::ProviderModelsUpdated(_))
+    }));
+
+    h.handle_extension_message(
+        conn_id,
+        Message::Ready(tau_proto::Ready {
+            message: Some("ready".to_owned()),
+        }),
+    )
+    .expect("ready");
+
+    assert!(h.available_models.contains(&model_id));
+    assert_eq!(
+        h.provider_model_routes.get(&model_id).map(|id| id.as_str()),
+        Some(conn_id)
+    );
+    assert!(event_log_contains_source_event(&h, conn_id, |event| {
+        matches!(event, Event::ProviderModelsUpdated(update) if update.models.iter().any(|model| model.id == model_id))
+    }));
+    let prompt = h
+        .prompt_snapshots
+        .values()
+        .find(|prompt| prompt.model.as_ref() == Some(&model_id))
+        .expect("queued prompt dispatched with staged model");
+    assert!(prompt_context_contains(prompt, "wait for staged model"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn skill_session_context_and_fragment_are_staged_until_ready() {
+    // Skills, session context, and extension prompt fragments all feed prompt
+    // assembly. None of them may affect the system prompt until Ready activates
+    // the staged batch.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let conn_id = "conn-staged-context";
+    let _sink = connect_handshaking_tool(&mut h, conn_id);
+
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+            name: "staged-skill".into(),
+            description: "STAGED SKILL DESCRIPTION".to_owned(),
+            file_path: "/tmp/staged-skill/SKILL.md".into(),
+            add_to_prompt: true,
+        })),
+    )
+    .expect("stage skill");
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtSessionContextPublish(
+            tau_proto::ExtSessionContextPublish {
+                session_id: "s1".into(),
+                key: "demo".into(),
+                value: tau_proto::SessionContextValue(serde_json::json!({
+                    "answer": "STAGED CONTEXT VALUE"
+                })),
+            },
+        )),
+    )
+    .expect("stage session context");
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtPromptFragmentPublish(
+            tau_proto::ExtPromptFragmentPublish {
+                fragment: tau_proto::PromptFragment::new(
+                    "staged.context.fragment",
+                    tau_proto::PromptPriority::new(20),
+                    "CTX={{#each session_context.demo}}{{value.answer}}{{/each}}",
+                ),
+            },
+        )),
+    )
+    .expect("stage prompt fragment");
+
+    assert!(!h.discovered_skills.contains_key("staged-skill"));
+    let before_prompt = h.build_current_system_prompt();
+    assert!(!before_prompt.contains("STAGED SKILL DESCRIPTION"));
+    assert!(!before_prompt.contains("STAGED CONTEXT VALUE"));
+
+    h.handle_extension_message(
+        conn_id,
+        Message::Ready(tau_proto::Ready {
+            message: Some("ready".to_owned()),
+        }),
+    )
+    .expect("ready");
+
+    assert!(h.discovered_skills.contains_key("staged-skill"));
+    let after_prompt = h.build_current_system_prompt();
+    assert!(after_prompt.contains("STAGED SKILL DESCRIPTION"));
+    assert!(after_prompt.contains("STAGED CONTEXT VALUE"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn agents_context_ready_staged_until_ready_and_queue_waits() {
+    // AGENTS.md discovery and the matching context-ready acknowledgement are
+    // startup context state. A queued user prompt must wait for Ready, then see
+    // the injected AGENTS.md context in the dispatched prompt.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "conn-staged-agents";
+    let _sink = connect_handshaking_tool(&mut h, conn_id);
+    h.initialized_sessions.remove("s1");
+    h.turn_state = TurnState::InitializingSession {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+        waiting_on: [tau_proto::ConnectionId::from(conn_id)]
+            .into_iter()
+            .collect(),
+    };
+
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtAgentsMdAvailable(
+            tau_proto::ExtAgentsMdAvailable {
+                file_path: "/repo/AGENTS.md".into(),
+                content: "# Rules\nSTAGED AGENTS CONTEXT".to_owned(),
+            },
+        )),
+    )
+    .expect("stage agents");
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtensionContextReady(
+            tau_proto::ExtensionContextReady {
+                session_id: "s1".into(),
+            },
+        )),
+    )
+    .expect("stage context ready");
+    let submission = h
+        .submit_user_prompt("s1".into(), "queued after staged context".to_owned())
+        .expect("submit");
+
+    assert!(matches!(submission, PromptSubmission::Queued));
+    assert!(h.discovered_agents_files.is_empty());
+    assert!(matches!(
+        h.turn_state,
+        TurnState::InitializingSession { .. }
+    ));
+    assert!(h.prompt_snapshots.is_empty());
+    assert!(!event_log_contains_source_event(&h, conn_id, |event| {
+        matches!(
+            event,
+            Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_)
+        )
+    }));
+
+    h.handle_extension_message(
+        conn_id,
+        Message::Ready(tau_proto::Ready {
+            message: Some("ready".to_owned()),
+        }),
+    )
+    .expect("ready");
+
+    assert!(h.initialized_sessions.contains("s1"));
+    assert!(event_log_contains_source_event(&h, conn_id, |event| {
+        matches!(
+            event,
+            Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_)
+        )
+    }));
+    let prompt = h
+        .prompt_snapshots
+        .values()
+        .find(|prompt| prompt_context_contains(prompt, "queued after staged context"))
+        .expect("queued prompt dispatched after Ready");
+    assert!(prompt_context_contains(prompt, "STAGED AGENTS CONTEXT"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn interceptor_registration_is_staged_until_ready() {
+    // Interception is an extension capability: before Ready, matching events
+    // must pass through normally; after Ready, the same selector becomes active.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "conn-staged-interceptor";
+    let sink = connect_handshaking_tool(&mut h, conn_id);
+
+    h.handle_extension_message(
+        conn_id,
+        Message::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        }),
+    )
+    .expect("stage intercept");
+    h.publish_event(None, draft_event("before ready"));
+    assert!(
+        sink.lock().expect("sink").iter().all(|routed| {
+            !matches!(routed.frame, Frame::Message(Message::InterceptRequest(_)))
+        })
+    );
+
+    h.handle_extension_message(
+        conn_id,
+        Message::Ready(tau_proto::Ready {
+            message: Some("ready".to_owned()),
+        }),
+    )
+    .expect("ready");
+    h.publish_event(None, draft_event("after ready"));
+
+    assert!(sink.lock().expect("sink").iter().any(|routed| {
+        matches!(&routed.frame, Frame::Message(Message::InterceptRequest(req))
+            if matches!(req.event.as_ref(), Event::UiPromptDraft(draft) if draft.text == "after ready"))
+    }));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn extension_emit_and_agent_query_are_staged_until_ready() {
+    // Generic emits are visible bus state, and ExtAgentQuery starts prompt
+    // dispatch. Both are held until Ready so a handshaking extension cannot
+    // publish or start side-agent work early.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "conn-staged-emit-query";
+    let _sink = connect_handshaking_tool(&mut h, conn_id);
+    let custom_name: tau_proto::EventName = "demo.startup_state".parse().expect("event name");
+
+    h.handle_extension_message(
+        conn_id,
+        Message::Emit(tau_proto::Emit {
+            event: Box::new(Event::ExtensionEvent(tau_proto::CustomEvent {
+                name: custom_name.clone(),
+                session_id: Some("s1".into()),
+                payload: CborValue::Text("STAGED CUSTOM EVENT".to_owned()),
+            })),
+            transient: false,
+        }),
+    )
+    .expect("stage emit");
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtAgentQuery(ExtAgentQuery {
+            query_id: "q-staged".to_owned(),
+            instruction: "STAGED EXT QUERY".to_owned(),
+            role: None,
+            execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
+            tool_call_id: None,
+            task_name: None,
+        })),
+    )
+    .expect("stage query");
+
+    assert!(!event_log_contains_source_event(&h, conn_id, |event| {
+        event.name() == custom_name
+    }));
+    assert!(
+        !h.conversations
+            .keys()
+            .any(|cid| cid.as_str().contains("q-staged"))
+    );
+    assert!(h.prompt_snapshots.is_empty());
+
+    h.handle_extension_message(
+        conn_id,
+        Message::Ready(tau_proto::Ready {
+            message: Some("ready".to_owned()),
+        }),
+    )
+    .expect("ready");
+
+    assert!(event_log_contains_source_event(&h, conn_id, |event| {
+        event.name() == custom_name
+    }));
+    assert!(
+        h.conversations
+            .keys()
+            .any(|cid| cid.as_str().contains("q-staged"))
+    );
+    assert!(
+        h.prompt_snapshots
+            .values()
+            .any(|prompt| prompt_context_contains(prompt, "STAGED EXT QUERY"))
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn disconnect_before_ready_drops_all_staged_state() {
+    // If a handshaking extension goes away, its staged batch is discarded rather
+    // than becoming visible through model routes, prompt assembly, interceptors,
+    // custom events, or tool routing.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    clear_quiet_provider_models(&mut h);
+    let conn_id = "conn-drop-staged";
+    let sink = connect_handshaking_extension(&mut h, conn_id, tau_proto::ClientKind::Provider);
+    let model_name = "staged/drop-model";
+    let model_id: tau_proto::ModelId = model_name.into();
+
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: staged_tool_spec("dropped_tool"),
+            prompt_fragment: Some(tau_proto::PromptFragment::new(
+                "dropped.tool.fragment",
+                tau_proto::PromptPriority::new(10),
+                "DROPPED TOOL FRAGMENT",
+            )),
+        })),
+    )
+    .expect("stage tool");
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ProviderModelsUpdated(
+            tau_proto::ProviderModelsUpdated {
+                models: vec![staged_provider_model(model_name)],
+            },
+        )),
+    )
+    .expect("stage models");
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+            name: "dropped-skill".into(),
+            description: "DROPPED SKILL".to_owned(),
+            file_path: "/tmp/dropped/SKILL.md".into(),
+            add_to_prompt: true,
+        })),
+    )
+    .expect("stage skill");
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtAgentsMdAvailable(
+            tau_proto::ExtAgentsMdAvailable {
+                file_path: "/repo/DROPPED.md".into(),
+                content: "DROPPED AGENTS".to_owned(),
+            },
+        )),
+    )
+    .expect("stage agents");
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtSessionContextPublish(
+            tau_proto::ExtSessionContextPublish {
+                session_id: "s1".into(),
+                key: "dropped".into(),
+                value: tau_proto::SessionContextValue(serde_json::json!("DROPPED CONTEXT")),
+            },
+        )),
+    )
+    .expect("stage session context");
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtPromptFragmentPublish(
+            tau_proto::ExtPromptFragmentPublish {
+                fragment: tau_proto::PromptFragment::new(
+                    "dropped.extension.fragment",
+                    tau_proto::PromptPriority::new(20),
+                    "DROPPED EXTENSION FRAGMENT",
+                ),
+            },
+        )),
+    )
+    .expect("stage fragment");
+    h.handle_extension_message(
+        conn_id,
+        Message::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        }),
+    )
+    .expect("stage intercept");
+    h.handle_extension_message(
+        conn_id,
+        Message::Emit(tau_proto::Emit {
+            event: Box::new(Event::ExtensionEvent(tau_proto::CustomEvent {
+                name: "demo.dropped".parse().expect("event name"),
+                session_id: Some("s1".into()),
+                payload: CborValue::Text("DROPPED EVENT".to_owned()),
+            })),
+            transient: false,
+        }),
+    )
+    .expect("stage emit");
+
+    h.handle_disconnect(conn_id);
+    h.publish_event(None, draft_event("after disconnect"));
+
+    assert!(!h.extension_activation_staging.contains_key(conn_id));
+    assert!(h.registry.providers_for("dropped_tool").is_empty());
+    assert!(!h.available_models.contains(&model_id));
+    assert!(!h.provider_model_routes.contains_key(&model_id));
+    assert!(!h.discovered_skills.contains_key("dropped-skill"));
+    assert!(h.discovered_agents_files.is_empty());
+    assert!(
+        !h.session_context
+            .template_value(&"s1".into())
+            .to_string()
+            .contains("DROPPED CONTEXT")
+    );
+    assert!(!h.build_current_system_prompt().contains("DROPPED"));
+    assert!(!event_log_contains_source_event(&h, conn_id, |event| {
+        event.name().to_string().contains("dropped")
+    }));
+    assert!(
+        sink.lock().expect("sink").iter().all(|routed| {
+            !matches!(routed.frame, Frame::Message(Message::InterceptRequest(_)))
+        })
+    );
 
     h.shutdown().expect("shutdown");
 }

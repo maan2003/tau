@@ -130,10 +130,10 @@ impl Handshake {
 
     /// Announce one startup event before the terminal `Ready` frame.
     ///
-    /// Use this for extension-owned state that the harness should see during
-    /// startup, such as `provider.models_updated`. Tool registrations should
-    /// continue to use [`Handshake::register_tool`] so their intent stays
-    /// clear.
+    /// Use this for extension-owned state that the harness should activate when
+    /// the handshake reaches `Ready`, such as `provider.models_updated`. Tool
+    /// registrations should continue to use [`Handshake::register_tool`] so
+    /// their intent stays clear.
     pub fn announce_event(mut self, event: Event) -> Self {
         self.events.push(event);
         self

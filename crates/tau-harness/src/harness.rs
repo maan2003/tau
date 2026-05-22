@@ -666,13 +666,38 @@ struct ActiveExtAgentQuery {
     execution_mode: tau_proto::ToolExecutionMode,
 }
 
+#[derive(Clone, Debug)]
+struct StagedExtensionPublish {
+    /// Event payload withheld until the source extension reaches `Ready`.
+    event: Event,
+    /// Whether the staged event should skip durable session history.
+    transient: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 struct ExtensionActivationStage {
     /// Tool registrations received before the extension finished its handshake.
     tool_registrations: Vec<ToolRegister>,
+    /// Provider model snapshots received before `Ready`, in wire order.
+    provider_model_updates: Vec<tau_proto::ProviderModelsUpdated>,
+    /// Skill announcements received before `Ready`, in wire order.
+    skill_announcements: Vec<tau_proto::ExtSkillAvailable>,
+    /// AGENTS.md announcements received before `Ready`, in wire order.
+    agents_files: Vec<tau_proto::ExtAgentsMdAvailable>,
+    /// Session context publishes received before `Ready`, in wire order.
+    session_context_publishes: Vec<tau_proto::ExtSessionContextPublish>,
     /// Extension-level prompt fragments received before `Ready`, keyed by name
     /// so repeated publishes replace earlier staged content.
     prompt_fragments: BTreeMap<String, PromptFragment>,
+    /// Interceptor registration received before `Ready`. Registration is a
+    /// replacement, so only the latest staged message matters.
+    intercept: Option<tau_proto::Intercept>,
+    /// Session-init acknowledgements received before `Ready`, in wire order.
+    context_ready_events: Vec<tau_proto::ExtensionContextReady>,
+    /// Extension-started agent queries received before `Ready`, in wire order.
+    agent_queries: Vec<tau_proto::ExtAgentQuery>,
+    /// Generic extension emits/events withheld until `Ready`.
+    emitted_events: Vec<StagedExtensionPublish>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -750,9 +775,9 @@ pub(crate) struct Harness {
     /// ack state. Lookups by connection id (the hot per-event path —
     /// every `Ack`, `Hello`, `Ready`, `Disconnected`) are O(1).
     pub(crate) extensions: std::collections::HashMap<tau_proto::ConnectionId, ExtensionEntry>,
-    /// Capability records announced during handshake and withheld until the
-    /// extension sends `Ready`. Activation happens in the main harness loop so
-    /// prompt assembly and tool routing see the full batch at once.
+    /// Extension-originated state announced during handshake and withheld until
+    /// the extension sends `Ready`. Activation happens in the main harness loop
+    /// so prompt assembly, routing, and subscribers see the full batch at once.
     extension_activation_staging:
         std::collections::HashMap<tau_proto::ConnectionId, ExtensionActivationStage>,
     /// Spawn-order list of connection ids into `extensions`. Drives
@@ -2588,10 +2613,14 @@ impl Harness {
             .is_some_and(|entry| entry.state != ExtensionState::Ready)
     }
 
-    fn stage_extension_tool_registration(&mut self, source_id: &str, registration: ToolRegister) {
+    fn extension_activation_stage_mut(&mut self, source_id: &str) -> &mut ExtensionActivationStage {
         self.extension_activation_staging
             .entry(source_id.into())
             .or_default()
+    }
+
+    fn stage_extension_tool_registration(&mut self, source_id: &str, registration: ToolRegister) {
+        self.extension_activation_stage_mut(source_id)
             .tool_registrations
             .push(registration);
     }
@@ -2607,16 +2636,80 @@ impl Harness {
         stage.tool_registrations.len() != before
     }
 
+    fn stage_provider_models_update(
+        &mut self,
+        source_id: &str,
+        update: tau_proto::ProviderModelsUpdated,
+    ) {
+        self.extension_activation_stage_mut(source_id)
+            .provider_model_updates
+            .push(update);
+    }
+
+    fn stage_extension_skill_available(
+        &mut self,
+        source_id: &str,
+        skill: tau_proto::ExtSkillAvailable,
+    ) {
+        self.extension_activation_stage_mut(source_id)
+            .skill_announcements
+            .push(skill);
+    }
+
+    fn stage_agents_md_available(
+        &mut self,
+        source_id: &str,
+        agents: tau_proto::ExtAgentsMdAvailable,
+    ) {
+        self.extension_activation_stage_mut(source_id)
+            .agents_files
+            .push(agents);
+    }
+
+    fn stage_session_context_publish(
+        &mut self,
+        source_id: &str,
+        publish: tau_proto::ExtSessionContextPublish,
+    ) {
+        self.extension_activation_stage_mut(source_id)
+            .session_context_publishes
+            .push(publish);
+    }
+
     fn stage_extension_prompt_fragment(
         &mut self,
         source_id: &str,
         publish: tau_proto::ExtPromptFragmentPublish,
     ) {
-        self.extension_activation_staging
-            .entry(source_id.into())
-            .or_default()
+        self.extension_activation_stage_mut(source_id)
             .prompt_fragments
             .insert(publish.fragment.name.clone(), publish.fragment);
+    }
+
+    fn stage_extension_intercept(&mut self, source_id: &str, intercept: tau_proto::Intercept) {
+        self.extension_activation_stage_mut(source_id).intercept = Some(intercept);
+    }
+
+    fn stage_extension_context_ready(
+        &mut self,
+        source_id: &str,
+        ready: tau_proto::ExtensionContextReady,
+    ) {
+        self.extension_activation_stage_mut(source_id)
+            .context_ready_events
+            .push(ready);
+    }
+
+    fn stage_ext_agent_query(&mut self, source_id: &str, query: tau_proto::ExtAgentQuery) {
+        self.extension_activation_stage_mut(source_id)
+            .agent_queries
+            .push(query);
+    }
+
+    fn stage_extension_publish(&mut self, source_id: &str, event: Event, transient: bool) {
+        self.extension_activation_stage_mut(source_id)
+            .emitted_events
+            .push(StagedExtensionPublish { event, transient });
     }
 
     fn register_extension_tool(&mut self, source_id: &str, registration: ToolRegister) {
@@ -2634,6 +2727,20 @@ impl Harness {
         }
     }
 
+    fn register_extension_interceptor(&mut self, source_id: &str, intercept: tau_proto::Intercept) {
+        let component_name = self
+            .bus
+            .connection(source_id)
+            .map(|m| ExtensionName::from(m.name.clone()))
+            .unwrap_or_else(|| ExtensionName::from(source_id.to_owned()));
+        self.interceptors.replace_for_connection(
+            source_id,
+            component_name,
+            intercept.selectors,
+            intercept.priority,
+        );
+    }
+
     fn publish_extension_prompt_fragment(
         &mut self,
         source_id: &str,
@@ -2647,12 +2754,106 @@ impl Harness {
         self.publish_event(Some(source_id), Event::ExtPromptFragmentPublish(publish));
     }
 
-    fn activate_staged_extension_capabilities(&mut self, source_id: &str) {
+    fn publish_extension_skill_available(
+        &mut self,
+        source_id: &str,
+        skill: tau_proto::ExtSkillAvailable,
+    ) {
+        self.record_discovered_skill(source_id, &skill);
+        self.publish_event(Some(source_id), Event::ExtSkillAvailable(skill));
+    }
+
+    fn publish_agents_md_available(
+        &mut self,
+        source_id: &str,
+        agents: tau_proto::ExtAgentsMdAvailable,
+    ) {
+        let file_path = PathBuf::from(&agents.file_path);
+        if let Some(existing) = self
+            .discovered_agents_files
+            .iter_mut()
+            .find(|existing| existing.source_id == source_id && existing.file_path == file_path)
+        {
+            existing.content = agents.content.clone();
+        } else {
+            self.discovered_agents_files.push(DiscoveredAgentsFile {
+                source_id: source_id.into(),
+                file_path,
+                content: agents.content.clone(),
+            });
+        }
+        self.publish_event(Some(source_id), Event::ExtAgentsMdAvailable(agents));
+    }
+
+    fn publish_provider_models_update(
+        &mut self,
+        source_id: &str,
+        update: tau_proto::ProviderModelsUpdated,
+    ) {
+        self.publish_event(
+            Some(source_id),
+            Event::ProviderModelsUpdated(update.clone()),
+        );
+        self.set_provider_models(source_id, update.models);
+    }
+
+    fn publish_session_context_publish(
+        &mut self,
+        source_id: &str,
+        publish: tau_proto::ExtSessionContextPublish,
+    ) {
+        let contributor = tau_proto::ConnectionId::from(source_id);
+        let extension_name = self
+            .extensions
+            .get(&contributor)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_else(|| source_id.to_owned());
+        self.session_context.publish(
+            publish.session_id.clone(),
+            publish.key.clone(),
+            contributor,
+            extension_name,
+            publish.value.clone(),
+        );
+        self.publish_event(Some(source_id), Event::ExtSessionContextPublish(publish));
+    }
+
+    fn publish_extension_context_ready(
+        &mut self,
+        source_id: &str,
+        ready: tau_proto::ExtensionContextReady,
+    ) -> Result<(), HarnessError> {
+        self.publish_event(Some(source_id), Event::ExtensionContextReady(ready.clone()));
+        self.handle_extension_context_ready(source_id, ready)
+    }
+
+    fn activate_staged_extension_capabilities(
+        &mut self,
+        source_id: &str,
+    ) -> (
+        Vec<tau_proto::ExtensionContextReady>,
+        Vec<tau_proto::ExtAgentQuery>,
+    ) {
         let Some(stage) = self.extension_activation_staging.remove(source_id) else {
-            return;
+            return (Vec::new(), Vec::new());
         };
+        if let Some(intercept) = stage.intercept {
+            self.register_extension_interceptor(source_id, intercept);
+        }
         for registration in stage.tool_registrations {
             self.register_extension_tool(source_id, registration);
+        }
+        for update in stage.provider_model_updates {
+            self.publish_provider_models_update(source_id, update);
+        }
+        for skill in stage.skill_announcements {
+            self.publish_extension_skill_available(source_id, skill);
+        }
+        for agents in stage.agents_files {
+            self.publish_agents_md_available(source_id, agents);
+        }
+        for publish in stage.session_context_publishes {
+            self.publish_session_context_publish(source_id, publish);
         }
         for fragment in stage.prompt_fragments.into_values() {
             self.publish_extension_prompt_fragment(
@@ -2660,6 +2861,10 @@ impl Harness {
                 tau_proto::ExtPromptFragmentPublish { fragment },
             );
         }
+        for staged in stage.emitted_events {
+            self.enqueue_publish(Some(source_id), staged.event, staged.transient, false, None);
+        }
+        (stage.context_ready_events, stage.agent_queries)
     }
 
     fn handle_extension_message(
@@ -2702,22 +2907,23 @@ impl Harness {
                 self.bus.set_subscriptions(source_id, subscribe.selectors)?;
             }
             Message::Intercept(intercept) => {
-                let component_name = self
-                    .bus
-                    .connection(source_id)
-                    .map(|m| ExtensionName::from(m.name.clone()))
-                    .unwrap_or_else(|| ExtensionName::from(source_id.to_owned()));
-                self.interceptors.replace_for_connection(
-                    source_id,
-                    component_name,
-                    intercept.selectors,
-                    intercept.priority,
-                );
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_extension_intercept(source_id, intercept);
+                } else {
+                    self.register_extension_interceptor(source_id, intercept);
+                }
             }
             Message::Ready(_ready) => {
+                let (context_ready_events, agent_queries) =
+                    self.activate_staged_extension_capabilities(source_id);
                 self.set_extension_state(source_id, ExtensionState::Ready);
-                self.activate_staged_extension_capabilities(source_id);
                 self.emit_extension_ready(source_id);
+                for ready in context_ready_events {
+                    self.publish_extension_context_ready(source_id, ready)?;
+                }
+                for query in agent_queries {
+                    self.handle_ext_agent_query(source_id, query)?;
+                }
                 self.drain_pending_tool_invocations()?;
                 self.try_advance_queue();
             }
@@ -2728,7 +2934,11 @@ impl Harness {
                 {
                     return Ok(());
                 }
-                self.enqueue_publish(Some(source_id), event, emit.transient, false, None);
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_extension_publish(source_id, event, emit.transient);
+                } else {
+                    self.enqueue_publish(Some(source_id), event, emit.transient, false, None);
+                }
             }
             Message::InterceptReply(reply) => {
                 self.handle_intercept_reply(source_id, reply);
@@ -2771,6 +2981,9 @@ impl Harness {
             }
             Event::ToolUnregister(unregister) => {
                 self.remove_staged_tool_registration(source_id, &unregister.tool_name);
+                if self.should_stage_extension_capabilities(source_id) {
+                    return Ok(());
+                }
                 let visible_name = self
                     .registry
                     .providers_for(unregister.tool_name.as_str())
@@ -2948,51 +3161,40 @@ impl Harness {
                     self.inject_user_shell_output(&finished);
                 }
             }
-            Event::ExtSkillAvailable(ref skill) => {
-                self.record_discovered_skill(source_id, skill);
-                self.publish_event(Some(source_id), event);
-            }
-            Event::ExtAgentsMdAvailable(ref agents) => {
-                let file_path = PathBuf::from(&agents.file_path);
-                if let Some(existing) = self.discovered_agents_files.iter_mut().find(|existing| {
-                    existing.source_id == source_id && existing.file_path == file_path
-                }) {
-                    existing.content = agents.content.clone();
+            Event::ExtSkillAvailable(skill) => {
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_extension_skill_available(source_id, skill);
                 } else {
-                    self.discovered_agents_files.push(DiscoveredAgentsFile {
-                        source_id: source_id.into(),
-                        file_path,
-                        content: agents.content.clone(),
-                    });
+                    self.publish_extension_skill_available(source_id, skill);
                 }
-                self.publish_event(Some(source_id), event);
+            }
+            Event::ExtAgentsMdAvailable(agents) => {
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_agents_md_available(source_id, agents);
+                } else {
+                    self.publish_agents_md_available(source_id, agents);
+                }
             }
             Event::ProviderModelsUpdated(updated) => {
-                self.publish_event(
-                    Some(source_id),
-                    Event::ProviderModelsUpdated(updated.clone()),
-                );
-                self.set_provider_models(source_id, updated.models);
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_provider_models_update(source_id, updated);
+                } else {
+                    self.publish_provider_models_update(source_id, updated);
+                }
             }
             Event::ExtensionContextReady(ready) => {
-                self.publish_event(Some(source_id), Event::ExtensionContextReady(ready.clone()));
-                self.handle_extension_context_ready(source_id, ready)?;
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_extension_context_ready(source_id, ready);
+                } else {
+                    self.publish_extension_context_ready(source_id, ready)?;
+                }
             }
             Event::ExtSessionContextPublish(publish) => {
-                let contributor = tau_proto::ConnectionId::from(source_id);
-                let extension_name = self
-                    .extensions
-                    .get(&contributor)
-                    .map(|entry| entry.name.clone())
-                    .unwrap_or_else(|| source_id.to_owned());
-                self.session_context.publish(
-                    publish.session_id.clone(),
-                    publish.key.clone(),
-                    contributor,
-                    extension_name,
-                    publish.value.clone(),
-                );
-                self.publish_event(Some(source_id), Event::ExtSessionContextPublish(publish));
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_session_context_publish(source_id, publish);
+                } else {
+                    self.publish_session_context_publish(source_id, publish);
+                }
             }
             Event::ExtPromptFragmentPublish(publish) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -3002,7 +3204,11 @@ impl Harness {
                 }
             }
             Event::ExtAgentQuery(query) => {
-                self.handle_ext_agent_query(source_id, query)?;
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_ext_agent_query(source_id, query);
+                } else {
+                    self.handle_ext_agent_query(source_id, query)?;
+                }
             }
             Event::ProviderPromptSubmitted(submitted) => {
                 if !self.canceled_prompts.contains(&submitted.session_prompt_id)
@@ -3036,7 +3242,12 @@ impl Harness {
                 }
             }
             other => {
-                self.publish_event(Some(source_id), other);
+                if self.should_stage_extension_capabilities(source_id) {
+                    let transient = other.defaults_to_transient();
+                    self.stage_extension_publish(source_id, other, transient);
+                } else {
+                    self.publish_event(Some(source_id), other);
+                }
             }
         }
         Ok(())
