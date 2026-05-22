@@ -4,7 +4,7 @@
 //! type only tracks states that genuinely block the whole harness —
 //! currently just per-session setup waiting on extensions.
 
-use tau_proto::SessionId;
+use tau_proto::{SessionId, SessionStartReason};
 
 /// Global harness state that is not owned by one conversation.
 pub(crate) enum TurnState {
@@ -16,6 +16,7 @@ pub(crate) enum TurnState {
     /// before any prompt for that session can be dispatched.
     InitializingSession {
         session_id: SessionId,
+        reason: SessionStartReason,
         waiting_on: std::collections::HashSet<tau_proto::ConnectionId>,
     },
 }

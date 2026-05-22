@@ -369,6 +369,7 @@ fn agents_context_is_injected_at_session_init() {
     });
     h.turn_state = TurnState::InitializingSession {
         session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
         waiting_on: [tools_connection_id.clone().into()].into_iter().collect(),
     };
     h.handle_extension_event(
@@ -406,6 +407,79 @@ fn agents_context_is_injected_at_session_init() {
     assert!(
         root_pos < pkg_pos,
         "broader file should appear before nested one"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn resumed_session_init_does_not_reinject_agents_context() {
+    // Regression: cold resume must wait for extensions to refresh their
+    // context, but the restored conversation already contains the startup
+    // AGENTS.md user message. Appending it again makes the model see a
+    // duplicate user instruction before the first resumed prompt.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let tools_connection_id = h
+        .extension_connection_id("shell")
+        .expect("shell")
+        .to_owned();
+    let marker = "resume AGENTS marker";
+    let count_marker_injections = |h: &Harness| -> usize {
+        h.store
+            .session_events("s1")
+            .expect("session events")
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.event,
+                    Event::SessionUserMessageInjected(injected)
+                        if injected.text.contains(marker)
+                )
+            })
+            .count()
+    };
+
+    h.discovered_agents_files.clear();
+    let cid = h.default_conversation_id.clone();
+    h.publish_event_for_conversation(
+        &cid,
+        None,
+        Event::SessionUserMessageInjected(tau_proto::SessionUserMessageInjected {
+            session_id: "s1".into(),
+            text: format!("# AGENTS.md instructions\n{marker}"),
+            message_class: tau_proto::PromptMessageClass::User,
+        }),
+    );
+    assert_eq!(count_marker_injections(&h), 1);
+
+    h.discovered_agents_files.push(DiscoveredAgentsFile {
+        source_id: tools_connection_id.clone().into(),
+        file_path: PathBuf::from("/repo/AGENTS.md"),
+        content: format!("# Root\n- {marker}\n"),
+    });
+    h.pending_restore_notice_sessions.insert("s1".into());
+    h.turn_state = TurnState::InitializingSession {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Resume,
+        waiting_on: [tools_connection_id.clone().into()].into_iter().collect(),
+    };
+    h.handle_extension_event(
+        &tools_connection_id,
+        Frame::Event(Event::ExtensionContextReady(
+            tau_proto::ExtensionContextReady {
+                session_id: "s1".into(),
+            },
+        )),
+    )
+    .expect("ready");
+
+    assert!(matches!(h.turn_state, TurnState::Idle));
+    assert_eq!(count_marker_injections(&h), 1);
+    assert!(
+        h.pending_restore_notice_sessions.contains("s1"),
+        "restore notice queue should be independent from AGENTS.md injection"
     );
 
     h.shutdown().expect("shutdown");

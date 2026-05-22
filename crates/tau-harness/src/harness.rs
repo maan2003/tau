@@ -4675,9 +4675,9 @@ impl Harness {
     /// Broadcasts `SessionStarted` for `session_id` and enters
     /// `InitializingSession` until every subscribed tool extension has
     /// acknowledged with `ExtensionContextReady` (or all of them have
-    /// disconnected). When the wait set drains, AGENTS.md content is
-    /// injected into the session log and any queued user prompts are
-    /// dispatched.
+    /// disconnected). When the wait set drains for a new/initial session,
+    /// AGENTS.md content is injected into the session log and any queued user
+    /// prompts are dispatched. Resume keeps the existing transcript intact.
     /// Renders the session tree as one `harness.info` line per node.
     /// Bound-session-only: refuses if `session_id` doesn't match.
     fn handle_tree_request(&mut self, session_id: &SessionId) {
@@ -5087,7 +5087,7 @@ impl Harness {
             if matches!(reason, tau_proto::SessionStartReason::Resume) {
                 self.repair_restored_session_tool_state(&session_id);
             }
-            if let Err(error) = self.complete_session_init(session_id) {
+            if let Err(error) = self.complete_session_init(session_id, reason) {
                 self.emit_info(&format!("failed to initialize session: {error}"));
                 self.turn_state = TurnState::Idle;
             }
@@ -5100,6 +5100,7 @@ impl Harness {
 
         self.turn_state = TurnState::InitializingSession {
             session_id: session_id.clone(),
+            reason,
             waiting_on,
         };
         self.publish_event(
@@ -5122,16 +5123,17 @@ impl Harness {
         let completed_session = match &mut self.turn_state {
             TurnState::InitializingSession {
                 session_id,
+                reason,
                 waiting_on,
             } if *session_id == ready.session_id => {
                 waiting_on.remove(source_id);
-                waiting_on.is_empty().then(|| session_id.clone())
+                waiting_on.is_empty().then(|| (session_id.clone(), *reason))
             }
             _ => None,
         };
 
-        if let Some(session_id) = completed_session {
-            self.complete_session_init(session_id)?;
+        if let Some((session_id, reason)) = completed_session {
+            self.complete_session_init(session_id, reason)?;
         }
 
         Ok(())
@@ -5141,11 +5143,12 @@ impl Harness {
         let completed_session = match &mut self.turn_state {
             TurnState::InitializingSession {
                 session_id,
+                reason,
                 waiting_on,
             } => {
                 let removed = waiting_on.remove(connection_id);
                 if removed && waiting_on.is_empty() {
-                    Some(session_id.clone())
+                    Some((session_id.clone(), *reason))
                 } else {
                     None
                 }
@@ -5153,16 +5156,25 @@ impl Harness {
             _ => None,
         };
 
-        if let Some(session_id) = completed_session
-            && let Err(error) = self.complete_session_init(session_id)
+        if let Some((session_id, reason)) = completed_session
+            && let Err(error) = self.complete_session_init(session_id, reason)
         {
             self.emit_info(&format!("failed to initialize session: {error}"));
             self.turn_state = TurnState::Idle;
         }
     }
 
-    fn complete_session_init(&mut self, session_id: SessionId) -> Result<(), HarnessError> {
-        self.ensure_agents_context_inserted(session_id.as_str())?;
+    fn complete_session_init(
+        &mut self,
+        session_id: SessionId,
+        reason: tau_proto::SessionStartReason,
+    ) -> Result<(), HarnessError> {
+        // A resumed session already has its model-visible startup context in
+        // history. Re-injecting AGENTS.md would append a duplicate user message;
+        // restore/tool notices are queued separately before the next real prompt.
+        if !matches!(reason, tau_proto::SessionStartReason::Resume) {
+            self.ensure_agents_context_inserted(session_id.as_str())?;
+        }
         // No explicit head sync needed: when the AGENTS.md
         // injection is for `current_session_id` it's stamped with
         // `default_conversation_id` and the post-commit hook keeps
