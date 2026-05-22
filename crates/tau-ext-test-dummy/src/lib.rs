@@ -5,12 +5,33 @@ use rand::Rng;
 #[cfg(test)]
 use rand::{SeedableRng, rngs::StdRng};
 use tau_proto::{
-    Emit, Event, EventSelector, Frame, FrameReader, FrameWriter, HarnessInfo, HarnessInfoLevel,
-    InterceptAction, InterceptReply, InterceptionPriority, Message, ToolError, ToolExecutionMode,
-    ToolSpec, UiPromptSubmitted,
+    ConfigError, Emit, Event, EventSelector, Frame, FrameReader, FrameWriter, HarnessInfo,
+    HarnessInfoLevel, InterceptAction, InterceptReply, InterceptionPriority, Message, ToolError,
+    ToolExecutionMode, ToolResult, ToolResultKind, ToolSpec, UiPromptSubmitted,
 };
 
 pub const RESTART_TEST_DUMMY_TOOL_NAME: &str = "restart_test_dummy";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RestartMode {
+    /// Preserve the historical random exit-or-error behavior.
+    #[default]
+    Random,
+    /// Emit a successful tool result without restarting the extension.
+    Success,
+    /// Emit the same tool error as the historical failure branch.
+    Error,
+    /// Exit without replying to the tool invocation.
+    Exit,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ExtConfig {
+    /// Test-only deterministic behavior for `restart_test_dummy`.
+    restart_mode: Option<RestartMode>,
+}
 
 /// Returns a copy of `text` with every case-insensitive "tao" word
 /// rewritten to "tau", preserving the original casing letter-by-letter
@@ -111,6 +132,8 @@ where
         .ready_message("test dummy tools ready")
         .run(&mut writer)?;
 
+    let mut restart_mode = RestartMode::Random;
+
     while let Some(frame) = reader.read_frame()? {
         let (_, inner) = frame.peel_log();
         match inner {
@@ -145,23 +168,38 @@ where
                 })))?;
                 writer.flush()?;
             }
+            Frame::Message(Message::Configure(msg)) => {
+                match tau_extension::parse_config::<ExtConfig>(&msg.config) {
+                    Ok(config) => restart_mode = config.restart_mode.unwrap_or_default(),
+                    Err(message) => {
+                        writer.write_frame(&Frame::Message(Message::ConfigError(ConfigError {
+                            message,
+                        })))?;
+                        writer.flush()?;
+                    }
+                }
+            }
             Frame::Event(Event::ToolInvoke(invoke))
                 if invoke.tool_name == RESTART_TEST_DUMMY_TOOL_NAME =>
             {
-                if rng.gen_bool(0.5) {
-                    writer.flush()?;
-                    return Ok(());
+                match restart_mode {
+                    RestartMode::Random if rng.gen_bool(0.5) => {
+                        writer.flush()?;
+                        return Ok(());
+                    }
+                    RestartMode::Random | RestartMode::Error => {
+                        writer.write_frame(&restart_error(invoke))?;
+                        writer.flush()?;
+                    }
+                    RestartMode::Success => {
+                        writer.write_frame(&restart_success(invoke))?;
+                        writer.flush()?;
+                    }
+                    RestartMode::Exit => {
+                        writer.flush()?;
+                        return Ok(());
+                    }
                 }
-                writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
-                    call_id: invoke.call_id,
-                    tool_name: invoke.tool_name,
-                    tool_type: tau_proto::ToolType::Function,
-                    message: "restarting failed".to_owned(),
-                    details: None,
-                    display: None,
-                    originator: tau_proto::PromptOriginator::User,
-                })))?;
-                writer.flush()?;
             }
             Frame::Message(Message::Disconnect(_)) => break,
             _ => {}
@@ -169,6 +207,30 @@ where
     }
 
     Ok(())
+}
+
+fn restart_success(invoke: tau_proto::ToolInvoke) -> Frame {
+    Frame::Event(Event::ToolResult(ToolResult {
+        call_id: invoke.call_id,
+        tool_name: invoke.tool_name,
+        tool_type: tau_proto::ToolType::Function,
+        result: tau_proto::CborValue::Text("restart succeeded".to_owned()),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }))
+}
+
+fn restart_error(invoke: tau_proto::ToolInvoke) -> Frame {
+    Frame::Event(Event::ToolError(ToolError {
+        call_id: invoke.call_id,
+        tool_name: invoke.tool_name,
+        tool_type: tau_proto::ToolType::Function,
+        message: "restarting failed".to_owned(),
+        details: None,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }))
 }
 
 #[cfg(test)]

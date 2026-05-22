@@ -1892,6 +1892,7 @@ name = "tau-ext-test-dummy"
 version = "0.1.0"
 dependencies = [
  "rand 0.8.6",
+ "serde",
  "serde_json",
  "tau-extension",
  "tau-proto",
