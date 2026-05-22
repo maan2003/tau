@@ -2,7 +2,7 @@ use super::*;
 use crate::conversation::{Conversation, ConversationId, PendingPrompt};
 use crate::harness::{
     PendingTool, background_completion_prompt, is_restore_notice_prompt_text,
-    restore_notice_prompt_for_elapsed,
+    restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
 };
 
 fn responses_backend() -> tau_proto::ProviderBackend {
@@ -6142,6 +6142,7 @@ fn wait_resolves_on_synthetic_tool_error() {
     h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
         .expect("start wait");
 
+    let missing_message = unavailable_tool_error_message(&ToolName::new("missing"));
     h.publish_terminal_tool_error(
         Some(&cid),
         None,
@@ -6149,7 +6150,7 @@ fn wait_resolves_on_synthetic_tool_error() {
             call_id: target_call_id,
             tool_name: ToolName::new("missing"),
             tool_type: tau_proto::ToolType::Function,
-            message: "tool is not available".to_owned(),
+            message: missing_message.clone(),
             details: None,
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -6160,7 +6161,7 @@ fn wait_resolves_on_synthetic_tool_error() {
         event,
         Event::ToolError(error)
             if error.call_id.as_str() == "wait-call"
-                && error.message == "tool is not available"
+                && error.message == missing_message
     )));
 
     h.shutdown().expect("shutdown");

@@ -206,6 +206,32 @@ fn restored_background_tool_call_error_message(call_id: &ToolCallId) -> String {
     )
 }
 
+/// Model-visible internal tool error for calls whose provider is no longer
+/// live.
+pub(crate) fn unavailable_tool_error_message(tool_name: &ToolName) -> String {
+    format!(
+        "{}: true\n\nTool `{tool_name}` is not available.",
+        tau_proto::TAU_INTERNAL_HEADER_NAME
+    )
+}
+
+/// Hidden prompt text used to tell the model a tool left the live registry.
+pub(crate) fn tool_unavailable_notice_prompt(tool_name: &ToolName) -> String {
+    format!(
+        "{} Tool `{tool_name}` is temporarily no longer available.",
+        crate::INTERNAL_MARKER
+    )
+}
+
+/// Hidden prompt text used to tell the model a previously missing tool
+/// returned.
+pub(crate) fn tool_available_again_notice_prompt(tool_name: &ToolName) -> String {
+    format!(
+        "{} Tool `{tool_name}` is available again.",
+        crate::INTERNAL_MARKER
+    )
+}
+
 fn remove_pending_internal_prompt_text(prompts: &mut VecDeque<PendingPrompt>, text: &str) -> bool {
     let before = prompts.len();
     prompts.retain(|prompt| !(prompt.is_internal() && prompt.text == text));
@@ -624,6 +650,23 @@ struct ActiveExtAgentQuery {
     execution_mode: tau_proto::ToolExecutionMode,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PendingToolAvailabilityNotice {
+    Unavailable { visible_name: ToolName },
+    AvailableAgain { visible_name: ToolName },
+}
+
+impl PendingToolAvailabilityNotice {
+    fn prompt_text(&self) -> String {
+        match self {
+            Self::Unavailable { visible_name } => tool_unavailable_notice_prompt(visible_name),
+            Self::AvailableAgain { visible_name } => {
+                tool_available_again_notice_prompt(visible_name)
+            }
+        }
+    }
+}
+
 pub(crate) struct Harness {
     /// Sender side of the harness's central event channel. Cloned into
     /// each per-connection reader thread so they can feed
@@ -816,6 +859,14 @@ pub(crate) struct Harness {
     /// Per-background-tool restore notes that should be folded immediately
     /// before the next real user prompt, not dispatched as standalone turns.
     pub(crate) pending_restore_background_notices: HashMap<SessionId, Vec<String>>,
+    /// Tool availability notices waiting to be folded before the next real
+    /// user prompt on the default conversation, keyed by internal tool name for
+    /// deterministic delivery.
+    pending_tool_availability_notices: BTreeMap<String, PendingToolAvailabilityNotice>,
+    /// Tools whose unavailable notice has already been delivered and that are
+    /// still absent from the registry. A later registration uses this to queue
+    /// the matching available-again notice.
+    unavailable_tool_notices_delivered: BTreeMap<String, ToolName>,
     /// Session prompt IDs that have already been completed by the agent.
     /// Used to dedupe duplicate `ProviderResponseFinished` events that can
     /// arise under at-least-once delivery (e.g. an agent that reconnects
@@ -1246,6 +1297,8 @@ impl Harness {
             initialized_sessions: std::collections::HashSet::new(),
             pending_restore_notice_sessions: HashMap::new(),
             pending_restore_background_notices: HashMap::new(),
+            pending_tool_availability_notices: BTreeMap::new(),
+            unavailable_tool_notices_delivered: BTreeMap::new(),
             completed_prompts: std::collections::HashSet::new(),
             tool_turn: ToolTurnMachine::default(),
             suppressed_background_completion_prompts: HashSet::new(),
@@ -1464,6 +1517,8 @@ impl Harness {
             initialized_sessions: std::collections::HashSet::new(),
             pending_restore_notice_sessions: HashMap::new(),
             pending_restore_background_notices: HashMap::new(),
+            pending_tool_availability_notices: BTreeMap::new(),
+            unavailable_tool_notices_delivered: BTreeMap::new(),
             completed_prompts: std::collections::HashSet::new(),
             tool_turn: ToolTurnMachine::default(),
             suppressed_background_completion_prompts: HashSet::new(),
@@ -2521,9 +2576,42 @@ impl Harness {
 
         match event {
             Event::ToolRegister(registration) => {
+                let internal_name = registration.tool.name.clone();
+                let visible_name = self.tool_model_visible_name(&registration.tool).clone();
+                let was_available = !self
+                    .registry
+                    .providers_for(internal_name.as_str())
+                    .is_empty();
                 let _ = self
                     .registry
                     .register_with_prompt_fragment(source_id, registration);
+                if !was_available {
+                    self.mark_tool_available_for_notice(internal_name, visible_name);
+                }
+            }
+            Event::ToolUnregister(unregister) => {
+                let visible_name = self
+                    .registry
+                    .providers_for(unregister.tool_name.as_str())
+                    .into_iter()
+                    .find(|provider| provider.connection_id.as_str() == source_id)
+                    .map(|provider| self.tool_model_visible_name(&provider.tool).clone())
+                    .unwrap_or_else(|| unregister.tool_name.clone());
+                let removed = self
+                    .registry
+                    .unregister(source_id, unregister.tool_name.as_str());
+                if removed
+                    && self
+                        .registry
+                        .providers_for(unregister.tool_name.as_str())
+                        .is_empty()
+                {
+                    self.mark_tool_unavailable_for_notice(
+                        unregister.tool_name.clone(),
+                        visible_name,
+                    );
+                }
+                self.publish_event(Some(source_id), Event::ToolUnregister(unregister));
             }
             Event::ToolRequest(request) => {
                 // Track session attribution before publishing — the
@@ -2557,9 +2645,9 @@ impl Harness {
                         let owning_cid = self.tool_conversations.get(&request.call_id).cloned();
                         let error = ToolError {
                             call_id: request.call_id,
-                            tool_name,
+                            tool_name: tool_name.clone(),
                             tool_type: request.tool_type,
-                            message: "no live provider available".to_owned(),
+                            message: unavailable_tool_error_message(&tool_name),
                             details: None,
                             display: None,
                             originator: tau_proto::PromptOriginator::User,
@@ -4883,6 +4971,8 @@ impl Harness {
         self.pending_compactions.clear();
         self.pending_restore_notice_sessions.clear();
         self.pending_restore_background_notices.clear();
+        self.pending_tool_availability_notices.clear();
+        self.unavailable_tool_notices_delivered.clear();
         self.pending_ext_agent_queries.clear();
         self.active_ext_agent_queries.clear();
         self.subagents = SubagentToolState::default();
@@ -5035,8 +5125,80 @@ impl Harness {
         }
     }
 
-    /// Consume pending restore notices for the default conversation, if the
-    /// next prompt is the first real user prompt after a resumed startup.
+    fn mark_tool_unavailable_for_notice(
+        &mut self,
+        internal_name: ToolName,
+        visible_name: ToolName,
+    ) {
+        let internal_name = internal_name.into_string();
+        if matches!(
+            self.pending_tool_availability_notices.get(&internal_name),
+            Some(PendingToolAvailabilityNotice::Unavailable { .. })
+        ) {
+            return;
+        }
+        if matches!(
+            self.pending_tool_availability_notices.get(&internal_name),
+            Some(PendingToolAvailabilityNotice::AvailableAgain { .. })
+        ) {
+            self.pending_tool_availability_notices
+                .remove(&internal_name);
+            return;
+        }
+        if self
+            .unavailable_tool_notices_delivered
+            .contains_key(&internal_name)
+        {
+            return;
+        }
+        self.pending_tool_availability_notices.insert(
+            internal_name,
+            PendingToolAvailabilityNotice::Unavailable { visible_name },
+        );
+    }
+
+    fn mark_tool_available_for_notice(&mut self, internal_name: ToolName, visible_name: ToolName) {
+        let internal_name = internal_name.into_string();
+        if matches!(
+            self.pending_tool_availability_notices.get(&internal_name),
+            Some(PendingToolAvailabilityNotice::Unavailable { .. })
+        ) {
+            self.pending_tool_availability_notices
+                .remove(&internal_name);
+            return;
+        }
+        if self
+            .unavailable_tool_notices_delivered
+            .contains_key(&internal_name)
+        {
+            self.pending_tool_availability_notices.insert(
+                internal_name,
+                PendingToolAvailabilityNotice::AvailableAgain { visible_name },
+            );
+        }
+    }
+
+    fn take_pending_tool_availability_prompts_for_user_prompt(&mut self) -> Vec<PendingPrompt> {
+        let pending = std::mem::take(&mut self.pending_tool_availability_notices);
+        let mut prompts = Vec::new();
+        for (internal_name, notice) in pending {
+            match &notice {
+                PendingToolAvailabilityNotice::Unavailable { visible_name } => {
+                    self.unavailable_tool_notices_delivered
+                        .insert(internal_name, visible_name.clone());
+                }
+                PendingToolAvailabilityNotice::AvailableAgain { .. } => {
+                    self.unavailable_tool_notices_delivered
+                        .remove(&internal_name);
+                }
+            }
+            prompts.push(PendingPrompt::internal(notice.prompt_text()));
+        }
+        prompts
+    }
+
+    /// Consume pending internal notices for the default conversation, if the
+    /// next prompt is a real user prompt on the current session.
     pub(crate) fn take_pending_restore_prompts_for_user_prompt(
         &mut self,
         cid: &ConversationId,
@@ -5074,6 +5236,7 @@ impl Harness {
                 }
             }
         }
+        prompts.extend(self.take_pending_tool_availability_prompts_for_user_prompt());
         prompts
     }
 
@@ -7027,9 +7190,9 @@ impl Harness {
             self.resolve_enabled_tool_name_for_role(&tool_name, &role_name)
         else {
             let message = if self.has_registered_tool_name(&tool_name) {
-                "tool is not enabled for the current role"
+                "tool is not enabled for the current role".to_owned()
             } else {
-                "tool is not available"
+                unavailable_tool_error_message(&tool_name)
             };
             let call_id: ToolCallId = call.id.clone();
             self.tool_conversations.insert(call_id.clone(), cid.clone());
@@ -7057,7 +7220,7 @@ impl Harness {
                     call_id: call_id.clone(),
                     tool_name,
                     tool_type: call.tool_type,
-                    message: message.to_owned(),
+                    message,
                     details: None,
                     display: None,
                     originator: tau_proto::PromptOriginator::User,
@@ -7121,9 +7284,9 @@ impl Harness {
             Err(ToolRouteError::NoProvider { tool_name: _ }) => {
                 let error = ToolError {
                     call_id: call_id.clone(),
-                    tool_name: visible_tool_name,
+                    tool_name: visible_tool_name.clone(),
                     tool_type: call.tool_type,
-                    message: "no live provider available".to_owned(),
+                    message: unavailable_tool_error_message(&visible_tool_name),
                     details: None,
                     display: None,
                     originator: tau_proto::PromptOriginator::User,

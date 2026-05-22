@@ -1,5 +1,301 @@
 use super::*;
-use crate::harness::PendingTool;
+use crate::conversation::PendingPrompt;
+use crate::harness::{
+    PendingTool, tool_available_again_notice_prompt, tool_unavailable_notice_prompt,
+    unavailable_tool_error_message,
+};
+
+fn context_text(item: &ContextItem) -> Option<&str> {
+    match item {
+        ContextItem::Message(message) => message.content.first().map(|part| match part {
+            ContentPart::Text { text } => text.as_str(),
+        }),
+        ContextItem::ToolResult(result) => match &result.output.raw {
+            CborValue::Text(text) => Some(text.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn prompt_has_tool(prompt: &SessionPromptCreated, name: &str) -> bool {
+    prompt.tools.iter().any(|tool| tool.name == name)
+}
+
+fn context_text_count(prompt: &SessionPromptCreated, text: &str) -> usize {
+    prompt
+        .context_items
+        .iter()
+        .filter(|item| context_text(item) == Some(text))
+        .count()
+}
+
+fn session_prompt_text_count(h: &Harness, text: &str) -> usize {
+    h.store
+        .session_events("s1")
+        .expect("session events")
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.event,
+                Event::UiPromptSubmitted(prompt)
+                    if prompt.message_class.is_internal() && prompt.text == text
+            )
+        })
+        .count()
+}
+
+fn shell_tool_spec(h: &Harness) -> ToolSpec {
+    h.registry
+        .providers_for("shell")
+        .into_iter()
+        .find(|provider| provider.tool.name == "shell")
+        .expect("shell provider")
+        .tool
+}
+
+fn unregister_shell(h: &mut Harness) {
+    let conn_id = h
+        .extension_connection_id("shell")
+        .expect("shell")
+        .to_owned();
+    h.handle_extension_event(
+        &conn_id,
+        Frame::Event(Event::ToolUnregister(tau_proto::ToolUnregister {
+            tool_name: ToolName::new("shell"),
+        })),
+    )
+    .expect("unregister shell");
+}
+
+fn reregister_shell(h: &mut Harness, spec: ToolSpec) {
+    let conn_id = h
+        .extension_connection_id("shell")
+        .expect("shell")
+        .to_owned();
+    h.handle_extension_event(
+        &conn_id,
+        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: spec,
+            prompt_fragment: None,
+        })),
+    )
+    .expect("reregister shell");
+}
+
+#[test]
+fn tool_unregister_removes_tool_from_future_prompt() {
+    // Regression: an explicit ToolUnregister must update the live registry used
+    // for future prompt assembly while leaving old prompt snapshots intact.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    append_user_message_via_event(&mut h, "s1", "before unregister");
+    let before_spid = h.send_prompt_to_agent("s1");
+    let before_prompt = read_prompt_created(&h, &before_spid);
+    assert!(prompt_has_tool(&before_prompt, "shell"));
+
+    unregister_shell(&mut h);
+
+    append_user_message_via_event(&mut h, "s1", "after unregister");
+    let after_spid = h.send_prompt_to_agent("s1");
+    let after_prompt = read_prompt_created(&h, &after_spid);
+
+    assert!(prompt_has_tool(&before_prompt, "shell"));
+    assert!(!prompt_has_tool(&after_prompt, "shell"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn old_prompt_call_gets_tau_internal_unavailable_error() {
+    // Regression: a prompt that was created before unregister can still contain
+    // the old tool definition. If the agent calls it after the provider removed
+    // the tool, the harness must close the call with an internal tool error.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    append_user_message_via_event(&mut h, "s1", "use shell");
+    let spid = h.send_prompt_to_agent("s1");
+    let old_prompt = read_prompt_created(&h, &spid);
+    assert!(prompt_has_tool(&old_prompt, "shell"));
+
+    unregister_shell(&mut h);
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "c1".into(),
+            name: ToolName::new("shell"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("unavailable old tool call should be closed");
+
+    let expected = unavailable_tool_error_message(&ToolName::new("shell"));
+    let session = h.store.session("s1").expect("session");
+    assert!(session.nodes().iter().any(|node| {
+        matches!(
+            &node.entry,
+            SessionEntry::ToolResults { items }
+                if items.iter().any(|item| {
+                    item.call_id.as_str() == "c1"
+                        && matches!(
+                            &item.status,
+                            ToolResultStatus::Error { message } if message == &expected
+                        )
+                })
+        )
+    }));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn unregister_queues_unavailable_notice_for_next_user_prompt_only() {
+    // Availability notices are hidden context for the next real user turn, not
+    // standalone internal prompts dispatched at unregister time.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let notice = tool_unavailable_notice_prompt(&ToolName::new("shell"));
+    unregister_shell(&mut h);
+
+    assert!(h.prompt_snapshots.is_empty());
+    assert_eq!(session_prompt_text_count(&h, &notice), 0);
+
+    let cid = h.default_conversation_id.clone();
+    h.dispatch_prompt_for_conversation(&cid, PendingPrompt::user("after unregister".to_owned()))
+        .expect("dispatch user prompt");
+
+    let prompt = read_prompt_created(&h, &SessionPromptId::from("sp-0"));
+    let notice_pos = prompt
+        .context_items
+        .iter()
+        .position(|item| context_text(item) == Some(notice.as_str()))
+        .expect("availability notice in prompt");
+    let user_pos = prompt
+        .context_items
+        .iter()
+        .position(|item| context_text(item) == Some("after unregister"))
+        .expect("user prompt in prompt");
+    assert!(notice_pos < user_pos);
+    assert_eq!(session_prompt_text_count(&h, &notice), 1);
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn reregister_before_notice_delivery_dequeues_unavailable_notice() {
+    // A quick unregister/register pair should be invisible to the model.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let spec = shell_tool_spec(&h);
+    let notice = tool_unavailable_notice_prompt(&ToolName::new("shell"));
+    unregister_shell(&mut h);
+    reregister_shell(&mut h, spec);
+
+    let cid = h.default_conversation_id.clone();
+    h.dispatch_prompt_for_conversation(&cid, PendingPrompt::user("after reconnect".to_owned()))
+        .expect("dispatch user prompt");
+
+    let prompt = read_prompt_created(&h, &SessionPromptId::from("sp-0"));
+    assert_eq!(context_text_count(&prompt, &notice), 0);
+    assert_eq!(session_prompt_text_count(&h, &notice), 0);
+    assert!(prompt_has_tool(&prompt, "shell"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn reregister_after_notice_delivery_queues_available_again_notice() {
+    // Once the model has been told a tool disappeared, the matching
+    // re-registration needs a hidden available-again notice on the next user
+    // turn so the model can trust the refreshed tool list.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let spec = shell_tool_spec(&h);
+    let unavailable = tool_unavailable_notice_prompt(&ToolName::new("shell"));
+    let available = tool_available_again_notice_prompt(&ToolName::new("shell"));
+    unregister_shell(&mut h);
+
+    let cid = h.default_conversation_id.clone();
+    h.dispatch_prompt_for_conversation(&cid, PendingPrompt::user("after unregister".to_owned()))
+        .expect("dispatch unavailable prompt");
+    let first_prompt = read_prompt_created(&h, &SessionPromptId::from("sp-0"));
+    assert_eq!(context_text_count(&first_prompt, &unavailable), 1);
+
+    reregister_shell(&mut h, spec);
+    h.dispatch_prompt_for_conversation(&cid, PendingPrompt::user("after reregister".to_owned()))
+        .expect("dispatch available prompt");
+
+    let second_prompt = read_prompt_created(&h, &SessionPromptId::from("sp-1"));
+    let available_pos = second_prompt
+        .context_items
+        .iter()
+        .position(|item| context_text(item) == Some(available.as_str()))
+        .expect("available-again notice in prompt");
+    let user_pos = second_prompt
+        .context_items
+        .iter()
+        .position(|item| context_text(item) == Some("after reregister"))
+        .expect("user prompt in prompt");
+    assert!(available_pos < user_pos);
+    assert_eq!(session_prompt_text_count(&h, &available), 1);
+    assert!(prompt_has_tool(&second_prompt, "shell"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn duplicate_provider_keeps_tool_available_without_notice() {
+    // Removing one provider must not hide the tool if another provider for the
+    // same tool name remains registered.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let spec = shell_tool_spec(&h);
+    h.registry.register("conn-duplicate-shell", spec);
+    let notice = tool_unavailable_notice_prompt(&ToolName::new("shell"));
+
+    unregister_shell(&mut h);
+    assert_eq!(h.registry.providers_for("shell").len(), 1);
+
+    let cid = h.default_conversation_id.clone();
+    h.dispatch_prompt_for_conversation(
+        &cid,
+        PendingPrompt::user("after partial unregister".to_owned()),
+    )
+    .expect("dispatch user prompt");
+
+    let prompt = read_prompt_created(&h, &SessionPromptId::from("sp-0"));
+    assert_eq!(context_text_count(&prompt, &notice), 0);
+    assert_eq!(session_prompt_text_count(&h, &notice), 0);
+    assert!(prompt_has_tool(&prompt, "shell"));
+
+    h.shutdown().expect("shutdown");
+}
 
 #[test]
 fn unavailable_tool_is_reported_without_crashing() {
@@ -45,6 +341,7 @@ fn unavailable_tool_is_reported_without_crashing() {
     })
     .expect("unavailable tool should be rejected cleanly");
 
+    let expected = unavailable_tool_error_message(&ToolName::new("shell"));
     let session = h.store.session("s1").expect("session");
     assert!(session.nodes().iter().any(|node| {
         matches!(
@@ -54,7 +351,7 @@ fn unavailable_tool_is_reported_without_crashing() {
                     item.call_id.as_str() == "c1"
                         && matches!(
                             &item.status,
-                            ToolResultStatus::Error { message } if message == "tool is not available"
+                            ToolResultStatus::Error { message } if message == &expected
                         )
                 })
         )
@@ -243,6 +540,7 @@ fn disconnected_tool_is_removed_cleanly() {
     })
     .expect("removed tool should be rejected cleanly");
 
+    let expected = unavailable_tool_error_message(&ToolName::new("shell"));
     let session = h.store.session("s1").expect("session");
     assert!(session.nodes().iter().any(|node| {
         matches!(
@@ -252,7 +550,7 @@ fn disconnected_tool_is_removed_cleanly() {
                     item.call_id.as_str() == "c1"
                         && matches!(
                             &item.status,
-                            ToolResultStatus::Error { message } if message == "tool is not available"
+                            ToolResultStatus::Error { message } if message == &expected
                         )
                 })
         )
@@ -550,6 +848,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     // under the same call_id, so the Responses-API serializer can
     // emit a matching `function_call` / `function_call_output`
     // without the latter looking unpaired.
+    let expected = unavailable_tool_error_message(&ToolName::new("not_a_tool"));
     let session = h.store.session("s1").expect("session");
     let mut saw_call = false;
     let mut saw_error = false;
@@ -566,7 +865,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
                         && matches!(
                             &item.status,
                             ToolResultStatus::Error { message }
-                                if message.contains("tool is not available")
+                                if message == &expected
                         )
                 });
             }
