@@ -53,7 +53,7 @@ use crate::harness::interception::{
     ConversationHeadSync, DeferredPublish, InterceptorRegistry, PendingIntercept,
 };
 use crate::harness::subagents_tool::{
-    CANCEL_TOOL_NAME, DELEGATE_TOOL_NAME, SubagentToolState, WAIT_TOOL_NAME,
+    CANCEL_TOOL_NAME, DELEGATE_TOOL_NAME, MESSAGE_TOOL_NAME, SubagentToolState, WAIT_TOOL_NAME,
 };
 use crate::model::{
     baseline_params_for_selection, clamp_effort, clamp_thinking_summary, clamp_verbosity,
@@ -411,6 +411,13 @@ fn hex_bytes(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+fn random_agent_id_suffix() -> String {
+    use rand::RngCore as _;
+    let mut bytes = [0u8; 4];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex_bytes(&bytes)
 }
 
 fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill> {
@@ -815,6 +822,8 @@ pub(crate) struct Harness {
     /// additional entries that live until their final response is
     /// routed back to the requesting extension.
     pub(crate) conversations: std::collections::HashMap<ConversationId, Conversation>,
+    /// Agent id to conversation routing for live agents.
+    pub(crate) agent_conversations: HashMap<String, ConversationId>,
     /// Id of the user's main interactive conversation. Always present
     /// in `conversations` for the harness's whole lifetime.
     pub(crate) default_conversation_id: ConversationId,
@@ -1339,6 +1348,7 @@ impl Harness {
             prompt_snapshots: std::collections::HashMap::new(),
             prompt_cache_diagnostics: std::collections::HashMap::new(),
             conversations,
+            agent_conversations: HashMap::new(),
             default_conversation_id,
             turn_state: TurnState::Idle,
             debug_log: None,
@@ -1555,6 +1565,7 @@ impl Harness {
             prompt_snapshots: std::collections::HashMap::new(),
             prompt_cache_diagnostics: std::collections::HashMap::new(),
             conversations,
+            agent_conversations: HashMap::new(),
             default_conversation_id,
             turn_state: TurnState::Idle,
             debug_log: None,
@@ -2224,6 +2235,9 @@ impl Harness {
     /// dispatch depends on is handled inside `commit_event` for any
     /// publish stamped via `publish_event_for_conversation`.
     fn react_to_committed_event(&mut self, event: &Event) {
+        if let Event::AgentMessage(message) = event {
+            self.deliver_agent_message(message);
+        }
         let folds_user_message = matches!(
             event,
             Event::UiPromptSubmitted(_)
@@ -2242,6 +2256,24 @@ impl Harness {
             return;
         }
         self.send_prompt_to_agent_for(&cid);
+    }
+
+    fn deliver_agent_message(&mut self, message: &tau_proto::AgentMessage) {
+        if message.recipient_id == "user" {
+            return;
+        }
+        let Some(cid) = self.agent_conversations.get(&message.recipient_id).cloned() else {
+            return;
+        };
+        let text = format!(
+            "[tau-internal]: You have received a message from {}\n\n<message>\n{}\n</message>",
+            message.sender_id, message.message
+        );
+        if let Some(conv) = self.conversations.get_mut(&cid) {
+            conv.pending_prompts
+                .push_back(PendingPrompt::agent_message(text));
+        }
+        self.try_advance_queue();
     }
 
     /// Persists `event` to the durable per-session log and folds it
@@ -2315,6 +2347,7 @@ impl Harness {
             Event::SessionPromptTerminated(terminated) => Some(terminated.session_id.clone()),
             Event::SessionPromptPrewarmRequested(prewarm) => Some(prewarm.session_id.clone()),
             Event::SessionUserMessageInjected(injected) => Some(injected.session_id.clone()),
+            Event::AgentMessage(message) => Some(message.session_id.clone()),
             Event::ProviderPromptSubmitted(submitted) => {
                 self.session_id_for_prompt(&submitted.session_prompt_id)
             }
@@ -2940,6 +2973,7 @@ impl Harness {
                 let event = *emit.event;
                 if event.name().category == tau_proto::EventCategory::Provider
                     || Self::requires_tool_event_intake(&event)
+                    || matches!(event, Event::AgentMessage(_))
                 {
                     return Ok(());
                 }
@@ -3128,7 +3162,7 @@ impl Harness {
                     self.publish_event(Some(source_id), Event::ToolProgress(progress));
                 }
             }
-            Event::ProviderToolResult(_) | Event::ProviderToolError(_) => {
+            Event::ProviderToolResult(_) | Event::ProviderToolError(_) | Event::AgentMessage(_) => {
                 return Ok(());
             }
             Event::ToolCancelled(mut cancelled) => {
@@ -3356,7 +3390,9 @@ impl Harness {
                 Ok(true)
             }
             other => {
-                if Self::requires_tool_event_intake(&other) {
+                if Self::requires_tool_event_intake(&other)
+                    || matches!(other, Event::AgentMessage(_))
+                {
                     return Ok(true);
                 }
                 self.publish_event(Some(client_id), other);
@@ -3829,7 +3865,7 @@ impl Harness {
         }
         self.release_start_agent_request(&cid);
         self.transfer_background_completion_target_before_teardown(&cid);
-        self.conversations.remove(&cid);
+        self.remove_conversation(&cid);
         self.try_advance_queue();
     }
 
@@ -5611,6 +5647,7 @@ impl Harness {
                 .and_then(|t| t.head())
         };
         self.conversations.clear();
+        self.agent_conversations.clear();
         self.conversations.insert(
             default_id.clone(),
             Conversation::new(
@@ -6207,6 +6244,32 @@ impl Harness {
         self.send_prompt_to_agent_for(&cid)
     }
 
+    fn remove_conversation(&mut self, cid: &ConversationId) -> Option<Conversation> {
+        if let Some(conv) = self.conversations.get(cid)
+            && let Some(agent_id) = &conv.agent_id
+        {
+            self.agent_conversations.remove(agent_id);
+        }
+        self.conversations.remove(cid)
+    }
+
+    fn ensure_agent_id_for_conversation(&mut self, cid: &ConversationId) -> Option<String> {
+        let role = {
+            let conv = self.conversations.get(cid)?;
+            if let Some(agent_id) = &conv.agent_id {
+                return Some(agent_id.clone());
+            }
+            self.role_name_for_conversation(conv)
+        };
+        let agent_id = format!("{role}_{}", random_agent_id_suffix());
+        if let Some(conv) = self.conversations.get_mut(cid) {
+            conv.agent_id = Some(agent_id.clone());
+        }
+        self.agent_conversations
+            .insert(agent_id.clone(), cid.clone());
+        Some(agent_id)
+    }
+
     /// Mints a new `SessionPromptId`, registers it with `cid`'s
     /// conversation, and dispatches either a normal
     /// `SessionPromptCreated` or a `SessionCompactionRequested` to the
@@ -6220,6 +6283,7 @@ impl Harness {
     /// `system_prompt`, `tools`, or earlier messages busts the cache.
     /// See `linear_session_prompts_strictly_extend_previous_messages`.
     pub(crate) fn send_prompt_to_agent_for(&mut self, cid: &ConversationId) -> SessionPromptId {
+        let _ = self.ensure_agent_id_for_conversation(cid);
         let conv = self
             .conversations
             .get(cid)
@@ -6744,7 +6808,7 @@ impl Harness {
             .remove(&response.session_prompt_id);
         self.completed_prompts
             .insert(response.session_prompt_id.clone());
-        self.conversations.remove(&summary_cid);
+        self.remove_conversation(&summary_cid);
 
         let Some(target_conv) = self.conversations.get_mut(&pending.target_cid) else {
             self.publish_event(
@@ -7138,6 +7202,14 @@ impl Harness {
         } = response.originator
             && (!requested_tool_calls || is_non_tool_ext_query)
         {
+            if self.has_pending_agent_message_prompt(&cid) {
+                self.fold_pending_prompts_as_steered(&cid);
+                if !self.maybe_start_auto_compaction_for_followup(&cid) {
+                    self.dispatch_prompt_after_publish_idle(&cid);
+                }
+                return Ok(());
+            }
+
             let source = self
                 .conversations
                 .get(&cid)
@@ -7184,7 +7256,7 @@ impl Harness {
             // the parent is torn down.
             self.release_start_agent_request(&cid);
             self.transfer_background_completion_target_before_teardown(&cid);
-            self.conversations.remove(&cid);
+            self.remove_conversation(&cid);
             self.try_advance_queue();
             return Ok(());
         }
@@ -7829,6 +7901,14 @@ impl Harness {
         }
     }
 
+    fn has_pending_agent_message_prompt(&self, cid: &ConversationId) -> bool {
+        self.conversations.get(cid).is_some_and(|conv| {
+            conv.pending_prompts
+                .iter()
+                .any(PendingPrompt::is_agent_message)
+        })
+    }
+
     fn publish_prompts_as_steered(&mut self, cid: &ConversationId, prompts: Vec<PendingPrompt>) {
         let session_id = match self.conversations.get(cid) {
             Some(c) => c.session_id.clone(),
@@ -7976,6 +8056,9 @@ impl Harness {
         }
         if internal_tool_name.as_str() == WAIT_TOOL_NAME {
             return self.handle_wait_tool_call(cid, call, visible_tool_name);
+        }
+        if internal_tool_name.as_str() == MESSAGE_TOOL_NAME {
+            return self.handle_message_tool_call(cid, call, visible_tool_name);
         }
         if internal_tool_name.as_str() == CANCEL_TOOL_NAME {
             return self.handle_cancel_tool_call(cid, call, visible_tool_name);

@@ -232,6 +232,8 @@ pub(crate) struct Conversation {
     /// Agent role used for this conversation. `None` means the conversation
     /// follows the harness's globally selected interactive role.
     pub(crate) role: Option<String>,
+    /// Stable id assigned when this conversation first starts an agent turn.
+    pub(crate) agent_id: Option<String>,
     /// Scheduling mode requested for this delegate side conversation. `None`
     /// for the default conversation and non-tool side conversations.
     pub(crate) delegate_execution_mode: Option<ToolExecutionMode>,
@@ -304,6 +306,15 @@ pub(crate) struct ChainAnchor {
     pub(crate) request_fingerprint_parts: ChainFingerprintParts,
 }
 
+/// Where a queued prompt came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PendingPromptSource {
+    /// A normal user or harness steering prompt.
+    General,
+    /// A prompt created from an `agent.message` delivery.
+    AgentMessage,
+}
+
 /// A queued prompt plus its user/internal classification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingPrompt {
@@ -311,6 +322,9 @@ pub(crate) struct PendingPrompt {
     pub(crate) text: String,
     /// Whether this queued prompt is visible user text or hidden internal text.
     pub(crate) message_class: PromptMessageClass,
+    /// Source marker for lifecycle decisions that must not confuse internal
+    /// prompts.
+    pub(crate) source: PendingPromptSource,
 }
 
 impl From<String> for PendingPrompt {
@@ -337,6 +351,7 @@ impl PendingPrompt {
         Self {
             text,
             message_class: PromptMessageClass::User,
+            source: PendingPromptSource::General,
         }
     }
 
@@ -345,6 +360,16 @@ impl PendingPrompt {
         Self {
             text,
             message_class: PromptMessageClass::Internal,
+            source: PendingPromptSource::General,
+        }
+    }
+
+    /// Create a hidden queued prompt from an `agent.message` delivery.
+    pub(crate) fn agent_message(text: String) -> Self {
+        Self {
+            text,
+            message_class: PromptMessageClass::Internal,
+            source: PendingPromptSource::AgentMessage,
         }
     }
 
@@ -352,6 +377,12 @@ impl PendingPrompt {
     #[must_use]
     pub(crate) fn is_internal(&self) -> bool {
         self.message_class.is_internal()
+    }
+
+    /// Whether this prompt came from an `agent.message` delivery.
+    #[must_use]
+    pub(crate) fn is_agent_message(&self) -> bool {
+        self.source == PendingPromptSource::AgentMessage
     }
 }
 
@@ -380,6 +411,7 @@ impl Conversation {
             task_name: None,
             delegate_input_stats: ToolDisplayStats::default(),
             role: None,
+            agent_id: None,
             delegate_execution_mode: None,
             tools_in_flight: 0,
             tools_total: 0,

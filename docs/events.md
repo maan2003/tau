@@ -168,6 +168,14 @@ harness/agent.
 - **`agent.start_result`** — The agent's final answer to an
   earlier `agent.start_request`, routed point-to-point back to the
   requesting extension. Carries the same `query_id`.
+- **`agent.message`** — An agent sends a short text message to another
+  agent or to the user. Carries `session_id`, `sender_id`,
+  `recipient_id`, and `message`. This is durable transcript state, so
+  late UI subscribers can replay it. A `recipient_id` of `user` is
+  displayed to UI subscribers only. Any other recipient is resolved to a
+  live agent conversation and delivered as a hidden internal prompt; if
+  that agent is a side/delegate agent about to finish, teardown waits
+  until the message turn has been dispatched and answered.
 - **`extension.event`** — Custom extension-defined event with a free-form
   dotted name and CBOR payload. The harness routes it like any other
   event; if `session_id` is set it can be folded into that session's

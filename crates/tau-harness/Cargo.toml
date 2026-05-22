@@ -31,6 +31,7 @@ dirs.workspace = true
 handlebars.workspace = true
 json5.workspace = true
 libc.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tau-config.workspace = true

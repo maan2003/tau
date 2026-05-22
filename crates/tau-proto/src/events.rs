@@ -225,6 +225,7 @@ impl EventName {
         Self::from_static(EventCategory::Extension, "prompt_fragment_publish");
     pub const AGENT_START_REQUEST: Self = Self::from_static(EventCategory::Agent, "start_request");
     pub const AGENT_START_RESULT: Self = Self::from_static(EventCategory::Agent, "start_result");
+    pub const AGENT_MESSAGE: Self = Self::from_static(EventCategory::Agent, "message");
     pub const PROVIDER_MODELS_UPDATED: Self =
         Self::from_static(EventCategory::Provider, "models_updated");
     pub const PROVIDER_TOOL_RESULT: Self =
@@ -1823,21 +1824,25 @@ pub struct ExtPromptFragmentPublish {
     pub fragment: PromptFragment,
 }
 
-/// A request for the harness to start a side/sub-agent conversation.
+/// A harness-authored message sent by one live agent to another agent or to the
+/// user.
 ///
-/// Extension clients can send this event directly. The harness-owned
-/// `delegate` tool also uses the same payload internally and completes the
-/// original tool call when the side prompt finishes.
-///
-/// The harness spawns a fresh conversation off the user's current
-/// branch, treats the side prompt like any other turn (LLM call,
-/// optional tool calls, final response), then routes the agent's final text
-/// back to the requester as [`StartAgentResult`] with the same `query_id`
-/// or as the terminal result of the harness-owned delegate tool.
-///
-/// Side conversations are persisted as real branches in the session
-/// tree but tagged via [`PromptOriginator::Extension`] so UIs can
-/// filter them out.
+/// External clients and extensions must not forge this event. The harness-owned
+/// `message` tool validates the sender and recipient, then publishes this
+/// durable transcript fact for UI display or internal agent delivery.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentMessage {
+    /// Session that owns this message.
+    pub session_id: SessionId,
+    /// Agent id of the sender.
+    pub sender_id: String,
+    /// Recipient agent id, or the special `user` recipient.
+    pub recipient_id: String,
+    /// Message body.
+    pub message: String,
+}
+
+/// Request to start a side-agent conversation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StartAgentRequest {
     /// Extension-assigned correlation id, echoed back on the result.
@@ -3181,6 +3186,8 @@ pub enum Event {
     StartAgentRequest(StartAgentRequest),
     #[serde(rename = "agent.start_result")]
     StartAgentResult(StartAgentResult),
+    #[serde(rename = "agent.message")]
+    AgentMessage(AgentMessage),
     #[serde(rename = "extension.event")]
     ExtensionEvent(CustomEvent),
     #[serde(rename = "provider.models_updated")]
@@ -3323,6 +3330,7 @@ impl Event {
             Self::ExtPromptFragmentPublish(_) => EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,
             Self::StartAgentRequest(_) => EventName::AGENT_START_REQUEST,
             Self::StartAgentResult(_) => EventName::AGENT_START_RESULT,
+            Self::AgentMessage(_) => EventName::AGENT_MESSAGE,
             Self::ExtensionEvent(event) => event.name.clone(),
             Self::ProviderModelsUpdated(_) => EventName::PROVIDER_MODELS_UPDATED,
             Self::ProviderToolResult(_) => EventName::PROVIDER_TOOL_RESULT,

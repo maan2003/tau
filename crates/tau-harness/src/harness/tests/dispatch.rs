@@ -5257,6 +5257,138 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     h.shutdown().expect("shutdown");
 }
 
+/// A side agent that receives `agent.message` while its original turn is in
+/// flight must process that internal message before teardown. Otherwise the
+/// `PromptOriginator::Extension` completion path removes the side conversation
+/// and drops the queued delivery.
+#[test]
+fn side_agent_drains_agent_message_before_extension_teardown() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let delegate_events = connect_test_tool(&mut h, "conn-delegate");
+
+    h.handle_start_agent_request(
+        "conn-delegate",
+        StartAgentRequest {
+            query_id: "q-message".to_owned(),
+            instruction: "side task".to_owned(),
+            role: None,
+            execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
+            tool_call_id: Some("delegate-call".into()),
+            task_name: None,
+        },
+    )
+    .expect("query");
+
+    let (side_spid, side_cid) = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| {
+            (prompt_cid.as_str() != "default").then(|| (spid.clone(), prompt_cid.clone()))
+        })
+        .expect("side prompt id");
+    let recipient_id = h
+        .conversations
+        .get(&side_cid)
+        .and_then(|conv| conv.agent_id.clone())
+        .expect("side agent id");
+
+    h.publish_event(
+        Some(HARNESS_CONNECTION_ID),
+        Event::AgentMessage(tau_proto::AgentMessage {
+            session_id: "s1".into(),
+            sender_id: "manager".to_owned(),
+            recipient_id,
+            message: "please include this".to_owned(),
+        }),
+    );
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: side_spid.clone(),
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "initial answer".to_owned(),
+            }],
+            phase: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "conn-delegate".into(),
+            query_id: "q-message".to_owned(),
+        },
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("side first response");
+
+    assert!(
+        h.conversations.contains_key(&side_cid),
+        "side conversation must stay alive to process queued agent.message"
+    );
+    assert!(
+        delegate_events
+            .lock()
+            .expect("delegate events")
+            .iter()
+            .all(|routed| !matches!(routed.frame, Frame::Event(Event::StartAgentResult(_)))),
+        "start result must wait until the message turn completes"
+    );
+    let message_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| {
+            (prompt_cid == &side_cid && spid != &side_spid).then_some(spid.clone())
+        })
+        .expect("message prompt dispatched");
+    let prompt = read_prompt_created(&h, &message_spid);
+    let serialized = serde_json::to_string(&prompt.context_items).expect("json");
+    assert!(serialized.contains("please include this"));
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: message_spid,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "final answer".to_owned(),
+            }],
+            phase: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "conn-delegate".into(),
+            query_id: "q-message".to_owned(),
+        },
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("side message response");
+
+    assert!(
+        !h.conversations.contains_key(&side_cid),
+        "side conversation tears down after message turn"
+    );
+    let events = delegate_events.lock().expect("delegate events");
+    let result = events
+        .iter()
+        .find_map(|routed| match &routed.frame {
+            Frame::Event(Event::StartAgentResult(result)) if result.query_id == "q-message" => {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("query result routed");
+    assert_eq!(result.text, "final answer");
+    h.shutdown().expect("shutdown");
+}
+
 /// A tool-backed `StartAgentRequest` (`tool_call_id: Some(...)`) is the
 /// `delegate` path: it dispatches *while the parent's tool call is
 /// still in flight*, so the parent conv's tip is a `ToolUse` block
@@ -9886,6 +10018,191 @@ fn cancel_tool_rejects_unknown_tool_call_id() {
             if error.call_id.as_str() == "cancel-call"
                 && error.message.contains("not a running cancellable")
     )));
+
+    h.shutdown().expect("shutdown");
+}
+
+fn message_tool_call(id: &str, recipient_id: &str, message: &str) -> AgentToolCall {
+    AgentToolCall {
+        id: id.into(),
+        name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("recipient_id".to_owned()),
+                CborValue::Text(recipient_id.to_owned()),
+            ),
+            (
+                CborValue::Text("message".to_owned()),
+                CborValue::Text(message.to_owned()),
+            ),
+        ]),
+        display: None,
+    }
+}
+
+fn session_agent_messages(h: &Harness) -> Vec<tau_proto::AgentMessage> {
+    h.store
+        .session_events("s1")
+        .expect("session events")
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            Event::AgentMessage(message) => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The harness-owned `message` tool is the only authoritative path that can
+/// create `AgentMessage` events. A valid user-directed send persists exactly
+/// one durable message with a harness-minted sender id.
+#[test]
+fn message_tool_to_user_emits_exactly_one_agent_message() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+
+    h.handle_message_tool_call(
+        &cid,
+        &message_tool_call("msg-user", "user", "hello user"),
+        ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+    )
+    .expect("message tool");
+
+    let messages = session_agent_messages(&h);
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].sender_id.starts_with("engineer_"));
+    assert_eq!(messages[0].recipient_id, "user");
+    assert_eq!(messages[0].message, "hello user");
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Unknown agent recipients must fail the tool call before publishing any
+/// `AgentMessage`, so a typo cannot create forged transcript state.
+#[test]
+fn message_tool_unknown_recipient_errors_without_agent_message() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+
+    h.handle_message_tool_call(
+        &cid,
+        &message_tool_call("msg-bad", "missing_agent", "hello"),
+        ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+    )
+    .expect("message tool");
+
+    assert!(session_agent_messages(&h).is_empty());
+    let errors: Vec<_> = h
+        .store
+        .session_events("s1")
+        .expect("session events")
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            Event::ToolError(error) if error.call_id.as_str() == "msg-bad" => Some(error),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].message.contains("unknown message recipient"));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Agent-directed messages are hidden from the UI renderer, but the recipient
+/// agent must receive an internal queued prompt with stable markup.
+#[test]
+fn message_tool_to_agent_queues_internal_prompt_markup() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+    let recipient_id = h.ensure_agent_id_for_conversation(&cid).expect("agent id");
+    h.conversations
+        .get_mut(&cid)
+        .expect("conversation")
+        .turn_state = ConversationTurnState::AgentThinking {
+        session_prompt_id: "sp-message-target".into(),
+    };
+
+    h.handle_message_tool_call(
+        &cid,
+        &message_tool_call("msg-agent", &recipient_id, "secret payload"),
+        ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+    )
+    .expect("message tool");
+
+    let conv = h.conversations.get(&cid).expect("conversation");
+    let queued = conv.pending_prompts.back().expect("queued prompt");
+    assert_eq!(
+        queued.message_class,
+        tau_proto::PromptMessageClass::Internal
+    );
+    assert!(queued.text.contains(&format!(
+        "[tau-internal]: You have received a message from {recipient_id}"
+    )));
+    assert!(
+        queued
+            .text
+            .contains("<message>\nsecret payload\n</message>")
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Agent ids are minted once per conversation, are role-prefixed, and are
+/// removed from the reverse lookup when the conversation is torn down.
+#[test]
+fn agent_id_generation_is_stable_and_cleaned_up() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+
+    let first = h.ensure_agent_id_for_conversation(&cid).expect("agent id");
+    let second = h.ensure_agent_id_for_conversation(&cid).expect("agent id");
+    assert_eq!(first, second);
+    assert!(first.starts_with("engineer_"));
+    assert_eq!(first.len(), "engineer_".len() + 8);
+    assert_eq!(h.agent_conversations.get(&first), Some(&cid));
+
+    h.remove_conversation(&cid);
+    assert!(!h.agent_conversations.contains_key(&first));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// External clients and extensions must not forge `AgentMessage` events; only
+/// the harness-owned message tool may publish them.
+#[test]
+fn inbound_agent_message_events_are_ignored() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let forged = Event::AgentMessage(tau_proto::AgentMessage {
+        session_id: "s1".into(),
+        sender_id: "attacker".to_owned(),
+        recipient_id: "user".to_owned(),
+        message: "forged".to_owned(),
+    });
+    h.handle_client_event_inner("ui", forged.clone())
+        .expect("client event");
+    h.handle_extension_event_inner("extension", forged.clone())
+        .expect("extension event");
+    h.handle_extension_message(
+        "extension",
+        Message::Emit(tau_proto::Emit {
+            event: Box::new(forged),
+            transient: false,
+        }),
+    )
+    .expect("extension emit");
+
+    assert!(session_agent_messages(&h).is_empty());
 
     h.shutdown().expect("shutdown");
 }

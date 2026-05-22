@@ -197,6 +197,69 @@ fn repeated_resume_does_not_duplicate_synthetic_tool_errors() {
 }
 
 #[test]
+fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.store
+        .append_session_event(
+            "s1",
+            Some(HARNESS_CONNECTION_ID.into()),
+            Event::AgentMessage(tau_proto::AgentMessage {
+                session_id: "s1".into(),
+                sender_id: "agent-1".to_owned(),
+                recipient_id: "user".to_owned(),
+                message: "persisted hello".to_owned(),
+            }),
+        )
+        .expect("seed agent message");
+
+    let (server_end, client_end) = UnixStream::pair().expect("pair");
+    client_end
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("read timeout");
+    h.accept_client(server_end).expect("accept");
+    let ui_conn = h
+        .bus
+        .connections()
+        .into_iter()
+        .find(|c| c.name == "socket-ui")
+        .expect("ui connection")
+        .id
+        .to_string();
+
+    h.handle_client_event(
+        &ui_conn,
+        Frame::Message(Message::Subscribe(Subscribe {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_MESSAGE)],
+        })),
+    )
+    .expect("subscribe");
+
+    let mut reader = FrameReader::new(BufReader::new(client_end));
+    let mut got_message = false;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && !got_message {
+        let Ok(Some(frame)) = reader.read_frame() else {
+            break;
+        };
+        let (_log_id, inner) = frame.peel_log();
+        got_message = matches!(
+            inner,
+            Frame::Event(Event::AgentMessage(message))
+                if message.sender_id == "agent-1"
+                    && message.recipient_id == "user"
+                    && message.message == "persisted hello"
+        );
+    }
+
+    assert!(got_message, "late UI should replay durable agent messages");
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn late_joining_ui_client_receives_replayed_session_events() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");

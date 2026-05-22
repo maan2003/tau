@@ -1904,6 +1904,10 @@ impl EventRenderer {
         // into the user's transcript.
         self.learn_side_conversation_tool_calls(event);
 
+        if self.handle_agent_message_event(event) {
+            return;
+        }
+
         // Keep this filter immediately after the side-conversation tool-call
         // learning above. Prompt lifecycle events from extension-owned side
         // conversations share the bus with the user's interactive turn but
@@ -1936,6 +1940,23 @@ impl EventRenderer {
             event = ?std::mem::discriminant(event),
             "unhandled event variant"
         );
+    }
+
+    fn handle_agent_message_event(&mut self, event: &Event) -> bool {
+        let Event::AgentMessage(message) = event else {
+            return false;
+        };
+        if message.recipient_id != "user" {
+            return true;
+        }
+        let block = self.submitted_prompt_block(
+            tau_themes::names::SYSTEM_INFO,
+            format!("Message from {}:\n{}", message.sender_id, message.message),
+        );
+        let id = self.handle.new_block("agent-message", block);
+        self.handle.push_above_active(id);
+        self.handle.redraw();
+        true
     }
 
     fn handle_session_events(&mut self, event: &Event) -> bool {

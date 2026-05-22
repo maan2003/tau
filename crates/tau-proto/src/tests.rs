@@ -73,6 +73,12 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
             ctx_id: None,
         }),
+        Event::AgentMessage(AgentMessage {
+            session_id: "s1".into(),
+            sender_id: "engineer_abcd1234".to_owned(),
+            recipient_id: "user".to_owned(),
+            message: "hello".to_owned(),
+        }),
         Event::SessionStarted(SessionStarted {
             session_id: "s1".into(),
             reason: SessionStartReason::Initial,
@@ -345,6 +351,19 @@ fn event_name_round_trips_from_string() {
         let serialized = name.to_string();
         assert_eq!(serialized.parse::<EventName>(), Ok(name));
     }
+}
+
+#[test]
+fn agent_message_event_name_and_persistence_default() {
+    let event = Event::AgentMessage(AgentMessage {
+        session_id: "s1".into(),
+        sender_id: "engineer_abcd1234".to_owned(),
+        recipient_id: "user".to_owned(),
+        message: "hello".to_owned(),
+    });
+    assert_eq!(event.name(), EventName::AGENT_MESSAGE);
+    assert_eq!(event.name().to_string(), "agent.message");
+    assert!(!event.defaults_to_transient());
 }
 
 #[test]

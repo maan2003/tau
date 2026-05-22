@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
-    ClientKind, Disconnect, Event, EventSelector, Frame, FrameReader, FrameWriter, Hello, Message,
-    PROTOCOL_VERSION, Subscribe, UiPromptDraft, UiPromptSubmitted, UnixMicros,
+    ClientKind, Disconnect, Event, EventName, EventSelector, Frame, FrameReader, FrameWriter,
+    Hello, Message, PROTOCOL_VERSION, Subscribe, UiPromptDraft, UiPromptSubmitted, UnixMicros,
 };
 
 use crate::daemon::{daemon_output_for_session, resolve_daemon};
@@ -349,6 +349,7 @@ pub(crate) fn run_chat(
         &Frame::Message(Message::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Prefix("ui.".to_owned()),
+                EventSelector::Exact(EventName::AGENT_MESSAGE),
                 EventSelector::Prefix("session.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
                 EventSelector::Prefix("tool.".to_owned()),

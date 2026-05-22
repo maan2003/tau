@@ -225,6 +225,7 @@ fn should_replay_session_event_to_late_subscriber(event: &Event) -> bool {
         Event::UiPromptSubmitted(_)
             | Event::SessionPromptSteered(_)
             | Event::SessionUserMessageInjected(_)
+            | Event::AgentMessage(_)
             | Event::ToolResult(_)
             | Event::ToolError(_)
             | Event::ToolBackgroundResult(_)

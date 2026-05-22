@@ -1,10 +1,10 @@
-//! Harness-owned `delegate` and `wait` tools.
+//! Harness-owned `delegate`, `wait`, `cancel`, and `message` tools.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    BackgroundSupport, CborValue, Event, SessionContextKey, SessionContextValue,
+    AgentMessage, BackgroundSupport, CborValue, Event, SessionContextKey, SessionContextValue,
     ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolDisplay, ToolDisplayStats,
     ToolError, ToolExecutionMode, ToolName, ToolRequest, ToolResult, ToolResultKind, ToolSpec,
     ToolType,
@@ -20,6 +20,8 @@ pub(crate) const DELEGATE_TOOL_NAME: &str = "delegate";
 pub(crate) const WAIT_TOOL_NAME: &str = "wait";
 /// Model-visible name of the harness-owned cancel tool.
 pub(crate) const CANCEL_TOOL_NAME: &str = "cancel";
+/// Model-visible name of the harness-owned message tool.
+pub(crate) const MESSAGE_TOOL_NAME: &str = "message";
 
 const DELEGATE_PREFIX: &str = include_str!("prompts/delegate_prefix.md");
 const SLOW_DELEGATE_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
@@ -61,6 +63,9 @@ impl Harness {
         let _ = self
             .registry
             .register(HARNESS_CONNECTION_ID, cancel_tool_spec());
+        let _ = self
+            .registry
+            .register(HARNESS_CONNECTION_ID, message_tool_spec());
     }
 
     pub(crate) fn publish_delegate_roles_context(&mut self) {
@@ -232,6 +237,64 @@ impl Harness {
                 task_name: Some(parsed.task_name),
             },
         )
+    }
+
+    /// Handle the harness-owned `message` tool call inline.
+    pub(crate) fn handle_message_tool_call(
+        &mut self,
+        cid: &ConversationId,
+        call: &AgentToolCall,
+        visible_tool_name: ToolName,
+    ) -> Result<(), HarnessError> {
+        let call_id: ToolCallId = call.id.clone();
+        self.track_harness_owned_tool_request(cid, call, &visible_tool_name);
+        let result = parse_message_args(&call.arguments).and_then(|parsed| {
+            let sender_id = self
+                .ensure_agent_id_for_conversation(cid)
+                .ok_or_else(|| "sender conversation no longer exists".to_owned())?;
+            if parsed.recipient_id != "user"
+                && !self.agent_conversations.contains_key(&parsed.recipient_id)
+            {
+                return Err(format!(
+                    "unknown message recipient: `{}`",
+                    parsed.recipient_id
+                ));
+            }
+            let session_id = self
+                .conversations
+                .get(cid)
+                .map(|conv| conv.session_id.clone())
+                .unwrap_or_else(|| self.current_session_id.clone());
+            self.publish_event(
+                Some(HARNESS_CONNECTION_ID),
+                Event::AgentMessage(AgentMessage {
+                    session_id,
+                    sender_id,
+                    recipient_id: parsed.recipient_id,
+                    message: parsed.message,
+                }),
+            );
+            Ok(())
+        });
+        match result {
+            Ok(()) => self.finish_harness_owned_tool_with_result(
+                cid,
+                call_id,
+                visible_tool_name,
+                call.tool_type,
+                "Message sent".to_owned(),
+                None,
+            ),
+            Err(message) => self.finish_harness_owned_tool_with_error(
+                cid,
+                call_id,
+                visible_tool_name,
+                call.tool_type,
+                message,
+                Some(call.arguments.clone()),
+            ),
+        }
+        Ok(())
     }
 
     /// Handle the harness-owned `cancel` tool call inline.
@@ -513,6 +576,27 @@ fn delegate_tool_spec() -> ToolSpec {
     }
 }
 
+fn message_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: ToolName::new(MESSAGE_TOOL_NAME),
+        model_visible_name: None,
+        description: Some("Send a message to another live agent or to the user. Use recipient_id `user` to display to the user, or an agent_id for a live agent. Requires `recipient_id` and `message`.".to_owned()),
+        tool_type: ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "recipient_id": { "type": "string", "description": "Recipient agent_id, or the special value `user`." },
+                "message": { "type": "string", "description": "Message body." }
+            },
+            "required": ["recipient_id", "message"]
+        })),
+        format: None,
+        enabled_by_default: true,
+        execution_mode: ToolExecutionMode::Shared,
+        background_support: Some(BackgroundSupport::Never),
+    }
+}
+
 fn cancel_tool_spec() -> ToolSpec {
     ToolSpec {
         name: ToolName::new(CANCEL_TOOL_NAME),
@@ -554,6 +638,46 @@ struct DelegateArgs {
     prompt: String,
     execution_mode: ToolExecutionMode,
     role: Option<String>,
+}
+
+#[derive(Debug, PartialEq)]
+struct MessageArgs {
+    recipient_id: String,
+    message: String,
+}
+
+fn parse_message_args(arguments: &CborValue) -> Result<MessageArgs, String> {
+    let CborValue::Map(entries) = arguments else {
+        return Err("arguments must be an object".to_owned());
+    };
+    let mut recipient_id = None;
+    let mut message = None;
+    for (k, v) in entries {
+        let CborValue::Text(name) = k else { continue };
+        match name.as_str() {
+            "recipient_id" => match v {
+                CborValue::Text(text) => recipient_id = Some(text.clone()),
+                _ => return Err("`recipient_id` must be a string".to_owned()),
+            },
+            "message" => match v {
+                CborValue::Text(text) => message = Some(text.clone()),
+                _ => return Err("`message` must be a string".to_owned()),
+            },
+            _ => {}
+        }
+    }
+    let recipient_id = recipient_id.ok_or_else(|| "`recipient_id` is required".to_owned())?;
+    if recipient_id.trim().is_empty() {
+        return Err("`recipient_id` must not be empty".to_owned());
+    }
+    let message = message.ok_or_else(|| "`message` is required".to_owned())?;
+    if message.trim().is_empty() {
+        return Err("`message` must not be empty".to_owned());
+    }
+    Ok(MessageArgs {
+        recipient_id,
+        message,
+    })
 }
 
 fn parse_cancel_args(arguments: &CborValue) -> Result<ToolCallId, String> {
@@ -1518,6 +1642,57 @@ mod tests {
         assert_eq!(
             parameters["properties"]["execution_mode"]["enum"],
             serde_json::json!(["shared", "update", "exclusive"])
+        );
+    }
+
+    #[test]
+    fn message_tool_schema_requires_recipient_and_message() {
+        let spec = message_tool_spec();
+        let parameters = spec.parameters.expect("parameters");
+        assert_eq!(
+            parameters["required"],
+            serde_json::json!(["recipient_id", "message"])
+        );
+    }
+
+    #[test]
+    fn message_args_require_non_empty_recipient_and_message() {
+        let ok = CborValue::Map(vec![
+            (
+                CborValue::Text("recipient_id".to_owned()),
+                CborValue::Text("user".to_owned()),
+            ),
+            (
+                CborValue::Text("message".to_owned()),
+                CborValue::Text("hello".to_owned()),
+            ),
+        ]);
+        let parsed = parse_message_args(&ok).expect("valid message args");
+        assert_eq!(parsed.recipient_id, "user");
+        assert_eq!(parsed.message, "hello");
+
+        let missing = CborValue::Map(vec![(
+            CborValue::Text("recipient_id".to_owned()),
+            CborValue::Text("user".to_owned()),
+        )]);
+        assert_eq!(
+            parse_message_args(&missing),
+            Err("`message` is required".to_owned())
+        );
+
+        let empty = CborValue::Map(vec![
+            (
+                CborValue::Text("recipient_id".to_owned()),
+                CborValue::Text(" ".to_owned()),
+            ),
+            (
+                CborValue::Text("message".to_owned()),
+                CborValue::Text("hello".to_owned()),
+            ),
+        ]);
+        assert_eq!(
+            parse_message_args(&empty),
+            Err("`recipient_id` must not be empty".to_owned())
         );
     }
 
