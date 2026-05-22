@@ -30,6 +30,11 @@ pub struct Hello {
 }
 
 /// Subscription request describing which events a participant wants.
+///
+/// Selectors describe event interest, not replay intent. UI socket
+/// clients currently receive selected late-join replay from the
+/// harness, while extension subscriptions are live-only. This payload
+/// has no past-event opt-in field.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Subscribe {
     pub selectors: Vec<EventSelector>,

@@ -347,6 +347,9 @@ where
     let mut writer = FrameWriter::new(BufWriter::new(writer));
     let mut auth = auth_file_auth.clone();
 
+    // No past events requested: SessionPromptCreated is a work request.
+    // Replaying old prompts would rerun completed turns; models are
+    // announced from current auth below.
     tau_extension::Handshake::with_kind(EXTENSION_NAME, ClientKind::Provider)
         .subscribe([EventName::SESSION_PROMPT_CREATED])
         .announce_event(Event::ProviderModelsUpdated(ProviderModelsUpdated {

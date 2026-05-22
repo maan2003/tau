@@ -247,6 +247,9 @@ where
 {
     let mut handshake_writer = FrameWriter::new(BufWriter::new(writer));
 
+    // No past events requested: provider work starts from fresh live state.
+    // Models are announced from current auth below; replaying old prompt,
+    // prewarm, or cancel events would rerun or cancel completed turns.
     tau_extension::Handshake::with_kind(EXTENSION_NAME, ClientKind::Provider)
         .subscribe([
             EventName::SESSION_PROMPT_PREWARM_REQUESTED,

@@ -814,6 +814,8 @@ where
         client_name: "tau-echo-provider".into(),
         client_kind: ClientKind::Provider,
     })))?;
+    // Live-only test provider: prompt, compaction, and cancel events are work
+    // requests. Replaying past ones would rerun or cancel completed turns.
     writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
         selectors: vec![
             EventSelector::Exact(EventName::SESSION_COMPACTION_REQUESTED),
@@ -2372,6 +2374,8 @@ impl Harness {
                 ));
             }
             Message::Subscribe(subscribe) => {
+                // Extension subscriptions are live-only today: set routing for
+                // future events, without replaying past log entries.
                 self.bus.set_subscriptions(source_id, subscribe.selectors)?;
             }
             Message::Intercept(intercept) => {
@@ -2702,7 +2706,8 @@ impl Harness {
         match message {
             Message::Hello(_hello) => Ok(true),
             Message::Subscribe(subscribe) => {
-                // Policy check via the bus.
+                // Socket/UI clients replay selected past state after subscribing.
+                // Extensions use `handle_extension_message`, which is live-only.
                 match self
                     .bus
                     .set_subscriptions(client_id, subscribe.selectors.clone())

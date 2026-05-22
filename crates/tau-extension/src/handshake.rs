@@ -9,6 +9,11 @@
 //! every crate is mechanical and drifts out of sync; this helper writes
 //! it once and lets each extension declare only what differs.
 //!
+//! For extensions, `Subscribe` is live-only today: it records selectors
+//! for future delivery and does not replay already logged events. Any
+//! future past-event replay support should be explicit opt-in, not
+//! inferred from selectors.
+//!
 //! ```ignore
 //! tau_extension::Handshake::tool("tau-ext-websearch-exa")
 //!     .subscribe([EventName::TOOL_INVOKE])
@@ -64,9 +69,12 @@ impl Handshake {
         }
     }
 
-    /// Subscribe to a set of events by exact name. Equivalent to
+    /// Subscribe to a set of future events by exact name. Equivalent to
     /// extending the existing selectors with one `EventSelector::Exact`
     /// per item.
+    ///
+    /// Extension subscriptions are live-only in the current harness:
+    /// this does not request replay of past events.
     pub fn subscribe(mut self, names: impl IntoIterator<Item = EventName>) -> Self {
         self.selectors
             .extend(names.into_iter().map(EventSelector::Exact));
@@ -145,6 +153,8 @@ impl Handshake {
     /// is omitted when no selectors have been added — sending an
     /// empty subscription would still be valid but adds noise on the
     /// wire.
+    ///
+    /// For extensions, `Subscribe` only starts live delivery.
     pub fn run<W: Write>(self, writer: &mut FrameWriter<W>) -> Result<(), EncodeError> {
         writer.write_frame(&Frame::Message(Message::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,

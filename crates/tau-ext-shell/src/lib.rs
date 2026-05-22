@@ -423,6 +423,9 @@ where
         },
     ]);
 
+    // No past events requested: the shell starts from fresh live state.
+    // Replaying old invokes/commands would repeat work; old session starts
+    // would duplicate context publication.
     let mut handshake = tau_extension::Handshake::tool("tau-ext-shell").subscribe([
         tau_proto::EventName::TOOL_INVOKE,
         tau_proto::EventName::SESSION_STARTED,

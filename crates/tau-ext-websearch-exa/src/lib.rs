@@ -125,6 +125,8 @@ where
     let mut reader = FrameReader::new(BufReader::new(reader));
     let mut writer = FrameWriter::new(BufWriter::new(writer));
 
+    // No past events requested: only future ToolInvoke frames should start
+    // HTTP searches. Replaying old invokes would duplicate external requests.
     tau_extension::Handshake::tool("tau-ext-websearch-exa")
         .subscribe([tau_proto::EventName::TOOL_INVOKE])
         .register_tool(tool_spec())

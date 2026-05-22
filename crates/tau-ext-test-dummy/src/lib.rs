@@ -83,6 +83,8 @@ where
     let mut reader = FrameReader::new(BufReader::new(reader));
     let mut writer = FrameWriter::new(BufWriter::new(writer));
 
+    // No Subscribe: interception and the restart-test tool start live-only.
+    // Replaying old prompts/invokes would mutate or retry past work.
     tau_extension::Handshake::tool("tau-ext-test-dummy")
         .intercept(
             EventSelector::Exact(tau_proto::EventName::UI_PROMPT_SUBMITTED),

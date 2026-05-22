@@ -1,7 +1,8 @@
 //! Late-subscriber replay.
 //!
 //! When a UI client subscribes after the harness has already emitted
-//! events, two replay paths catch it up:
+//! events, two replay paths catch it up. Extension subscriptions do not
+//! enter these paths today; their `Subscribe` only changes live routing.
 //!
 //! - [`Harness::replay_session_events`] pulls durable transcript facts from the
 //!   per-session log via [`crate::SessionStore`], filtering on the new

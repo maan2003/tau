@@ -249,6 +249,8 @@ where
     // from the harness overwrites both on receipt.
     let mut config = ExtConfig::default();
 
+    // No past events requested: notifications start from fresh live state.
+    // Replaying prior prompts/results would replay sounds and idle nudges.
     tau_extension::Handshake::tool("tau-ext-std-notifications")
         .subscribe([
             tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
