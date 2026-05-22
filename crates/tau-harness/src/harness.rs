@@ -21,8 +21,8 @@ use tau_proto::{
     SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, SessionPromptRecalled,
     SessionPromptTerminated, SessionPromptTerminationReason, TokenUsageStats, ToolBackgroundError,
     ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancel, ToolCancelled, ToolChoice,
-    ToolDefinition, ToolError, ToolName, ToolRequest, ToolResult, ToolResultKind, ToolType,
-    UiCancelPrompt,
+    ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest, ToolResult, ToolResultKind,
+    ToolType, UiCancelPrompt,
 };
 
 use crate::conversation::{
@@ -666,6 +666,15 @@ struct ActiveExtAgentQuery {
     execution_mode: tau_proto::ToolExecutionMode,
 }
 
+#[derive(Clone, Debug, Default)]
+struct ExtensionActivationStage {
+    /// Tool registrations received before the extension finished its handshake.
+    tool_registrations: Vec<ToolRegister>,
+    /// Extension-level prompt fragments received before `Ready`, keyed by name
+    /// so repeated publishes replace earlier staged content.
+    prompt_fragments: BTreeMap<String, PromptFragment>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PendingToolAvailabilityNotice {
     Unavailable { visible_name: ToolName },
@@ -741,6 +750,11 @@ pub(crate) struct Harness {
     /// ack state. Lookups by connection id (the hot per-event path —
     /// every `Ack`, `Hello`, `Ready`, `Disconnected`) are O(1).
     pub(crate) extensions: std::collections::HashMap<tau_proto::ConnectionId, ExtensionEntry>,
+    /// Capability records announced during handshake and withheld until the
+    /// extension sends `Ready`. Activation happens in the main harness loop so
+    /// prompt assembly and tool routing see the full batch at once.
+    extension_activation_staging:
+        std::collections::HashMap<tau_proto::ConnectionId, ExtensionActivationStage>,
     /// Spawn-order list of connection ids into `extensions`. Drives
     /// the deterministic "start every extension" and shutdown loops
     /// that a `HashMap` alone can't supply, and is updated in place
@@ -1283,6 +1297,7 @@ impl Harness {
             client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
             extensions: std::collections::HashMap::new(),
+            extension_activation_staging: std::collections::HashMap::new(),
             extension_order: Vec::new(),
             pending_extension_connects: 0,
             next_session_prompt_id: 0,
@@ -1498,6 +1513,7 @@ impl Harness {
             client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
             extensions: std::collections::HashMap::new(),
+            extension_activation_staging: std::collections::HashMap::new(),
             extension_order: Vec::new(),
             pending_extension_connects: 0,
             next_session_prompt_id: 0,
@@ -1635,6 +1651,7 @@ impl Harness {
 
         if let Some(replaced) = replaces {
             self.extensions.remove(&replaced);
+            self.extension_activation_staging.remove(&replaced);
             if let Some(slot) = self.extension_order.iter_mut().find(|id| **id == replaced) {
                 *slot = connection_id.clone();
             } else if !self.extension_order.iter().any(|id| id == &connection_id) {
@@ -1643,6 +1660,8 @@ impl Harness {
         } else if !self.extension_order.iter().any(|id| id == &connection_id) {
             self.extension_order.push(connection_id.clone());
         }
+        self.extension_activation_staging
+            .insert(connection_id.clone(), ExtensionActivationStage::default());
         self.extensions.insert(connection_id, entry);
         if 0 < self.pending_extension_connects {
             self.pending_extension_connects -= 1;
@@ -2563,6 +2582,86 @@ impl Harness {
         );
     }
 
+    fn should_stage_extension_capabilities(&self, source_id: &str) -> bool {
+        self.extensions
+            .get(source_id)
+            .is_some_and(|entry| entry.state != ExtensionState::Ready)
+    }
+
+    fn stage_extension_tool_registration(&mut self, source_id: &str, registration: ToolRegister) {
+        self.extension_activation_staging
+            .entry(source_id.into())
+            .or_default()
+            .tool_registrations
+            .push(registration);
+    }
+
+    fn remove_staged_tool_registration(&mut self, source_id: &str, tool_name: &ToolName) -> bool {
+        let Some(stage) = self.extension_activation_staging.get_mut(source_id) else {
+            return false;
+        };
+        let before = stage.tool_registrations.len();
+        stage
+            .tool_registrations
+            .retain(|registration| registration.tool.name != *tool_name);
+        stage.tool_registrations.len() != before
+    }
+
+    fn stage_extension_prompt_fragment(
+        &mut self,
+        source_id: &str,
+        publish: tau_proto::ExtPromptFragmentPublish,
+    ) {
+        self.extension_activation_staging
+            .entry(source_id.into())
+            .or_default()
+            .prompt_fragments
+            .insert(publish.fragment.name.clone(), publish.fragment);
+    }
+
+    fn register_extension_tool(&mut self, source_id: &str, registration: ToolRegister) {
+        let internal_name = registration.tool.name.clone();
+        let visible_name = self.tool_model_visible_name(&registration.tool).clone();
+        let was_available = !self
+            .registry
+            .providers_for(internal_name.as_str())
+            .is_empty();
+        let _ = self
+            .registry
+            .register_with_prompt_fragment(source_id, registration);
+        if !was_available {
+            self.mark_tool_available_for_notice(internal_name, visible_name);
+        }
+    }
+
+    fn publish_extension_prompt_fragment(
+        &mut self,
+        source_id: &str,
+        publish: tau_proto::ExtPromptFragmentPublish,
+    ) {
+        let contributor = tau_proto::ConnectionId::from(source_id);
+        self.extension_prompt_fragments
+            .entry(contributor)
+            .or_default()
+            .insert(publish.fragment.name.clone(), publish.fragment.clone());
+        self.publish_event(Some(source_id), Event::ExtPromptFragmentPublish(publish));
+    }
+
+    fn activate_staged_extension_capabilities(&mut self, source_id: &str) {
+        let Some(stage) = self.extension_activation_staging.remove(source_id) else {
+            return;
+        };
+        for registration in stage.tool_registrations {
+            self.register_extension_tool(source_id, registration);
+        }
+        for fragment in stage.prompt_fragments.into_values() {
+            self.publish_extension_prompt_fragment(
+                source_id,
+                tau_proto::ExtPromptFragmentPublish { fragment },
+            );
+        }
+    }
+
     fn handle_extension_message(
         &mut self,
         source_id: &str,
@@ -2596,7 +2695,10 @@ impl Harness {
             }
             Message::Subscribe(subscribe) => {
                 // Extension subscriptions are live-only today: set routing for
-                // future events, without replaying past log entries.
+                // future events, without replaying past log entries. Do not
+                // treat first-party extensions that want live-only delivery as
+                // universal; any external-extension replay support needs an
+                // explicit opt-in separate from selectors.
                 self.bus.set_subscriptions(source_id, subscribe.selectors)?;
             }
             Message::Intercept(intercept) => {
@@ -2614,7 +2716,9 @@ impl Harness {
             }
             Message::Ready(_ready) => {
                 self.set_extension_state(source_id, ExtensionState::Ready);
+                self.activate_staged_extension_capabilities(source_id);
                 self.emit_extension_ready(source_id);
+                self.drain_pending_tool_invocations()?;
                 self.try_advance_queue();
             }
             Message::Emit(emit) => {
@@ -2659,20 +2763,14 @@ impl Harness {
 
         match event {
             Event::ToolRegister(registration) => {
-                let internal_name = registration.tool.name.clone();
-                let visible_name = self.tool_model_visible_name(&registration.tool).clone();
-                let was_available = !self
-                    .registry
-                    .providers_for(internal_name.as_str())
-                    .is_empty();
-                let _ = self
-                    .registry
-                    .register_with_prompt_fragment(source_id, registration);
-                if !was_available {
-                    self.mark_tool_available_for_notice(internal_name, visible_name);
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_extension_tool_registration(source_id, registration);
+                } else {
+                    self.register_extension_tool(source_id, registration);
                 }
             }
             Event::ToolUnregister(unregister) => {
+                self.remove_staged_tool_registration(source_id, &unregister.tool_name);
                 let visible_name = self
                     .registry
                     .providers_for(unregister.tool_name.as_str())
@@ -2897,12 +2995,11 @@ impl Harness {
                 self.publish_event(Some(source_id), Event::ExtSessionContextPublish(publish));
             }
             Event::ExtPromptFragmentPublish(publish) => {
-                let contributor = tau_proto::ConnectionId::from(source_id);
-                self.extension_prompt_fragments
-                    .entry(contributor)
-                    .or_default()
-                    .insert(publish.fragment.name.clone(), publish.fragment.clone());
-                self.publish_event(Some(source_id), Event::ExtPromptFragmentPublish(publish));
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_extension_prompt_fragment(source_id, publish);
+                } else {
+                    self.publish_extension_prompt_fragment(source_id, publish);
+                }
             }
             Event::ExtAgentQuery(query) => {
                 self.handle_ext_agent_query(source_id, query)?;
@@ -3390,6 +3487,7 @@ impl Harness {
     }
 
     fn handle_disconnect(&mut self, connection_id: &str) {
+        self.extension_activation_staging.remove(connection_id);
         self.remove_discovered_context(connection_id);
         self.interceptors.remove_connection(connection_id);
         self.fail_pending_intercept_for_disconnect(connection_id);
@@ -6106,6 +6204,27 @@ impl Harness {
         false
     }
 
+    fn tool_call_waits_for_staged_registration(
+        &self,
+        cid: &ConversationId,
+        requested_name: &ToolName,
+    ) -> bool {
+        let role_name = self.role_name_for_conversation_id(cid);
+        if self
+            .resolve_enabled_tool_name_for_role(requested_name, &role_name)
+            .is_some()
+        {
+            return false;
+        }
+        self.extension_activation_staging.values().any(|stage| {
+            stage.tool_registrations.iter().any(|registration| {
+                self.is_tool_enabled_for_role(&registration.tool, &role_name)
+                    && (registration.tool.name == *requested_name
+                        || self.tool_model_visible_name(&registration.tool) == requested_name)
+            })
+        })
+    }
+
     fn resolve_enabled_tool_name_for_role(
         &self,
         requested_name: &ToolName,
@@ -6864,16 +6983,25 @@ impl Harness {
 
     /// Drain scheduler-selected tool invocations into harness side effects.
     fn drain_pending_tool_invocations(&mut self) -> Result<(), HarnessError> {
-        while let Some((
-            PendingToolInvocation {
-                conversation_id,
-                invocation,
-                execution_mode: _,
-                background_support: _,
-            },
-            foreground_action,
-        )) = self.tool_turn.pop_dispatchable(Instant::now())
-        {
+        while let Some(next) = self.tool_turn.next_dispatchable().cloned() {
+            if self.tool_call_waits_for_staged_registration(
+                &next.conversation_id,
+                &next.invocation.name,
+            ) {
+                break;
+            }
+            let Some((
+                PendingToolInvocation {
+                    conversation_id,
+                    invocation,
+                    execution_mode: _,
+                    background_support: _,
+                },
+                foreground_action,
+            )) = self.tool_turn.pop_dispatchable(Instant::now())
+            else {
+                break;
+            };
             let call_id = invocation.id.clone();
             // If dispatch fails synchronously, roll back the in-flight
             // entry so a retry or clean-up is not wedged on a phantom

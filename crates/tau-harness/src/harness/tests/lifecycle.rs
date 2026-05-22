@@ -85,6 +85,313 @@ fn reregister_shell(h: &mut Harness, spec: ToolSpec) {
     .expect("reregister shell");
 }
 
+fn staged_tool_spec(name: &str) -> ToolSpec {
+    ToolSpec {
+        name: ToolName::new(name),
+        model_visible_name: None,
+        description: Some(format!("{name} test tool")),
+        parameters: None,
+        tool_type: tau_proto::ToolType::Function,
+        format: None,
+        enabled_by_default: true,
+        execution_mode: ToolExecutionMode::Exclusive,
+        background_support: Some(tau_proto::BackgroundSupport::Never),
+    }
+}
+
+fn connect_handshaking_tool(h: &mut Harness, conn_id: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
+    let sink = connect_test_tool(h, conn_id);
+    let connection_id: tau_proto::ConnectionId = conn_id.into();
+    h.extensions.insert(
+        connection_id.clone(),
+        ExtensionEntry {
+            name: conn_id.to_owned(),
+            instance_id: 42.into(),
+            connection_id: connection_id.clone(),
+            kind: tau_proto::ClientKind::Tool,
+            pid: None,
+            in_process_thread: None,
+            supervised_config: None,
+            restart_attempt: 0,
+            state: ExtensionState::Handshaking,
+            last_acked: tau_proto::LogEventId::default(),
+        },
+    );
+    h.extension_order.push(connection_id);
+    sink
+}
+
+fn sink_has_tool_invoke(sink: &Arc<Mutex<Vec<RoutedFrame>>>, call_id: &str) -> bool {
+    sink.lock().expect("sink").iter().any(|routed| {
+        matches!(
+            peel_inner_event(&routed.frame),
+            Some(Event::ToolInvoke(invoke)) if invoke.call_id.as_str() == call_id
+        )
+    })
+}
+
+fn test_tool_result(call_id: &str, tool_name: &str) -> Event {
+    Event::ToolResult(ToolResult {
+        call_id: call_id.into(),
+        tool_name: ToolName::new(tool_name),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("ok".to_owned()),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+}
+
+#[test]
+fn handshaking_tool_register_is_not_active_before_ready() {
+    // Capability staging: a tool announced during handshake must not enter the
+    // live registry, prompt tool list, or prompt fragments until the extension
+    // sends Ready. Tests bypass dispatch gating to verify the assembly inputs
+    // directly.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let conn_id = "conn-staged-before-ready";
+    let _sink = connect_handshaking_tool(&mut h, conn_id);
+
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: staged_tool_spec("staged_tool"),
+            prompt_fragment: Some(tau_proto::PromptFragment::new(
+                "staged_tool.instructions",
+                tau_proto::PromptPriority::new(10),
+                "STAGED TOOL PROMPT",
+            )),
+        })),
+    )
+    .expect("stage tool");
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtPromptFragmentPublish(
+            tau_proto::ExtPromptFragmentPublish {
+                fragment: tau_proto::PromptFragment::new(
+                    "staged.extension.instructions",
+                    tau_proto::PromptPriority::new(20),
+                    "STAGED EXTENSION PROMPT",
+                ),
+            },
+        )),
+    )
+    .expect("stage extension prompt fragment");
+
+    assert!(h.registry.providers_for("staged_tool").is_empty());
+    assert!(
+        !h.gather_tool_definitions()
+            .iter()
+            .any(|tool| tool.name.as_str() == "staged_tool")
+    );
+    let system_prompt = h.build_current_system_prompt();
+    assert!(!system_prompt.contains("STAGED TOOL PROMPT"));
+    assert!(!system_prompt.contains("STAGED EXTENSION PROMPT"));
+
+    append_user_message_via_event(&mut h, "s1", "before ready");
+    let spid = h.send_prompt_to_agent("s1");
+    let prompt = read_prompt_created(&h, &spid);
+    assert!(!prompt_has_tool(&prompt, "staged_tool"));
+    assert!(!prompt.system_prompt.contains("STAGED TOOL PROMPT"));
+    assert!(!prompt.system_prompt.contains("STAGED EXTENSION PROMPT"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
+    // Ready is the activation boundary: the staged tool and its prompt fragment
+    // become visible together before any queued prompts are advanced.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let conn_id = "conn-staged-ready";
+    let _sink = connect_handshaking_tool(&mut h, conn_id);
+
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: staged_tool_spec("staged_tool"),
+            prompt_fragment: Some(tau_proto::PromptFragment::new(
+                "staged_tool.instructions",
+                tau_proto::PromptPriority::new(10),
+                "STAGED TOOL PROMPT",
+            )),
+        })),
+    )
+    .expect("stage tool");
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ExtPromptFragmentPublish(
+            tau_proto::ExtPromptFragmentPublish {
+                fragment: tau_proto::PromptFragment::new(
+                    "staged.extension.instructions",
+                    tau_proto::PromptPriority::new(20),
+                    "STAGED EXTENSION PROMPT",
+                ),
+            },
+        )),
+    )
+    .expect("stage extension prompt fragment");
+
+    h.handle_extension_message(
+        conn_id,
+        Message::Ready(tau_proto::Ready {
+            message: Some("ready".to_owned()),
+        }),
+    )
+    .expect("ready");
+
+    assert_eq!(h.registry.providers_for("staged_tool").len(), 1);
+    append_user_message_via_event(&mut h, "s1", "after ready");
+    let spid = h.send_prompt_to_agent("s1");
+    let prompt = read_prompt_created(&h, &spid);
+    assert!(prompt_has_tool(&prompt, "staged_tool"));
+    assert!(prompt.system_prompt.contains("STAGED TOOL PROMPT"));
+    assert!(prompt.system_prompt.contains("STAGED EXTENSION PROMPT"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn queued_tool_call_waits_for_staged_provider_until_ready() {
+    // Regression: a tool call can sit behind another in-flight call while a
+    // replacement/late extension is still handshaking. The staged provider must
+    // not receive the invoke until Ready, but the queued call should run once
+    // the staged registration is activated and still matches the request.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let blocking_sink = connect_test_tool(&mut h, "conn-blocking-tool");
+    h.registry
+        .register("conn-blocking-tool", staged_tool_spec("blocking_tool"));
+    let staged_sink = connect_handshaking_tool(&mut h, "conn-staged-tool");
+    h.handle_extension_event(
+        "conn-staged-tool",
+        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: staged_tool_spec("staged_tool"),
+            prompt_fragment: None,
+        })),
+    )
+    .expect("stage tool");
+
+    let cid = h.default_conversation_id.clone();
+    seed_agent_thinking(&mut h, &cid, "sp-staged-tools");
+    h.prompt_conversations
+        .insert("sp-staged-tools".into(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "run two tools".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: "sp-staged-tools".into(),
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-blocking".into(),
+                name: ToolName::new("blocking_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-staged".into(),
+                name: ToolName::new("staged_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+        ],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("tool response");
+
+    assert!(sink_has_tool_invoke(&blocking_sink, "call-blocking"));
+    assert!(!sink_has_tool_invoke(&staged_sink, "call-staged"));
+    assert_eq!(h.tool_turn.pending_len(), 1);
+
+    h.handle_extension_event(
+        "conn-blocking-tool",
+        Frame::Event(test_tool_result("call-blocking", "blocking_tool")),
+    )
+    .expect("blocking result");
+
+    assert!(!sink_has_tool_invoke(&staged_sink, "call-staged"));
+    assert_eq!(h.tool_turn.pending_len(), 1);
+    assert_eq!(h.tool_turn.in_flight_len(), 0);
+
+    h.handle_extension_message(
+        "conn-staged-tool",
+        Message::Ready(tau_proto::Ready {
+            message: Some("ready".to_owned()),
+        }),
+    )
+    .expect("ready");
+
+    assert!(sink_has_tool_invoke(&staged_sink, "call-staged"));
+    assert_eq!(
+        h.pending_tool_providers
+            .get("call-staged")
+            .map(|provider| provider.as_str()),
+        Some("conn-staged-tool")
+    );
+
+    h.handle_extension_event(
+        "conn-staged-tool",
+        Frame::Event(test_tool_result("call-staged", "staged_tool")),
+    )
+    .expect("staged result");
+    assert!(!h.pending_tool_providers.contains_key("call-staged"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn extension_that_never_sends_ready_never_exposes_staged_tool() {
+    // A handshaking extension may never finish. Its staged tools must remain
+    // unavailable and prompt dispatch stays queued behind the existing Ready
+    // gate instead of leaking half-initialized capabilities.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let conn_id = "conn-never-ready";
+    let _sink = connect_handshaking_tool(&mut h, conn_id);
+
+    h.handle_extension_event(
+        conn_id,
+        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: staged_tool_spec("never_ready_tool"),
+            prompt_fragment: None,
+        })),
+    )
+    .expect("stage tool");
+
+    let submission = h
+        .submit_user_prompt("s1".into(), "try never ready tool".to_owned())
+        .expect("submit");
+    assert!(matches!(submission, PromptSubmission::Queued));
+    assert!(h.registry.providers_for("never_ready_tool").is_empty());
+    assert!(h.prompt_snapshots.is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn tool_unregister_removes_tool_from_future_prompt() {
     // Regression: an explicit ToolUnregister must update the live registry used

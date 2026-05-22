@@ -10,9 +10,10 @@
 //! it once and lets each extension declare only what differs.
 //!
 //! For extensions, `Subscribe` is live-only today: it records selectors
-//! for future delivery and does not replay already logged events. Any
-//! future past-event replay support should be explicit opt-in, not
-//! inferred from selectors.
+//! for future delivery and does not replay already logged events. Some
+//! first-party extensions intentionally want only future events, but external
+//! extensions may need past events; any future replay support must be an
+//! explicit opt-in, not inferred from selectors.
 //!
 //! ```ignore
 //! tau_extension::Handshake::tool("tau-ext-websearch-exa")
@@ -74,7 +75,9 @@ impl Handshake {
     /// per item.
     ///
     /// Extension subscriptions are live-only in the current harness:
-    /// this does not request replay of past events.
+    /// this does not request replay of past events. That is a first-party
+    /// default, not a statement that external extensions never need replay;
+    /// any replay mode should be a separate opt-in.
     pub fn subscribe(mut self, names: impl IntoIterator<Item = EventName>) -> Self {
         self.selectors
             .extend(names.into_iter().map(EventSelector::Exact));

@@ -72,6 +72,13 @@ impl ToolTurnMachine {
             });
     }
 
+    /// Returns the next invocation the scheduler would dispatch, without
+    /// removing it or marking it in flight.
+    pub(crate) fn next_dispatchable(&self) -> Option<&PendingToolInvocation> {
+        let idx = self.next_dispatchable_index()?;
+        self.pending_tool_invocations.get(idx)
+    }
+
     /// Select the next dispatchable invocation and mark it in flight.
     pub(crate) fn pop_dispatchable(
         &mut self,
