@@ -361,7 +361,7 @@ impl Harness {
         let call_id: ToolCallId = call.id.clone();
         self.track_harness_owned_tool_request(cid, call, &visible_tool_name);
         let result = match parse_cancel_args(&call.arguments) {
-            Ok(target_call_id) => self.cancel_harness_delegate_tool_call(&target_call_id),
+            Ok(target_call_id) => self.cancel_tool_call(&target_call_id),
             Err(message) => Err(message),
         };
         match result {
@@ -502,6 +502,7 @@ impl Harness {
             call_id.clone(),
             PendingTool {
                 name: visible_tool_name.clone(),
+                internal_name: visible_tool_name.clone(),
                 tool_type: call.tool_type,
             },
         );
@@ -668,7 +669,7 @@ fn cancel_tool_spec() -> ToolSpec {
     ToolSpec {
         name: ToolName::new(CANCEL_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Cancel a running supported background tool call. Requires `tool_call_id`; currently only delegate tool calls can be canceled. Duplicate cancellation requests for the same tool call fail.".to_owned()),
+        description: Some("Cancel a running supported background tool call. Requires `tool_call_id`; currently delegate and shell tool calls can be canceled. Duplicate cancellation requests for the same tool call fail when tracked.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",

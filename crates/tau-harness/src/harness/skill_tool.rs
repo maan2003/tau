@@ -95,6 +95,7 @@ impl Harness {
             call_id.clone(),
             PendingTool {
                 name: tool_name.clone(),
+                internal_name: tool_name.clone(),
                 tool_type: call.tool_type,
             },
         );

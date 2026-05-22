@@ -401,6 +401,7 @@ pub(crate) struct AgentToolCall {
 #[derive(Clone, Debug)]
 pub(crate) struct PendingTool {
     pub(crate) name: ToolName,
+    pub(crate) internal_name: ToolName,
     pub(crate) tool_type: ToolType,
 }
 
@@ -3221,7 +3222,9 @@ impl Harness {
                 if !self.validate_tool_event_source(&cancelled.call_id, source_id) {
                     return Ok(());
                 }
-                if let Some(cid) = self.tool_conversations.get(&cancelled.call_id).cloned() {
+                if self.tool_turn.is_backgrounded(&cancelled.call_id) {
+                    self.handle_background_tool_cancelled(cancelled);
+                } else if let Some(cid) = self.tool_conversations.get(&cancelled.call_id).cloned() {
                     let call_id = cancelled.call_id.to_string();
                     if let Some(tool) = self.pending_tools.get(&cancelled.call_id) {
                         cancelled.tool_name = tool.name.clone();
@@ -3812,6 +3815,42 @@ impl Harness {
         }
     }
 
+    pub(crate) fn cancel_tool_call(&mut self, target_call_id: &ToolCallId) -> Result<(), String> {
+        if self.subagents.canceled_delegates.contains(target_call_id) {
+            return Err("Tool call already canceled".to_owned());
+        }
+        if self
+            .subagents
+            .pending_delegates
+            .values()
+            .any(|pending| &pending.call_id == target_call_id)
+        {
+            return self.cancel_harness_delegate_tool_call(target_call_id);
+        }
+
+        let Some(tool) = self.pending_tools.get(target_call_id).cloned() else {
+            return Err("Tool call is not a running cancellable tool call".to_owned());
+        };
+        let Some(provider_id) = self.pending_tool_providers.get(target_call_id).cloned() else {
+            return Err("Tool call is not a running cancellable tool call".to_owned());
+        };
+        if tool.internal_name.as_str() != "shell" && tool.internal_name.as_str() != "gpt_shell" {
+            return Err("Tool call is not a running cancellable tool call".to_owned());
+        }
+
+        self.bus
+            .send_to(
+                provider_id.as_str(),
+                Some(HARNESS_CONNECTION_ID),
+                Frame::Event(Event::ToolCancel(ToolCancel {
+                    call_id: target_call_id.clone(),
+                    tool_name: tool.internal_name,
+                })),
+            )
+            .map_err(|error| format!("failed to send cancellation: {error}"))?;
+        Ok(())
+    }
+
     pub(crate) fn cancel_harness_delegate_tool_call(
         &mut self,
         target_call_id: &ToolCallId,
@@ -4275,6 +4314,7 @@ impl Harness {
             request.call_id.clone(),
             PendingTool {
                 name: request.tool_name.clone(),
+                internal_name: request.tool_name.clone(),
                 tool_type: request.tool_type,
             },
         );
@@ -7388,6 +7428,7 @@ impl Harness {
                     call.id.clone(),
                     PendingTool {
                         name: call.name.clone(),
+                        internal_name: call.name.clone(),
                         tool_type: call.tool_type,
                     },
                 );
@@ -7697,6 +7738,14 @@ impl Harness {
             error,
             BackgroundCompletionPromptMode::QueueAndAdvance,
         );
+    }
+
+    fn handle_background_tool_cancelled(&mut self, cancelled: ToolCancelled) {
+        let call_id = cancelled.call_id.clone();
+        self.finish_tool_call_runtime_state(call_id.as_str());
+        self.record_wait_tool_cancelled(&std::collections::HashSet::from([call_id.clone()]));
+        self.drain_pending_tool_invocations_or_report();
+        self.clear_tool_call_tracking(call_id.as_str());
     }
 
     fn handle_background_tool_error_without_advancing(
@@ -8161,6 +8210,7 @@ impl Harness {
                 call_id.clone(),
                 PendingTool {
                     name: tool_name.clone(),
+                    internal_name: tool_name.clone(),
                     tool_type: call.tool_type,
                 },
             );
@@ -8230,6 +8280,7 @@ impl Harness {
             call_id.clone(),
             PendingTool {
                 name: visible_tool_name.clone(),
+                internal_name: internal_tool_name.clone(),
                 tool_type: call.tool_type,
             },
         );

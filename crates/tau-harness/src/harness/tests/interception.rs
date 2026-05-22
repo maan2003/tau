@@ -650,6 +650,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
         call_id.clone(),
         PendingTool {
             name: tool_name.clone(),
+            internal_name: tool_name.clone(),
             tool_type: tau_proto::ToolType::Function,
         },
     );

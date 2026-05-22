@@ -952,6 +952,117 @@ fn background_error_drains_update_queued_behind_exclusive() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression: a cancelled backgrounded exclusive call frees its scheduler lane
+/// without publishing a terminal background result. The cancellation path must
+/// still drain queued calls so incompatible work behind it is not stuck until
+/// an unrelated event arrives.
+#[test]
+fn background_cancel_drains_update_queued_behind_exclusive() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let tool_events = connect_test_tool(&mut h, "conn-bg-cancel-drain");
+    h.registry.register(
+        "conn-bg-cancel-drain",
+        scheduled_test_tool_spec(
+            "bg_exclusive_cancel",
+            ToolExecutionMode::Exclusive,
+            tau_proto::BackgroundSupport::Instant,
+        ),
+    );
+    h.registry.register(
+        "conn-bg-cancel-drain",
+        scheduled_test_tool_spec(
+            "queued_update_after_cancel",
+            ToolExecutionMode::Update,
+            tau_proto::BackgroundSupport::Never,
+        ),
+    );
+
+    let cid = h.default_conversation_id.clone();
+    let spid: SessionPromptId = "sp-bg-cancel-drain".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_conversations.insert(spid.clone(), cid);
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: spid,
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "bg-exclusive-cancel-running".into(),
+                name: ToolName::new("bg_exclusive_cancel"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "queued-update-after-cancel".into(),
+                name: ToolName::new("queued_update_after_cancel"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+        ],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("tool response");
+
+    assert_eq!(
+        tool_invoke_call_ids(&tool_events),
+        vec!["bg-exclusive-cancel-running".to_owned()]
+    );
+    assert_eq!(
+        background_placeholder_count(&h, "bg-exclusive-cancel-running"),
+        1
+    );
+    assert!(
+        h.tool_turn
+            .is_backgrounded(&"bg-exclusive-cancel-running".into())
+    );
+    assert_eq!(h.tool_turn.pending_len(), 1);
+
+    h.handle_extension_event_inner(
+        "conn-bg-cancel-drain",
+        Event::ToolCancelled(tau_proto::ToolCancelled {
+            call_id: "bg-exclusive-cancel-running".into(),
+            tool_name: ToolName::new("bg_exclusive_cancel"),
+            tool_type: tau_proto::ToolType::Function,
+        }),
+    )
+    .expect("background cancellation accepted");
+
+    assert_eq!(
+        tool_invoke_call_ids(&tool_events),
+        vec![
+            "bg-exclusive-cancel-running".to_owned(),
+            "queued-update-after-cancel".to_owned(),
+        ]
+    );
+    assert!(
+        !h.tool_turn
+            .is_backgrounded(&"bg-exclusive-cancel-running".into())
+    );
+    assert_eq!(h.tool_turn.pending_len(), 0);
+    assert!(
+        !h.pending_tool_providers
+            .contains_key("bg-exclusive-cancel-running")
+    );
+    assert!(
+        h.pending_tool_providers
+            .contains_key("queued-update-after-cancel")
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolBackgroundResult(result)
+            if result.call_id.as_str() == "bg-exclusive-cancel-running"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Regression: disconnect cleanup can synthesize errors for more than one
 /// backgrounded call from the same dead provider. The queued scheduler must not
 /// drain between those errors, or a newly-unblocked call can start before the
@@ -1650,6 +1761,7 @@ fn provider_owner_validation_rejects_external_result_for_harness_owned_call() {
         call_id.clone(),
         PendingTool {
             name: ToolName::new("delegate"),
+            internal_name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
         },
     );
@@ -1788,6 +1900,7 @@ fn cancel_clears_active_wait_state() {
         target_call_id.clone(),
         PendingTool {
             name: ToolName::new("slow"),
+            internal_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
         },
     );
@@ -7597,6 +7710,7 @@ fn wait_resolves_on_synthetic_tool_error() {
         target_call_id.clone(),
         PendingTool {
             name: ToolName::new("missing"),
+            internal_name: ToolName::new("missing"),
             tool_type: tau_proto::ToolType::Function,
         },
     );
@@ -9920,6 +10034,7 @@ fn cancel_tool_cancels_delegate_side_conversation() {
         delegate_call_id.clone(),
         PendingTool {
             name: ToolName::new("delegate"),
+            internal_name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
         },
     );
@@ -9967,6 +10082,7 @@ fn cancel_tool_cancels_delegate_side_conversation() {
         "nested-delegate-call".into(),
         PendingTool {
             name: ToolName::new("delegate"),
+            internal_name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
         },
     );
@@ -10128,6 +10244,92 @@ fn cancel_tool_rejects_unknown_tool_call_id() {
         Event::ToolError(error)
             if error.call_id.as_str() == "cancel-call"
                 && error.message.contains("not a running cancellable")
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A backgrounded shell cancellation arrives after the foreground tool round
+/// was closed by the synthetic background placeholder. It must update runtime
+/// and wait state without publishing a second terminal tool result into that
+/// round.
+#[test]
+fn backgrounded_shell_cancel_updates_wait_state_without_terminal_tool_result() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+    let call_id: ToolCallId = "background-shell-call".into();
+
+    h.tool_conversations.insert(call_id.clone(), cid.clone());
+    h.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("shell"),
+            internal_name: ToolName::new("shell"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.pending_tool_providers
+        .insert(call_id.clone(), "shell-provider".into());
+    h.tool_turn.record_in_flight_for_test(
+        cid.clone(),
+        call_id.clone(),
+        tau_proto::ToolExecutionMode::Shared,
+    );
+    h.tool_turn.mark_backgrounded(&call_id);
+    h.record_wait_tool_request(&call_id);
+
+    h.handle_extension_event_inner(
+        "shell-provider",
+        Event::ToolCancelled(tau_proto::ToolCancelled {
+            call_id: call_id.clone(),
+            tool_name: ToolName::new("shell"),
+            tool_type: tau_proto::ToolType::Function,
+        }),
+    )
+    .expect("cancel accepted");
+
+    assert!(!h.tool_turn.is_backgrounded(&call_id));
+    assert!(!h.tool_conversations.contains_key(&call_id));
+    assert!(!event_log_contains(&h, "shell-provider", |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled) if cancelled.call_id == call_id
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// `gpt_shell` is exposed to the model as `shell_command`; cancellation must
+/// check the internal routed tool name so the visible alias remains
+/// cancellable.
+#[test]
+fn cancel_tool_accepts_gpt_shell_visible_shell_command() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let provider_frames =
+        connect_test_client(&mut h, "gpt-shell-provider", tau_proto::ClientKind::Tool);
+    let call_id: ToolCallId = "gpt-shell-call".into();
+
+    h.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("shell_command"),
+            internal_name: ToolName::new("gpt_shell"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.pending_tool_providers
+        .insert(call_id.clone(), "gpt-shell-provider".into());
+
+    h.cancel_tool_call(&call_id).expect("cancel sent");
+
+    let frames = provider_frames.lock().expect("frames");
+    assert!(frames.iter().any(|routed| matches!(
+        &routed.frame,
+        Frame::Event(Event::ToolCancel(cancel))
+            if cancel.call_id == call_id && cancel.tool_name.as_str() == "gpt_shell"
     )));
 
     h.shutdown().expect("shutdown");

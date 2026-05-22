@@ -2,10 +2,11 @@ use std::io::{BufReader, BufWriter};
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use tau_proto::{
-    CborValue, EventName, Frame, FrameReader, FrameWriter, Message, ToolDisplayPayload,
+    CborValue, EventName, Frame, FrameReader, FrameWriter, Message, ToolCancel, ToolDisplayPayload,
     ToolDisplayStatus, ToolInvoke,
 };
 use tempfile::TempDir;
@@ -204,6 +205,59 @@ fn startup_registers_gpt_shell_with_shell_command_visible_name() {
         }
     }
     assert!(found, "expected gpt_shell tool registration");
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn shell_tool_cancel_stops_running_command_quickly() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    let call_id = tau_proto::ToolCallId::new("cancel-shell-call");
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: call_id.clone(),
+            tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("command".to_owned()),
+                CborValue::Text("sleep 30".to_owned()),
+            )]),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("invoke shell");
+    writer.flush().expect("flush invoke");
+
+    let started = Instant::now();
+    loop {
+        assert!(started.elapsed() < Duration::from_secs(2));
+        match reader.read_event().expect("read") {
+            Some(Event::ToolProgress(progress)) if progress.call_id == call_id => break,
+            Some(_) => continue,
+            None => panic!("extension closed before shell started"),
+        }
+    }
+
+    writer
+        .write_event(&Event::ToolCancel(ToolCancel {
+            call_id: call_id.clone(),
+            tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
+        }))
+        .expect("cancel shell");
+    writer.flush().expect("flush cancel");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        assert!(Instant::now() < deadline, "shell cancellation timed out");
+        match reader.read_event().expect("read") {
+            Some(Event::ToolCancelled(cancelled)) if cancelled.call_id == call_id => break,
+            Some(_) => continue,
+            None => panic!("extension closed before cancellation"),
+        }
+    }
 
     writer
         .write_frame(&disconnect_frame(None))

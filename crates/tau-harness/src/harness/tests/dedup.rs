@@ -33,6 +33,7 @@ fn run_tool_result(
         call_id_typed.clone(),
         PendingTool {
             name: name.clone(),
+            internal_name: name.clone(),
             tool_type: tau_proto::ToolType::Function,
         },
     );
@@ -83,6 +84,7 @@ fn run_tool_error(
         call_id_typed.clone(),
         PendingTool {
             name: name.clone(),
+            internal_name: name.clone(),
             tool_type: tau_proto::ToolType::Function,
         },
     );

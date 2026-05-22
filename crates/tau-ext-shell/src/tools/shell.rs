@@ -20,10 +20,26 @@ pub(crate) const SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
 /// result fields such as `status`, `timed_out`, `signal`, and
 /// `termination_reason`; true invocation/config/start errors remain
 /// `ToolError`.
+pub(crate) enum CommandOutcome {
+    Finished(ToolOutput),
+    Cancelled,
+}
+
 pub(crate) fn run_command(
     arguments: &CborValue,
     shell_config: &ShellConfig,
 ) -> Result<ToolOutput, ToolFailure> {
+    match run_command_cancellable(arguments, shell_config, None)? {
+        CommandOutcome::Finished(output) => Ok(output),
+        CommandOutcome::Cancelled => Err(ToolFailure::from("shell command cancelled".to_owned())),
+    }
+}
+
+pub(crate) fn run_command_cancellable(
+    arguments: &CborValue,
+    shell_config: &ShellConfig,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+) -> Result<CommandOutcome, ToolFailure> {
     let command = argument_text(arguments, "command").map_err(ToolFailure::from)?;
     let cwd = optional_argument_text(arguments, "cwd");
     let display_args = command_display_args(&command);
@@ -56,7 +72,7 @@ pub(crate) fn run_command(
         })?;
 
     let started = std::time::Instant::now();
-    let wait = wait_with_timeout(child, timeout);
+    let wait = wait_with_timeout(child, timeout, cancel_rx);
     let elapsed = started.elapsed();
     let duration_seconds =
         if std::time::Duration::from_secs(SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS) < elapsed {
@@ -68,6 +84,10 @@ pub(crate) fn run_command(
     let status_code = wait.status_code;
     let signal = wait.signal;
     let success = wait.success;
+
+    if wait.cancelled {
+        return Ok(CommandOutcome::Cancelled);
+    }
 
     let output_trunc = wait.output.truncate();
     let combined = output_trunc.content.clone();
@@ -111,7 +131,7 @@ pub(crate) fn run_command(
     };
     display.payload = display_payload;
     display.stats = text_stats(&combined);
-    Ok(ToolOutput { result, display })
+    Ok(CommandOutcome::Finished(ToolOutput { result, display }))
 }
 
 fn parse_timeout_secs(arguments: &CborValue) -> Result<u64, String> {
@@ -298,9 +318,15 @@ pub(crate) fn dispatch_user_shell_command(
 /// returns after foreground exit or timeout with only a brief nonblocking
 /// drain.
 #[cfg(unix)]
-fn wait_with_timeout(mut child: std::process::Child, timeout: std::time::Duration) -> WaitResult {
+fn wait_with_timeout(
+    mut child: std::process::Child,
+    timeout: std::time::Duration,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+) -> WaitResult {
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::TryRecvError;
 
     const READ_CHUNK_BYTES: usize = 8192;
@@ -417,6 +443,18 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: std::time::Duratio
     if let Some(wake_read) = wake_read.as_ref() {
         set_nonblocking(wake_read.as_raw_fd());
     }
+    let cancel_wake_write = wake_write.as_ref().and_then(|wake_write| {
+        #[allow(unsafe_code)]
+        let fd = unsafe { libc::dup(wake_write.as_raw_fd()) };
+        if 0 <= fd {
+            #[allow(unsafe_code)]
+            unsafe {
+                Some(OwnedFd::from_raw_fd(fd))
+            }
+        } else {
+            None
+        }
+    });
     let waiter_wake_read = wake_read.as_ref().and_then(|wake_read| {
         #[allow(unsafe_code)]
         let fd = unsafe { libc::dup(wake_read.as_raw_fd()) };
@@ -429,6 +467,27 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: std::time::Duratio
             None
         }
     });
+
+    let cancelled_by_request = Arc::new(AtomicBool::new(false));
+    if let Some(cancel_rx) = cancel_rx {
+        let cancelled_by_request = Arc::clone(&cancelled_by_request);
+        std::thread::spawn(move || {
+            if cancel_rx.recv().is_ok() {
+                cancelled_by_request.store(true, Ordering::SeqCst);
+                if let Some(cancel_wake_write) = cancel_wake_write {
+                    let byte = [1u8];
+                    #[allow(unsafe_code)]
+                    unsafe {
+                        let _ = libc::write(
+                            cancel_wake_write.as_raw_fd(),
+                            byte.as_ptr().cast::<libc::c_void>(),
+                            byte.len(),
+                        );
+                    }
+                }
+            }
+        });
+    }
 
     let (status_tx, status_rx) = mpsc::channel::<Option<std::process::ExitStatus>>();
     let _waiter = std::thread::spawn(move || {
@@ -451,12 +510,18 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: std::time::Duratio
     let mut output = CapturedOutput::default();
     let mut status = None;
     let mut timed_out = false;
+    let mut cancelled = false;
     let deadline = std::time::Instant::now() + timeout;
 
     loop {
         read_available(&mut stdout_pipe, OutputStream::Stdout, &mut output);
         read_available(&mut stderr_pipe, OutputStream::Stderr, &mut output);
         if collect_status(&status_rx, &mut status) {
+            break;
+        }
+        if cancelled_by_request.load(Ordering::SeqCst) {
+            cancelled = true;
+            kill_process_group_by_pid(pid);
             break;
         }
 
@@ -550,7 +615,7 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: std::time::Duratio
     }
 
     output.finish();
-    wait_result_from_parts(status, timed_out, output)
+    wait_result_from_parts(status, timed_out, cancelled, output)
 }
 
 /// Wait for a child process with a timeout, preserving output even when
@@ -560,7 +625,11 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: std::time::Duratio
 /// isolation is Unix-only, so the hard timeout/read-loop guarantees are
 /// provided by the Unix implementation above.
 #[cfg(not(unix))]
-fn wait_with_timeout(mut child: std::process::Child, timeout: std::time::Duration) -> WaitResult {
+fn wait_with_timeout(
+    mut child: std::process::Child,
+    timeout: std::time::Duration,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+) -> WaitResult {
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
@@ -569,11 +638,18 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: std::time::Duratio
 
     let deadline = std::time::Instant::now() + timeout;
     let mut timed_out = false;
+    let mut cancelled = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {}
             Err(_) => break None,
+        }
+
+        if cancel_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
+            cancelled = true;
+            let _ = child.kill();
+            break child.wait().ok();
         }
 
         let now = std::time::Instant::now();
@@ -597,7 +673,7 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: std::time::Duratio
     for line in stderr_output.lines {
         output.push_line(line.stream, line.content);
     }
-    wait_result_from_parts(status, timed_out, output)
+    wait_result_from_parts(status, timed_out, cancelled, output)
 }
 
 #[cfg(unix)]
@@ -623,12 +699,16 @@ fn kill_process_group_by_pid(pid: u32) {
 fn wait_result_from_parts(
     status: Option<std::process::ExitStatus>,
     timed_out: bool,
+    cancelled: bool,
     output: CapturedOutput,
 ) -> WaitResult {
     let status_code = status.as_ref().and_then(|status| status.code());
     let signal = status.as_ref().and_then(exit_status_signal);
-    let success = !timed_out && status.as_ref().is_some_and(|status| status.success());
-    let termination_reason = if timed_out {
+    let success =
+        !timed_out && !cancelled && status.as_ref().is_some_and(|status| status.success());
+    let termination_reason = if cancelled {
+        "cancelled"
+    } else if timed_out {
         "timeout"
     } else if signal.is_some() {
         "signal"
@@ -646,6 +726,7 @@ fn wait_result_from_parts(
         output,
         had_invalid_utf8,
         timed_out,
+        cancelled,
         termination_reason,
     }
 }
@@ -657,6 +738,7 @@ struct WaitResult {
     output: CapturedOutput,
     had_invalid_utf8: bool,
     timed_out: bool,
+    cancelled: bool,
     termination_reason: &'static str,
 }
 

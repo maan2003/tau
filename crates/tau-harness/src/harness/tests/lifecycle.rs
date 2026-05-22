@@ -1226,6 +1226,7 @@ fn disconnected_tool_completes_pending_call() {
         call_id.clone(),
         PendingTool {
             name: tool_name.clone(),
+            internal_name: tool_name.clone(),
             tool_type: tau_proto::ToolType::Function,
         },
     );

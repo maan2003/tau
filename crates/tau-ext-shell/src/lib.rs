@@ -6,14 +6,16 @@
 //! The `echo` tool is available under `cfg(test)` or the
 //! `echo-agent` cargo feature for harness-side echo-agent tests.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 
 use tau_proto::{
     Ack, ConfigError, Event, ExtPromptFragmentPublish, ExtSessionContextPublish, Frame,
     FrameReader, FrameWriter, LogEventId, Message, PromptContent, PromptFragment, PromptPriority,
-    SessionContextKey, SessionContextValue, SessionStarted, ToolExecutionMode, ToolSpec,
+    SessionContextKey, SessionContextValue, SessionStarted, ToolCancelled, ToolExecutionMode,
+    ToolResult, ToolResultKind, ToolSpec,
 };
 
 mod agents;
@@ -437,6 +439,7 @@ where
     // would duplicate context publication.
     let mut handshake = tau_extension::Handshake::tool("tau-ext-shell").subscribe([
         tau_proto::EventName::TOOL_INVOKE,
+        tau_proto::EventName::TOOL_CANCEL,
         tau_proto::EventName::SESSION_STARTED,
         tau_proto::EventName::UI_SHELL_COMMAND,
     ]);
@@ -454,6 +457,9 @@ where
     // drains them onto the wire.
     let (tx, rx) = mpsc::channel::<Frame>();
     let sem = Arc::new(Semaphore::new(16));
+    let running_shells = Arc::new(Mutex::new(
+        HashMap::<tau_proto::ToolCallId, mpsc::Sender<()>>::new(),
+    ));
 
     // Writer thread: drains response frames and writes them to the wire.
     let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
@@ -499,13 +505,24 @@ where
                 let permit = sem.acquire();
                 let tx = tx.clone();
                 let shell_config = config.shell.clone();
+                let running_shells = Arc::clone(&running_shells);
                 std::thread::spawn(move || {
                     let _permit = permit;
-                    dispatch_tool_invoke(invoke, shell_config, &tx);
+                    dispatch_tool_invoke(invoke, shell_config, &tx, &running_shells);
                 });
             }
             Frame::Event(Event::SessionStarted(started)) => {
                 dispatch_session_started(started, &tx);
+            }
+            Frame::Event(Event::ToolCancel(cancel)) => {
+                if let Some(cancel_tx) = running_shells
+                    .lock()
+                    .expect("running shell registry lock poisoned")
+                    .get(&cancel.call_id)
+                    .cloned()
+                {
+                    let _ = cancel_tx.send(());
+                }
             }
             Frame::Event(Event::UiShellCommand(cmd)) => {
                 // User-initiated `!`/`!!` — run on a worker thread
@@ -540,11 +557,80 @@ fn dispatch_tool_invoke(
     invoke: tau_proto::ToolInvoke,
     shell_config: ShellConfig,
     tx: &mpsc::Sender<Frame>,
+    running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
 ) {
+    if invoke.tool_name == SHELL_TOOL_NAME || invoke.tool_name == GPT_SHELL_TOOL_NAME {
+        dispatch_cancellable_shell_tool(invoke, shell_config, tx, running_shells);
+        return;
+    }
+
     let events = execute_tool(invoke, &shell_config);
     for event in events {
         let _ = tx.send(Frame::Event(event));
     }
+}
+
+fn dispatch_cancellable_shell_tool(
+    invoke: tau_proto::ToolInvoke,
+    shell_config: ShellConfig,
+    tx: &mpsc::Sender<Frame>,
+    running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+) {
+    let (cancel_tx, cancel_rx) = mpsc::channel();
+    running_shells
+        .lock()
+        .expect("running shell registry lock poisoned")
+        .insert(invoke.call_id.clone(), cancel_tx);
+
+    let _ = tx.send(Frame::Event(Event::ToolProgress(tau_proto::ToolProgress {
+        call_id: invoke.call_id.clone(),
+        tool_name: invoke.tool_name.clone(),
+        message: Some("running shell command".to_owned()),
+        progress: None,
+    })));
+
+    let event = match crate::tools::shell::run_command_cancellable(
+        &invoke.arguments,
+        &shell_config,
+        Some(cancel_rx),
+    ) {
+        Ok(crate::tools::shell::CommandOutcome::Finished(crate::display::ToolOutput {
+            result,
+            display,
+        })) => Event::ToolResult(ToolResult {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
+            tool_type: tau_proto::ToolType::Function,
+            result,
+            kind: ToolResultKind::Final,
+            display: Some(display),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        Ok(crate::tools::shell::CommandOutcome::Cancelled) => Event::ToolCancelled(ToolCancelled {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
+            tool_type: tau_proto::ToolType::Function,
+        }),
+        Err(crate::display::ToolFailure {
+            message,
+            details,
+            display,
+        }) => Event::ToolError(tau_proto::ToolError {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
+            tool_type: tau_proto::ToolType::Function,
+            message,
+            details: details.map(|details| *details),
+            display: Some(*display),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    };
+
+    running_shells
+        .lock()
+        .expect("running shell registry lock poisoned")
+        .remove(&invoke.call_id);
+    let _ = tx.send(Frame::Event(event));
 }
 
 fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<Frame>) {
