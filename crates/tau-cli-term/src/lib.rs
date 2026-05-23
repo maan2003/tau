@@ -49,10 +49,10 @@ pub enum Event {
     Escape,
     /// A binding requested Fast mode toggle without touching the prompt draft.
     FastToggle,
-    /// A binding requested cycling to the next agent role.
-    RoleCycle,
     /// A binding requested cycling within the current agent role group.
-    RoleCycleAlternate,
+    CycleRole,
+    /// A binding requested cycling to the next agent role group.
+    CycleRoleGroup,
 }
 
 /// Higher-level terminal prompt with completion support.
@@ -347,11 +347,11 @@ impl HighTerm {
             Ok(Some(PromptShellResult::FastToggle)) => {
                 return PromptActionOutcome::Return(Event::FastToggle);
             }
-            Ok(Some(PromptShellResult::RoleCycle)) => {
-                return PromptActionOutcome::Return(Event::RoleCycle);
+            Ok(Some(PromptShellResult::CycleRole)) => {
+                return PromptActionOutcome::Return(Event::CycleRole);
             }
-            Ok(Some(PromptShellResult::RoleCycleAlternate)) => {
-                return PromptActionOutcome::Return(Event::RoleCycleAlternate);
+            Ok(Some(PromptShellResult::CycleRoleGroup)) => {
+                return PromptActionOutcome::Return(Event::CycleRoleGroup);
             }
             Ok(Some(PromptShellResult::History(delta))) => {
                 self.term.trigger_history_step(delta);
@@ -432,8 +432,8 @@ enum PromptShellAction {
     Edit(PromptShellCommand),
     HistorySearch(PromptShellCommand),
     FastToggle,
-    RoleCycle,
-    RoleCycleAlternate,
+    CycleRole,
+    CycleRoleGroup,
     PromptNext,
     PromptPrevious,
     PromptUndo,
@@ -454,8 +454,8 @@ enum PromptShellResult {
     Replace(String),
     ReplacePreservingUndo(String),
     FastToggle,
-    RoleCycle,
-    RoleCycleAlternate,
+    CycleRole,
+    CycleRoleGroup,
     History(isize),
     Undo,
     Redo,
@@ -474,8 +474,8 @@ impl PromptShellAction {
     fn parse(action: &str) -> Option<Self> {
         match action {
             "fast-toggle" => return Some(Self::FastToggle),
-            "role-cycle" => return Some(Self::RoleCycle),
-            "role-cycle-alternate" => return Some(Self::RoleCycleAlternate),
+            "cycle-role" => return Some(Self::CycleRole),
+            "cycle-role-group" => return Some(Self::CycleRoleGroup),
             "prompt-next" => return Some(Self::PromptNext),
             "prompt-previous" => return Some(Self::PromptPrevious),
             "prompt-undo" => return Some(Self::PromptUndo),
@@ -515,9 +515,9 @@ fn run_prompt_shell_action(
         PromptShellAction::PromptUndo => return Ok(Some(PromptShellResult::Undo)),
         PromptShellAction::PromptRedo => return Ok(Some(PromptShellResult::Redo)),
         PromptShellAction::FastToggle => return Ok(Some(PromptShellResult::FastToggle)),
-        PromptShellAction::RoleCycle => return Ok(Some(PromptShellResult::RoleCycle)),
-        PromptShellAction::RoleCycleAlternate => {
-            return Ok(Some(PromptShellResult::RoleCycleAlternate));
+        PromptShellAction::CycleRole => return Ok(Some(PromptShellResult::CycleRole)),
+        PromptShellAction::CycleRoleGroup => {
+            return Ok(Some(PromptShellResult::CycleRoleGroup));
         }
         PromptShellAction::SubmitPrompt => {
             return Ok(Some(PromptShellResult::RawEvent(
@@ -544,8 +544,8 @@ fn run_prompt_shell_action(
         PromptShellAction::Edit(_) => append_prompt_trailer(&current, &editor_context),
         PromptShellAction::Insert(_) | PromptShellAction::HistorySearch(_) => current.clone(),
         PromptShellAction::FastToggle
-        | PromptShellAction::RoleCycle
-        | PromptShellAction::RoleCycleAlternate
+        | PromptShellAction::CycleRole
+        | PromptShellAction::CycleRoleGroup
         | PromptShellAction::PromptNext
         | PromptShellAction::PromptPrevious
         | PromptShellAction::PromptUndo
@@ -669,8 +669,8 @@ fn run_prompt_shell_action(
             Ok(Some(PromptShellResult::ReplacePreservingUndo(text)))
         }
         PromptShellAction::FastToggle
-        | PromptShellAction::RoleCycle
-        | PromptShellAction::RoleCycleAlternate
+        | PromptShellAction::CycleRole
+        | PromptShellAction::CycleRoleGroup
         | PromptShellAction::PromptNext
         | PromptShellAction::PromptPrevious
         | PromptShellAction::PromptUndo

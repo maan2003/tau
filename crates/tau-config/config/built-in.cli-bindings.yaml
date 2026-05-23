@@ -13,9 +13,9 @@ C-f:
     rg --files --hidden --glob '!.git' | fzf --height=100%
   trim: true
 Tab:
-  action: role-cycle
+  action: cycle-role
 BackTab:
-  action: role-cycle-alternate
+  action: cycle-role-group
 C-r:
   action: prompt-history-search
   command: >-

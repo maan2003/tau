@@ -93,7 +93,7 @@ fn cycle_role_in_groups(
     print_local: &impl Fn(&str),
 ) {
     if groups.is_empty() {
-        print_local("role-cycle: no agent roles are available yet");
+        print_local("cycle-role: no agent roles are available yet");
         return;
     }
     let current = current_role_state.lock().ok().and_then(|role| role.clone());
@@ -103,7 +103,7 @@ fn cycle_role_in_groups(
         .unwrap_or_default();
     remember_group_role(&mut memory, groups, current.as_deref());
     let Some(next) = next_role_in_groups(current.as_deref(), groups, alternate, &memory) else {
-        print_local("role-cycle: no agent roles are available yet");
+        print_local("cycle-role: no agent roles are available yet");
         return;
     };
     remember_group_role(&mut memory, groups, Some(&next));
@@ -172,7 +172,7 @@ fn cycle_role(
         Err(_) => Vec::new(),
     };
     if roles.is_empty() {
-        print_local("role-cycle: no agent roles are available yet");
+        print_local("cycle-role: no agent roles are available yet");
         return;
     }
     let current = current_role_state.lock().ok().and_then(|role| role.clone());
@@ -875,8 +875,8 @@ impl<'a> TerminalInputSession<'a> {
             }
             TermEvent::BufferChanged => self.update_draft(),
             TermEvent::FastToggle => self.toggle_fast_service_tier(),
-            TermEvent::RoleCycle => self.cycle_role(),
-            TermEvent::RoleCycleAlternate | TermEvent::BackTab => self.cycle_role_alternate(),
+            TermEvent::CycleRole => self.cycle_role_inner(),
+            TermEvent::CycleRoleGroup | TermEvent::BackTab => self.cycle_role_group(),
             TermEvent::Escape => self.recall_queued_prompt(),
             TermEvent::Line(_) | TermEvent::Eof | TermEvent::CancelPrompt => {}
         }
@@ -1250,7 +1250,7 @@ impl<'a> TerminalInputSession<'a> {
         );
     }
 
-    fn cycle_role(&self) {
+    fn cycle_role_group(&self) {
         let output = &self.output;
         let groups = self
             .ctx
@@ -1277,7 +1277,7 @@ impl<'a> TerminalInputSession<'a> {
         }
     }
 
-    fn cycle_role_alternate(&self) {
+    fn cycle_role_inner(&self) {
         let output = &self.output;
         let groups = self
             .ctx

@@ -79,12 +79,12 @@ fn parses_fast_toggle() {
 #[test]
 fn parses_role_cycle() {
     assert!(matches!(
-        PromptShellAction::parse("role-cycle"),
-        Some(PromptShellAction::RoleCycle)
+        PromptShellAction::parse("cycle-role"),
+        Some(PromptShellAction::CycleRole)
     ));
     assert!(matches!(
-        PromptShellAction::parse("role-cycle-alternate"),
-        Some(PromptShellAction::RoleCycleAlternate)
+        PromptShellAction::parse("cycle-role-group"),
+        Some(PromptShellAction::CycleRoleGroup)
     ));
 }
 

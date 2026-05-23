@@ -89,7 +89,7 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     );
     assert_eq!(
         s.bind.get("BackTab").expect("BackTab").action,
-        "role-cycle-alternate"
+        "cycle-role-group"
     );
 }
 

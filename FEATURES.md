@@ -367,10 +367,10 @@ Supported actions:
   cursor on success.
 - `fast-toggle`: toggle Fast mode directly. For example:
   `{ action: "fast-toggle" }`.
-- `role-cycle`: cycle to the first role in the next configured role group. For example:
-  `{ action: "role-cycle" }`.
-- `role-cycle-alternate`: cycle roles within the current role group. For example:
-  `{ action: "role-cycle-alternate" }`.
+- `cycle-role`: cycle roles within the current role group. For example:
+  `{ action: "cycle-role" }`.
+- `cycle-role-group`: cycle to the first role in the next configured role group. For example:
+  `{ action: "cycle-role-group" }`.
 - `prompt-history-search`: feed indexed prompt-history rows to a picker command,
   expose original prompts under `$TAU_PROMPT_HISTORY_DIR/<index>` for previews,
   then replace the prompt with the selected original prompt. The draft active
@@ -395,8 +395,8 @@ bind: {
     command: "rg --files --hidden --glob '!.git' | fzf --height=100%",
     trim: true,
   },
-  Tab: { action: "role-cycle" },
-  BackTab: { action: "role-cycle-alternate" },
+  Tab: { action: "cycle-role" },
+  BackTab: { action: "cycle-role-group" },
   "C-r": {
     action: "prompt-history-search",
     command: "fzf --height=100% --delimiter='\\t' --with-nth=2 --no-hscroll --preview 'cat \"$TAU_PROMPT_HISTORY_DIR\"/{1}' --preview-window 'right,60%,wrap' | cut -f1",
