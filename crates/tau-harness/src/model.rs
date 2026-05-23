@@ -1,6 +1,6 @@
 //! Provider-model helpers: loading harness-owned roles, computing valid
-//! effort/verbosity/thinking-summary levels from provider metadata, persisting
-//! the user's selection, and gauging context-window usage.
+//! effort/verbosity/thinking-summary levels from provider metadata, and gauging
+//! context-window usage.
 
 use std::collections::{HashMap, HashSet};
 
@@ -18,9 +18,9 @@ pub(crate) struct MissingDefaultRole {
 const BASE_AGENT_ROLE: &str = "engineer";
 
 pub(crate) struct LoadedRoles {
-    /// Effective roles after layering persisted runtime overrides onto config.
+    /// Effective roles loaded from config.
     pub roles: HashMap<String, AgentRole>,
-    /// Persisted runtime role overrides that still match configured roles.
+    /// Runtime role overrides for this process. Startup begins with none.
     pub role_overrides: HashMap<String, AgentRole>,
     /// Role selected for startup.
     pub selected_role: String,
@@ -30,24 +30,12 @@ pub(crate) struct LoadedRoles {
     pub missing_default_role: Option<MissingDefaultRole>,
 }
 
-/// Load configured roles, persisted role overrides, and the startup role.
+/// Load configured roles and the startup role.
 /// Runtime model availability is provider-owned and is therefore not loaded
 /// from config here.
-pub(crate) fn load_roles(
-    dirs: &tau_config::settings::TauDirs,
-    harness_settings: &HarnessSettings,
-) -> LoadedRoles {
-    let mut role_overrides = load_role_overrides(dirs);
-    let mut roles = harness_settings.roles.clone();
-    role_overrides.retain(|name, _| roles.contains_key(name));
-    for (name, role) in &role_overrides {
-        let mut effective_role = role.clone();
-        if let Some(configured_role) = roles.get(name) {
-            effective_role.description = configured_role.description.clone();
-            effective_role.prompt_fragments = configured_role.prompt_fragments.clone();
-        }
-        roles.insert(name.clone(), effective_role);
-    }
+pub(crate) fn load_roles(harness_settings: &HarnessSettings) -> LoadedRoles {
+    let roles = harness_settings.roles.clone();
+    let role_overrides = HashMap::new();
     let role_groups = role_groups_for_roles(&roles, &harness_settings.role_groups);
     let (selected_role, missing_default_role) =
         select_startup_role(harness_settings, &roles, &role_groups);
@@ -395,22 +383,7 @@ pub(crate) fn clamp_thinking_summary(
     allowed.first().copied().unwrap_or(T::Off)
 }
 
-fn load_state_json(
-    dirs: &tau_config::settings::TauDirs,
-) -> serde_json::Map<String, serde_json::Value> {
-    let Some(path) = dirs.state_dir.as_ref().map(|d| d.join("harness.json")) else {
-        return serde_json::Map::new();
-    };
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return serde_json::Map::new();
-    };
-    serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default()
-}
-
-/// Resolve provider fallback parameters for `model`, ignoring persisted state.
+/// Resolve provider fallback parameters for `model`.
 pub(crate) fn baseline_params_for_model(
     provider_models: &HashMap<ModelId, ProviderModelInfo>,
     model: &ModelId,
@@ -434,8 +407,7 @@ fn baseline_params_for_model_with_allowed(
     }
 }
 
-/// Resolve baseline parameters for a selected role/model pair, ignoring
-/// persisted role overrides.
+/// Resolve baseline parameters for a selected role/model pair from config.
 pub(crate) fn baseline_params_for_selection(
     harness_settings: &HarnessSettings,
     provider_models: &HashMap<ModelId, ProviderModelInfo>,
@@ -457,7 +429,7 @@ pub(crate) fn middle_effort(allowed: &[tau_proto::Effort]) -> tau_proto::Effort 
     allowed[allowed.len() / 2]
 }
 
-/// Default verbosity when no persisted preference exists.
+/// Default verbosity when no role preference exists.
 pub(crate) fn default_verbosity(allowed: &[tau_proto::Verbosity]) -> tau_proto::Verbosity {
     use tau_proto::Verbosity as V;
     if allowed.contains(&V::Low) {
@@ -466,7 +438,7 @@ pub(crate) fn default_verbosity(allowed: &[tau_proto::Verbosity]) -> tau_proto::
     allowed.first().copied().unwrap_or(V::Low)
 }
 
-/// Default thinking-summary mode when no persisted preference exists.
+/// Default thinking-summary mode when no role preference exists.
 pub(crate) fn default_thinking_summary(
     allowed: &[tau_proto::ThinkingSummary],
 ) -> tau_proto::ThinkingSummary {
@@ -478,56 +450,4 @@ pub(crate) fn default_thinking_summary(
         return T::Off;
     }
     allowed.first().copied().unwrap_or(T::Off)
-}
-
-fn role_without_config_metadata(mut role: AgentRole) -> AgentRole {
-    role.description = None;
-    role.prompt_fragments.clear();
-    role
-}
-
-fn load_role_overrides(dirs: &tau_config::settings::TauDirs) -> HashMap<String, AgentRole> {
-    let json = load_state_json(dirs);
-    let mut out = HashMap::new();
-    if let Some(map) = json
-        .get("role_overrides")
-        .and_then(serde_json::Value::as_object)
-    {
-        for (name, entry) in map {
-            if let Ok(role) = serde_json::from_value::<AgentRole>(entry.clone()) {
-                out.insert(name.clone(), role_without_config_metadata(role));
-            }
-        }
-    }
-    out
-}
-
-/// Persist per-role runtime overrides.
-pub(crate) fn save_role_overrides(
-    dirs: &tau_config::settings::TauDirs,
-    roles: &HashMap<String, AgentRole>,
-) {
-    let Some(dir) = dirs.state_dir.as_ref() else {
-        return;
-    };
-    let path = dir.join("harness.json");
-    let _ = std::fs::create_dir_all(dir);
-    let mut json = serde_json::Map::new();
-    let overrides = roles
-        .iter()
-        .map(|(name, role)| {
-            (
-                name.clone(),
-                serde_json::to_value(role_without_config_metadata(role.clone()))
-                    .unwrap_or(serde_json::Value::Null),
-            )
-        })
-        .collect::<serde_json::Map<String, serde_json::Value>>();
-    json.insert(
-        "role_overrides".to_owned(),
-        serde_json::Value::Object(overrides),
-    );
-    let _ = serde_json::to_string_pretty(&serde_json::Value::Object(json))
-        .ok()
-        .and_then(|s| std::fs::write(&path, s).ok());
 }

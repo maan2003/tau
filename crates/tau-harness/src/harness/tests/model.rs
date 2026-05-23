@@ -404,10 +404,10 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
     );
 }
 
-/// Persisted role overrides are the live selection, but the baseline shown for
-/// "reset to role" must come from `harness.yaml`, not from state.
+/// Stale harness state is ignored now that role edits are runtime-only.
+/// Startup should use `harness.yaml` as the only role source.
 #[test]
-fn role_baseline_ignores_persisted_role_overrides() {
+fn load_roles_ignores_stale_harness_state() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -433,92 +433,11 @@ fn role_baseline_ignores_persisted_role_overrides() {
         state_dir.join("harness.json"),
         r#"{
             "role_overrides": {
-                "engineer": { "model": "openai/gpt-4.1", "effort": "low", "verbosity": "high" }
+                "engineer": { "model": "openai/gpt-4.1-mini", "effort": "low", "verbosity": "high" }
             }
         }"#,
     )
-    .expect("write state");
-
-    let harness_settings =
-        tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
-    let LoadedRoles {
-        roles,
-        role_overrides: _role_overrides,
-        selected_role,
-        role_groups: _role_groups,
-        missing_default_role: _missing_default_role,
-    } = load_roles(&dirs, &harness_settings);
-    let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
-    let provider_models = provider_models([ProviderModelInfo {
-        id: model_id,
-        display_name: None,
-        default_affinity: 0,
-        context_window: 128_000,
-        efforts: vec![Effort::Off, Effort::Low, Effort::High],
-        verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
-        thinking_summaries: vec![ThinkingSummary::Off, ThinkingSummary::Auto],
-        supports_compaction: false,
-    }]);
-    let model =
-        select_model_for_role(&provider_models, &roles, &selected_role).expect("selected model");
-
-    let selected = selected_params_for_role(&provider_models, &roles, "engineer", &model);
-    assert_eq!(selected.effort, Effort::Low);
-    assert_eq!(selected.verbosity, Verbosity::High);
-
-    let baseline =
-        baseline_params_for_selection(&harness_settings, &provider_models, "engineer", &model);
-    assert_eq!(baseline.effort, Effort::High);
-    assert_eq!(baseline.verbosity, Verbosity::Medium);
-}
-
-/// Persisted runtime role overrides must never carry prompt text or role
-/// descriptions. Config-only metadata must come from `harness.yaml` so changes
-/// are reflected after a restart instead of being shadowed by stale state.
-#[test]
-fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
-    let td = TempDir::new().expect("tempdir");
-    let config_dir = td.path().join("config");
-    let state_dir = td.path().join("state");
-    std::fs::create_dir_all(&config_dir).expect("mkdir config");
-    std::fs::create_dir_all(&state_dir).expect("mkdir state");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(config_dir.clone()),
-        state_dir: Some(state_dir.clone()),
-    };
-
-    std::fs::write(
-        config_dir.join("harness.yaml"),
-        r#"{
-            promptFragments: [
-                { name: "global.prompt", priority: 50, text: "CURRENT GLOBAL PROMPT" },
-            ],
-            roleGroups: {
-                coding: {
-                    engineer: {
-                        description: "CURRENT CONFIG DESCRIPTION",
-                        model: "openai/gpt-4.1",
-                        promptFragments: [
-                            { name: "engineer.prompt", priority: 100, text: "CURRENT CONFIG PROMPT" },
-                            { name: "engineer.extra", priority: 200, text: "CURRENT CONFIG EXTRA" },
-                        ],
-                    },
-                },
-            },
-        }"#,
-    )
-    .expect("write harness config");
-    std::fs::write(
-        state_dir.join("harness.json"),
-        r#"{
-            "role_overrides": {
-                "engineer": {
-                    "description": "STALE STATE DESCRIPTION",
-                    "model": "openai/gpt-4.1-mini"                }
-            }
-        }"#,
-    )
-    .expect("write state");
+    .expect("write stale state");
 
     let harness_settings =
         tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
@@ -528,50 +447,16 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-    } = load_roles(&dirs, &harness_settings);
-    let role = roles.get("engineer").expect("engineer role");
+    } = load_roles(&harness_settings);
+    assert!(role_overrides.is_empty());
     assert_eq!(selected_role, "engineer");
+    let role = roles.get("engineer").expect("engineer role");
     assert_eq!(
         role.model.as_ref().map(ToString::to_string).as_deref(),
-        Some("openai/gpt-4.1-mini")
+        Some("openai/gpt-4.1")
     );
-    assert_eq!(
-        role.description.as_deref(),
-        Some("CURRENT CONFIG DESCRIPTION")
-    );
-    assert!(
-        role.prompt_fragments
-            .iter()
-            .any(|fragment| fragment.text.as_str() == "CURRENT GLOBAL PROMPT")
-    );
-    assert!(
-        role.prompt_fragments
-            .iter()
-            .any(|fragment| fragment.text.as_str() == "CURRENT CONFIG PROMPT")
-    );
-    assert!(
-        role.prompt_fragments
-            .iter()
-            .any(|fragment| fragment.text.as_str() == "CURRENT CONFIG EXTRA")
-    );
-    let runtime_override = role_overrides.get("engineer").expect("runtime override");
-    assert!(runtime_override.description.is_none());
-    assert!(runtime_override.prompt_fragments.is_empty());
-
-    save_role_overrides(&dirs, &roles);
-    let saved = std::fs::read_to_string(state_dir.join("harness.json")).expect("read state");
-    assert!(
-        !saved.contains("description"),
-        "saved state must strip description: {saved}"
-    );
-    assert!(
-        !saved.contains("prompt"),
-        "saved state must strip prompt fields: {saved}"
-    );
-    assert!(
-        !saved.contains("last_selected_role"),
-        "saved state must not persist the selected role: {saved}"
-    );
+    assert_eq!(role.effort, Some(Effort::High));
+    assert_eq!(role.verbosity, Some(Verbosity::Medium));
 }
 
 /// Roles without an explicit effort get the middle provider-published
@@ -670,7 +555,7 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-    } = load_roles(&dirs, &harness_settings);
+    } = load_roles(&harness_settings);
     assert!(!role_overrides.contains_key("default"));
     assert!(!roles.contains_key("default"));
     assert_eq!(selected_role, "engineer");
@@ -727,7 +612,7 @@ fn role_missing_fields_use_model_defaults() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
-    } = load_roles(&dirs, &harness_settings);
+    } = load_roles(&harness_settings);
     let available = ["local/aaa".into(), "local/engineer".into()];
     let available_provider_models = provider_models(
         available
@@ -1017,58 +902,23 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
     );
 }
 
-/// Persisted role overrides are restored as the runtime role definition, then
-/// clamped against provider-owned metadata for the resolved model.
+/// Runtime role updates become the active role definition, then clamp against
+/// provider-owned metadata for the resolved model.
 #[test]
-fn selected_params_restore_each_field_from_role_override() {
-    let td = TempDir::new().expect("tempdir");
-    let config_dir = td.path().join("config");
-    let state_dir = td.path().join("state");
-    std::fs::create_dir_all(&config_dir).expect("mkdir config");
-    std::fs::create_dir_all(&state_dir).expect("mkdir state");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(config_dir.clone()),
-        state_dir: Some(state_dir.clone()),
-    };
-
-    std::fs::write(
-        config_dir.join("harness.yaml"),
-        r#"{
-            roleGroups: {
-                coding: {
-                    engineer: { model: "openai/gpt-5" },
-                },
-            },
-        }"#,
-    )
-    .expect("write harness config");
-    std::fs::write(
-        state_dir.join("harness.json"),
-        r#"{
-            "role_overrides": {
-                "engineer": {
-                    "model": "openai/gpt-5",
-                    "effort": "high",
-                    "verbosity": "low",
-                    "thinkingSummary": "concise"
-                }
-            }
-        }"#,
-    )
-    .expect("write state");
-
-    let harness_settings =
-        tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
-    let LoadedRoles {
-        roles,
-        role_overrides: _role_overrides,
-        selected_role,
-        role_groups: _role_groups,
-        missing_default_role: _missing_default_role,
-    } = load_roles(&dirs, &harness_settings);
-    assert_eq!(selected_role, "engineer");
-
+fn selected_params_use_runtime_role_fields() {
     let model: ModelId = "openai/gpt-5".parse().expect("model id");
+    let roles = std::collections::HashMap::from([(
+        "engineer".to_owned(),
+        tau_config::settings::AgentRole {
+            model: Some(model.clone()),
+            effort: Some(Effort::High),
+            verbosity: Some(Verbosity::Low),
+            thinking_summary: Some(ThinkingSummary::Concise),
+            ..Default::default()
+        },
+    )]);
+    let selected_role = "engineer";
+
     let provider_models = provider_models([ProviderModelInfo {
         id: model.clone(),
         display_name: None,

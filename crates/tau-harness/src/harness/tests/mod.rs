@@ -39,9 +39,8 @@ use crate::discovery::DiscoveredAgentsFile;
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::model::{
-    baseline_params_for_selection, clamp_effort, efforts_for_model, load_roles, role_infos,
-    save_role_overrides, select_model_for_role, selected_params_for_role,
-    thinking_summaries_for_model, verbosities_for_model,
+    clamp_effort, efforts_for_model, load_roles, role_infos, select_model_for_role,
+    selected_params_for_role, thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::turn::{PromptSubmission, TurnState};
 

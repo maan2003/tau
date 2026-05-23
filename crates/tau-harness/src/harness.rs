@@ -58,7 +58,7 @@ use crate::internal_tools::InternalToolHandlers;
 use crate::model::{
     LoadedRoles, MissingDefaultRole, baseline_params_for_selection, clamp_effort,
     clamp_thinking_summary, clamp_verbosity, context_percent_used, context_window_for_model,
-    efforts_for_model, fallback_role, load_roles, model_for_role, role_infos, save_role_overrides,
+    efforts_for_model, fallback_role, load_roles, model_for_role, role_infos,
     select_model_for_role, selected_params_for_role, thinking_summaries_for_model,
     verbosities_for_model,
 };
@@ -915,7 +915,7 @@ pub struct Harness {
     pub(crate) available_roles: std::collections::HashMap<String, tau_config::settings::AgentRole>,
     /// Ordered role navigation groups for the currently available roles.
     pub(crate) available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
-    /// Persisted role overrides loaded from state and changed at runtime.
+    /// Role overrides changed at runtime for this process.
     pub(crate) role_overrides: std::collections::HashMap<String, tau_config::settings::AgentRole>,
     /// Currently selected role. The resolved model is derived from this role
     /// and provider model availability.
@@ -1340,7 +1340,7 @@ impl Harness {
             selected_role,
             role_groups: available_role_groups,
             missing_default_role,
-        } = load_roles(&dirs, &harness_settings);
+        } = load_roles(&harness_settings);
         let selected_model =
             select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
         crate::session_cleanup::spawn_session_cleanup(
@@ -1568,7 +1568,7 @@ impl Harness {
             selected_role,
             role_groups: available_role_groups,
             missing_default_role,
-        } = load_roles(&dirs, &harness_settings);
+        } = load_roles(&harness_settings);
         let selected_model =
             select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
         tracing::debug!(target: "tau_harness::startup", selected_model = ?selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "harness settings loaded");
@@ -3622,7 +3622,6 @@ impl Harness {
                 self.try_advance_queue();
             }
         }
-        save_role_overrides(&self.dirs, &self.role_overrides);
         self.publish_event(
             None,
             Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
