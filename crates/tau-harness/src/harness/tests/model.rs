@@ -715,6 +715,48 @@ fn borked_harness_yaml_emits_important_info() {
     );
 }
 
+/// Disabling every role is a configuration error: startup must fail clearly
+/// instead of selecting the built-in fallback role name even though it was
+/// filtered out.
+#[test]
+fn harness_startup_errors_when_no_roles_are_enabled() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"{
+            roleGroups: {
+                engineer: {
+                    "senior-engineer": { enabled: false },
+                    "junior-engineer": { enabled: false },
+                    "staff-engineer": { enabled: false },
+                },
+                manager: {
+                    manager: { enabled: false },
+                },
+            },
+        }"#,
+    )
+    .expect("write harness config");
+
+    let error = match echo_harness_with_dirs("s1", state_dir, dirs) {
+        Ok(_) => panic!("startup should fail"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("no roles are enabled"),
+        "error should explain that every role was disabled, got: {error}"
+    );
+}
+
 /// A misspelled startup default must be visible instead of silently selecting a
 /// different role. The harness falls back to the first configured role so users
 /// still get a usable session.

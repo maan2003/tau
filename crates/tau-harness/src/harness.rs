@@ -1341,6 +1341,11 @@ impl Harness {
             role_groups: available_role_groups,
             missing_default_role,
         } = load_roles(&harness_settings);
+        if available_roles.is_empty() {
+            return Err(HarnessError::Participant(
+                "no roles are enabled; enable at least one role in harness.yaml or with --enable-role <role>".to_owned(),
+            ));
+        }
         let selected_model =
             select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
         crate::session_cleanup::spawn_session_cleanup(
@@ -1569,6 +1574,11 @@ impl Harness {
             role_groups: available_role_groups,
             missing_default_role,
         } = load_roles(&harness_settings);
+        if available_roles.is_empty() {
+            return Err(HarnessError::Participant(
+                "no roles are enabled; enable at least one role in harness.yaml or with --enable-role <role>".to_owned(),
+            ));
+        }
         let selected_model =
             select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
         tracing::debug!(target: "tau_harness::startup", selected_model = ?selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "harness settings loaded");

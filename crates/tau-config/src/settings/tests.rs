@@ -296,6 +296,24 @@ fn harness_settings_role_cli_overrides_later_disable_wins() {
 }
 
 #[test]
+fn harness_settings_role_cli_disable_all_leaves_no_effective_roles() {
+    // `--disable-roles-all` must not be undone by default-role fallback. The
+    // harness reports an explicit startup error for this empty effective role set.
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+
+    let s = load_harness_settings_with_role_overrides_in(
+        &dirs_with_config(dir),
+        &[RoleCliOverride::DisableAll],
+    )
+    .expect("load");
+
+    assert!(s.roles.is_empty());
+    assert!(s.role_groups.is_empty());
+    assert_eq!(s.default_role.as_deref(), Some("senior-engineer"));
+}
+
+#[test]
 fn cli_settings_drop_in_layers_on_top_of_base() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
