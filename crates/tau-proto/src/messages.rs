@@ -9,7 +9,7 @@
 //! peer.
 //!
 //! Wire form: `{"message": "hello", "payload": {...}}` — flat, lower
-//! snake_case names, distinct from `Event`'s `{"event": "tool.invoke",
+//! snake_case names, distinct from `Event`'s `{"event": "tool.started",
 //! ...}` shape so the [`crate::Frame`] envelope can disambiguate by
 //! discriminator.
 

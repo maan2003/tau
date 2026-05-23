@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 use std::thread;
 
-use tau_proto::ToolInvoke;
+use tau_proto::ToolStarted;
 
 use super::*;
 
@@ -206,7 +206,7 @@ fn forwards_query_and_num_results_to_exa_searcher_and_returns_text() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -253,7 +253,7 @@ fn defaults_num_results_when_omitted() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-2".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -280,7 +280,7 @@ fn missing_query_returns_tool_error() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-3".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(Vec::new()),
@@ -303,7 +303,7 @@ fn searcher_error_surfaces_as_tool_error() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-4".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -329,7 +329,7 @@ fn rejects_num_results_out_of_range() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-5".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -362,7 +362,7 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-6".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_SEARCH_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -403,7 +403,7 @@ fn forwards_parallel_fetch_to_web_fetch() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-7".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_FETCH_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -432,7 +432,7 @@ fn parallel_non_string_argument_keys_are_rejected_before_forwarding() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-8".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_SEARCH_TOOL_NAME),
             arguments: CborValue::Map(vec![(

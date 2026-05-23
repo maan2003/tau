@@ -174,7 +174,8 @@ struct SessionCompacted {
 ```
 
 Operational-only events such as `ToolRequest`, `SessionPromptQueued`, and
-progress events stay out of the durable transcript model.
+progress events stay out of the semantic transcript model. `ToolRequest`
+is durable routing intent, but still not assistant-output truth.
 
 The bus-level runtime `ToolResult` event may still carry extra operational
 fields such as `tool_name`, `result`, `display`, and `originator` for UI

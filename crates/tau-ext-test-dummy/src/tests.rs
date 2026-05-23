@@ -2,13 +2,13 @@ use std::io::Cursor;
 
 use tau_proto::{
     CborValue, Configure, Event, Frame, FrameReader, FrameWriter, InterceptRequest, Message,
-    ToolInvoke,
+    ToolStarted,
 };
 
 use super::*;
 
 fn invoke_restart() -> Frame {
-    Frame::Event(Event::ToolInvoke(ToolInvoke {
+    Frame::Event(Event::ToolStarted(ToolStarted {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new(RESTART_TEST_DUMMY_TOOL_NAME),
         arguments: tau_proto::CborValue::Map(Vec::new()),
@@ -62,6 +62,11 @@ fn restart_tool_can_return_error() {
         .expect("read")
         .expect("hello should exist");
     assert!(matches!(hello, Frame::Message(Message::Hello(_))));
+    let subscribe = reader
+        .read_frame()
+        .expect("read")
+        .expect("subscribe should exist");
+    assert!(matches!(subscribe, Frame::Message(Message::Subscribe(_))));
     let intercept = reader
         .read_frame()
         .expect("read")
@@ -104,11 +109,12 @@ fn restart_tool_can_exit_without_reply() {
     while let Some(frame) = reader.read_frame().expect("read") {
         frames.push(frame);
     }
-    assert_eq!(frames.len(), 4);
+    assert_eq!(frames.len(), 5);
     assert!(matches!(frames[0], Frame::Message(Message::Hello(_))));
-    assert!(matches!(frames[1], Frame::Message(Message::Intercept(_))));
-    assert!(matches!(frames[2], Frame::Event(Event::ToolRegister(_))));
-    assert!(matches!(frames[3], Frame::Message(Message::Ready(_))));
+    assert!(matches!(frames[1], Frame::Message(Message::Subscribe(_))));
+    assert!(matches!(frames[2], Frame::Message(Message::Intercept(_))));
+    assert!(matches!(frames[3], Frame::Event(Event::ToolRegister(_))));
+    assert!(matches!(frames[4], Frame::Message(Message::Ready(_))));
     // The restart-success branch must exit without emitting any
     // reply frame for the invoke — guard against a future bug that
     // re-introduces a stray ToolResult/ToolError before exit.
@@ -175,7 +181,7 @@ fn restart_tool_config_exit_overrides_random_error() {
     // extension-disconnect shape with no tool reply frame.
     let frames = run_restart_frames(&[restart_config("exit"), invoke_restart()], 1);
 
-    assert_eq!(frames.len(), 4);
+    assert_eq!(frames.len(), 5);
     assert!(frames.iter().all(|frame| !matches!(
         frame,
         Frame::Event(Event::ToolError(_)) | Frame::Event(Event::ToolResult(_))

@@ -195,7 +195,8 @@ impl EventName {
     pub const TOOL_REGISTER: Self = Self::from_static(EventCategory::Tool, "register");
     pub const TOOL_UNREGISTER: Self = Self::from_static(EventCategory::Tool, "unregister");
     pub const TOOL_REQUEST: Self = Self::from_static(EventCategory::Tool, "request");
-    pub const TOOL_INVOKE: Self = Self::from_static(EventCategory::Tool, "invoke");
+    pub const TOOL_STARTED: Self = Self::from_static(EventCategory::Tool, "started");
+    pub const TOOL_REJECTED: Self = Self::from_static(EventCategory::Tool, "rejected");
     pub const TOOL_RESULT: Self = Self::from_static(EventCategory::Tool, "result");
     pub const TOOL_ERROR: Self = Self::from_static(EventCategory::Tool, "error");
     pub const TOOL_BACKGROUND_RESULT: Self =
@@ -1399,11 +1400,30 @@ pub struct ToolUnregister {
     pub tool_name: ToolName,
 }
 
+/// Request to run a tool call.
+///
+/// This is the pre-routing intent: it may come from an agent response
+/// (`ContextItem::ToolCall`) or from another extension, and the harness may
+/// still reject it before any provider receives a [`ToolStarted`].
+///
+/// A matching [`ToolStarted`] means routing succeeded and the selected
+/// tool extension should start handling the call. A matching
+/// [`ToolRejected`] means no tool extension was invoked.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolRequest {
+    /// Stable id assigned by the agent/provider for this logical tool call.
+    /// All later started, rejected, progress, result, error, or cancellation
+    /// events for the same call use this id.
     pub call_id: ToolCallId,
+    /// Tool name requested by the agent or extension. The harness resolves this
+    /// name against the live tool registry before emitting [`ToolStarted`].
     pub tool_name: ToolName,
+    /// Protocol-level kind of tool being requested. Function tools are the
+    /// normal model-callable tools; the value is echoed in rejection/error
+    /// paths.
     pub tool_type: ToolType,
+    /// Raw CBOR arguments supplied by the requester. These are not trusted
+    /// until the harness validates and routes the request.
     pub arguments: CborValue,
     /// Who started the prompt that produced this tool call. The
     /// harness stamps this from the call's owning conversation so
@@ -1414,15 +1434,47 @@ pub struct ToolRequest {
     pub originator: PromptOriginator,
 }
 
+/// Broadcast by the harness after accepting a tool request.
+///
+/// This is the post-routing counterpart to [`ToolRequest`]: if a tool
+/// extension sees this event for a tool it owns, it should start handling the
+/// call. The event is also durable UI-visible evidence that the invoke really
+/// started.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolInvoke {
+pub struct ToolStarted {
+    /// Stable id of the accepted tool call, copied from
+    /// [`ToolRequest::call_id`].
     pub call_id: ToolCallId,
+    /// Registry-resolved tool name. Subscribed extensions must ignore this
+    /// event unless they own this tool.
     pub tool_name: ToolName,
+    /// Arguments to pass to the selected tool provider. These are copied from
+    /// the accepted request after harness validation/routing.
     pub arguments: CborValue,
     /// Echo of [`ToolRequest::originator`]. Tools usually don't
     /// branch on it, but it's available for logging / progress
     /// tagging / policy decisions that depend on whether the call
     /// is for the main agent or a sub-agent.
+    #[serde(default)]
+    pub originator: PromptOriginator,
+}
+
+/// Broadcast by the harness when a tool request is rejected before any
+/// tool extension is asked to run it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolRejected {
+    /// Stable id of the rejected tool call, copied from
+    /// [`ToolRequest::call_id`].
+    pub call_id: ToolCallId,
+    /// Requested tool name that could not be routed or accepted.
+    pub tool_name: ToolName,
+    /// Requested tool type, echoed so UIs and logs can render the rejected call
+    /// without consulting the original request.
+    pub tool_type: ToolType,
+    /// Human-readable rejection reason produced by the harness.
+    pub message: String,
+    /// Echo of [`ToolRequest::originator`], stamped by the harness so UIs can
+    /// attribute the rejected call to the main agent or a sub-agent.
     #[serde(default)]
     pub originator: PromptOriginator,
 }
@@ -3144,8 +3196,10 @@ pub enum Event {
     ToolUnregister(ToolUnregister),
     #[serde(rename = "tool.request")]
     ToolRequest(ToolRequest),
-    #[serde(rename = "tool.invoke")]
-    ToolInvoke(ToolInvoke),
+    #[serde(rename = "tool.started")]
+    ToolStarted(ToolStarted),
+    #[serde(rename = "tool.rejected")]
+    ToolRejected(ToolRejected),
     #[serde(rename = "tool.result")]
     ToolResult(ToolResult),
     #[serde(rename = "tool.error")]
@@ -3310,7 +3364,8 @@ impl Event {
             Self::ToolRegister(_) => EventName::TOOL_REGISTER,
             Self::ToolUnregister(_) => EventName::TOOL_UNREGISTER,
             Self::ToolRequest(_) => EventName::TOOL_REQUEST,
-            Self::ToolInvoke(_) => EventName::TOOL_INVOKE,
+            Self::ToolStarted(_) => EventName::TOOL_STARTED,
+            Self::ToolRejected(_) => EventName::TOOL_REJECTED,
             Self::ToolResult(_) => EventName::TOOL_RESULT,
             Self::ToolError(_) => EventName::TOOL_ERROR,
             Self::ToolBackgroundResult(_) => EventName::TOOL_BACKGROUND_RESULT,
@@ -3392,8 +3447,7 @@ impl Event {
     pub const fn defaults_to_transient(&self) -> bool {
         matches!(
             self,
-            Self::ToolRequest(_)
-                | Self::ToolError(_)
+            Self::ToolError(_)
                 | Self::ToolCancelled(_)
                 | Self::ProviderResponseUpdated(_)
                 | Self::ProviderPromptSubmitted(_)

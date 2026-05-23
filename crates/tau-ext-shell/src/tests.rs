@@ -7,7 +7,7 @@ use std::{fs, thread};
 
 use tau_proto::{
     CborValue, EventName, Frame, FrameReader, FrameWriter, Message, ToolCancel, ToolDisplayPayload,
-    ToolDisplayStatus, ToolInvoke,
+    ToolDisplayStatus, ToolStarted,
 };
 use tempfile::TempDir;
 
@@ -219,7 +219,7 @@ fn shell_tool_cancel_stops_running_command_quickly() {
 
     let call_id = tau_proto::ToolCallId::new("cancel-shell-call");
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: call_id.clone(),
             tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -684,7 +684,7 @@ fn extension_reads_file() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(READ_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -718,7 +718,7 @@ fn extension_read_missing_file_reports_error() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(READ_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -1106,7 +1106,7 @@ fn extension_writes_file() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(WRITE_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -1151,7 +1151,7 @@ fn extension_write_missing_parent_reports_short_error() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(WRITE_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -1190,7 +1190,7 @@ fn extension_write_directory_reports_short_error() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(WRITE_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -1231,7 +1231,7 @@ fn extension_writes_file_creates_directories() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(WRITE_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -1276,7 +1276,7 @@ fn extension_apply_patch_updates_file() {
         file_path.display()
     );
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-patch-1".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1322,7 +1322,7 @@ fn extension_apply_patch_reports_context_mismatch_without_writing() {
         file_path.display()
     );
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-patch-2".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1368,7 +1368,7 @@ fn extension_apply_patch_move_renames_file() {
         dst.display()
     );
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-patch-3".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1407,7 +1407,7 @@ fn extension_apply_patch_applies_multiple_operations() {
         modify_path.display(),
     );
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-patch-4".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1460,7 +1460,7 @@ fn extension_apply_patch_applies_multiple_chunks() {
         target_path.display(),
     );
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-patch-5".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1497,7 +1497,7 @@ fn extension_apply_patch_failure_after_partial_success_leaves_changes() {
         missing_path.display(),
     );
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-patch-5b".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1551,7 +1551,7 @@ fn extension_apply_patch_requires_existing_file_for_update() {
         missing_path.display(),
     );
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-patch-6".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1597,7 +1597,7 @@ fn extension_apply_patch_add_overwrites_existing_file() {
         path.display(),
     );
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-patch-7".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1633,7 +1633,7 @@ fn extension_apply_patch_update_appends_trailing_newline() {
         path.display(),
     );
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-patch-8".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1660,7 +1660,7 @@ fn edit_read_failure_reports_short_reason() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -1711,7 +1711,7 @@ fn edit_rejects_empty_old_text() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -1761,7 +1761,7 @@ fn edit_rejects_negative_max_matches_with_path_args() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -1857,7 +1857,7 @@ fn edit_can_replace_up_to_max_matches() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -1914,7 +1914,7 @@ fn edit_defaults_to_replacing_first_match() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -1964,7 +1964,7 @@ fn edit_errors_for_no_matches() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -2018,7 +2018,7 @@ fn edit_restricts_matches_to_line_range() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -2090,7 +2090,7 @@ fn extension_finds_files() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(FIND_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -2136,7 +2136,7 @@ fn extension_lists_directory_contents() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(LS_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -2171,7 +2171,7 @@ fn shell_tool_reports_progress_and_success() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -2208,7 +2208,7 @@ fn gpt_shell_tool_reports_progress_and_success() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-gpt-shell".into(),
             tool_name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -2268,7 +2268,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
         })))
         .expect("configure");
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -2804,7 +2804,7 @@ fn shell_tool_reports_failures_with_details() {
     drain_startup(&mut reader);
 
     writer
-        .write_event(&Event::ToolInvoke(ToolInvoke {
+        .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             arguments: CborValue::Map(vec![(

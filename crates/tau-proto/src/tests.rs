@@ -33,7 +33,7 @@ fn representative_events() -> Vec<Event> {
             arguments: CborValue::Text("hello".to_owned()),
             originator: PromptOriginator::User,
         }),
-        Event::ToolInvoke(ToolInvoke {
+        Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
             arguments: CborValue::Text("hello".to_owned()),
@@ -413,14 +413,14 @@ fn message_wire_form_uses_flat_message_tag() {
 
 #[test]
 fn event_wire_form_uses_dotted_event_tag() {
-    let event = Event::ToolInvoke(ToolInvoke {
+    let event = Event::ToolStarted(ToolStarted {
         call_id: "call-1".into(),
         tool_name: ToolName::new("echo"),
         arguments: CborValue::Text("hi".to_owned()),
         originator: PromptOriginator::User,
     });
     let json = serde_json::to_value(&event).expect("serialize");
-    assert_eq!(json["event"], "tool.invoke");
+    assert_eq!(json["event"], "tool.started");
     assert!(json.get("payload").is_some());
 }
 

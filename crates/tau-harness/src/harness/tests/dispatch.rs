@@ -458,16 +458,17 @@ fn tool_invoke_call_ids(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> Vec<String> {
         .lock()
         .expect("sink mutex")
         .iter()
-        .filter_map(|routed| match &routed.frame {
-            Frame::Event(Event::ToolInvoke(invoke)) => Some(invoke.call_id.to_string()),
+        .filter_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::ToolStarted(invoke)) => Some(invoke.call_id.to_string()),
             _ => None,
         })
         .collect()
 }
 
 /// Invalid model arguments must be rejected before the logical tool pipeline.
-/// This keeps bad calls out of the event log as `ToolRequest`/`ToolInvoke`
-/// while still returning a provider-facing tool error to the model.
+/// This keeps bad calls out of the event log as
+/// `ToolRequest`/`ToolStarted` while still returning a
+/// provider-facing tool error to the model.
 #[test]
 fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
     let td = TempDir::new().expect("tempdir");
@@ -530,8 +531,8 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
             Event::ToolRequest(request) if request.call_id.as_str() == "bad-args" => {
                 logical_events.push("tool.request");
             }
-            Event::ToolInvoke(invoke) if invoke.call_id.as_str() == "bad-args" => {
-                logical_events.push("tool.invoke");
+            Event::ToolStarted(invoke) if invoke.call_id.as_str() == "bad-args" => {
+                logical_events.push("tool.started");
             }
             Event::ToolError(error) if error.call_id.as_str() == "bad-args" => {
                 logical_events.push("tool.error");
@@ -556,7 +557,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
 fn disconnect_with_inflight_and_queued_tool_does_not_invoke_queued_on_dead_connection() {
     // Regression: disconnect cleanup must unregister the provider before a
     // failed foreground call releases the scheduler. Otherwise the queued call
-    // can be routed as `ToolInvoke` to the already-dead connection.
+    // can be routed as `ToolStarted` to the already-dead connection.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -6321,14 +6322,13 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     })
     .expect("side response");
 
-    // The Shared call must have been routed to the websearch
-    // extension — the bus sends `ToolInvoke` directly to the
-    // resolved provider, so the test sink sees it there rather
-    // than the broadcast `ToolRequest`.
+    // The Shared call must have been accepted for the websearch
+    // extension. The harness broadcasts `ToolStarted`; the
+    // subscribed provider sees that event and starts the tool.
     let saw_routed = websearch_events.lock().expect("ws").iter().any(|routed| {
         matches!(
-            &routed.frame,
-            Frame::Event(Event::ToolInvoke(invoke)) if invoke.call_id.as_str() == "websearch-call"
+            peel_inner_event(&routed.frame),
+            Some(Event::ToolStarted(invoke)) if invoke.call_id.as_str() == "websearch-call"
         )
     });
     assert!(

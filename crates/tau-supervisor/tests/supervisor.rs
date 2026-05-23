@@ -4,7 +4,7 @@ use std::time::Duration;
 use tau_core::ToolRegistry;
 use tau_proto::{
     CborValue, ClientKind, Disconnect, Event, Frame, Hello, Message, PROTOCOL_VERSION, Ready,
-    ToolInvoke, ToolRegister,
+    Subscribe, ToolRegister, ToolStarted,
 };
 use tau_supervisor::{ExtensionCommand, SupervisedChild};
 
@@ -52,6 +52,19 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         })))
         .expect("hello should be sent");
 
+    let subscribe = child
+        .recv_timeout(Duration::from_secs(1))
+        .expect("subscribe should decode")
+        .expect("subscribe should arrive");
+    assert_eq!(
+        subscribe,
+        Frame::Message(Message::Subscribe(Subscribe {
+            selectors: vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::TOOL_STARTED,
+            )],
+        }))
+    );
+
     let ready = child
         .recv_timeout(Duration::from_secs(1))
         .expect("ready should decode")
@@ -94,13 +107,13 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
     );
 
     child
-        .send(&Frame::Event(Event::ToolInvoke(ToolInvoke {
+        .send(&Frame::Event(Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("echo"),
             arguments: CborValue::Text("hello".to_owned()),
             originator: tau_proto::PromptOriginator::User,
         })))
-        .expect("tool invoke should be sent");
+        .expect("tool should be sent");
     let result = child
         .recv_timeout(Duration::from_secs(1))
         .expect("tool result should decode")
@@ -161,6 +174,10 @@ fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
             client_kind: ClientKind::Core,
         })))
         .expect("hello should be sent");
+    let _subscribe = child
+        .recv_timeout(Duration::from_secs(1))
+        .expect("subscribe should decode")
+        .expect("subscribe should arrive");
     let _ready = child
         .recv_timeout(Duration::from_secs(1))
         .expect("ready should decode")
@@ -224,6 +241,10 @@ fn restarted_child_can_reregister_after_disconnect_cleanup() {
                 client_kind: ClientKind::Core,
             })))
             .expect("hello should be sent");
+        let _subscribe = child
+            .recv_timeout(Duration::from_secs(1))
+            .expect("subscribe should decode")
+            .expect("subscribe should arrive");
         let _ready = child
             .recv_timeout(Duration::from_secs(1))
             .expect("ready should decode")

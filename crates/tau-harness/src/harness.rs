@@ -22,8 +22,8 @@ use tau_proto::{
     SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, SessionPromptRecalled,
     SessionPromptTerminated, SessionPromptTerminationReason, TokenUsageStats, ToolBackgroundError,
     ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancel, ToolCancelled, ToolChoice,
-    ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest, ToolResult, ToolResultKind,
-    ToolType, UiCancelPrompt,
+    ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult,
+    ToolResultKind, ToolType, UiCancelPrompt,
 };
 
 use crate::conversation::{
@@ -757,9 +757,9 @@ pub(crate) struct Harness {
     /// ↔ socket clients). Owns connection state and per-connection
     /// outgoing queues.
     pub(crate) bus: EventBus,
-    /// Maps tool name → providing connection. Used to route an
-    /// outgoing `ToolRequest` to the extension that registered the
-    /// tool.
+    /// Maps tool name → providing connection. Used to resolve
+    /// `ToolRequest` into either a broadcast `ToolStarted`
+    /// or a broadcast `ToolRejected`.
     pub(crate) registry: ToolRegistry,
     /// Append-only on-disk session store. Owns one `SessionTree` per
     /// session id, derived by folding the durable per-session event log
@@ -2178,7 +2178,7 @@ impl Harness {
             // conversation's last fold; syncing to it after a
             // non-folding event (e.g. `ProviderResponseFinished` with
             // only tool calls) would graft this conversation's next
-            // tool request onto the wrong branch and produce orphan
+            // tool tool request onto the wrong branch and produce orphan
             // ToolUse blocks downstream.
             c.head = Some(node_id);
             // Keep the dedup map's "built for" cursor in lockstep with
@@ -2411,6 +2411,8 @@ impl Harness {
                 self.session_id_for_prompt(&finished.session_prompt_id)
             }
             Event::ToolRequest(request) => self.session_id_for_tool_call(&request.call_id),
+            Event::ToolStarted(started) => self.session_id_for_tool_call(&started.call_id),
+            Event::ToolRejected(rejected) => self.session_id_for_tool_call(&rejected.call_id),
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 self.session_id_for_tool_call(&result.call_id)
             }
@@ -2817,8 +2819,29 @@ impl Harness {
         let _ = self
             .registry
             .register_with_prompt_fragment(source_id, registration);
+        self.ensure_tool_started_subscription(source_id);
         if !was_available {
             self.mark_tool_available_for_notice(internal_name, visible_name);
+        }
+    }
+
+    fn ensure_tool_started_subscription(&mut self, source_id: &str) {
+        let selector = EventSelector::Exact(tau_proto::EventName::TOOL_STARTED);
+        let mut selectors = self
+            .bus
+            .subscriptions(source_id)
+            .map_or_else(Vec::new, |s| s.to_vec());
+        if selectors.iter().any(|existing| existing == &selector) {
+            return;
+        }
+        selectors.push(selector);
+        if let Err(error) = self.bus.set_subscriptions(source_id, selectors) {
+            tracing::warn!(
+                target: "tau_harness",
+                connection_id = %source_id,
+                %error,
+                "could not subscribe tool provider to tool.started"
+            );
         }
     }
 
@@ -3118,26 +3141,52 @@ impl Harness {
                 // there instead.
                 let owning_cid = self.tool_conversations.get(&request.call_id).cloned();
                 let event = Event::ToolRequest(request.clone());
-                match owning_cid {
-                    Some(cid) => self.publish_event_for_conversation(&cid, Some(source_id), event),
+                match owning_cid.as_ref() {
+                    Some(cid) => self.publish_event_for_conversation(cid, Some(source_id), event),
                     None => self.publish_event(Some(source_id), event),
                 }
-                match self
-                    .registry
-                    .route_tool_request(&mut self.bus, source_id, request.clone())
-                {
+                // `ToolRequest` is the persisted pre-routing intent.
+                // `route_tool_request` resolves it. On success we
+                // publish durable `ToolStarted`; subscribed tool
+                // extensions see that event and the owner starts work. On
+                // failure we publish `ToolRejected` and the terminal
+                // `ToolError` for model-facing completion.
+                match self.registry.route_tool_request(request.clone()) {
                     Ok(route) => {
+                        self.ensure_tool_started_subscription(&route.provider_connection_id);
                         self.pending_tool_providers
                             .insert(request.call_id.clone(), route.provider_connection_id);
+                        let event = Event::ToolStarted(route.invoke);
+                        match owning_cid.as_ref() {
+                            Some(cid) => {
+                                self.publish_for_conversation_from(cid, Some(source_id), event)
+                            }
+                            None => self.publish_event(Some(source_id), event),
+                        }
                     }
                     Err(ToolRouteError::NoProvider { tool_name }) => {
                         let call_id = request.call_id.to_string();
                         let owning_cid = self.tool_conversations.get(&request.call_id).cloned();
+                        let message = unavailable_tool_error_message(&tool_name);
+                        let rejected = ToolRejected {
+                            call_id: request.call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            tool_type: request.tool_type,
+                            message: message.clone(),
+                            originator: request.originator.clone(),
+                        };
+                        let event = Event::ToolRejected(rejected);
+                        match owning_cid.as_ref() {
+                            Some(cid) => {
+                                self.publish_for_conversation_from(cid, Some(source_id), event)
+                            }
+                            None => self.publish_event(Some(source_id), event),
+                        }
                         let error = ToolError {
                             call_id: request.call_id,
                             tool_name: tool_name.clone(),
                             tool_type: request.tool_type,
-                            message: unavailable_tool_error_message(&tool_name),
+                            message,
                             details: None,
                             display: None,
                             originator: tau_proto::PromptOriginator::User,
@@ -4300,7 +4349,7 @@ impl Harness {
     /// Records that an extension-originated `ToolRequest` belongs to
     /// the harness's *default* conversation (the user's UI thread).
     /// Extensions don't currently carry an owning conversation on
-    /// their tool requests; future work could extend the protocol so
+    /// their tool tool requests; future work could extend the protocol so
     /// extension-side tools also attribute to a specific conversation.
     /// Must run *before* the request is published, so
     /// `session_id_for_event` can attribute the corresponding
@@ -4746,7 +4795,7 @@ impl Harness {
 
         // Resolve the parent conversation at enqueue time: tool-backed requests
         // inherit from the conversation that owns the triggering tool call;
-        // non-tool requests inherit from the default user conversation.
+        // non-tool tool requests inherit from the default user conversation.
         let parent_cid = query
             .tool_call_id
             .as_ref()
@@ -8302,20 +8351,30 @@ impl Harness {
             originator: tau_proto::PromptOriginator::User,
         };
 
-        match self
-            .registry
-            .route_tool_request(&mut self.bus, HARNESS_CONNECTION_ID, request)
-        {
+        match self.registry.route_tool_request(request) {
             Ok(route) => {
+                self.ensure_tool_started_subscription(&route.provider_connection_id);
                 self.pending_tool_providers
                     .insert(call_id.clone(), route.provider_connection_id);
+                self.publish_for_conversation(cid, Event::ToolStarted(route.invoke));
             }
             Err(ToolRouteError::NoProvider { tool_name: _ }) => {
+                let message = unavailable_tool_error_message(&visible_tool_name);
+                self.publish_for_conversation(
+                    cid,
+                    Event::ToolRejected(ToolRejected {
+                        call_id: call_id.clone(),
+                        tool_name: visible_tool_name.clone(),
+                        tool_type: call.tool_type,
+                        message: message.clone(),
+                        originator: tau_proto::PromptOriginator::User,
+                    }),
+                );
                 let error = ToolError {
                     call_id: call_id.clone(),
                     tool_name: visible_tool_name.clone(),
                     tool_type: call.tool_type,
-                    message: unavailable_tool_error_message(&visible_tool_name),
+                    message,
                     details: None,
                     display: None,
                     originator: tau_proto::PromptOriginator::User,
@@ -8823,6 +8882,14 @@ fn stamp_tool_event_originator(event: Event, originator: tau_proto::PromptOrigin
         Event::ToolRequest(mut e) => {
             e.originator = originator;
             Event::ToolRequest(e)
+        }
+        Event::ToolStarted(mut e) => {
+            e.originator = originator;
+            Event::ToolStarted(e)
+        }
+        Event::ToolRejected(mut e) => {
+            e.originator = originator;
+            Event::ToolRejected(e)
         }
         Event::ToolResult(mut e) => {
             e.originator = originator;

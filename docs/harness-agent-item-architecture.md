@@ -20,7 +20,7 @@ For a Rust-shaped sketch of the same model, see
 
 - The transcript is an ordered item timeline.
 - `ProviderResponseFinished` is assistant-output truth.
-- `ToolRequest` is runtime machinery, not transcript truth.
+- `ToolRequest` is durable routing intent, not transcript truth.
 - A single conversation may have at most one unresolved tool round at a time.
 - A tool round may contain multiple tool calls.
 
@@ -99,7 +99,6 @@ payload.
 
 These should be transient/non-durable:
 
-- `ToolRequest`
 - `SessionPromptQueued`
 - `SessionPromptCreated`
 - `SessionPromptPrewarmRequested`
@@ -295,7 +294,7 @@ For now, existing behavior may be preserved there and improved later.
 - Durable per-session protocol events are the source of truth.
 - Transcript projection is deterministic.
 - Assistant output order is preserved exactly.
-- `ToolRequest` is not used to reconstruct transcript tool calls.
+- `ToolRequest` is persisted but not used to reconstruct transcript tool calls.
 - One conversation has at most one unresolved tool round at a time.
 - `ToolResultsNode` is emitted only when that round is terminal.
 - `ToolResultsNode` is the direct child of the `AssistantResponseNode` it

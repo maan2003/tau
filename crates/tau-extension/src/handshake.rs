@@ -17,7 +17,7 @@
 //!
 //! ```ignore
 //! tau_extension::Handshake::tool("tau-ext-websearch")
-//!     .subscribe([EventName::TOOL_INVOKE])
+//!     .subscribe([EventName::TOOL_STARTED])
 //!     .register_tool(tool_spec())
 //!     .ready_message("websearch ready")
 //!     .run(&mut writer)?;

@@ -183,7 +183,7 @@ fn sink_has_tool_invoke(sink: &Arc<Mutex<Vec<RoutedFrame>>>, call_id: &str) -> b
     sink.lock().expect("sink").iter().any(|routed| {
         matches!(
             peel_inner_event(&routed.frame),
-            Some(Event::ToolInvoke(invoke)) if invoke.call_id.as_str() == call_id
+            Some(Event::ToolStarted(invoke)) if invoke.call_id.as_str() == call_id
         )
     })
 }

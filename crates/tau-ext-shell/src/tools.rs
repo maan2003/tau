@@ -1,4 +1,4 @@
-//! Tool registry: dispatches a `ToolInvoke` to the right handler.
+//! Tool registry: dispatches a `ToolStarted` to the right handler.
 
 use tau_proto::{CborValue, Event, ToolError, ToolProgress, ToolResult, ToolResultKind};
 
@@ -28,7 +28,7 @@ pub const LS_TOOL_NAME: &str = "ls";
 
 /// Execute a tool and return the response event(s).
 pub(crate) fn execute_tool(
-    invoke: tau_proto::ToolInvoke,
+    invoke: tau_proto::ToolStarted,
     shell_config: &ShellConfig,
 ) -> Vec<Event> {
     let error_details = standard_tool_error_details(&invoke.tool_name, &invoke.arguments);
@@ -119,7 +119,7 @@ pub(crate) fn execute_tool(
 /// failure's own details take precedence, with `fallback_details` used
 /// only when the handler didn't attach any.
 fn wrap_pure(
-    invoke: tau_proto::ToolInvoke,
+    invoke: tau_proto::ToolStarted,
     fallback_details: Option<CborValue>,
     handler: fn(&CborValue) -> Result<ToolOutput, ToolFailure>,
 ) -> Vec<Event> {

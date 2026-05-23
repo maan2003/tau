@@ -580,7 +580,11 @@ impl SessionTree {
                 }
                 Some(node_id)
             }
-            Event::ToolRequest(_) | Event::ToolResult(_) | Event::ToolError(_) => None,
+            Event::ToolRequest(_)
+            | Event::ToolStarted(_)
+            | Event::ToolRejected(_)
+            | Event::ToolResult(_)
+            | Event::ToolError(_) => None,
             Event::ProviderToolResult(result) => self.record_terminal_tool_result(ToolResultItem {
                 call_id: result.call_id.clone(),
                 tool_type: result.tool_type,

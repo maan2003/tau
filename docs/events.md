@@ -97,12 +97,16 @@ the agent requests calls, and the harness orchestrates dispatch.
   execution mode).
 - **`tool.unregister`** *(extension)* — A previously registered tool is
   withdrawn.
-- **`tool.request`** *(provider)* — The provider asks for a tool call by id,
-  model-produced name, and CBOR arguments. Goes through the harness's
-  dispatch queue. Operational only; transient rather than durable
-  transcript truth.
-- **`tool.invoke`** *(harness)* — The harness has decided to run a
-  request and is dispatching it to the tool's implementing extension.
+- **`tool.request`** *(provider/extension)* — A request to run a
+  tool call by id, model-produced name, and CBOR arguments. It may come from
+  an agent response or another extension, and can still be rejected before any
+  provider receives it. Persisted as the pre-routing intent.
+- **`tool.started`** *(harness)* — The harness accepted and routed a
+  tool request. This durable broadcast is the signal that the selected tool
+  provider should start the call, and that UIs can show the tool as running.
+- **`tool.rejected`** *(harness)* — The harness rejected a tool request
+  before any tool provider was asked to run it. UIs can display this as a tool
+  call rejection.
 - **`tool.result`** *(extension/harness)* — Successful logical runtime tool
   completion, by call id, with tool-owned `result` plus optional UI
   `display` metadata and echoed originator. This event is renderer-facing.
@@ -163,7 +167,7 @@ harness/agent.
   correlation `query_id`, optional requested `role`, optional tool-call
   attribution, and human-readable task name (used by the `delegate` tool).
   Tool-backed delegate requests default to `engineer` when `role` is
-  absent; non-tool requests without `role` use the currently selected
+  absent; non-tool tool requests without `role` use the currently selected
   interactive role.
 - **`agent.start_result`** — The agent's final answer to an
   earlier `agent.start_request`, routed point-to-point back to the

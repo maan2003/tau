@@ -220,7 +220,7 @@ fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
         ui_connection.with_visibility_filter(Box::new(|routed: &RoutedFrame| {
             matches!(
                 &routed.frame,
-                Frame::Event(event) if event.name() == EventName::TOOL_INVOKE
+                Frame::Event(event) if event.name() == EventName::TOOL_STARTED
             )
         }));
     let ui_id = bus.connect(filtered_connection);
@@ -246,7 +246,7 @@ fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
         .send_to(
             &ui_id,
             Some(&tool_id),
-            Frame::Event(Event::ToolInvoke(tau_proto::ToolInvoke {
+            Frame::Event(Event::ToolStarted(tau_proto::ToolStarted {
                 call_id: "call-1".into(),
                 tool_name: tau_proto::ToolName::new("echo"),
                 arguments: CborValue::Null,
@@ -387,7 +387,7 @@ fn provider_can_register_tool_and_receive_invocations() {
 
     let (provider_connection, provider_inbox) = memory_connection("provider", ClientKind::Provider);
     let (tool_connection, tool_inbox) = memory_connection("tool", ClientKind::Tool);
-    let provider_id = bus.connect(provider_connection);
+    let _provider_id = bus.connect(provider_connection);
     let tool_id = bus.connect(tool_connection);
 
     let register_report = registry.register(
@@ -407,37 +407,26 @@ fn provider_can_register_tool_and_receive_invocations() {
     assert!(register_report.warnings.is_empty());
 
     let route_report = registry
-        .route_tool_request(
-            &mut bus,
-            &provider_id,
-            ToolRequest {
-                call_id: "call-1".into(),
-                tool_name: tau_proto::ToolName::new("echo"),
-                tool_type: ToolType::Function,
-                arguments: CborValue::Text("hello".to_owned()),
-                originator: tau_proto::PromptOriginator::User,
-            },
-        )
-        .expect("tool request should route");
+        .route_tool_request(ToolRequest {
+            call_id: "call-1".into(),
+            tool_name: tau_proto::ToolName::new("echo"),
+            tool_type: ToolType::Function,
+            arguments: CborValue::Text("hello".to_owned()),
+            originator: tau_proto::PromptOriginator::User,
+        })
+        .expect("tool tool request should route");
 
     assert_eq!(route_report.provider_connection_id, tool_id.clone());
-    assert_eq!(
-        route_report.route_report.delivered_to,
-        vec![tool_id.clone()]
-    );
     assert!(provider_inbox.snapshot().is_empty());
-
-    let delivered_events = tool_inbox.snapshot();
-    assert_eq!(delivered_events.len(), 1);
-    assert_eq!(delivered_events[0].source_id, Some(provider_id));
+    assert!(tool_inbox.snapshot().is_empty());
     assert_eq!(
-        delivered_events[0].frame,
-        Frame::Event(Event::ToolInvoke(tau_proto::ToolInvoke {
+        route_report.invoke,
+        tau_proto::ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("echo"),
             arguments: CborValue::Text("hello".to_owned()),
             originator: tau_proto::PromptOriginator::User,
-        }))
+        }
     );
 }
 

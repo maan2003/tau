@@ -1375,11 +1375,11 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
     let routed = tool_events.lock().expect("tool events");
     assert!(
         routed.iter().any(|frame| matches!(
-            &frame.frame,
-            Frame::Event(Event::ToolInvoke(invoke))
+            peel_inner_event(&frame.frame),
+            Some(Event::ToolStarted(invoke))
                 if invoke.call_id.as_str() == "call-alias" && invoke.tool_name == "test_gpt_shell"
         )),
-        "expected internal tool invoke; got: {routed:?}"
+        "expected internal tool; got: {routed:?}"
     );
 
     seed_assistant_tool_round(&mut h, &cid, &[("call-alias", "shell")]);

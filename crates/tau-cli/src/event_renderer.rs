@@ -1730,8 +1730,11 @@ impl EventRenderer {
                 self.agent_activity
                     .finish_prompt(&terminated.session_prompt_id, &[]);
             }
-            Event::ToolRequest(request) => self.agent_activity.start_tool(&request.call_id),
-            Event::ToolInvoke(invoke) => self.agent_activity.start_tool(&invoke.call_id),
+            Event::ToolRequest(_) => {}
+            Event::ToolStarted(invoke) => self.agent_activity.start_tool(&invoke.call_id),
+            Event::ToolRejected(rejected) => {
+                self.agent_activity.finish_tool(&rejected.call_id);
+            }
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
                     self.agent_activity.background_tool(&result.call_id);

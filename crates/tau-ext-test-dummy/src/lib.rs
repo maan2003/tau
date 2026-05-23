@@ -104,9 +104,10 @@ where
     let mut reader = FrameReader::new(BufReader::new(reader));
     let mut writer = FrameWriter::new(BufWriter::new(writer));
 
-    // No Subscribe: interception and the restart-test tool start live-only.
-    // Replaying old prompts/invokes would mutate or retry past work.
+    // Subscribe only to fresh live invoke-start events. Extension
+    // subscriptions are live-only, so old invokes are not replayed.
     tau_extension::Handshake::tool("tau-ext-test-dummy")
+        .subscribe([tau_proto::EventName::TOOL_STARTED])
         .intercept(
             EventSelector::Exact(tau_proto::EventName::UI_PROMPT_SUBMITTED),
             InterceptionPriority::new(0),
@@ -135,7 +136,7 @@ where
     let mut restart_mode = RestartMode::Random;
 
     while let Some(frame) = reader.read_frame()? {
-        let (_, inner) = frame.peel_log();
+        let (log_id, inner) = frame.peel_log();
         match inner {
             Frame::Message(Message::InterceptRequest(req)) => {
                 let mutated = match req.event.as_ref() {
@@ -179,9 +180,13 @@ where
                     }
                 }
             }
-            Frame::Event(Event::ToolInvoke(invoke))
+            Frame::Event(Event::ToolStarted(invoke))
                 if invoke.tool_name == RESTART_TEST_DUMMY_TOOL_NAME =>
             {
+                if let Some(id) = log_id {
+                    writer
+                        .write_frame(&Frame::Message(Message::Ack(tau_proto::Ack { up_to: id })))?;
+                }
                 match restart_mode {
                     RestartMode::Random if rng.gen_bool(0.5) => {
                         writer.flush()?;
@@ -209,7 +214,7 @@ where
     Ok(())
 }
 
-fn restart_success(invoke: tau_proto::ToolInvoke) -> Frame {
+fn restart_success(invoke: tau_proto::ToolStarted) -> Frame {
     Frame::Event(Event::ToolResult(ToolResult {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
@@ -221,7 +226,7 @@ fn restart_success(invoke: tau_proto::ToolInvoke) -> Frame {
     }))
 }
 
-fn restart_error(invoke: tau_proto::ToolInvoke) -> Frame {
+fn restart_error(invoke: tau_proto::ToolStarted) -> Frame {
     Frame::Event(Event::ToolError(ToolError {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,

@@ -438,7 +438,7 @@ where
     // Replaying old invokes/commands would repeat work; old session starts
     // would duplicate context publication.
     let mut handshake = tau_extension::Handshake::tool("tau-ext-shell").subscribe([
-        tau_proto::EventName::TOOL_INVOKE,
+        tau_proto::EventName::TOOL_STARTED,
         tau_proto::EventName::TOOL_CANCEL,
         tau_proto::EventName::SESSION_STARTED,
         tau_proto::EventName::UI_SHELL_COMMAND,
@@ -476,14 +476,9 @@ where
 
     let mut config = ExtConfig::default();
 
-    // Reader loop: dispatch each tool invocation to a worker thread.
-    //
-    // ToolInvoke is sent point-to-point (not via the harness event log)
-    // so it carries no `LogEventId` and needs no ack — the
-    // ToolResult/ToolError correlated by call_id is the implicit reply.
-    //
-    // Other subscribed events (SessionStarted) come wrapped as
-    // `Message::LogEvent` and require an `Ack` after processing.
+    // Reader loop: dispatch each owned tool invocation to a worker thread.
+    // ToolStarted is a subscribed event-log delivery, so it arrives as a
+    // LogEvent and must be acked after processing like other subscribed events.
     while let Some(frame) = reader.read_frame()? {
         let (log_id, inner) = frame.peel_log();
         match inner {
@@ -497,10 +492,14 @@ where
                     }
                 }
             }
-            Frame::Event(Event::ToolInvoke(invoke)) => {
+            Frame::Event(Event::ToolStarted(invoke)) => {
+                if !is_shell_tool(invoke.tool_name.as_str()) {
+                    ack_if_logged(log_id, &tx)?;
+                    continue;
+                }
                 // Block here until a permit is free. This bounds the
                 // total number of in-flight worker threads — without
-                // it, a burst of ToolInvokes would spawn unbounded
+                // it, a burst of ToolStarted events would spawn unbounded
                 // native threads that then serialize on the semaphore.
                 let permit = sem.acquire();
                 let tx = tx.clone();
@@ -554,7 +553,7 @@ where
 
 /// Execute a single tool invocation and send the response event(s).
 fn dispatch_tool_invoke(
-    invoke: tau_proto::ToolInvoke,
+    invoke: tau_proto::ToolStarted,
     shell_config: ShellConfig,
     tx: &mpsc::Sender<Frame>,
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
@@ -571,7 +570,7 @@ fn dispatch_tool_invoke(
 }
 
 fn dispatch_cancellable_shell_tool(
-    invoke: tau_proto::ToolInvoke,
+    invoke: tau_proto::ToolStarted,
     shell_config: ShellConfig,
     tx: &mpsc::Sender<Frame>,
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
@@ -639,8 +638,43 @@ fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<Frame>) {
     }
 }
 
+fn ack_if_logged(
+    id: Option<LogEventId>,
+    tx: &mpsc::Sender<Frame>,
+) -> Result<(), mpsc::SendError<Frame>> {
+    if let Some(id) = id {
+        tx.send(Frame::Message(Message::Ack(Ack { up_to: id })))?;
+    }
+    Ok(())
+}
+
 fn ack_log_event(id: LogEventId, tx: &mpsc::Sender<Frame>) {
     let _ = tx.send(Frame::Message(Message::Ack(Ack { up_to: id })));
+}
+
+fn is_shell_tool(name: &str) -> bool {
+    matches!(
+        name,
+        READ_TOOL_NAME
+            | WRITE_TOOL_NAME
+            | EDIT_TOOL_NAME
+            | APPLY_PATCH_TOOL_NAME
+            | GREP_TOOL_NAME
+            | FIND_TOOL_NAME
+            | LS_TOOL_NAME
+            | SHELL_TOOL_NAME
+            | GPT_SHELL_TOOL_NAME
+    ) || is_echo_tool(name)
+}
+
+#[cfg(any(test, feature = "echo-agent"))]
+fn is_echo_tool(name: &str) -> bool {
+    name == ECHO_TOOL_NAME
+}
+
+#[cfg(not(any(test, feature = "echo-agent")))]
+fn is_echo_tool(_name: &str) -> bool {
+    false
 }
 
 fn build_session_started_events(started: SessionStarted) -> Vec<Event> {

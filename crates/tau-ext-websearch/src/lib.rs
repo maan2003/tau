@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use tau_proto::{
     Ack, CborValue, ConfigError, Event, Frame, FrameReader, FrameWriter, LogEventId, Message,
-    ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError, ToolExecutionMode, ToolInvoke,
-    ToolResult, ToolSpec,
+    ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError, ToolExecutionMode, ToolResult,
+    ToolSpec, ToolStarted,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -126,7 +126,7 @@ where
     let mut writer = FrameWriter::new(BufWriter::new(writer));
 
     tau_extension::Handshake::tool("tau-ext-websearch")
-        .subscribe([tau_proto::EventName::TOOL_INVOKE])
+        .subscribe([tau_proto::EventName::TOOL_STARTED])
         .register_tool(exa_tool_spec())
         .register_tool(parallel_search_tool_spec())
         .register_tool(parallel_fetch_tool_spec())
@@ -171,7 +171,11 @@ where
                     }
                 }
             }
-            Frame::Event(Event::ToolInvoke(invoke)) => {
+            Frame::Event(Event::ToolStarted(invoke)) => {
+                if !is_websearch_tool(invoke.tool_name.as_str()) {
+                    ack_if_logged(log_id, &tx)?;
+                    continue;
+                }
                 let permit = sem.acquire();
                 let tx = tx.clone();
                 let searcher = Arc::clone(&searcher);
@@ -197,8 +201,25 @@ where
     Ok(())
 }
 
+fn ack_if_logged(
+    id: Option<LogEventId>,
+    tx: &mpsc::Sender<Frame>,
+) -> Result<(), mpsc::SendError<Frame>> {
+    if let Some(id) = id {
+        tx.send(Frame::Message(Message::Ack(Ack { up_to: id })))?;
+    }
+    Ok(())
+}
+
 fn ack_log_event(id: LogEventId, tx: &mpsc::Sender<Frame>) {
     let _ = tx.send(Frame::Message(Message::Ack(Ack { up_to: id })));
+}
+
+fn is_websearch_tool(name: &str) -> bool {
+    matches!(
+        name,
+        EXA_TOOL_NAME | PARALLEL_SEARCH_TOOL_NAME | PARALLEL_FETCH_TOOL_NAME
+    )
 }
 
 fn exa_tool_spec() -> ToolSpec {
@@ -292,7 +313,7 @@ fn parallel_fetch_tool_spec() -> ToolSpec {
 }
 
 fn dispatch_tool_invoke(
-    invoke: ToolInvoke,
+    invoke: ToolStarted,
     searcher: &dyn Searcher,
     parallel_client: &dyn ParallelClient,
     tx: &mpsc::Sender<Frame>,
@@ -318,7 +339,7 @@ fn dispatch_tool_invoke(
     let _ = tx.send(Frame::Event(event));
 }
 
-fn dispatch_exa(invoke: ToolInvoke, searcher: &dyn Searcher) -> Event {
+fn dispatch_exa(invoke: ToolStarted, searcher: &dyn Searcher) -> Event {
     match parse_exa_args(&invoke.arguments) {
         Ok((query, num_results)) => match searcher.search(&query, num_results) {
             Ok(text) => {
@@ -340,7 +361,7 @@ fn dispatch_exa(invoke: ToolInvoke, searcher: &dyn Searcher) -> Event {
 }
 
 fn dispatch_parallel(
-    invoke: ToolInvoke,
+    invoke: ToolStarted,
     client: &dyn ParallelClient,
     remote_tool: &'static str,
 ) -> Event {
@@ -364,7 +385,7 @@ fn dispatch_parallel(
     }
 }
 
-fn tool_error(invoke: ToolInvoke, message: String) -> Event {
+fn tool_error(invoke: ToolStarted, message: String) -> Event {
     Event::ToolError(ToolError {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,

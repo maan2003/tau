@@ -1,17 +1,16 @@
-//! Live tool registration tracking and routing of `tool.request` events to
-//! the connection that owns each tool.
+//! Live tool registration tracking and routing of `tool.request` events
+//! to the connection that owns each tool.
 
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
 use tau_proto::{
-    CborValue, ConnectionId, Event, PromptFragment, ToolName, ToolRegister, ToolRequest, ToolSpec,
-    ToolType,
+    CborValue, ConnectionId, PromptFragment, ToolName, ToolRegister, ToolRequest, ToolSpec,
+    ToolStarted, ToolType,
 };
 
-use crate::bus::EventBus;
-use crate::connection::{RouteError, RouteReport};
+use crate::connection::RouteError;
 
 /// One live provider registered for a tool name.
 #[derive(Clone, Debug, PartialEq)]
@@ -40,7 +39,7 @@ pub struct RegisterToolReport {
     pub warnings: Vec<ToolRegistryWarning>,
 }
 
-/// Error returned when a tool request cannot be routed.
+/// Error returned when a tool tool request cannot be routed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolRouteError {
     NoProvider { tool_name: ToolName },
@@ -79,7 +78,7 @@ impl fmt::Display for ToolRouteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoProvider { tool_name } => write!(f, "no live provider for tool: {tool_name}"),
-            Self::Route(error) => write!(f, "failed to route tool request: {error}"),
+            Self::Route(error) => write!(f, "failed to route tool tool request: {error}"),
         }
     }
 }
@@ -94,10 +93,10 @@ impl Error for ToolRouteError {
 }
 
 /// Summary of one `tool.request` routing decision.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ToolRouteReport {
     pub provider_connection_id: ConnectionId,
-    pub route_report: RouteReport,
+    pub invoke: ToolStarted,
 }
 
 /// Validates a model-produced function-tool argument object against the tool's
@@ -556,12 +555,14 @@ impl ToolRegistry {
             .and_then(|providers| providers.first())
     }
 
-    /// Routes a `tool.request` to one live provider as a directed
-    /// `tool.invoke`.
+    /// Resolves a `tool.request` to one live provider and builds the
+    /// corresponding `tool.started` event.
+    ///
+    /// Success means the request is accepted and the harness can publish the
+    /// started event. Failure means no provider was invoked; the harness
+    /// reports that as a rejection event.
     pub fn route_tool_request(
         &self,
-        bus: &mut EventBus,
-        requester_id: &str,
         request: ToolRequest,
     ) -> Result<ToolRouteReport, ToolRouteError> {
         let tool_name = request.tool_name.clone();
@@ -572,22 +573,14 @@ impl ToolRegistry {
                 tool_name: tool_name.clone(),
             })?;
 
-        let route_report = bus
-            .send_to(
-                &provider_connection_id,
-                Some(requester_id),
-                tau_proto::Frame::Event(Event::ToolInvoke(tau_proto::ToolInvoke {
-                    call_id: request.call_id,
-                    tool_name,
-                    arguments: request.arguments,
-                    originator: request.originator,
-                })),
-            )
-            .map_err(ToolRouteError::Route)?;
-
         Ok(ToolRouteReport {
             provider_connection_id,
-            route_report,
+            invoke: ToolStarted {
+                call_id: request.call_id,
+                tool_name,
+                arguments: request.arguments,
+                originator: request.originator,
+            },
         })
     }
 
