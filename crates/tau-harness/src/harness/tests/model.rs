@@ -300,7 +300,7 @@ fn provider_model_metadata_drives_selection_state() {
     )
     .expect("handle provider snapshot");
 
-    assert_eq!(h.selected_role, "engineer");
+    assert_eq!(h.selected_role, "senior-engineer");
     assert_eq!(h.selected_model.as_ref(), Some(&model_id));
     assert_eq!(h.selected_params.effort, Effort::High);
     assert_eq!(h.selected_params.verbosity, Verbosity::Low);
@@ -421,6 +421,7 @@ fn load_roles_ignores_stale_harness_state() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
+            defaultRole: "engineer",
             roleGroups: {
                 engineer: {
                     engineer: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
@@ -526,6 +527,7 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
+            defaultRole: "engineer",
             roleGroups: {
                 engineer: {
                     engineer: { model: "local/engineer" },
@@ -737,11 +739,11 @@ fn missing_default_role_emits_important_info_and_falls_back() {
     .expect("write harness config");
 
     let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
-    assert_eq!(h.selected_role, "engineer");
+    assert_eq!(h.selected_role, "junior-engineer");
     let message = find_important_info(&h, "defaultRole `ghost`")
         .expect("expected Important HarnessInfo about missing defaultRole");
     assert!(
-        message.contains("selected `engineer` instead"),
+        message.contains("selected `junior-engineer` instead"),
         "message should name the fallback role, got: {message}"
     );
 }

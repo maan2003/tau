@@ -1,14 +1,23 @@
 # Built-in HarnessSettings defaults. Harness-owned roles and prompt fragments
 # are provided as ordinary config so user partial overrides keep built-in fields.
 session_retention_days: 60
-defaultRole: engineer
+defaultRole: senior-engineer
 extensions: {}
 roleGroups:
   engineer:
-    engineer:
+    senior-engineer:
       enabled: true
       description: Individual contributor using a state-of-the-art model. Good default for most tasks.
       effort: medium
+      promptFragments:
+        - name: manager.instructions
+          priority: 5
+          text: |-
+              Trust the `<instructions>`. When sent they always contain a carefully researched detailed plan. Do not waste time second guessing them. Focus on following them immediately and implementation details.
+    junior-engineer:
+      enabled: true
+      description: Lower-reasoning engineering assistant for straightforward coding tasks.
+      effort: low
       promptFragments:
         - name: manager.instructions
           priority: 5

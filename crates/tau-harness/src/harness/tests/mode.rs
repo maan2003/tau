@@ -143,7 +143,8 @@ fn daemon_mode_renders_system_prompt_for_requested_role() {
 
     wait_for_socket(&sock);
 
-    let prompt = get_daemon_rendered_system_prompt(&sock, "engineer").expect("render prompt");
+    let prompt =
+        get_daemon_rendered_system_prompt(&sock, "senior-engineer").expect("render prompt");
     assert!(prompt.contains("expert coding assistant"));
     assert!(prompt.contains("Current working directory:"));
 

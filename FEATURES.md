@@ -94,10 +94,13 @@ promptFragments:
     priority: 65
     text: Keep answers short and plain, using only simple words.
 
-defaultRole: engineer
+defaultRole: senior-engineer
 roleGroups:
   engineer:
-    engineer:
+    junior-engineer:
+      description: Lower-reasoning engineering assistant
+      effort: low
+    senior-engineer:
       description: Balanced coding assistant
       model: chatgpt/gpt-5.5
       effort: medium

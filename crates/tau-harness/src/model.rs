@@ -15,7 +15,7 @@ pub(crate) struct MissingDefaultRole {
     pub fallback: String,
 }
 
-const BASE_AGENT_ROLE: &str = "engineer";
+const BASE_AGENT_ROLE: &str = "senior-engineer";
 
 pub(crate) struct LoadedRoles {
     /// Effective roles loaded from config.

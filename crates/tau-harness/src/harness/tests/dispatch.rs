@@ -7681,7 +7681,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     let initial = pop_delegate_progress(&sink, "delegate-call")
         .expect("initial DelegateProgress on side conv spawn");
     assert_eq!(initial.task_name, "look it up");
-    assert_eq!(initial.role.as_deref(), Some("engineer"));
+    assert_eq!(initial.role.as_deref(), Some("senior-engineer"));
     assert_eq!(initial.execution_mode, Some(ToolExecutionMode::Update));
     assert_eq!(initial.tools_in_flight, 0);
     assert_eq!(initial.tools_total, 0);
@@ -7733,7 +7733,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         .pop()
         .expect("at least one DelegateProgress after side response");
     assert_eq!(latest.task_name, "look it up");
-    assert_eq!(latest.role.as_deref(), Some("engineer"));
+    assert_eq!(latest.role.as_deref(), Some("senior-engineer"));
     assert_eq!(latest.execution_mode, Some(ToolExecutionMode::Update));
     assert_eq!(latest.tools_in_flight, 1, "websearch is in flight");
     assert_eq!(latest.tools_total, 1, "websearch counts toward total");
@@ -8213,11 +8213,11 @@ fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
     h.shutdown().expect("shutdown");
 }
 
-/// Omitting `role` on the delegate tool means `engineer`; if `engineer` cannot
-/// resolve to an available model, the harness reports that compatibility
+/// Omitting `role` on the delegate tool means `senior-engineer`; if that role
+/// cannot resolve to an available model, the harness reports that compatibility
 /// default as the problem instead of silently falling back to another role.
 #[test]
-fn delegate_missing_default_engineer_errors_when_engineer_unavailable() {
+fn delegate_missing_default_senior_engineer_errors_when_unavailable() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -8242,7 +8242,7 @@ fn delegate_missing_default_engineer_errors_when_engineer_unavailable() {
     let error = start_agent_request_error(&delegate, "q-default").expect("query error");
     assert!(
         error.contains(
-            "delegate requires default role `engineer`, but it is not available: `engineer`"
+            "delegate requires default role `senior-engineer`, but it is not available: `senior-engineer`"
         ),
         "got: {error}"
     );
@@ -9118,7 +9118,7 @@ fn message_tool_to_user_emits_exactly_one_agent_message() {
 
     let messages = session_agent_messages(&h);
     assert_eq!(messages.len(), 1);
-    assert!(messages[0].sender_id.starts_with("engineer_"));
+    assert!(messages[0].sender_id.starts_with("senior-engineer_"));
     assert_eq!(messages[0].recipient_id, "user");
     assert_eq!(messages[0].message, "hello user");
 
@@ -9265,8 +9265,8 @@ fn agent_id_generation_is_stable_and_cleaned_up() {
     let first = h.ensure_agent_id_for_conversation(&cid).expect("agent id");
     let second = h.ensure_agent_id_for_conversation(&cid).expect("agent id");
     assert_eq!(first, second);
-    assert!(first.starts_with("engineer_"));
-    assert_eq!(first.len(), "engineer_".len() + 8);
+    assert!(first.starts_with("senior-engineer_"));
+    assert_eq!(first.len(), "senior-engineer_".len() + 8);
     assert_eq!(h.agent_conversations.get(&first), Some(&cid));
 
     h.remove_conversation(&cid);

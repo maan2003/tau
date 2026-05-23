@@ -402,7 +402,7 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
             .count(),
         1
     );
-    for role_name in ["assistant", "engineer", "manager", "custom"] {
+    for role_name in ["assistant", "senior-engineer", "manager", "custom"] {
         let role = &s.roles[role_name];
         assert_eq!(
             role.prompt_fragments
@@ -606,7 +606,7 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
     // visible orchestration prompt there. Engineer has a lightweight follow-up
     // prompt for delegated tasks, while assistant keeps no built-in prompt.
     let s = HarnessSettings::built_in();
-    assert_eq!(s.default_role.as_deref(), Some("engineer"));
+    assert_eq!(s.default_role.as_deref(), Some("senior-engineer"));
     assert_eq!(
         s.role_groups
             .iter()
@@ -615,19 +615,25 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
         vec![
             (
                 "engineer".to_owned(),
-                vec!["engineer".to_owned(), "staff-engineer".to_owned()],
+                vec![
+                    "junior-engineer".to_owned(),
+                    "senior-engineer".to_owned(),
+                    "staff-engineer".to_owned(),
+                ],
             ),
             ("assistant".to_owned(), vec!["assistant".to_owned()]),
             ("manager".to_owned(), vec!["manager".to_owned()]),
         ]
     );
-    let engineer = &s.roles["engineer"];
+    let junior_engineer = &s.roles["junior-engineer"];
+    assert_eq!(junior_engineer.effort, Some(tau_proto::Effort::Low));
+    let senior_engineer = &s.roles["senior-engineer"];
     assert_eq!(
-        engineer.prompt_fragments[0].priority,
+        senior_engineer.prompt_fragments[0].priority,
         PromptPriority::new(5)
     );
     assert!(
-        engineer.prompt_fragments[0]
+        senior_engineer.prompt_fragments[0]
             .text
             .contains("Trust the `<instructions>`")
     );
@@ -722,9 +728,10 @@ fn missing_user_files_load_the_built_in_baseline() {
     let td = TempDir::new().expect("tempdir");
     let _cli = load_cli_settings_in(&dirs_with_config(td.path())).expect("cli");
     let harness = load_harness_settings_in(&dirs_with_config(td.path())).expect("harness");
-    assert!(harness.roles.contains_key("engineer"));
+    assert!(harness.roles.contains_key("junior-engineer"));
+    assert!(harness.roles.contains_key("senior-engineer"));
     assert!(harness.roles.contains_key("manager"));
-    assert_eq!(harness.default_role.as_deref(), Some("engineer"));
+    assert_eq!(harness.default_role.as_deref(), Some("senior-engineer"));
     assert!(harness.roles.contains_key("assistant"));
     assert!(harness.roles.contains_key("staff-engineer"));
     assert_eq!(
@@ -747,10 +754,11 @@ fn harness_role_enabled_false_filters_built_in_roles_after_merging() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            defaultRole: "staff-engineer",
+            defaultRole: "senior-engineer",
             roleGroups: {
                 engineer: {
-                    engineer: { enabled: false },
+                    "junior-engineer": { enabled: false },
+                    "senior-engineer": { enabled: false },
                     "staff-engineer": { enabled: false },
                 },
                 assistant: {
@@ -762,10 +770,11 @@ fn harness_role_enabled_false_filters_built_in_roles_after_merging() {
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert!(!s.roles.contains_key("engineer"));
+    assert!(!s.roles.contains_key("junior-engineer"));
+    assert!(!s.roles.contains_key("senior-engineer"));
     assert!(!s.roles.contains_key("staff-engineer"));
     assert!(s.roles.contains_key("assistant"));
-    assert_eq!(s.default_role.as_deref(), Some("staff-engineer"));
+    assert_eq!(s.default_role.as_deref(), Some("senior-engineer"));
     assert_eq!(
         s.role_groups
             .iter()

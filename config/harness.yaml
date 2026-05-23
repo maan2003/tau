@@ -15,7 +15,7 @@
 # Optional startup role. If omitted, Tau starts on the first role in
 # `roleGroups` order. If the named role is missing, Tau warns and falls back to
 # that first role.
-# defaultRole: engineer
+# defaultRole: senior-engineer
 
 # Optional grouped role defaults. Role names are globally unique across all
 # groups. Tab cycles between groups; Shift-Tab cycles within the selected
@@ -25,7 +25,9 @@
 # internal tool availability for the role.
 # roleGroups:
 #   engineer:
-#     engineer:
+#     junior-engineer:
+#       effort: low
+#     senior-engineer:
 #       description: Balanced coding assistant.
 #       model: chatgpt/gpt-5.5
 #       promptFragments:
