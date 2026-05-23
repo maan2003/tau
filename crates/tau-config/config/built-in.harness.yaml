@@ -6,6 +6,7 @@ extensions: {}
 roleGroups:
   engineer:
     engineer:
+      enabled: true
       description: Individual contributor using a state-of-the-art model. Good default for most tasks.
       effort: medium
       promptFragments:
@@ -14,6 +15,7 @@ roleGroups:
           text: |-
               Trust the `<instructions>`. When sent they always contain a carefully researched detailed plan. Do not waste time second guessing them. Focus on following them immediately and implementation details.
     staff-engineer:
+      enabled: true
       description: Senior individual contributor using maximum reasoning for hard engineering tasks.
       effort: xhigh
       promptFragments:
@@ -23,10 +25,12 @@ roleGroups:
               Trust the `<instructions>`. When sent they always contain a carefully researched detailed plan. Do not waste time second guessing them. Focus on following them immediately and implementation details.
   assistant:
     assistant:
+      enabled: true
       description: Fast and lightweight assistant.
       effort: off
   manager:
     manager:
+      enabled: true
       description: Role focused on splitting and delegation of tasks to other sub-agents.
       effort: low
       promptFragments:

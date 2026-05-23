@@ -105,6 +105,8 @@ roleGroups:
     staff-engineer:
       description: Maximum-reasoning engineering assistant
       effort: xhigh
+    legacy-role:
+      enabled: false  # hide a lower-layer or built-in role without deleting it
   assistant:
     assistant: { effort: off, serviceTier: fast }
   manager:

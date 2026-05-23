@@ -36,6 +36,8 @@
 #       disableTools: [shell]
 #     staff-engineer:
 #       effort: xhigh
+#     old-role:
+#       enabled: false  # hide a lower-layer or built-in role
 #   assistant:
 #     assistant:
 #       effort: off

@@ -43,6 +43,9 @@ selects the startup role; if omitted, Tau starts on the first role in
         description: "Maximum-reasoning engineering assistant",
         effort: "xhigh",
       },
+      "old-role": {
+        enabled: false,
+      },
     },
     assistant: {
       assistant: {
@@ -61,7 +64,7 @@ selects the startup role; if omitted, Tau starts on the first role in
 }
 ```
 
-Missing fields use provider-published fallback knobs for the role's resolved model.
+Missing fields use provider-published fallback knobs for the role's resolved model. Set `enabled: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
 
 Tau ships built-in `assistant`, `engineer`, `staff-engineer`, and `manager` roles, with `defaultRole: engineer`. `engineer` uses state-of-the-art individual-contributor defaults, while `staff-engineer` is the maximum-reasoning engineering variant. `assistant` is fast and lightweight with effort off. `manager` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `manager` prompt tells the model to use `delegate` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
 

@@ -450,6 +450,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         settings
             .apply_role_group_overrides(wire.role_groups)
             .map_err(D::Error::custom)?;
+        settings.remove_disabled_roles();
         Ok(settings)
     }
 }
@@ -478,6 +479,7 @@ impl HarnessSettings {
     /// the embedded `built-in.harness.yaml`.
     pub fn built_in() -> Self {
         let mut s: Self = parse_built_in_yaml("built-in.harness.yaml", BUILT_IN_HARNESS_YAML);
+        s.remove_disabled_roles();
         s.apply_global_prompt_fragments_to_roles();
         s
     }
@@ -493,6 +495,17 @@ impl HarnessSettings {
             }
         }
         Ok(())
+    }
+
+    fn remove_disabled_roles(&mut self) {
+        self.roles
+            .retain(|_role_name, role| role.enabled.unwrap_or(true));
+        for group in &mut self.role_groups {
+            group
+                .roles
+                .retain(|role_name| self.roles.contains_key(role_name));
+        }
+        self.role_groups.retain(|group| !group.roles.is_empty());
     }
 
     fn ensure_role_group_member(
@@ -612,6 +625,11 @@ pub struct ExtensionEntry {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AgentRole {
+    /// Whether this role is part of the effective runtime role set. Defaults to
+    /// enabled; set to `false` in a higher-precedence config layer to hide a
+    /// built-in or lower-layer role without deleting the rest of its settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     /// Short free-form summary shown in role-selection completion menus.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -655,6 +673,9 @@ pub struct AgentRole {
 
 impl AgentRole {
     fn apply_overrides_from(&mut self, override_role: &Self) {
+        if let Some(enabled) = override_role.enabled {
+            self.enabled = Some(enabled);
+        }
         if let Some(description) = &override_role.description {
             self.description = Some(description.clone());
         }
@@ -848,6 +869,7 @@ pub fn load_harness_settings_in(dirs: &TauDirs) -> Result<HarnessSettings, Setti
         role_settings.apply_prompt_fragment_overrides(overrides.prompt_fragments);
         role_settings.apply_role_group_overrides(overrides.role_groups)?;
     }
+    role_settings.remove_disabled_roles();
     role_settings.apply_global_prompt_fragments_to_roles();
     settings.prompt_fragments = role_settings.prompt_fragments;
     settings.roles = role_settings.roles;
