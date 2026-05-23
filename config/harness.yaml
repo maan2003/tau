@@ -28,21 +28,18 @@
 #     junior-engineer:
 #       effort: low
 #     senior-engineer:
-#       description: Balanced coding assistant.
+#       description: Balanced coding engineer.
 #       model: chatgpt/gpt-5.5
 #       promptFragments:
 #         - name: engineer.careful
 #           priority: 80
-#           text: You are a careful coding assistant.
+#           text: You are a careful coding agent.
 #       tools: [read, grep]
 #       disableTools: [shell]
 #     staff-engineer:
 #       effort: xhigh
 #     old-role:
 #       enabled: false  # hide a lower-layer or built-in role
-#   assistant:
-#     assistant:
-#       effort: off
 
 # Optional built-in extension overrides.
 # extensions:

@@ -34,27 +34,21 @@ selects the startup role; if omitted, Tau starts on the first role in
   roleGroups: {
     engineer: {
       "junior-engineer": {
-        description: "Lower-reasoning engineering assistant",
+        description: "Lower-reasoning engineer",
         effort: "low",
       },
       "senior-engineer": {
-        description: "Balanced coding assistant",
+        description: "Balanced coding engineer",
         model: "chatgpt/gpt-5.3-codex",
         effort: "medium",
         tools: ["read", "grep"],
       },
       "staff-engineer": {
-        description: "Maximum-reasoning engineering assistant",
+        description: "Maximum-reasoning engineer",
         effort: "xhigh",
       },
       "old-role": {
         enabled: false,
-      },
-    },
-    assistant: {
-      assistant: {
-        effort: "off",
-        serviceTier: "fast",
       },
     },
     manager: {
@@ -70,7 +64,7 @@ selects the startup role; if omitted, Tau starts on the first role in
 
 Missing fields use provider-published fallback knobs for the role's resolved model. Set `enabled: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
 
-Tau ships built-in `assistant`, `junior-engineer`, `senior-engineer`, `staff-engineer`, and `manager` roles, with `defaultRole: senior-engineer`. `junior-engineer` uses lower reasoning for straightforward engineering work, `senior-engineer` uses balanced individual-contributor defaults, and `staff-engineer` is the maximum-reasoning engineering variant. `assistant` is fast and lightweight with effort off. `manager` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `manager` prompt tells the model to use `delegate` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
+Tau ships built-in `junior-engineer`, `senior-engineer`, `staff-engineer`, and `manager` roles, with `defaultRole: senior-engineer`. `junior-engineer` uses lower reasoning for straightforward engineering work, `senior-engineer` uses balanced individual-contributor defaults, and `staff-engineer` is the maximum-reasoning engineering variant. `manager` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `manager` prompt tells the model to use `delegate` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
 
 
 ## Selecting a role
@@ -92,7 +86,6 @@ Examples:
 
 ```text
 /role engineer model chatgpt/gpt-5.3-codex
-/role assistant service-tier fast
 /role manager effort xhigh
 /role engineer disable-tools shell
 /role temporary model anthropic/claude-sonnet-4-20250514

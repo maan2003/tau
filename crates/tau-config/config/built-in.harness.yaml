@@ -16,7 +16,7 @@ roleGroups:
               Trust the `<instructions>`. When sent they always contain a carefully researched detailed plan. Do not waste time second guessing them. Focus on following them immediately and implementation details.
     junior-engineer:
       enabled: true
-      description: Lower-reasoning engineering assistant for straightforward coding tasks.
+      description: Lower-reasoning engineer for straightforward coding tasks.
       effort: low
       promptFragments:
         - name: manager.instructions
@@ -32,11 +32,6 @@ roleGroups:
           priority: 5
           text: |-
               Trust the `<instructions>`. When sent they always contain a carefully researched detailed plan. Do not waste time second guessing them. Focus on following them immediately and implementation details.
-  assistant:
-    assistant:
-      enabled: true
-      description: Fast and lightweight assistant.
-      effort: off
   manager:
     manager:
       enabled: true

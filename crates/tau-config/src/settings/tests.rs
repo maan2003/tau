@@ -402,7 +402,7 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
             .count(),
         1
     );
-    for role_name in ["assistant", "senior-engineer", "manager", "custom"] {
+    for role_name in ["senior-engineer", "manager", "custom"] {
         let role = &s.roles[role_name];
         assert_eq!(
             role.prompt_fragments
@@ -440,7 +440,7 @@ fn harness_roles_merge_with_built_ins() {
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     assert!(s.roles.contains_key("engineer"));
     assert!(s.roles.contains_key("manager"));
-    assert!(s.roles.contains_key("assistant"));
+    assert!(!s.roles.contains_key("assistant"));
     assert!(!s.roles.contains_key("smart"));
     assert!(!s.roles.contains_key("deep"));
     assert!(!s.roles.contains_key("rush"));
@@ -468,18 +468,6 @@ fn harness_roles_merge_with_built_ins() {
         Some(vec![tau_proto::ToolName::new("read")])
     );
 
-    let assistant = &s.roles["assistant"];
-    assert_eq!(
-        assistant.description.as_deref(),
-        Some("Fast and lightweight assistant.")
-    );
-    assert_eq!(
-        assistant.model.as_ref().map(ToString::to_string).as_deref(),
-        None
-    );
-    assert_eq!(assistant.effort, Some(tau_proto::Effort::Off));
-    assert_eq!(assistant.verbosity, None);
-    assert_eq!(assistant.thinking_summary, None);
     let manager = &s.roles["manager"];
     assert_eq!(
         manager.description.as_deref(),
@@ -603,8 +591,8 @@ fn harness_role_prompt_fragments_parse_as_plain_strings() {
 #[test]
 fn harness_built_in_roles_load_from_json_with_manager_prompt() {
     // Built-in role defaults live in built-in.harness.yaml. Manager has a
-    // visible orchestration prompt there. Engineer has a lightweight follow-up
-    // prompt for delegated tasks, while assistant keeps no built-in prompt.
+    // visible orchestration prompt there. Engineer roles have a lightweight
+    // follow-up prompt for delegated tasks.
     let s = HarnessSettings::built_in();
     assert_eq!(s.default_role.as_deref(), Some("senior-engineer"));
     assert_eq!(
@@ -616,12 +604,11 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
             (
                 "engineer".to_owned(),
                 vec![
-                    "junior-engineer".to_owned(),
                     "senior-engineer".to_owned(),
+                    "junior-engineer".to_owned(),
                     "staff-engineer".to_owned(),
                 ],
             ),
-            ("assistant".to_owned(), vec!["assistant".to_owned()]),
             ("manager".to_owned(), vec!["manager".to_owned()]),
         ]
     );
@@ -637,7 +624,7 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
             .text
             .contains("Trust the `<instructions>`")
     );
-    assert!(s.roles["assistant"].prompt_fragments.is_empty());
+    assert!(!s.roles.contains_key("assistant"));
     let staff_engineer = &s.roles["staff-engineer"];
     assert_eq!(staff_engineer.effort, Some(tau_proto::Effort::XHigh));
     assert!(
@@ -732,7 +719,7 @@ fn missing_user_files_load_the_built_in_baseline() {
     assert!(harness.roles.contains_key("senior-engineer"));
     assert!(harness.roles.contains_key("manager"));
     assert_eq!(harness.default_role.as_deref(), Some("senior-engineer"));
-    assert!(harness.roles.contains_key("assistant"));
+    assert!(!harness.roles.contains_key("assistant"));
     assert!(harness.roles.contains_key("staff-engineer"));
     assert_eq!(
         harness.roles["staff-engineer"].effort,
@@ -761,9 +748,6 @@ fn harness_role_enabled_false_filters_built_in_roles_after_merging() {
                     "senior-engineer": { enabled: false },
                     "staff-engineer": { enabled: false },
                 },
-                assistant: {
-                    assistant: { serviceTier: "fast" },
-                },
             },
         }"#,
     )
@@ -773,17 +757,14 @@ fn harness_role_enabled_false_filters_built_in_roles_after_merging() {
     assert!(!s.roles.contains_key("junior-engineer"));
     assert!(!s.roles.contains_key("senior-engineer"));
     assert!(!s.roles.contains_key("staff-engineer"));
-    assert!(s.roles.contains_key("assistant"));
+    assert!(!s.roles.contains_key("assistant"));
     assert_eq!(s.default_role.as_deref(), Some("senior-engineer"));
     assert_eq!(
         s.role_groups
             .iter()
             .map(|group| (group.name.as_str(), group.roles.as_slice()))
             .collect::<Vec<_>>(),
-        vec![
-            ("assistant", &["assistant".to_owned()][..]),
-            ("manager", &["manager".to_owned()][..]),
-        ]
+        vec![("manager", &["manager".to_owned()][..]),]
     );
 }
 

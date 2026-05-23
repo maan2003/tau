@@ -98,20 +98,18 @@ defaultRole: senior-engineer
 roleGroups:
   engineer:
     junior-engineer:
-      description: Lower-reasoning engineering assistant
+      description: Lower-reasoning engineer
       effort: low
     senior-engineer:
-      description: Balanced coding assistant
+      description: Balanced coding engineer
       model: chatgpt/gpt-5.5
       effort: medium
       tools: [read, grep]
     staff-engineer:
-      description: Maximum-reasoning engineering assistant
+      description: Maximum-reasoning engineer
       effort: xhigh
     legacy-role:
       enabled: false  # hide a lower-layer or built-in role without deleting it
-  assistant:
-    assistant: { effort: off, serviceTier: fast }
   manager:
     manager:
       promptFragments:
