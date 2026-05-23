@@ -600,6 +600,7 @@ where
                         writer.write_frame(&Frame::Event(Event::StartAgentRequest(
                             StartAgentRequest {
                                 query_id: query_id.clone(),
+                                agent_id: format!("notifications-{query_id}"),
                                 instruction: SUMMARY_INSTRUCTION.to_owned(),
                                 role: None,
                                 execution_mode: tau_proto::ToolExecutionMode::Shared,

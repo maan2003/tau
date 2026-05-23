@@ -1,56 +1,25 @@
 //! Harness-owned `delegate`, `wait`, `cancel`, and `message` tools.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::{Duration, Instant};
 
 use tau_proto::{
     AgentMessage, CborValue, Event, SessionContextKey, SessionContextValue, ToolBackgroundError,
-    ToolBackgroundResult, ToolCallId, ToolDisplay, ToolDisplayStats, ToolError, ToolExecutionMode,
-    ToolName, ToolResult, ToolResultKind, ToolType,
+    ToolBackgroundResult, ToolCallId, ToolDisplay, ToolError, ToolName, ToolResult, ToolResultKind,
+    ToolType,
 };
 
 use crate::conversation::ConversationId;
 use crate::error::HarnessError;
 use crate::harness::{AgentMessageRecipientStatus, AgentToolCall, HARNESS_CONNECTION_ID, Harness};
 
-/// Model-visible name of the harness-owned delegate tool.
-pub(crate) const DELEGATE_TOOL_NAME: &str = "delegate";
 /// Model-visible name of the harness-owned wait tool.
 pub(crate) const WAIT_TOOL_NAME: &str = "wait";
 #[cfg(test)]
 pub(crate) const MESSAGE_TOOL_NAME: &str = "message";
-#[cfg(test)]
-pub(crate) const CANCEL_TOOL_NAME: &str = "cancel";
-
-const DELEGATE_PREFIX: &str = include_str!("prompts/delegate_prefix.md");
-const SLOW_DELEGATE_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
-
-#[derive(Clone, Debug)]
-pub(crate) struct PendingHarnessDelegate {
-    /// Original tool call id that should receive the side-agent answer.
-    pub(crate) call_id: ToolCallId,
-    /// Visible tool name for the original call.
-    pub(crate) tool_name: ToolName,
-    /// Wall-clock start time used for slow-call duration metadata.
-    pub(crate) started_at: Instant,
-    /// Agent id of the caller that invoked `delegate`.
-    pub(crate) self_agent_id: Option<String>,
-    /// Agent id allocated for the side conversation, when it started.
-    pub(crate) agent_id: Option<String>,
-}
-
 #[derive(Default)]
 pub(crate) struct SubagentToolState {
-    /// Outstanding harness-owned delegations indexed by query id.
-    pub(crate) pending_delegates: HashMap<String, PendingHarnessDelegate>,
-    /// Monotonic id used to create delegate query ids.
-    pub(crate) next_delegate_query_id: u64,
     /// State used by the wait tool to track background completions.
     wait_tracker: WaitTracker,
-    /// Recent delegate tool calls that already received a cancel request.
-    pub(crate) canceled_delegates: HashSet<ToolCallId>,
-    /// Insertion order for pruning `canceled_delegates`.
-    pub(crate) canceled_delegate_order: VecDeque<ToolCallId>,
 }
 
 impl Harness {
@@ -174,100 +143,6 @@ impl Harness {
         self.publish_wait_replies(cancelled.replies);
     }
 
-    /// Handle the harness-owned `delegate` tool call inline.
-    pub(crate) fn handle_delegate_tool_call(
-        &mut self,
-        cid: &ConversationId,
-        call: &AgentToolCall,
-        visible_tool_name: ToolName,
-    ) -> Result<(), HarnessError> {
-        let call_id: ToolCallId = call.id.clone();
-        self.ensure_harness_owned_tool_tracking(cid, call, &visible_tool_name);
-
-        let parsed = match parse_delegate_args(&call.arguments) {
-            Ok(parsed) => parsed,
-            Err(message) => {
-                self.finish_harness_owned_tool_with_error(
-                    cid,
-                    call_id,
-                    visible_tool_name,
-                    call.tool_type,
-                    message,
-                    Some(call.arguments.clone()),
-                );
-                return Ok(());
-            }
-        };
-
-        let self_agent_id = match self.ensure_agent_id_for_conversation(cid) {
-            Some(agent_id) => agent_id,
-            None => {
-                self.finish_harness_owned_tool_with_error(
-                    cid,
-                    call_id,
-                    visible_tool_name,
-                    call.tool_type,
-                    "sender conversation no longer exists".to_owned(),
-                    Some(call.arguments.clone()),
-                );
-                return Ok(());
-            }
-        };
-
-        let query_id = format!("delegate-{}", self.subagents.next_delegate_query_id);
-        self.subagents.next_delegate_query_id += 1;
-        self.subagents.pending_delegates.insert(
-            query_id.clone(),
-            PendingHarnessDelegate {
-                call_id: call_id.clone(),
-                tool_name: visible_tool_name.clone(),
-                started_at: Instant::now(),
-                self_agent_id: Some(self_agent_id.clone()),
-                agent_id: None,
-            },
-        );
-        let start_request = tau_proto::StartAgentRequest {
-            query_id: query_id.clone(),
-            instruction: format!("{DELEGATE_PREFIX}{}", parsed.prompt),
-            role: parsed.role,
-            execution_mode: parsed.execution_mode,
-            input_stats: ToolDisplayStats::for_text(&parsed.prompt),
-            tool_call_id: Some(call_id.clone()),
-            task_name: Some(parsed.task_name),
-        };
-        let agent_id = match self
-            .enqueue_harness_delegate_start_agent_request_without_draining(start_request)
-        {
-            Ok(agent_id) => agent_id,
-            Err(message) => {
-                self.subagents.pending_delegates.remove(&query_id);
-                self.finish_harness_owned_tool_with_error(
-                    cid,
-                    call_id,
-                    visible_tool_name,
-                    call.tool_type,
-                    message,
-                    Some(call.arguments.clone()),
-                );
-                return Ok(());
-            }
-        };
-        if let Some(pending) = self.subagents.pending_delegates.get_mut(&query_id) {
-            pending.agent_id = Some(agent_id.clone());
-        }
-        if self.tool_turn.mark_backgrounded(&call_id) {
-            self.publish_synthetic_background_result_with_agent_ids(
-                &call_id,
-                &self_agent_id,
-                &agent_id,
-            );
-        }
-        // `delegate` is harness-owned and already inside the main event loop, so
-        // publishing a bus event would only echo an internal command. Use the
-        // same shared scheduler that external `agent.start_request` events reach.
-        self.drain_pending_start_agent_requests()
-    }
-
     /// Handle the harness-owned `message` tool call inline.
     /// Publish an agent message after validating sender and recipient state.
     pub(crate) fn publish_agent_message_from_conversation(
@@ -340,38 +215,6 @@ impl Harness {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn handle_cancel_tool_call(
-        &mut self,
-        cid: &ConversationId,
-        call: &AgentToolCall,
-        visible_tool_name: ToolName,
-    ) -> Result<(), HarnessError> {
-        let call_id: ToolCallId = call.id.clone();
-        self.ensure_harness_owned_tool_tracking(cid, call, &visible_tool_name);
-        let result =
-            parse_cancel_args(&call.arguments).and_then(|target| self.cancel_tool_call(&target));
-        match result {
-            Ok(()) => self.finish_harness_owned_tool_with_result(
-                cid,
-                call_id,
-                visible_tool_name,
-                call.tool_type,
-                "Tool cancellation sent".to_owned(),
-                None,
-            ),
-            Err(message) => self.finish_harness_owned_tool_with_error(
-                cid,
-                call_id,
-                visible_tool_name,
-                call.tool_type,
-                message,
-                Some(call.arguments.clone()),
-            ),
-        }
-        Ok(())
-    }
-
     /// Handle the harness-owned `wait` tool call inline.
     pub(crate) fn handle_wait_tool_call(
         &mut self,
@@ -392,89 +235,6 @@ impl Harness {
         }
         self.publish_wait_replies(start.reply.into_iter().collect());
         Ok(())
-    }
-
-    pub(crate) fn complete_harness_delegate(
-        &mut self,
-        cid: &ConversationId,
-        query_id: &str,
-        text: String,
-        error: Option<String>,
-    ) {
-        self.complete_harness_delegate_inner(cid, query_id, text, error, false);
-    }
-
-    pub(crate) fn complete_harness_delegate_inner(
-        &mut self,
-        _cid: &ConversationId,
-        query_id: &str,
-        text: String,
-        error: Option<String>,
-        suppress_background_completion_prompt: bool,
-    ) {
-        let Some(pending) = self.subagents.pending_delegates.remove(query_id) else {
-            return;
-        };
-        let duration_seconds = delegate_duration_seconds(pending.started_at.elapsed());
-        let self_agent_id = pending.self_agent_id.clone();
-        let agent_id = pending.agent_id.clone();
-        let call_id = pending.call_id.clone();
-        let owner_cid = self
-            .tool_conversations
-            .get(&call_id)
-            .cloned()
-            .unwrap_or_else(|| self.default_conversation_id.clone());
-        if let Some(message) = error {
-            let event = ToolError {
-                call_id: call_id.clone(),
-                tool_name: pending.tool_name,
-                tool_type: ToolType::Function,
-                message,
-                details: delegate_error_details(
-                    duration_seconds,
-                    self_agent_id.as_deref(),
-                    agent_id.as_deref(),
-                ),
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            };
-            if self.tool_turn.is_backgrounded(&call_id) {
-                if suppress_background_completion_prompt {
-                    self.handle_background_tool_error_without_completion_prompt(
-                        Some(HARNESS_CONNECTION_ID),
-                        event,
-                    );
-                } else {
-                    self.handle_background_tool_error(Some(HARNESS_CONNECTION_ID), event);
-                }
-            } else {
-                self.publish_terminal_tool_error(Some(&owner_cid), None, event);
-                self.on_tool_call_complete(call_id.as_str());
-                self.clear_tool_call_tracking(call_id.as_str());
-            }
-        } else {
-            let event = ToolResult {
-                call_id: call_id.clone(),
-                tool_name: pending.tool_name,
-                tool_type: ToolType::Function,
-                result: delegate_result_value(
-                    text,
-                    duration_seconds,
-                    self_agent_id.as_deref(),
-                    agent_id.as_deref(),
-                ),
-                kind: ToolResultKind::Final,
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            };
-            if self.tool_turn.is_backgrounded(&call_id) {
-                self.handle_background_tool_result(HARNESS_CONNECTION_ID, event);
-            } else {
-                self.publish_terminal_tool_result(Some(&owner_cid), None, event);
-                self.on_tool_call_complete(call_id.as_str());
-                self.clear_tool_call_tracking(call_id.as_str());
-            }
-        }
     }
 
     pub(crate) fn ensure_harness_owned_tool_tracking(
@@ -578,6 +338,38 @@ impl Harness {
         self.clear_tool_call_tracking(call_id.as_str());
     }
 
+    pub(crate) fn finish_prebuilt_internal_tool_result(&mut self, result: ToolResult) {
+        let call_id = result.call_id.clone();
+        let owner_cid = self
+            .tool_conversations
+            .get(&call_id)
+            .cloned()
+            .unwrap_or_else(|| self.default_conversation_id.clone());
+        if self.tool_turn.is_backgrounded(&call_id) {
+            self.handle_background_tool_result(HARNESS_CONNECTION_ID, result);
+        } else {
+            self.publish_terminal_tool_result(Some(&owner_cid), None, result);
+            self.on_tool_call_complete(call_id.as_str());
+            self.clear_tool_call_tracking(call_id.as_str());
+        }
+    }
+
+    pub(crate) fn finish_prebuilt_internal_tool_error(&mut self, error: ToolError) {
+        let call_id = error.call_id.clone();
+        let owner_cid = self
+            .tool_conversations
+            .get(&call_id)
+            .cloned()
+            .unwrap_or_else(|| self.default_conversation_id.clone());
+        if self.tool_turn.is_backgrounded(&call_id) {
+            self.handle_background_tool_error(Some(HARNESS_CONNECTION_ID), error);
+        } else {
+            self.publish_terminal_tool_error(Some(&owner_cid), None, error);
+            self.on_tool_call_complete(call_id.as_str());
+            self.clear_tool_call_tracking(call_id.as_str());
+        }
+    }
+
     fn publish_wait_replies(&mut self, replies: Vec<WaitReply>) {
         for reply in replies {
             if let Some(call_id) = reply.unsuppress_call_id.clone() {
@@ -640,9 +432,7 @@ impl crate::InternalToolHandler for TestBuiltinTools {
     fn tool_specs(&self) -> Vec<tau_proto::ToolSpec> {
         vec![
             test_tool_spec("skill", None),
-            delegate_tool_spec(),
             wait_tool_spec(),
-            test_tool_spec(CANCEL_TOOL_NAME, Some(tau_proto::BackgroundSupport::Never)),
             message_tool_spec(),
         ]
     }
@@ -650,45 +440,33 @@ impl crate::InternalToolHandler for TestBuiltinTools {
     fn handles(&self, internal_tool_name: &ToolName) -> bool {
         matches!(
             internal_tool_name.as_str(),
-            "skill" | DELEGATE_TOOL_NAME | WAIT_TOOL_NAME | CANCEL_TOOL_NAME | MESSAGE_TOOL_NAME
+            "skill" | WAIT_TOOL_NAME | MESSAGE_TOOL_NAME
         )
     }
 
-    fn handle_started(
+    fn handle_event(
         &self,
         host: &mut crate::InternalToolHost<'_>,
-        conversation_id: &crate::ConversationId,
-        call: &crate::AgentToolCall,
-        visible_tool_name: ToolName,
+        event: &tau_proto::Event,
     ) -> Result<(), HarnessError> {
+        let tau_proto::Event::ToolStarted(started) = event else {
+            return Ok(());
+        };
+        let Some((conversation_id, call, visible_tool_name)) = host.internal_started_call(started)
+        else {
+            return Ok(());
+        };
         match call.name.as_str() {
             "skill" => Ok(()),
-            DELEGATE_TOOL_NAME => {
-                host.handle_delegate_tool_call(conversation_id, call, visible_tool_name)
+            WAIT_TOOL_NAME => {
+                host.handle_wait_tool_call(&conversation_id, &call, visible_tool_name)
             }
-            WAIT_TOOL_NAME => host.handle_wait_tool_call(conversation_id, call, visible_tool_name),
             MESSAGE_TOOL_NAME => {
-                host.handle_message_tool_call(conversation_id, call, visible_tool_name)
-            }
-            CANCEL_TOOL_NAME => {
-                host.handle_cancel_tool_call(conversation_id, call, visible_tool_name)
+                host.handle_message_tool_call(&conversation_id, &call, visible_tool_name)
             }
             _ => Ok(()),
         }
     }
-}
-
-#[cfg(test)]
-fn delegate_tool_spec() -> tau_proto::ToolSpec {
-    let mut spec = test_tool_spec(
-        DELEGATE_TOOL_NAME,
-        Some(tau_proto::BackgroundSupport::Instant),
-    );
-    spec.parameters = Some(serde_json::json!({
-        "type":"object",
-        "properties":{"execution_mode":{"enum":["shared","update","exclusive"]}}
-    }));
-    spec
 }
 
 #[cfg(test)]
@@ -719,17 +497,9 @@ fn test_tool_spec(
         parameters: Some(serde_json::json!({"type":"object"})),
         format: None,
         enabled_by_default: true,
-        execution_mode: ToolExecutionMode::Shared,
+        execution_mode: tau_proto::ToolExecutionMode::Shared,
         background_support,
     }
-}
-
-#[derive(Debug)]
-struct DelegateArgs {
-    task_name: String,
-    prompt: String,
-    execution_mode: ToolExecutionMode,
-    role: Option<String>,
 }
 
 #[cfg(test)]
@@ -772,158 +542,6 @@ fn parse_message_args(arguments: &CborValue) -> Result<MessageArgs, String> {
         recipient_id,
         message,
     })
-}
-
-#[cfg(test)]
-fn parse_cancel_args(arguments: &CborValue) -> Result<ToolCallId, String> {
-    let CborValue::Map(entries) = arguments else {
-        return Err("arguments must be an object".to_owned());
-    };
-    for (k, v) in entries {
-        let CborValue::Text(name) = k else { continue };
-        if name == "tool_call_id" {
-            return match v {
-                CborValue::Text(text) if !text.is_empty() => Ok(text.clone().into()),
-                CborValue::Text(_) => Err("`tool_call_id` must not be empty".to_owned()),
-                _ => Err("`tool_call_id` must be a string".to_owned()),
-            };
-        }
-    }
-    Err("`tool_call_id` is required".to_owned())
-}
-
-fn parse_delegate_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
-    let CborValue::Map(entries) = arguments else {
-        return Err("arguments must be an object".to_owned());
-    };
-    let mut prompt = None;
-    let mut task_name = None;
-    let mut execution_mode = None;
-    let mut role = None;
-    for (k, v) in entries {
-        let CborValue::Text(name) = k else { continue };
-        match name.as_str() {
-            "prompt" => match v {
-                CborValue::Text(text) => prompt = Some(text.clone()),
-                _ => return Err("`prompt` must be a string".to_owned()),
-            },
-            "task_name" => match v {
-                CborValue::Text(text) => task_name = Some(text.clone()),
-                _ => return Err("`task_name` must be a string".to_owned()),
-            },
-            "role" => match v {
-                CborValue::Text(text) => role = Some(text.clone()),
-                _ => return Err("`role` must be a string".to_owned()),
-            },
-            "execution_mode" => match v {
-                CborValue::Text(text) if text == "shared" => {
-                    execution_mode = Some(ToolExecutionMode::Shared)
-                }
-                CborValue::Text(text) if text == "update" => {
-                    execution_mode = Some(ToolExecutionMode::Update)
-                }
-                CborValue::Text(text) if text == "exclusive" => {
-                    execution_mode = Some(ToolExecutionMode::Exclusive)
-                }
-                CborValue::Text(_) => {
-                    return Err(
-                        "`execution_mode` must be `shared`, `update`, or `exclusive`".to_owned(),
-                    );
-                }
-                _ => return Err("`execution_mode` must be a string".to_owned()),
-            },
-            _ => {}
-        }
-    }
-    let prompt = prompt.ok_or_else(|| "missing string argument: prompt".to_owned())?;
-    if prompt.trim().is_empty() {
-        return Err("`prompt` must not be empty".to_owned());
-    }
-    let task_name = task_name.ok_or_else(|| "missing string argument: task_name".to_owned())?;
-    if task_name.trim().is_empty() {
-        return Err("`task_name` must not be empty".to_owned());
-    }
-    Ok(DelegateArgs {
-        task_name,
-        prompt,
-        execution_mode: execution_mode.unwrap_or(ToolExecutionMode::Shared),
-        role: role.filter(|role| !role.trim().is_empty()),
-    })
-}
-
-fn delegate_duration_seconds(elapsed: Duration) -> Option<u64> {
-    if Duration::from_secs(SLOW_DELEGATE_EXEC_TIME_THRESHOLD_SECS) < elapsed {
-        Some(elapsed.as_secs_f64().ceil() as u64)
-    } else {
-        None
-    }
-}
-
-fn delegate_result_value(
-    text: String,
-    duration_seconds: Option<u64>,
-    self_agent_id: Option<&str>,
-    agent_id: Option<&str>,
-) -> CborValue {
-    if duration_seconds.is_none() && self_agent_id.is_none() && agent_id.is_none() {
-        return CborValue::Text(text);
-    }
-    CborValue::Map(delegate_detail_entries(
-        Some(text),
-        duration_seconds,
-        self_agent_id,
-        agent_id,
-    ))
-}
-
-fn delegate_error_details(
-    duration_seconds: Option<u64>,
-    self_agent_id: Option<&str>,
-    agent_id: Option<&str>,
-) -> Option<CborValue> {
-    if duration_seconds.is_none() && self_agent_id.is_none() && agent_id.is_none() {
-        return None;
-    }
-    Some(CborValue::Map(delegate_detail_entries(
-        None,
-        duration_seconds,
-        self_agent_id,
-        agent_id,
-    )))
-}
-
-fn delegate_detail_entries(
-    output: Option<String>,
-    duration_seconds: Option<u64>,
-    self_agent_id: Option<&str>,
-    agent_id: Option<&str>,
-) -> Vec<(CborValue, CborValue)> {
-    let mut entries = Vec::new();
-    if let Some(self_agent_id) = self_agent_id {
-        entries.push((
-            CborValue::Text("self_agent_id".to_owned()),
-            CborValue::Text(self_agent_id.to_owned()),
-        ));
-    }
-    if let Some(agent_id) = agent_id {
-        entries.push((
-            CborValue::Text("sub_agent_id".to_owned()),
-            CborValue::Text(agent_id.to_owned()),
-        ));
-    }
-    if let Some(duration_seconds) = duration_seconds {
-        entries.push((
-            CborValue::Text("duration_seconds".to_owned()),
-            CborValue::Integer((duration_seconds as i64).into()),
-        ));
-    }
-    if let Some(output) = output {
-        entries.push((
-            CborValue::Text("output".to_owned()),
-            CborValue::Text(output),
-        ));
-    }
-    entries
 }
 
 const ORIGINAL_TOOL_CALL_ID_HEADER: &str = "original_tool_call_id";

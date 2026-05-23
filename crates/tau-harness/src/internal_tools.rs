@@ -4,7 +4,10 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tau_proto::{ToolDisplay, ToolName, ToolSpec, ToolStarted};
+use tau_proto::{
+    CborValue, Event, StartAgentRequest, ToolCallId, ToolDisplay, ToolError, ToolName, ToolResult,
+    ToolSpec,
+};
 
 use crate::discovery::DiscoveredSkillSource;
 use crate::error::HarnessError;
@@ -19,14 +22,21 @@ pub trait InternalToolHandler: Send + Sync {
     /// Return true when this handler owns `internal_tool_name`.
     fn handles(&self, internal_tool_name: &ToolName) -> bool;
 
-    /// Handle a routed `ToolStarted` invocation.
-    fn handle_started(
+    /// React to a committed event.
+    ///
+    /// Internal tools observe the same durable lifecycle events as external
+    /// extensions. A handler should filter for events it owns, such as
+    /// `ToolStarted` for its registered tools or later correlation events like
+    /// `StartAgentResult`.
+    fn handle_event(
         &self,
         host: &mut InternalToolHost<'_>,
-        conversation_id: &ConversationId,
-        call: &AgentToolCall,
-        visible_tool_name: ToolName,
-    ) -> Result<(), HarnessError>;
+        event: &Event,
+    ) -> Result<(), HarnessError> {
+        let _ = host;
+        let _ = event;
+        Ok(())
+    }
 }
 
 /// Shared reference-counted internal tool handler.
@@ -103,15 +113,53 @@ impl<'a> InternalToolHost<'a> {
         self.harness.emit_info_important(message);
     }
 
-    /// Handle the built-in `delegate` tool.
-    pub fn handle_delegate_tool_call(
+    /// Ensure and return the agent id for a conversation.
+    pub fn ensure_agent_id_for_conversation(
         &mut self,
         conversation_id: &ConversationId,
-        call: &AgentToolCall,
-        visible_tool_name: ToolName,
-    ) -> Result<(), HarnessError> {
+    ) -> Option<String> {
         self.harness
-            .handle_delegate_tool_call(conversation_id, call, visible_tool_name)
+            .ensure_agent_id_for_conversation(conversation_id)
+    }
+
+    /// Mint an agent id appropriate for `role`.
+    pub fn mint_agent_id_for_role(&self, role: &str) -> String {
+        crate::harness::mint_agent_id_for_role(role)
+    }
+
+    /// Enqueue a start-agent request from an internal handler without draining.
+    pub fn enqueue_start_agent_request_without_draining(
+        &mut self,
+        query: StartAgentRequest,
+    ) -> Result<String, String> {
+        self.harness
+            .enqueue_internal_start_agent_request_without_draining(query)
+    }
+
+    /// Drain queued start-agent requests.
+    pub fn drain_start_agent_requests(&mut self) -> Result<(), HarnessError> {
+        self.harness.drain_pending_start_agent_requests()
+    }
+
+    /// Mark a call as backgrounded for instant-background tools.
+    pub fn mark_tool_backgrounded(&mut self, call_id: &ToolCallId) -> bool {
+        self.harness.tool_turn.mark_backgrounded(call_id)
+    }
+
+    /// Publish a background placeholder with custom text.
+    pub fn publish_background_placeholder(&mut self, call_id: &ToolCallId, result: CborValue) {
+        self.harness
+            .publish_internal_background_placeholder(call_id, result);
+    }
+
+    /// Complete a prebuilt internal tool result, routing foreground/background.
+    pub fn finish_prebuilt_tool_result(&mut self, result: ToolResult) {
+        self.harness.finish_prebuilt_internal_tool_result(result);
+    }
+
+    /// Complete a prebuilt internal tool error, routing foreground/background.
+    pub fn finish_prebuilt_tool_error(&mut self, error: ToolError) {
+        self.harness.finish_prebuilt_internal_tool_error(error);
     }
 
     /// Handle the built-in `wait` tool.
@@ -136,15 +184,25 @@ impl<'a> InternalToolHost<'a> {
             .handle_message_tool_call(conversation_id, call, visible_tool_name)
     }
 
-    #[cfg(test)]
-    pub(crate) fn handle_cancel_tool_call(
+    /// Resolve a committed `ToolStarted` event for an internal tool.
+    pub fn internal_started_call(
         &mut self,
-        conversation_id: &ConversationId,
-        call: &AgentToolCall,
-        visible_tool_name: ToolName,
-    ) -> Result<(), HarnessError> {
-        self.harness
-            .handle_cancel_tool_call(conversation_id, call, visible_tool_name)
+        started: &tau_proto::ToolStarted,
+    ) -> Option<(ConversationId, AgentToolCall, ToolName)> {
+        let cid = self
+            .harness
+            .tool_conversations
+            .get(&started.call_id)?
+            .clone();
+        let pending = self.harness.pending_tools.get(&started.call_id)?.clone();
+        let call = AgentToolCall {
+            id: started.call_id.clone(),
+            name: pending.internal_name,
+            tool_type: pending.tool_type,
+            arguments: started.arguments.clone(),
+            display: None,
+        };
+        Some((cid, call, pending.name))
     }
 
     /// Ensure the harness tracks an internal tool call before it completes.
@@ -240,12 +298,28 @@ impl<'a> InternalToolHost<'a> {
         );
     }
 
-    /// Request cancellation of a running cancellable tool call.
-    pub fn cancel_tool_call(
+    /// Return true when a tool call is still tracked as running.
+    pub fn is_running_tool_call(&self, target_call_id: &ToolCallId) -> bool {
+        self.harness.is_running_tool_call(target_call_id)
+    }
+
+    /// Publish a durable broadcast tool cancellation request.
+    pub fn publish_tool_cancel_request(&mut self, target_call_id: ToolCallId) {
+        self.harness.publish_tool_cancel_request(target_call_id);
+    }
+
+    /// Cancel a start-agent request owned by an internal tool handler.
+    pub fn cancel_start_agent_request(
         &mut self,
-        target_call_id: &tau_proto::ToolCallId,
+        query_id: &str,
+        target_call_id: &ToolCallId,
+        suppress_background_completion_prompt: bool,
     ) -> Result<(), String> {
-        self.harness.cancel_tool_call(target_call_id)
+        self.harness.cancel_start_agent_request(
+            query_id,
+            target_call_id,
+            suppress_background_completion_prompt,
+        )
     }
 
     /// Publish an agent-to-agent or agent-to-user message from a conversation.
@@ -273,44 +347,15 @@ impl Harness {
         }
     }
 
-    pub(crate) fn dispatch_internal_tool_started(
+    pub(crate) fn dispatch_internal_tool_event(
         &mut self,
-        started: ToolStarted,
+        event: &Event,
     ) -> Result<(), HarnessError> {
-        let Some(cid) = self.tool_conversations.get(&started.call_id).cloned() else {
-            self.emit_info(&format!(
-                "discarding internal tool.started for unknown call_id={}",
-                started.call_id
-            ));
-            return Ok(());
-        };
-        let Some(pending) = self.pending_tools.get(&started.call_id).cloned() else {
-            self.emit_info(&format!(
-                "discarding internal tool.started without pending tool for call_id={}",
-                started.call_id
-            ));
-            return Ok(());
-        };
-        let call = AgentToolCall {
-            id: started.call_id,
-            name: pending.internal_name.clone(),
-            tool_type: pending.tool_type,
-            arguments: started.arguments,
-            display: None,
-        };
-        let Some(handler) = self
-            .internal_tool_handlers
-            .iter()
-            .find(|handler| handler.handles(&pending.internal_name))
-            .cloned()
-        else {
-            self.emit_info(&format!(
-                "discarding internal tool.started for unhandled internal tool `{}`",
-                pending.internal_name
-            ));
-            return Ok(());
-        };
-        let mut host = InternalToolHost::new(self);
-        handler.handle_started(&mut host, &cid, &call, pending.name)
+        let handlers = self.internal_tool_handlers.clone();
+        for handler in handlers {
+            let mut host = InternalToolHost::new(self);
+            handler.handle_event(&mut host, event)?;
+        }
+        Ok(())
     }
 }

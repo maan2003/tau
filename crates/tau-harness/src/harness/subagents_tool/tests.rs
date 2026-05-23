@@ -1,22 +1,5 @@
 use super::*;
 
-fn delegate_args_with_mode(mode: &str) -> CborValue {
-    CborValue::Map(vec![
-        (
-            CborValue::Text("task_name".to_owned()),
-            CborValue::Text("task".to_owned()),
-        ),
-        (
-            CborValue::Text("prompt".to_owned()),
-            CborValue::Text("do the task".to_owned()),
-        ),
-        (
-            CborValue::Text("execution_mode".to_owned()),
-            CborValue::Text(mode.to_owned()),
-        ),
-    ])
-}
-
 fn conv(id: &str) -> ConversationId {
     ConversationId::new(id)
 }
@@ -132,16 +115,6 @@ fn cbor_map_text<'a>(value: &'a CborValue, key: &str) -> Option<&'a str> {
 }
 
 #[test]
-fn delegate_tool_schema_advertises_update_execution_mode() {
-    let spec = delegate_tool_spec();
-    let parameters = spec.parameters.expect("parameters");
-    assert_eq!(
-        parameters["properties"]["execution_mode"]["enum"],
-        serde_json::json!(["shared", "update", "exclusive"])
-    );
-}
-
-#[test]
 fn message_tool_schema_requires_recipient_and_message() {
     let spec = message_tool_spec();
     let parameters = spec.parameters.expect("parameters");
@@ -149,27 +122,6 @@ fn message_tool_schema_requires_recipient_and_message() {
         parameters["required"],
         serde_json::json!(["recipient_id", "message"])
     );
-}
-
-#[test]
-fn delegate_result_includes_only_caller_and_sub_agent_ids() {
-    let value = delegate_result_value(
-        "done".to_owned(),
-        None,
-        Some("engineer_parent"),
-        Some("engineer_child"),
-    );
-
-    assert_eq!(
-        cbor_map_text(&value, "self_agent_id"),
-        Some("engineer_parent")
-    );
-    assert_eq!(
-        cbor_map_text(&value, "sub_agent_id"),
-        Some("engineer_child")
-    );
-    assert_eq!(cbor_map_text(&value, "agent_id"), None);
-    assert_eq!(cbor_map_text(&value, "output"), Some("done"));
 }
 
 #[test]
@@ -210,25 +162,6 @@ fn message_args_require_non_empty_recipient_and_message() {
     assert_eq!(
         parse_message_args(&empty),
         Err("`recipient_id` must not be empty".to_owned())
-    );
-}
-
-/// Delegate accepts the `update` mode advertised in the tool schema and
-/// forwards it to the global sub-agent scheduler.
-#[test]
-fn delegate_args_accept_update_execution_mode() {
-    let parsed = parse_delegate_args(&delegate_args_with_mode("update")).expect("parse");
-    assert_eq!(parsed.execution_mode, ToolExecutionMode::Update);
-}
-
-/// Bad mode diagnostics list every accepted spelling so model-visible tool
-/// errors are actionable.
-#[test]
-fn delegate_args_execution_mode_error_mentions_update() {
-    let error = parse_delegate_args(&delegate_args_with_mode("mutating")).expect_err("error");
-    assert_eq!(
-        error,
-        "`execution_mode` must be `shared`, `update`, or `exclusive`"
     );
 }
 

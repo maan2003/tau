@@ -245,18 +245,6 @@ impl ToolTurnMachine {
             .map(|in_flight| &in_flight.execution_mode)
     }
 
-    /// True when all in-flight invocations match `predicate`.
-    #[cfg(test)]
-    pub(crate) fn all_in_flight_modes(
-        &self,
-        predicate: impl FnMut(&ToolExecutionMode) -> bool,
-    ) -> bool {
-        self.in_flight_tool_execution_modes
-            .values()
-            .map(|in_flight| &in_flight.execution_mode)
-            .all(predicate)
-    }
-
     /// Queued invocation by index.
     #[cfg(test)]
     pub(crate) fn pending(&self, idx: usize) -> Option<&PendingToolInvocation> {

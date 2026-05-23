@@ -733,6 +733,7 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
         conn_id,
         Frame::Event(Event::StartAgentRequest(StartAgentRequest {
             query_id: "q-staged".to_owned(),
+            agent_id: "test-agent-q-staged".to_owned(),
             instruction: "STAGED START AGENT REQUEST".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,

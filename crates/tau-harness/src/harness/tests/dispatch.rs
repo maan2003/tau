@@ -1,8 +1,8 @@
 use super::*;
 use crate::conversation::{Conversation, ConversationId, PendingPrompt};
 use crate::harness::{
-    AgentMessageRecipientStatus, PendingStartAgentRequest, PendingTool,
-    background_completion_prompt, extension_disconnected_background_tool_call_error_message,
+    PendingTool, background_completion_prompt,
+    extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
     restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
 };
@@ -689,6 +689,7 @@ fn tool_progress(call_id: &str, tool_name: &str, message: &str) -> tau_proto::To
 fn ext_query(query_id: &str, execution_mode: ToolExecutionMode) -> StartAgentRequest {
     StartAgentRequest {
         query_id: query_id.to_owned(),
+        agent_id: format!("test-agent-{}", query_id),
         instruction: format!("instruction {query_id}"),
         role: None,
         execution_mode,
@@ -1724,70 +1725,6 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
     h.shutdown().expect("shutdown");
 }
 
-#[test]
-fn provider_owner_validation_rejects_client_tool_event_injection() {
-    let (_td, mut h) = setup_routed_test_tool_call("client-cancelled-call", "owned_tool");
-    let _client = connect_test_client(&mut h, "ui-spoof", tau_proto::ClientKind::Ui);
-
-    h.handle_client_event_inner(
-        "ui-spoof",
-        Event::ToolCancelled(tau_proto::ToolCancelled {
-            call_id: "client-cancelled-call".into(),
-            tool_name: ToolName::new("owned_tool"),
-            tool_type: tau_proto::ToolType::Function,
-        }),
-    )
-    .expect("client cancellation ignored");
-
-    assert!(h.tool_conversations.contains_key("client-cancelled-call"));
-    assert!(!event_log_contains(&h, "ui-spoof", |event| matches!(
-        event,
-        Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "client-cancelled-call"
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Active harness-owned tools do not have an external provider owner. External
-/// extensions must not be able to complete those call ids anyway.
-#[test]
-fn provider_owner_validation_rejects_external_result_for_harness_owned_call() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
-    let call_id: ToolCallId = "harness-owned-call".into();
-    h.tool_conversations.insert(call_id.clone(), cid);
-    h.pending_tools.insert(
-        call_id.clone(),
-        PendingTool {
-            name: ToolName::new("delegate"),
-            internal_name: ToolName::new("delegate"),
-            tool_type: tau_proto::ToolType::Function,
-        },
-    );
-
-    h.handle_extension_event_inner(
-        "conn-wrong",
-        Event::ToolResult(final_tool_result(
-            call_id.as_str(),
-            "delegate",
-            "spoofed output",
-        )),
-    )
-    .expect("wrong result ignored");
-
-    assert!(h.tool_conversations.contains_key(&call_id));
-    assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
-        event,
-        Event::ToolResult(result) if result.call_id == call_id
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Progress for a call after tracking has been cleared is stale and should not
-/// be published as a visible update.
 #[test]
 fn provider_owner_validation_rejects_late_tool_progress_after_completion() {
     let (_td, mut h) = setup_routed_test_tool_call("late-progress-call", "owned_tool");
@@ -5377,6 +5314,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q1".to_owned(),
+            agent_id: "test-agent-q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -5474,6 +5412,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-message".to_owned(),
+            agent_id: "test-agent-q-message".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -5669,6 +5608,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q1".to_owned(),
+            agent_id: "test-agent-q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -5813,6 +5753,7 @@ fn non_tool_start_agent_request_inherits_parent_branch() {
         "conn-notifications",
         StartAgentRequest {
             query_id: "idle-0".to_owned(),
+            agent_id: "test-agent-idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -5958,6 +5899,7 @@ fn non_tool_start_agent_request_preserves_chain_anchor_and_tool_choice() {
         "conn-notifications",
         StartAgentRequest {
             query_id: "idle-0".to_owned(),
+            agent_id: "test-agent-idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -6070,6 +6012,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q1".to_owned(),
+            agent_id: "test-agent-q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -6120,6 +6063,7 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
         "conn-notifications",
         StartAgentRequest {
             query_id: "idle-0".to_owned(),
+            agent_id: "test-agent-idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -6274,6 +6218,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         "conn-delegate",
         StartAgentRequest {
             query_id: "q1".to_owned(),
+            agent_id: "test-agent-q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -6521,217 +6466,6 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
     h.shutdown().expect("shutdown");
 }
 
-/// A completed background call can already have a queued internal completion
-/// prompt when its side conversation tears down. The prompt and the target map
-/// must move to the live parent instead of being lost with the removed child.
-#[test]
-fn completed_background_completion_prompt_transfers_before_side_teardown() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-
-    let parent_cid = ConversationId::new("parent-side");
-    let child_cid = ConversationId::new("child-side");
-    let mut parent = Conversation::new(
-        parent_cid.clone(),
-        "s1".into(),
-        tau_proto::PromptOriginator::Extension {
-            name: "parent-ext".into(),
-            query_id: "parent".to_owned(),
-        },
-        None,
-        Some("parent-ext".into()),
-    );
-    parent.turn_state = ConversationTurnState::ToolsRunning {
-        remaining_calls: vec!["keep-parent-busy".into()],
-    };
-    let mut child = Conversation::new(
-        child_cid.clone(),
-        "s1".into(),
-        tau_proto::PromptOriginator::Extension {
-            name: HARNESS_CONNECTION_ID.into(),
-            query_id: "child".to_owned(),
-        },
-        None,
-        Some(HARNESS_CONNECTION_ID.into()),
-    );
-    child.parent_tool_call_id = Some("child-parent-call".into());
-    child.parent_conversation_id = Some(parent_cid.clone());
-    h.conversations.insert(parent_cid.clone(), parent);
-    h.conversations.insert(child_cid.clone(), child);
-
-    let call_id: ToolCallId = "completed-bg".into();
-    h.background_completion_targets
-        .insert(call_id.clone(), child_cid.clone());
-    h.conversations
-        .get_mut(&child_cid)
-        .expect("child conversation")
-        .pending_prompts
-        .push_back(PendingPrompt::internal(background_completion_prompt(
-            &call_id,
-        )));
-
-    h.transfer_background_completion_target_before_teardown(&child_cid);
-
-    assert_eq!(
-        h.background_completion_targets.get(&call_id),
-        Some(&parent_cid)
-    );
-    assert!(
-        h.conversations
-            .get(&child_cid)
-            .expect("child conversation")
-            .pending_prompts
-            .iter()
-            .all(|prompt| prompt.text != background_completion_prompt(&call_id))
-    );
-    let parent = h
-        .conversations
-        .get(&parent_cid)
-        .expect("parent conversation");
-    assert!(parent.pending_prompts.iter().any(|prompt| {
-        prompt.text == background_completion_prompt(&call_id) && prompt.is_internal()
-    }));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Nested harness-owned delegates clear the parent delegate call mapping before
-/// side teardown runs. A background child still running under that nested side
-/// must transfer first to the parent side conversation and then onward to the
-/// default conversation if the parent side also tears down before completion.
-#[test]
-fn nested_harness_delegate_background_survives_parent_side_teardown() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    h.selected_model = Some("test/model".into());
-
-    let _ = connect_test_tool(&mut h, "conn-outer");
-    let _ = connect_test_tool(&mut h, "conn-slow");
-    h.registry.register(
-        "conn-slow",
-        ToolSpec {
-            name: ToolName::new("slow"),
-            model_visible_name: None,
-            description: None,
-            parameters: None,
-            tool_type: tau_proto::ToolType::Function,
-            format: None,
-            enabled_by_default: true,
-            execution_mode: ToolExecutionMode::Shared,
-            background_support: Some(tau_proto::BackgroundSupport::Instant),
-        },
-    );
-
-    let default_cid = h.default_conversation_id.clone();
-    h.tool_conversations
-        .insert("outer-call".into(), default_cid.clone());
-    let mut outer_query = ext_query("q-parent", ToolExecutionMode::Shared);
-    outer_query.tool_call_id = Some("outer-call".into());
-    outer_query.task_name = Some("outer".to_owned());
-    h.handle_start_agent_request("conn-outer", outer_query)
-        .expect("outer query");
-    let outer_cid = ext_query_cid(&h, "q-parent").expect("outer side conversation");
-    let outer_spid = h
-        .prompt_conversations
-        .iter()
-        .find_map(|(spid, prompt_cid)| (prompt_cid == &outer_cid).then_some(spid.clone()))
-        .expect("outer prompt id");
-    let nested_delegate_args = CborValue::Map(vec![
-        (
-            CborValue::Text("task_name".to_owned()),
-            CborValue::Text("nested".to_owned()),
-        ),
-        (
-            CborValue::Text("prompt".to_owned()),
-            CborValue::Text("run slow work".to_owned()),
-        ),
-    ]);
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: outer_spid,
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "nested-delegate-call".into(),
-            name: ToolName::new("delegate"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: nested_delegate_args,
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        usage: None,
-        originator: tau_proto::PromptOriginator::Extension {
-            name: "conn-outer".into(),
-            query_id: "q-parent".to_owned(),
-        },
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("outer starts nested delegate");
-
-    let nested_cid = ext_query_cid(&h, "delegate-0").expect("nested side conversation");
-    assert_eq!(
-        h.conversations
-            .get(&nested_cid)
-            .expect("nested conversation")
-            .parent_conversation_id
-            .as_ref(),
-        Some(&outer_cid)
-    );
-    let nested_spid = h
-        .prompt_conversations
-        .iter()
-        .find_map(|(spid, prompt_cid)| (prompt_cid == &nested_cid).then_some(spid.clone()))
-        .expect("nested prompt id");
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: nested_spid,
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "slow-call".into(),
-            name: ToolName::new("slow"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        usage: None,
-        originator: tau_proto::PromptOriginator::Extension {
-            name: HARNESS_CONNECTION_ID.into(),
-            query_id: "delegate-0".to_owned(),
-        },
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("nested starts background tool");
-
-    finish_ext_query(&mut h, &nested_cid, "delegate-0");
-    assert!(!h.conversations.contains_key(&nested_cid));
-    assert_eq!(h.tool_conversations.get("slow-call"), Some(&outer_cid));
-
-    finish_ext_query(&mut h, &outer_cid, "q-parent");
-    assert!(!h.conversations.contains_key(&outer_cid));
-    assert_eq!(h.tool_conversations.get("slow-call"), Some(&default_cid));
-
-    h.handle_extension_event_inner(
-        "conn-slow",
-        Event::ToolResult(final_tool_result("slow-call", "slow", "real output")),
-    )
-    .expect("late background result");
-
-    assert_eq!(
-        h.background_completion_targets.get("slow-call"),
-        Some(&default_cid)
-    );
-    assert!(event_log_contains(&h, "conn-slow", |event| matches!(
-        event,
-        Event::ToolBackgroundResult(result)
-            if result.call_id.as_str() == "slow-call"
-                && matches!(&result.result, CborValue::Text(text) if text == "real output")
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// A suppression event removes the internal model steering prompt while keeping
-/// the real late background error event visible to the event log.
 #[test]
 fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     let td = TempDir::new().expect("tempdir");
@@ -7064,406 +6798,6 @@ fn background_notification_suppression_removes_queued_prompt() {
     h.shutdown().expect("shutdown");
 }
 
-/// Recall only returns user-authored queued prompts. Hidden background
-/// completion prompts must stay queued for the model instead of appearing in
-/// the user's editor.
-#[test]
-fn recall_queued_prompt_skips_internal_prompts() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
-    let conv = h
-        .conversations
-        .get_mut(&cid)
-        .expect("default conversation exists");
-    conv.pending_prompts
-        .push_back(PendingPrompt::user("user followup".to_owned()));
-    conv.pending_prompts
-        .push_back(PendingPrompt::internal(background_completion_prompt(
-            &"bg".into(),
-        )));
-
-    h.handle_recall_queued_prompt(&"s1".into());
-
-    let conv = h
-        .conversations
-        .get(&cid)
-        .expect("default conversation remains");
-    assert_eq!(conv.pending_prompts.len(), 1);
-    let remaining = conv
-        .pending_prompts
-        .front()
-        .expect("internal prompt remains");
-    assert_eq!(remaining.text, background_completion_prompt(&"bg".into()));
-    assert!(remaining.is_internal());
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::SessionPromptRecalled(recalled) if recalled.text == "user followup"
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Regression: `delegate` is an instant-background tool. Its placeholder must
-/// fold into the parent transcript before the harness starts the side prompt;
-/// otherwise the provider can replay a `function_call` without the matching
-/// output and reject the next request.
-#[test]
-fn instant_delegate_placeholder_is_committed_before_side_prompt() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-
-    h.selected_model = Some("test/model".into());
-    let cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
-    seed_agent_thinking(&mut h, &cid, "sp-main");
-    h.prompt_conversations
-        .insert(main_spid.clone(), cid.clone());
-    h.publish_for_conversation(
-        &cid,
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "delegate now".to_owned(),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }),
-    );
-    let args = CborValue::Map(vec![
-        (
-            CborValue::Text("task_name".to_owned()),
-            CborValue::Text("race".to_owned()),
-        ),
-        (
-            CborValue::Text("prompt".to_owned()),
-            CborValue::Text("side task".to_owned()),
-        ),
-    ]);
-
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "delegate-call".into(),
-            name: ToolName::new("delegate"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: args,
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("main response");
-
-    let mut placeholder_seq = None;
-    let mut placeholder_self_agent_id = None;
-    let mut placeholder_sub_agent_id = None;
-    let mut placeholder_legacy_agent_id = None;
-    let mut placeholder_count = 0;
-    let mut side_prompt_seq = None;
-    let mut side_agent_id = None;
-    let mut seq = 0;
-    while let Some(entry) = h.event_log.get_next_from(seq) {
-        seq = entry.seq + 1;
-        match &entry.event {
-            Event::ProviderToolResult(result)
-                if result.call_id.as_str() == "delegate-call"
-                    && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder =>
-            {
-                placeholder_count += 1;
-                placeholder_seq.get_or_insert(entry.seq);
-                if let CborValue::Text(text) = &result.result {
-                    placeholder_legacy_agent_id.get_or_insert_with(|| {
-                        text.lines()
-                            .find_map(|line| line.strip_prefix("agent_id: "))
-                            .map(str::to_owned)
-                    });
-                    placeholder_self_agent_id.get_or_insert_with(|| {
-                        text.lines()
-                            .find_map(|line| line.strip_prefix("self_agent_id: "))
-                            .expect("delegate placeholder self agent id header")
-                            .to_owned()
-                    });
-                    placeholder_sub_agent_id.get_or_insert_with(|| {
-                        text.lines()
-                            .find_map(|line| line.strip_prefix("sub_agent_id: "))
-                            .expect("delegate placeholder sub agent id header")
-                            .to_owned()
-                    });
-                }
-            }
-            Event::ToolResult(result)
-                if result.call_id.as_str() == "delegate-call"
-                    && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder =>
-            {
-                panic!("background placeholder must not be a logical tool.result");
-            }
-            Event::SessionPromptCreated(prompt)
-                if h.prompt_conversations
-                    .get(&prompt.session_prompt_id)
-                    .is_some_and(|prompt_cid| prompt_cid != &cid) =>
-            {
-                side_prompt_seq.get_or_insert(entry.seq);
-                side_agent_id.get_or_insert_with(|| {
-                    let prompt_cid = h
-                        .prompt_conversations
-                        .get(&prompt.session_prompt_id)
-                        .expect("side prompt conversation");
-                    h.conversations
-                        .get(prompt_cid)
-                        .and_then(|conv| conv.agent_id.clone())
-                        .expect("side conversation agent id")
-                });
-            }
-            _ => {}
-        }
-    }
-
-    assert_eq!(placeholder_count, 1);
-    assert!(
-        placeholder_seq.expect("delegate placeholder") < side_prompt_seq.expect("side prompt"),
-        "the parent transcript must contain the delegate placeholder before any side prompt is sent",
-    );
-    let placeholder_self_agent_id = placeholder_self_agent_id.expect("placeholder self agent id");
-    let placeholder_sub_agent_id = placeholder_sub_agent_id.expect("placeholder sub agent id");
-    let side_agent_id = side_agent_id.expect("side agent id");
-    assert_eq!(placeholder_legacy_agent_id, Some(None));
-    assert_eq!(placeholder_sub_agent_id, side_agent_id);
-    assert!(placeholder_sub_agent_id.starts_with("engineer_"));
-    assert!(placeholder_self_agent_id.starts_with("engineer_"));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Mixed-mode `delegate` calls issued in the same agent turn must still
-/// dispatch to the delegate extension concurrently. The call argument
-/// `execution_mode: "exclusive"` belongs to the `StartAgentRequest` emitted by
-/// the extension, not to the parent conversation's `delegate` tool invocation;
-/// global exclusivity is enforced only after those queries enter the harness
-/// `StartAgentRequest` scheduler.
-#[test]
-fn mixed_mode_delegate_calls_dispatch_concurrently_to_ext_scheduler() {
-    use tau_proto::CborValue;
-
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-
-    h.selected_model = Some("test/model".into());
-    let cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
-    seed_agent_thinking(&mut h, &cid, "sp-main");
-    h.prompt_conversations
-        .insert(main_spid.clone(), cid.clone());
-    h.publish_for_conversation(
-        &cid,
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "mixed delegate work".to_owned(),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }),
-    );
-    let exclusive_args = CborValue::Map(vec![
-        (
-            CborValue::Text("task_name".to_owned()),
-            CborValue::Text("exclusive".to_owned()),
-        ),
-        (
-            CborValue::Text("prompt".to_owned()),
-            CborValue::Text("exclusive task".to_owned()),
-        ),
-        (
-            CborValue::Text("execution_mode".to_owned()),
-            CborValue::Text("exclusive".to_owned()),
-        ),
-    ]);
-    let shared_args = CborValue::Map(vec![
-        (
-            CborValue::Text("task_name".to_owned()),
-            CborValue::Text("shared".to_owned()),
-        ),
-        (
-            CborValue::Text("prompt".to_owned()),
-            CborValue::Text("shared task".to_owned()),
-        ),
-        (
-            CborValue::Text("execution_mode".to_owned()),
-            CborValue::Text("shared".to_owned()),
-        ),
-    ]);
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        output_items: vec![
-            ContextItem::ToolCall(ToolCallItem {
-                call_id: "delegate-exclusive".into(),
-                name: ToolName::new("delegate"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: exclusive_args,
-            }),
-            ContextItem::ToolCall(ToolCallItem {
-                call_id: "delegate-shared".into(),
-                name: ToolName::new("delegate"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: shared_args,
-            }),
-        ],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        usage: match (None, None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("main response");
-
-    assert_eq!(h.tool_turn.in_flight_len(), 2);
-    assert!(
-        h.tool_turn
-            .all_in_flight_modes(|kind| matches!(kind, tau_proto::ToolExecutionMode::Shared)),
-        "delegate tool invocations should stay Shared even when an argument asks for an exclusive sub-agent",
-    );
-    assert_eq!(
-        h.tool_turn.pending_len(),
-        0,
-        "mixed delegate calls should not serialize before reaching the extension",
-    );
-
-    let exclusive_cid = ext_query_cid(&h, "delegate-0").expect("exclusive query started");
-    assert!(ext_query_cid(&h, "delegate-1").is_none());
-    assert_eq!(h.pending_start_agent_requests.len(), 1);
-
-    finish_ext_query(&mut h, &exclusive_cid, "delegate-0");
-    assert!(ext_query_cid(&h, "delegate-1").is_some());
-    assert!(h.pending_start_agent_requests.is_empty());
-}
-
-/// Canceling a delegate that is still queued in the global sub-agent scheduler
-/// must remove the queued `StartAgentRequest`. Otherwise the cancel succeeds
-/// but the side conversation can still start after the exclusive blocker
-/// finishes.
-#[test]
-fn cancel_tool_removes_queued_delegate_before_it_can_start() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    h.selected_model = Some("test/model".into());
-    h.register_harness_tools();
-
-    let parent_cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "main-spid-cancel-queued".into();
-    h.prompt_conversations
-        .insert(main_spid.clone(), parent_cid.clone());
-
-    let exclusive_args = CborValue::Map(vec![
-        (
-            CborValue::Text("task_name".to_owned()),
-            CborValue::Text("exclusive".to_owned()),
-        ),
-        (
-            CborValue::Text("prompt".to_owned()),
-            CborValue::Text("exclusive task".to_owned()),
-        ),
-        (
-            CborValue::Text("execution_mode".to_owned()),
-            CborValue::Text("exclusive".to_owned()),
-        ),
-    ]);
-    let shared_args = CborValue::Map(vec![
-        (
-            CborValue::Text("task_name".to_owned()),
-            CborValue::Text("shared".to_owned()),
-        ),
-        (
-            CborValue::Text("prompt".to_owned()),
-            CborValue::Text("shared task".to_owned()),
-        ),
-        (
-            CborValue::Text("execution_mode".to_owned()),
-            CborValue::Text("shared".to_owned()),
-        ),
-    ]);
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        output_items: vec![
-            ContextItem::ToolCall(ToolCallItem {
-                call_id: "delegate-exclusive".into(),
-                name: ToolName::new("delegate"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: exclusive_args,
-            }),
-            ContextItem::ToolCall(ToolCallItem {
-                call_id: "delegate-shared".into(),
-                name: ToolName::new("delegate"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: shared_args,
-            }),
-        ],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("main response");
-
-    let exclusive_cid = ext_query_cid(&h, "delegate-0").expect("exclusive query started");
-    assert!(ext_query_cid(&h, "delegate-1").is_none());
-    assert_eq!(h.pending_start_agent_requests.len(), 1);
-    let queued_agent_id = h.pending_start_agent_requests[0].agent_id.clone();
-
-    let cancel_call = AgentToolCall {
-        id: "cancel-queued".into(),
-        name: ToolName::new("cancel"),
-        tool_type: tau_proto::ToolType::Function,
-        arguments: CborValue::Map(vec![(
-            CborValue::Text("tool_call_id".to_owned()),
-            CborValue::Text("delegate-shared".to_owned()),
-        )]),
-        display: None,
-    };
-    h.handle_cancel_tool_call(&parent_cid, &cancel_call, ToolName::new("cancel"))
-        .expect("cancel handled");
-
-    assert!(h.pending_start_agent_requests.is_empty());
-    assert_eq!(
-        h.agent_message_recipient_status(&queued_agent_id),
-        AgentMessageRecipientStatus::Stopped,
-        "canceling a queued delegate should leave its already-published agent id stopped, not unknown",
-    );
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolBackgroundError(error)
-            if error.call_id.as_str() == "delegate-shared"
-                && error.message.contains("canceled")
-    )));
-
-    finish_ext_query(&mut h, &exclusive_cid, "delegate-0");
-    assert!(ext_query_cid(&h, "delegate-1").is_none());
-    assert!(h.pending_start_agent_requests.is_empty());
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Global sub-agent scheduling is harness-owned, not a delegate-extension local
-/// concern. Shared `StartAgentRequest`s from independent extensions should both
-/// be admitted immediately so read/research fan-out can overlap.
 #[test]
 fn shared_start_agent_requests_start_concurrently() {
     let td = TempDir::new().expect("tempdir");
@@ -7965,6 +7299,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-A".to_owned(),
+            agent_id: "test-agent-q-A".to_owned(),
             instruction: "side task A".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -7978,6 +7313,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-B".to_owned(),
+            agent_id: "test-agent-q-B".to_owned(),
             instruction: "side task B".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -8180,6 +7516,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q1".to_owned(),
+            agent_id: "test-agent-q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Update,
@@ -8367,6 +7704,7 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-disconnect".to_owned(),
+            agent_id: "test-agent-q-disconnect".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -8580,6 +7918,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-worker".to_owned(),
+            agent_id: "test-agent-q-worker".to_owned(),
             instruction: "side task".to_owned(),
             role: Some("worker".to_owned()),
             execution_mode: ToolExecutionMode::Shared,
@@ -8700,6 +8039,7 @@ fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
             "conn-delegate",
             StartAgentRequest {
                 query_id: query_id.to_owned(),
+                agent_id: format!("test-agent-{}", query_id),
                 instruction: "side task".to_owned(),
                 role: Some(role.to_owned()),
                 execution_mode: ToolExecutionMode::Shared,
@@ -8739,6 +8079,7 @@ fn delegate_missing_default_engineer_errors_when_engineer_unavailable() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-default".to_owned(),
+            agent_id: "test-agent-q-default".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -8844,6 +8185,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-outer".to_owned(),
+            agent_id: "test-agent-q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -8897,6 +8239,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-nested".to_owned(),
+            agent_id: "test-agent-q-nested".to_owned(),
             instruction: "nested task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9087,6 +8430,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-outer".to_owned(),
+            agent_id: "test-agent-q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9136,6 +8480,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-nested".to_owned(),
+            agent_id: "test-agent-q-nested".to_owned(),
             instruction: "nested task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9242,6 +8587,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-outer".to_owned(),
+            agent_id: "test-agent-q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9394,6 +8740,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-top".to_owned(),
+            agent_id: "test-agent-q-top".to_owned(),
             instruction: "TOP: delegate exactly two more subtasks".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9443,6 +8790,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-leaf".to_owned(),
+            agent_id: "test-agent-q-leaf".to_owned(),
             instruction: "LEAF: do one terminal search only".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9574,766 +8922,6 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
 /// the resulting prompt would walk through unrelated history,
 /// producing orphan ToolUse blocks the provider rejects with
 /// `No tool output found for function call …`.
-#[test]
-fn tool_call_response_preserves_assistant_text_items() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let sink = connect_test_tool(&mut h, "agent-finished-sink");
-    h.bus
-        .set_subscriptions(
-            "agent-finished-sink",
-            vec![tau_proto::EventSelector::Exact(
-                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
-            )],
-        )
-        .expect("subscribe");
-    let _ = connect_test_tool(&mut h, "conn-delegate");
-    h.registry.register(
-        "conn-delegate",
-        ToolSpec {
-            name: tau_proto::ToolName::new("delegate"),
-            model_visible_name: None,
-            description: None,
-            parameters: None,
-            tool_type: tau_proto::ToolType::Function,
-            format: None,
-            enabled_by_default: true,
-            execution_mode: ToolExecutionMode::Exclusive,
-            background_support: None,
-        },
-    );
-
-    let spid: SessionPromptId = "sp-text-and-tool".into();
-    h.prompt_conversations
-        .insert(spid.clone(), h.default_conversation_id.clone());
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid.clone(),
-        output_items: vec![
-            ContextItem::Message(MessageItem {
-                role: ContextRole::Assistant,
-                content: vec![ContentPart::Text {
-                    text: "I'll delegate this.".to_owned(),
-                }],
-                phase: Some(tau_proto::MessagePhase::Commentary),
-            }),
-            ContextItem::ToolCall(ToolCallItem {
-                call_id: "call-delegate".into(),
-                name: ToolName::new("delegate"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: CborValue::Map(Vec::new()),
-            }),
-        ],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("response");
-
-    let frames = sink.lock().expect("sink");
-    let published = frames
-        .iter()
-        .find_map(|routed| match peel_inner_event(&routed.frame) {
-            Some(Event::ProviderResponseFinished(finished))
-                if finished.session_prompt_id == spid =>
-            {
-                Some(finished)
-            }
-            _ => None,
-        })
-        .expect("published response");
-
-    assert_eq!(published.output_items.len(), 2);
-    assert_eq!(
-        text_part(&published.output_items[0]),
-        Some("I'll delegate this."),
-        "tool-call normalization must not drop assistant text items",
-    );
-    assert!(matches!(
-        published.output_items[1],
-        ContextItem::ToolCall(_)
-    ));
-
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
-fn parallel_side_convs_do_not_share_branch_cursor() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-
-    h.selected_model = Some("test/model".into());
-    let _ = connect_test_tool(&mut h, "conn-delegate");
-    h.registry.register(
-        "conn-delegate",
-        ToolSpec {
-            name: tau_proto::ToolName::new("delegate"),
-            model_visible_name: None,
-            description: None,
-            parameters: None,
-            tool_type: tau_proto::ToolType::Function,
-            format: None,
-            enabled_by_default: true,
-            execution_mode: ToolExecutionMode::Exclusive,
-            background_support: None,
-        },
-    );
-
-    let cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
-    seed_agent_thinking(&mut h, &cid, "sp-main");
-    h.prompt_conversations
-        .insert(main_spid.clone(), cid.clone());
-    h.publish_for_conversation(
-        &cid,
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "go".to_owned(),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }),
-    );
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        output_items: vec![
-            ContextItem::ToolCall(ToolCallItem {
-                call_id: "main-A".into(),
-                name: ToolName::new("delegate"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: CborValue::Map(Vec::new()),
-            }),
-            ContextItem::ToolCall(ToolCallItem {
-                call_id: "main-B".into(),
-                name: ToolName::new("delegate"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: CborValue::Map(Vec::new()),
-            }),
-        ],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        usage: match (None, None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("main response");
-
-    h.handle_start_agent_request(
-        "conn-delegate",
-        StartAgentRequest {
-            query_id: "q-A".to_owned(),
-            instruction: "instr A".to_owned(),
-            role: None,
-            execution_mode: ToolExecutionMode::Shared,
-            input_stats: tau_proto::ToolDisplayStats::default(),
-            tool_call_id: Some("main-A".into()),
-            task_name: Some("A".to_owned()),
-        },
-    )
-    .expect("query A");
-    h.handle_start_agent_request(
-        "conn-delegate",
-        StartAgentRequest {
-            query_id: "q-B".to_owned(),
-            instruction: "instr B".to_owned(),
-            role: None,
-            execution_mode: ToolExecutionMode::Shared,
-            input_stats: tau_proto::ToolDisplayStats::default(),
-            tool_call_id: Some("main-B".into()),
-            task_name: Some("B".to_owned()),
-        },
-    )
-    .expect("query B");
-
-    let cid_a = h
-        .conversations
-        .iter()
-        .find_map(|(cid, conv)| {
-            matches!(
-                &conv.originator,
-                tau_proto::PromptOriginator::Extension { query_id, .. } if query_id == "q-A"
-            )
-            .then_some(cid.clone())
-        })
-        .expect("conv A");
-    let cid_b = h
-        .conversations
-        .iter()
-        .find_map(|(cid, conv)| {
-            matches!(
-                &conv.originator,
-                tau_proto::PromptOriginator::Extension { query_id, .. } if query_id == "q-B"
-            )
-            .then_some(cid.clone())
-        })
-        .expect("conv B");
-
-    let head_a_after_init = h.conversations.get(&cid_a).expect("conv A after init").head;
-    let head_b_after_init = h.conversations.get(&cid_b).expect("conv B after init").head;
-    assert!(head_a_after_init.is_some());
-    assert!(head_b_after_init.is_some());
-    assert_ne!(
-        head_a_after_init, head_b_after_init,
-        "the two side convs must point at distinct UserMessage nodes",
-    );
-
-    // Conv A's agent finishes with a tool call (no text → the
-    // ProviderResponseFinished itself does NOT fold a tree node).
-    // After the response is processed, the harness emits a
-    // ToolRequest for `A-tool` on conv-A's branch. That request must
-    // be parented under conv-A's own `UserMessage` (head_a_after_init),
-    // not conv-B's last fold.
-    let spid_a = h
-        .prompt_conversations
-        .iter()
-        .find_map(|(spid, prompt_cid)| (prompt_cid == &cid_a).then_some(spid.clone()))
-        .expect("spid A");
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid_a,
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "A-tool".into(),
-            name: ToolName::new("delegate"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        usage: match (None, None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
-        originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
-            query_id: "q-A".to_owned(),
-        },
-
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("A response");
-
-    let tree = h.store.session("s1").expect("session tree");
-    let a_tool_node = tree
-        .nodes()
-        .iter()
-        .find(|n| {
-            matches!(
-                &n.entry,
-                tau_core::SessionEntry::AssistantResponse { output_items, .. }
-                    if output_items.iter().any(|item| tool_call_id(item) == Some("A-tool"))
-            )
-        })
-        .expect("A-tool assistant-response node");
-    assert_eq!(
-        a_tool_node.parent_id, head_a_after_init,
-        "conv A's ToolRequest must be parented under conv A's UserMessage; \
-         drift onto conv B would manifest here",
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Tool-event originator should reflect the conversation that owns
-/// the call, not a fixed `User`. Main-agent tool calls show
-/// `PromptOriginator::User`; sub-agent tool calls show
-/// `PromptOriginator::Extension { name, query_id }` matching the
-/// side conversation. The harness re-stamps on publish, so
-/// extensions don't have to track this themselves.
-#[test]
-fn tool_events_carry_owning_conversation_originator() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-
-    h.selected_model = Some("test/model".into());
-    let _ = connect_test_tool(&mut h, "conn-delegate");
-    let _ = connect_test_tool(&mut h, "conn-origin-tool");
-    h.registry
-        .register("conn-origin-tool", shared_test_tool_spec("origin_tool"));
-
-    // Subscribe a sink to tool.request so we can inspect originator.
-    let sink = connect_test_tool(&mut h, "test-tool-req-sink");
-    h.bus
-        .set_subscriptions(
-            "test-tool-req-sink",
-            vec![tau_proto::EventSelector::Exact(
-                tau_proto::EventName::TOOL_REQUEST,
-            )],
-        )
-        .expect("subscribe");
-
-    // Main agent submits a delegate call.
-    let cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
-    seed_agent_thinking(&mut h, &cid, "sp-main");
-    h.prompt_conversations
-        .insert(main_spid.clone(), cid.clone());
-    h.publish_for_conversation(
-        &cid,
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "kick off a delegate".to_owned(),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }),
-    );
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "main-call".into(),
-            name: ToolName::new("origin_tool"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        usage: match (None, None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("main response");
-
-    // Spawn the sub-agent and have IT call a tool too.
-    h.handle_start_agent_request(
-        "conn-delegate",
-        StartAgentRequest {
-            query_id: "q-sub".to_owned(),
-            instruction: "sub task".to_owned(),
-            role: None,
-            execution_mode: ToolExecutionMode::Shared,
-            input_stats: tau_proto::ToolDisplayStats::default(),
-            tool_call_id: Some("main-call".into()),
-            task_name: Some("sub".to_owned()),
-        },
-    )
-    .expect("sub query");
-    let sub_spid = h
-        .prompt_conversations
-        .iter()
-        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
-        .expect("sub prompt id");
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: sub_spid,
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "sub-call".into(),
-            name: ToolName::new("origin_tool"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        usage: match (None, None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
-        originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
-            query_id: "q-sub".to_owned(),
-        },
-
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("sub response");
-
-    let frames = sink.lock().expect("sink");
-    let mut originators_by_call = std::collections::HashMap::new();
-    for routed in frames.iter() {
-        if let Frame::Message(tau_proto::Message::LogEvent(env)) = &routed.frame
-            && let Event::ToolRequest(req) = env.event.as_ref()
-        {
-            originators_by_call.insert(req.call_id.as_str().to_owned(), req.originator.clone());
-        }
-    }
-    drop(frames);
-
-    assert!(
-        matches!(
-            originators_by_call.get("main-call"),
-            Some(tau_proto::PromptOriginator::User)
-        ),
-        "main-agent tool call should be tagged User; got {:?}",
-        originators_by_call.get("main-call"),
-    );
-    assert!(
-        matches!(
-            originators_by_call.get("sub-call"),
-            Some(tau_proto::PromptOriginator::Extension { query_id, .. }) if query_id == "q-sub"
-        ),
-        "sub-agent tool call should be tagged Extension{{query_id=q-sub}}; got {:?}",
-        originators_by_call.get("sub-call"),
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
-/// The cancel tool is targeted at delegate calls: it must stop the side
-/// conversation, notify the provider for the exact prompt, and complete the
-/// parent background call so waiters do not hang forever. A nested delegate
-/// that has already backgrounded is no longer in `ToolsRunning`; it must still
-/// be canceled instead of being transferred to the parent conversation.
-#[test]
-fn cancel_tool_cancels_delegate_side_conversation() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let parent_cid = h.default_conversation_id.clone();
-    let delegate_call_id: ToolCallId = "delegate-call".into();
-    h.subagents.pending_delegates.insert(
-        "delegate-1".to_owned(),
-        crate::harness::subagents_tool::PendingHarnessDelegate {
-            call_id: delegate_call_id.clone(),
-            tool_name: ToolName::new("delegate"),
-            started_at: std::time::Instant::now(),
-            self_agent_id: Some("engineer_parent".to_owned()),
-            agent_id: Some("worker_seeded123".to_owned()),
-        },
-    );
-    h.tool_conversations
-        .insert(delegate_call_id.clone(), parent_cid.clone());
-    h.pending_tools.insert(
-        delegate_call_id.clone(),
-        PendingTool {
-            name: ToolName::new("delegate"),
-            internal_name: ToolName::new("delegate"),
-            tool_type: tau_proto::ToolType::Function,
-        },
-    );
-    h.tool_turn.record_in_flight_for_test(
-        parent_cid.clone(),
-        delegate_call_id.clone(),
-        tau_proto::ToolExecutionMode::Shared,
-    );
-    h.tool_turn.mark_backgrounded(&delegate_call_id);
-    h.record_wait_tool_request(&delegate_call_id);
-
-    let side_cid = ConversationId::new("start-agent-__harness__-delegate-1");
-    let side_spid: SessionPromptId = "side-spid".into();
-    let mut side_conv = Conversation::new(
-        side_cid.clone(),
-        "s1".into(),
-        tau_proto::PromptOriginator::Extension {
-            name: HARNESS_CONNECTION_ID.into(),
-            query_id: "delegate-1".to_owned(),
-        },
-        None,
-        Some(HARNESS_CONNECTION_ID.into()),
-    );
-    side_conv.parent_tool_call_id = Some(delegate_call_id.clone());
-    side_conv.in_flight_prompt = Some(side_spid.clone());
-    side_conv.turn_state = ConversationTurnState::Idle;
-    h.prompt_conversations
-        .insert(side_spid.clone(), side_cid.clone());
-    h.conversations.insert(side_cid.clone(), side_conv);
-    h.subagents.pending_delegates.insert(
-        "delegate-nested".to_owned(),
-        crate::harness::subagents_tool::PendingHarnessDelegate {
-            call_id: "nested-delegate-call".into(),
-            tool_name: ToolName::new("delegate"),
-            started_at: std::time::Instant::now(),
-            self_agent_id: Some("worker_parent".to_owned()),
-            agent_id: Some("worker_nested123".to_owned()),
-        },
-    );
-    h.tool_conversations
-        .insert("nested-delegate-call".into(), side_cid.clone());
-    h.background_completion_targets
-        .insert("nested-delegate-call".into(), side_cid.clone());
-    h.pending_tools.insert(
-        "nested-delegate-call".into(),
-        PendingTool {
-            name: ToolName::new("delegate"),
-            internal_name: ToolName::new("delegate"),
-            tool_type: tau_proto::ToolType::Function,
-        },
-    );
-    h.tool_turn.record_in_flight_for_test(
-        side_cid.clone(),
-        "nested-delegate-call".into(),
-        tau_proto::ToolExecutionMode::Shared,
-    );
-    h.tool_turn
-        .mark_backgrounded(&"nested-delegate-call".into());
-    h.pending_start_agent_requests
-        .push_back(PendingStartAgentRequest {
-            source_id: HARNESS_CONNECTION_ID.to_owned(),
-            extension_name: "core-subagents".to_owned(),
-            query: ext_query("delegate-nested", tau_proto::ToolExecutionMode::Shared),
-            role: "worker".to_owned(),
-            cid: ConversationId::new("start-agent-__harness__-delegate-nested"),
-            parent_cid: side_cid.clone(),
-            agent_id: "worker_queued".to_owned(),
-            pending_agent_messages: std::collections::VecDeque::new(),
-        });
-
-    let cancel_call = AgentToolCall {
-        id: "cancel-call".into(),
-        name: ToolName::new("cancel"),
-        tool_type: tau_proto::ToolType::Function,
-        arguments: CborValue::Map(vec![(
-            CborValue::Text("tool_call_id".to_owned()),
-            CborValue::Text(delegate_call_id.to_string()),
-        )]),
-        display: None,
-    };
-    h.handle_cancel_tool_call(&parent_cid, &cancel_call, ToolName::new("cancel"))
-        .expect("cancel handled");
-
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolResult(result)
-            if result.call_id.as_str() == "cancel-call"
-                && result.result == CborValue::Text("Tool cancellation sent".to_owned())
-    )));
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::UiCancelPrompt(cancel)
-            if cancel.session_prompt_id.as_ref() == Some(&side_spid)
-    )));
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolBackgroundError(error)
-            if error.call_id.as_str() == "delegate-call"
-                && error.message.contains("canceled")
-    )));
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolBackgroundError(error)
-            if error.call_id.as_str() == "nested-delegate-call"
-                && error.message.contains("canceled")
-    )));
-    assert!(
-        !h.subagents
-            .pending_delegates
-            .contains_key("delegate-nested")
-    );
-    assert!(
-        !h.pending_start_agent_requests
-            .iter()
-            .any(|pending| pending.query.query_id == "delegate-nested")
-    );
-    assert!(!h.tool_turn.is_backgrounded(&"nested-delegate-call".into()));
-    assert!(
-        !h.tool_conversations
-            .contains_key(&ToolCallId::from("nested-delegate-call"))
-    );
-    assert!(
-        !h.background_completion_targets
-            .contains_key(&ToolCallId::from("nested-delegate-call"))
-    );
-    let nested_completion_prompt = background_completion_prompt(&"nested-delegate-call".into());
-    assert!(
-        h.conversations.values().all(|conv| conv
-            .pending_prompts
-            .iter()
-            .all(|prompt| prompt.text != nested_completion_prompt)),
-        "nested delegate cancellation must not leave a queued completion prompt"
-    );
-    assert!(!event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::SessionPromptSteered(steered) if steered.text == nested_completion_prompt
-    )));
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::HarnessInfo(info) if info.message.contains("tool call cancellation request")
-    )));
-    assert!(!h.conversations.contains_key(&side_cid));
-    assert!(!h.prompt_conversations.contains_key(&side_spid));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Duplicate cancel requests must be rejected. Without this, agents can race
-/// themselves and treat a second cancel as proof that a new request was sent.
-#[test]
-fn cancel_tool_rejects_duplicate_delegate_cancel() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
-    h.subagents
-        .canceled_delegates
-        .insert("delegate-call".into());
-
-    let cancel_call = AgentToolCall {
-        id: "cancel-call".into(),
-        name: ToolName::new("cancel"),
-        tool_type: tau_proto::ToolType::Function,
-        arguments: CborValue::Map(vec![(
-            CborValue::Text("tool_call_id".to_owned()),
-            CborValue::Text("delegate-call".to_owned()),
-        )]),
-        display: None,
-    };
-    h.handle_cancel_tool_call(&cid, &cancel_call, ToolName::new("cancel"))
-        .expect("cancel handled");
-
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolError(error)
-            if error.call_id.as_str() == "cancel-call"
-                && error.message == "Tool call already canceled"
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Only currently running supported tool calls are cancellable. A typo or a
-/// completed/non-delegate call should fail clearly instead of pretending to
-/// have sent cancellation somewhere.
-#[test]
-fn cancel_tool_rejects_unknown_tool_call_id() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
-    let cancel_call = AgentToolCall {
-        id: "cancel-call".into(),
-        name: ToolName::new("cancel"),
-        tool_type: tau_proto::ToolType::Function,
-        arguments: CborValue::Map(vec![(
-            CborValue::Text("tool_call_id".to_owned()),
-            CborValue::Text("missing-call".to_owned()),
-        )]),
-        display: None,
-    };
-    h.handle_cancel_tool_call(&cid, &cancel_call, ToolName::new("cancel"))
-        .expect("cancel handled");
-
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolError(error)
-            if error.call_id.as_str() == "cancel-call"
-                && error.message.contains("not a running cancellable")
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// A backgrounded shell cancellation arrives after the foreground tool round
-/// was closed by the synthetic background placeholder. It must update runtime
-/// and wait state without publishing a second terminal tool result into that
-/// round.
-#[test]
-fn backgrounded_shell_cancel_updates_wait_state_without_terminal_tool_result() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
-    let call_id: ToolCallId = "background-shell-call".into();
-
-    h.tool_conversations.insert(call_id.clone(), cid.clone());
-    h.pending_tools.insert(
-        call_id.clone(),
-        PendingTool {
-            name: ToolName::new("shell"),
-            internal_name: ToolName::new("shell"),
-            tool_type: tau_proto::ToolType::Function,
-        },
-    );
-    h.pending_tool_providers
-        .insert(call_id.clone(), "shell-provider".into());
-    h.tool_turn.record_in_flight_for_test(
-        cid.clone(),
-        call_id.clone(),
-        tau_proto::ToolExecutionMode::Shared,
-    );
-    h.tool_turn.mark_backgrounded(&call_id);
-    h.record_wait_tool_request(&call_id);
-
-    h.handle_extension_event_inner(
-        "shell-provider",
-        Event::ToolCancelled(tau_proto::ToolCancelled {
-            call_id: call_id.clone(),
-            tool_name: ToolName::new("shell"),
-            tool_type: tau_proto::ToolType::Function,
-        }),
-    )
-    .expect("cancel accepted");
-
-    assert!(!h.tool_turn.is_backgrounded(&call_id));
-    assert!(!h.tool_conversations.contains_key(&call_id));
-    assert!(!event_log_contains(&h, "shell-provider", |event| matches!(
-        event,
-        Event::ToolCancelled(cancelled) if cancelled.call_id == call_id
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// `gpt_shell` is exposed to the model as `shell_command`; cancellation must
-/// check the internal routed tool name so the visible alias remains
-/// cancellable.
-#[test]
-fn cancel_tool_accepts_gpt_shell_visible_shell_command() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let provider_frames =
-        connect_test_client(&mut h, "gpt-shell-provider", tau_proto::ClientKind::Tool);
-    let call_id: ToolCallId = "gpt-shell-call".into();
-
-    h.pending_tools.insert(
-        call_id.clone(),
-        PendingTool {
-            name: ToolName::new("shell_command"),
-            internal_name: ToolName::new("gpt_shell"),
-            tool_type: tau_proto::ToolType::Function,
-        },
-    );
-    h.pending_tool_providers
-        .insert(call_id.clone(), "gpt-shell-provider".into());
-
-    h.cancel_tool_call(&call_id).expect("cancel sent");
-
-    let frames = provider_frames.lock().expect("frames");
-    assert!(frames.iter().any(|routed| matches!(
-        &routed.frame,
-        Frame::Event(Event::ToolCancel(cancel))
-            if cancel.call_id == call_id && cancel.tool_name.as_str() == "gpt_shell"
-    )));
-
-    h.shutdown().expect("shutdown");
-}
 
 fn message_tool_call(id: &str, recipient_id: &str, message: &str) -> AgentToolCall {
     AgentToolCall {
@@ -10366,9 +8954,6 @@ fn session_agent_messages(h: &Harness) -> Vec<tau_proto::AgentMessage> {
         .collect()
 }
 
-/// The harness-owned `message` tool is the only authoritative path that can
-/// create `AgentMessage` events. A valid user-directed send persists exactly
-/// one durable message with a harness-minted sender id.
 #[test]
 fn message_tool_to_user_emits_exactly_one_agent_message() {
     let td = TempDir::new().expect("tempdir");

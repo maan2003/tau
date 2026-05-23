@@ -888,6 +888,7 @@ fn tool_register_prompt_is_optional_and_round_trips_when_present() {
 fn start_agent_request_execution_mode_defaults_to_shared() {
     let parsed: StartAgentRequest = serde_json::from_value(serde_json::json!({
         "query_id": "q1",
+        "agent_id": "agent-q1",
         "instruction": "summarize"
     }))
     .expect("deserialize start-agent request");
@@ -896,6 +897,7 @@ fn start_agent_request_execution_mode_defaults_to_shared() {
 
     let exclusive: StartAgentRequest = serde_json::from_value(serde_json::json!({
         "query_id": "q2",
+        "agent_id": "agent-q2",
         "instruction": "mutate carefully",
         "execution_mode": "exclusive"
     }))
@@ -904,6 +906,7 @@ fn start_agent_request_execution_mode_defaults_to_shared() {
 
     let update: StartAgentRequest = serde_json::from_value(serde_json::json!({
         "query_id": "q3",
+        "agent_id": "agent-q3",
         "instruction": "edit carefully",
         "execution_mode": "update"
     }))

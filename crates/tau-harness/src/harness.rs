@@ -23,7 +23,7 @@ use tau_proto::{
     SessionPromptTerminated, SessionPromptTerminationReason, TokenUsageStats, ToolBackgroundError,
     ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancel, ToolCancelled, ToolChoice,
     ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult,
-    ToolResultKind, ToolStarted, ToolType, UiCancelPrompt,
+    ToolResultKind, ToolType, UiCancelPrompt,
 };
 
 use crate::conversation::{
@@ -426,7 +426,7 @@ fn random_agent_id_suffix() -> String {
     hex_bytes(&bytes)
 }
 
-fn mint_agent_id_for_role(role: &str) -> String {
+pub fn mint_agent_id_for_role(role: &str) -> String {
     format!("{role}_{}", random_agent_id_suffix())
 }
 
@@ -1248,7 +1248,6 @@ fn instance_id_factory() -> impl FnMut() -> tau_proto::ExtensionInstanceId {
 enum BackgroundCompletionPromptMode {
     QueueAndAdvance,
     QueueOnly,
-    Suppress,
 }
 
 impl Harness {
@@ -2259,6 +2258,9 @@ impl Harness {
         } else {
             let _ = self.bus.publish_from(source, log_frame);
         }
+        if let Err(error) = self.dispatch_internal_tool_event(&event) {
+            self.emit_info(&format!("internal tool event handler failed: {error}"));
+        }
         self.react_to_committed_event(&event);
     }
 
@@ -3186,9 +3188,7 @@ impl Harness {
                             None => self.publish_event(Some(source_id), event),
                         }
                         match route.target {
-                            ToolRouteTarget::Internal => {
-                                self.handle_internal_tool_started(started)?
-                            }
+                            ToolRouteTarget::Internal => {}
                             ToolRouteTarget::Extension(provider_connection_id) => {
                                 self.ensure_tool_started_subscription(&provider_connection_id);
                                 self.pending_tool_providers
@@ -3845,24 +3845,6 @@ impl Harness {
             to_cancel.push((call_id, tool.name, tool.tool_type));
         }
 
-        let delegate_call_ids: Vec<ToolCallId> = to_cancel
-            .iter()
-            .filter_map(|(call_id, tool_name, _)| {
-                let is_pending_delegate = self
-                    .subagents
-                    .pending_delegates
-                    .values()
-                    .any(|pending| &pending.call_id == call_id);
-                (tool_name.as_str() == crate::harness::subagents_tool::DELEGATE_TOOL_NAME
-                    && is_pending_delegate)
-                    .then(|| call_id.clone())
-            })
-            .collect();
-        for call_id in &delegate_call_ids {
-            let _ = self.cancel_harness_delegate_tool_call(call_id);
-        }
-        to_cancel.retain(|(call_id, _, _)| !delegate_call_ids.contains(call_id));
-
         let cancelled_call_ids: std::collections::HashSet<ToolCallId> = to_cancel
             .iter()
             .map(|(call_id, _, _)| call_id.clone())
@@ -3896,108 +3878,60 @@ impl Harness {
         }
     }
 
-    pub(crate) fn cancel_tool_call(&mut self, target_call_id: &ToolCallId) -> Result<(), String> {
-        if self.subagents.canceled_delegates.contains(target_call_id) {
-            return Err("Tool call already canceled".to_owned());
-        }
-        if self
-            .subagents
-            .pending_delegates
-            .values()
-            .any(|pending| &pending.call_id == target_call_id)
-        {
-            return self.cancel_harness_delegate_tool_call(target_call_id);
-        }
-
-        let Some(tool) = self.pending_tools.get(target_call_id).cloned() else {
-            return Err("Tool call is not a running cancellable tool call".to_owned());
-        };
-        let Some(provider_id) = self.pending_tool_providers.get(target_call_id).cloned() else {
-            return Err("Tool call is not a running cancellable tool call".to_owned());
-        };
-        if tool.internal_name.as_str() != "shell" && tool.internal_name.as_str() != "gpt_shell" {
-            return Err("Tool call is not a running cancellable tool call".to_owned());
-        }
-
-        self.bus
-            .send_to(
-                provider_id.as_str(),
-                Some(HARNESS_CONNECTION_ID),
-                Frame::Event(Event::ToolCancel(ToolCancel {
-                    call_id: target_call_id.clone(),
-                    tool_name: tool.internal_name,
-                })),
-            )
-            .map_err(|error| format!("failed to send cancellation: {error}"))?;
-        Ok(())
+    pub(crate) fn is_running_tool_call(&self, target_call_id: &ToolCallId) -> bool {
+        self.pending_tools.contains_key(target_call_id)
     }
 
-    pub(crate) fn cancel_harness_delegate_tool_call(
-        &mut self,
-        target_call_id: &ToolCallId,
-    ) -> Result<(), String> {
-        self.cancel_harness_delegate_tool_call_inner(target_call_id, false)
+    pub(crate) fn publish_tool_cancel_request(&mut self, target_call_id: ToolCallId) {
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::ToolCancelRequest(tau_proto::ToolCancelRequest { target_call_id }),
+        );
     }
 
-    fn cancel_harness_delegate_tool_call_without_completion_prompt(
+    pub(crate) fn cancel_start_agent_request(
         &mut self,
-        target_call_id: &ToolCallId,
-    ) -> Result<(), String> {
-        self.cancel_harness_delegate_tool_call_inner(target_call_id, true)
-    }
-
-    fn cancel_harness_delegate_tool_call_inner(
-        &mut self,
+        query_id: &str,
         target_call_id: &ToolCallId,
         suppress_background_completion_prompt: bool,
     ) -> Result<(), String> {
-        if self.subagents.canceled_delegates.contains(target_call_id) {
-            return Err("Tool call already canceled".to_owned());
-        }
-        let pending_query_id =
-            self.subagents
-                .pending_delegates
-                .iter()
-                .find_map(|(query_id, pending)| {
-                    if &pending.call_id == target_call_id {
-                        Some(query_id.clone())
-                    } else {
-                        None
-                    }
-                });
-        let Some(query_id) = pending_query_id else {
-            return Err("Tool call is not a running cancellable tool call".to_owned());
-        };
-
-        self.subagents
-            .canceled_delegates
-            .insert(target_call_id.clone());
-        self.subagents
-            .canceled_delegate_order
-            .push_back(target_call_id.clone());
-        while self.subagents.canceled_delegate_order.len() > 1024 {
-            if let Some(old_call_id) = self.subagents.canceled_delegate_order.pop_front() {
-                self.subagents.canceled_delegates.remove(&old_call_id);
-            }
-        }
+        let mut source_id = None;
         let mut stopped_pending_agent_ids = Vec::new();
         self.pending_start_agent_requests.retain(|pending| {
             let is_canceled = pending.query.query_id == query_id
                 || pending.query.tool_call_id.as_ref() == Some(target_call_id);
             if is_canceled {
+                source_id = Some(pending.source_id.clone());
                 stopped_pending_agent_ids.push(pending.agent_id.clone());
             }
             !is_canceled
         });
         self.stopped_agent_ids.extend(stopped_pending_agent_ids);
+
+        if source_id.is_none() {
+            source_id = self.conversations.iter().find_map(|(_, conv)| {
+                if conv.parent_tool_call_id.as_ref() != Some(target_call_id) {
+                    return None;
+                }
+                conv.source_connection.as_ref().map(|id| id.to_string())
+            });
+        }
+        let Some(source_id) = source_id else {
+            return Err("Tool call is not a running cancellable tool call".to_owned());
+        };
+
         self.emit_info("tool call cancellation request");
         self.cancel_delegate_side_conversation(target_call_id);
-        self.complete_harness_delegate_inner(
-            &self.default_conversation_id.clone(),
-            &query_id,
-            String::new(),
-            Some("Tool call canceled".to_owned()),
-            suppress_background_completion_prompt,
+        let _ = suppress_background_completion_prompt;
+        let result = tau_proto::StartAgentResult {
+            query_id: query_id.to_owned(),
+            text: String::new(),
+            error: Some("Tool call canceled".to_owned()),
+        };
+        let _ = self.bus.send_to(
+            source_id.as_str(),
+            None,
+            Frame::Event(Event::StartAgentResult(result)),
         );
         Ok(())
     }
@@ -4023,7 +3957,6 @@ impl Harness {
         if let ConversationTurnState::ToolsRunning { remaining_calls } = turn_state {
             self.cancel_remaining_tool_calls(&cid, remaining_calls, "delegate cancel tool");
         }
-        self.cancel_backgrounded_delegate_tool_calls_for_conversation(&cid);
         if let Some(spid) = spid {
             self.canceled_prompts.insert(spid.clone());
             self.prompt_conversations.remove(&spid);
@@ -4045,30 +3978,6 @@ impl Harness {
         self.transfer_background_completion_target_before_teardown(&cid);
         self.remove_conversation(&cid);
         self.try_advance_queue();
-    }
-
-    fn cancel_backgrounded_delegate_tool_calls_for_conversation(&mut self, cid: &ConversationId) {
-        let call_ids: Vec<ToolCallId> = self
-            .background_completion_call_ids_for_teardown(cid)
-            .into_iter()
-            .filter(|call_id| {
-                self.tool_turn.is_backgrounded(call_id)
-                    && self
-                        .subagents
-                        .pending_delegates
-                        .values()
-                        .any(|pending| &pending.call_id == call_id)
-            })
-            .collect();
-
-        for call_id in call_ids {
-            let _ = self.cancel_harness_delegate_tool_call_without_completion_prompt(&call_id);
-            self.background_completion_targets.remove(&call_id);
-            let prompt = background_completion_prompt(&call_id);
-            for conv in self.conversations.values_mut() {
-                remove_pending_internal_prompt_text(&mut conv.pending_prompts, &prompt);
-            }
-        }
     }
 
     fn handle_disconnect(&mut self, connection_id: &str) {
@@ -4736,15 +4645,6 @@ impl Harness {
     }
 
     fn fail_start_agent_request(&mut self, source_id: &str, query_id: String, error: String) {
-        if source_id == HARNESS_CONNECTION_ID {
-            self.complete_harness_delegate(
-                &self.default_conversation_id.clone(),
-                &query_id,
-                String::new(),
-                Some(error),
-            );
-            return;
-        }
         let result = tau_proto::StartAgentResult {
             query_id,
             text: String::new(),
@@ -4778,16 +4678,25 @@ impl Harness {
                 return Ok(());
             }
         };
+        let accepted = tau_proto::StartAgentAccepted {
+            query_id: pending.query.query_id.clone(),
+            agent_id: pending.agent_id.clone(),
+        };
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::StartAgentAccepted(accepted.clone()),
+        );
+        let _ = self.bus.send_to(
+            source_id,
+            None,
+            Frame::Event(Event::StartAgentAccepted(accepted)),
+        );
         self.pending_start_agent_requests.push_back(pending);
         self.drain_pending_start_agent_requests()
     }
 
-    /// Enqueue a harness-owned delegate start request and return its minted
-    /// agent id.
-    ///
-    /// The caller drains the start-agent scheduler after it has published the
-    /// delegate background placeholder containing this id.
-    pub(crate) fn enqueue_harness_delegate_start_agent_request_without_draining(
+    /// Enqueue an internal start-agent request and return its minted agent id.
+    pub(crate) fn enqueue_internal_start_agent_request_without_draining(
         &mut self,
         query: tau_proto::StartAgentRequest,
     ) -> Result<String, String> {
@@ -4795,6 +4704,19 @@ impl Harness {
             return Err("duplicate delegate start-agent request".to_owned());
         };
         let agent_id = pending.agent_id.clone();
+        let accepted = tau_proto::StartAgentAccepted {
+            query_id: pending.query.query_id.clone(),
+            agent_id: agent_id.clone(),
+        };
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::StartAgentAccepted(accepted.clone()),
+        );
+        let _ = self.bus.send_to(
+            HARNESS_CONNECTION_ID,
+            None,
+            Frame::Event(Event::StartAgentAccepted(accepted)),
+        );
         self.pending_start_agent_requests.push_back(pending);
         Ok(agent_id)
     }
@@ -4833,7 +4755,18 @@ impl Harness {
             .and_then(|call_id| self.tool_conversations.get(call_id))
             .cloned()
             .unwrap_or_else(|| self.default_conversation_id.clone());
-        let agent_id = mint_agent_id_for_role(&role);
+        let agent_id = query.agent_id.clone();
+        if agent_id.trim().is_empty() {
+            return Err("start-agent request agent_id must not be empty".to_owned());
+        }
+        if self.agent_conversations.contains_key(&agent_id)
+            || self
+                .pending_start_agent_requests
+                .iter()
+                .any(|pending| pending.agent_id == agent_id)
+        {
+            return Err(format!("start-agent agent_id collision: `{agent_id}`"));
+        }
 
         Ok(Some(PendingStartAgentRequest {
             source_id: source_id.to_owned(),
@@ -4866,7 +4799,7 @@ impl Harness {
     ///   share with Shared work. Descendancy is computed from the side
     ///   conversation's stored parent conversation, with the older
     ///   `parent_tool_call_id` mapping as a fallback for manually seeded tests.
-    fn drain_pending_start_agent_requests(&mut self) -> Result<(), HarnessError> {
+    pub(crate) fn drain_pending_start_agent_requests(&mut self) -> Result<(), HarnessError> {
         loop {
             let Some(idx) = self.next_dispatchable_start_agent_request_index() else {
                 return Ok(());
@@ -6468,7 +6401,10 @@ impl Harness {
         self.conversations.remove(cid)
     }
 
-    fn ensure_agent_id_for_conversation(&mut self, cid: &ConversationId) -> Option<String> {
+    pub(crate) fn ensure_agent_id_for_conversation(
+        &mut self,
+        cid: &ConversationId,
+    ) -> Option<String> {
         let role = {
             let conv = self.conversations.get(cid)?;
             if let Some(agent_id) = &conv.agent_id {
@@ -7450,9 +7386,7 @@ impl Harness {
                 text: assistant_text.clone().unwrap_or_default(),
                 error,
             };
-            if source.as_deref() == Some(HARNESS_CONNECTION_ID) {
-                self.complete_harness_delegate(&cid, query_id, result.text, result.error);
-            } else if let Some(source) = source {
+            if let Some(source) = source {
                 let _ = self.bus.send_to(
                     source.as_str(),
                     None,
@@ -7709,18 +7643,28 @@ impl Harness {
         self.publish_synthetic_background_result_inner(call_id, None);
     }
 
-    /// Publish the instant background placeholder for a delegate, including the
-    /// caller and side-agent ids.
-    pub(crate) fn publish_synthetic_background_result_with_agent_ids(
+    pub(crate) fn publish_internal_background_placeholder(
         &mut self,
         call_id: &ToolCallId,
-        self_agent_id: &str,
-        sub_agent_id: &str,
+        result: CborValue,
     ) {
-        self.publish_synthetic_background_result_inner(
-            call_id,
-            Some((self_agent_id, sub_agent_id)),
-        );
+        let Some(cid) = self.tool_conversations.get(call_id).cloned() else {
+            return;
+        };
+        let Some(tool) = self.pending_tools.get(call_id).cloned() else {
+            return;
+        };
+        let result = ToolResult {
+            call_id: call_id.clone(),
+            tool_name: tool.name,
+            tool_type: tool.tool_type,
+            result,
+            kind: ToolResultKind::BackgroundPlaceholder,
+            display: None,
+            originator: PromptOriginator::User,
+        };
+        self.publish_for_conversation(&cid, Event::ProviderToolResult(result.clone()));
+        self.record_wait_tool_result(result);
     }
 
     fn publish_synthetic_background_result_inner(
@@ -7841,18 +7785,6 @@ impl Harness {
         );
     }
 
-    fn handle_background_tool_error_without_completion_prompt(
-        &mut self,
-        source: Option<&str>,
-        error: ToolError,
-    ) {
-        self.handle_background_tool_error_inner(
-            source,
-            error,
-            BackgroundCompletionPromptMode::Suppress,
-        );
-    }
-
     fn handle_background_tool_error_inner(
         &mut self,
         source: Option<&str>,
@@ -7896,11 +7828,6 @@ impl Harness {
                 self.background_completion_targets
                     .insert(call_id.clone(), cid.clone());
                 self.queue_background_completion_prompt_without_advancing(&cid, &call_id);
-            }
-            BackgroundCompletionPromptMode::Suppress => {
-                self.record_wait_tool_cancelled(&std::collections::HashSet::from(
-                    [call_id.clone()],
-                ));
             }
         }
         self.clear_tool_call_tracking(call_id.as_str());
@@ -8270,10 +8197,6 @@ impl Harness {
         self.clear_tool_call_tracking(call_id.as_str());
     }
 
-    fn handle_internal_tool_started(&mut self, started: ToolStarted) -> Result<(), HarnessError> {
-        self.dispatch_internal_tool_started(started)
-    }
-
     fn execute_agent_tool_call(
         &mut self,
         cid: &ConversationId,
@@ -8375,8 +8298,7 @@ impl Harness {
                 let started = route.invoke;
                 match route.target {
                     ToolRouteTarget::Internal => {
-                        self.publish_for_conversation(cid, Event::ToolStarted(started.clone()));
-                        self.handle_internal_tool_started(started)?;
+                        self.publish_for_conversation(cid, Event::ToolStarted(started));
                     }
                     ToolRouteTarget::Extension(provider_connection_id) => {
                         self.ensure_tool_started_subscription(&provider_connection_id);

@@ -205,6 +205,7 @@ impl EventName {
         Self::from_static(EventCategory::Tool, "background_error");
     pub const TOOL_PROGRESS: Self = Self::from_static(EventCategory::Tool, "progress");
     pub const TOOL_CANCEL: Self = Self::from_static(EventCategory::Tool, "cancel");
+    pub const TOOL_CANCEL_REQUEST: Self = Self::from_static(EventCategory::Tool, "cancel_request");
     pub const TOOL_CANCELLED: Self = Self::from_static(EventCategory::Tool, "cancelled");
     pub const TOOL_DELEGATE_PROGRESS: Self =
         Self::from_static(EventCategory::Tool, "delegate_progress");
@@ -225,6 +226,8 @@ impl EventName {
     pub const EXTENSION_PROMPT_FRAGMENT_PUBLISH: Self =
         Self::from_static(EventCategory::Extension, "prompt_fragment_publish");
     pub const AGENT_START_REQUEST: Self = Self::from_static(EventCategory::Agent, "start_request");
+    pub const AGENT_START_ACCEPTED: Self =
+        Self::from_static(EventCategory::Agent, "start_accepted");
     pub const AGENT_START_RESULT: Self = Self::from_static(EventCategory::Agent, "start_result");
     pub const AGENT_MESSAGE: Self = Self::from_static(EventCategory::Agent, "message");
     pub const PROVIDER_MODELS_UPDATED: Self =
@@ -1770,6 +1773,13 @@ pub struct ToolCancel {
     pub tool_name: ToolName,
 }
 
+/// Broadcast intent to request cancellation of a running tool call.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolCancelRequest {
+    /// Tool call id the requester wants canceled.
+    pub target_call_id: ToolCallId,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolCancelled {
     pub call_id: ToolCallId,
@@ -1897,8 +1907,11 @@ pub struct AgentMessage {
 /// Request to start a side-agent conversation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StartAgentRequest {
-    /// Extension-assigned correlation id, echoed back on the result.
+    /// Requester-assigned correlation id, echoed back on accepted/result
+    /// events.
     pub query_id: String,
+    /// Requester-assigned stable agent id for the side conversation.
+    pub agent_id: String,
     /// User-style instruction text. Appended to the current
     /// conversation's history as a `User` message before dispatch.
     pub instruction: String,
@@ -1940,8 +1953,17 @@ const fn default_start_agent_request_execution_mode() -> ToolExecutionMode {
     ToolExecutionMode::Shared
 }
 
-/// Reply to a [`StartAgentRequest`], routed point-to-point back to the
-/// extension that issued it. `text` is the agent's final answer
+/// A [`StartAgentRequest`] was accepted and queued for the side-agent
+/// scheduler.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StartAgentAccepted {
+    /// Request correlation id copied from [`StartAgentRequest::query_id`].
+    pub query_id: String,
+    /// Accepted side-agent id copied from [`StartAgentRequest::agent_id`].
+    pub agent_id: String,
+}
+
+/// Final reply to a [`StartAgentRequest`]. `text` is the agent's final answer
 /// (empty when `error` is set).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StartAgentResult {
@@ -3212,6 +3234,8 @@ pub enum Event {
     ToolProgress(ToolProgress),
     #[serde(rename = "tool.cancel")]
     ToolCancel(ToolCancel),
+    #[serde(rename = "tool.cancel_request")]
+    ToolCancelRequest(ToolCancelRequest),
     #[serde(rename = "tool.cancelled")]
     ToolCancelled(ToolCancelled),
     #[serde(rename = "tool.delegate_progress")]
@@ -3238,6 +3262,8 @@ pub enum Event {
     ExtPromptFragmentPublish(ExtPromptFragmentPublish),
     #[serde(rename = "agent.start_request")]
     StartAgentRequest(StartAgentRequest),
+    #[serde(rename = "agent.start_accepted")]
+    StartAgentAccepted(StartAgentAccepted),
     #[serde(rename = "agent.start_result")]
     StartAgentResult(StartAgentResult),
     #[serde(rename = "agent.message")]
@@ -3372,6 +3398,7 @@ impl Event {
             Self::ToolBackgroundError(_) => EventName::TOOL_BACKGROUND_ERROR,
             Self::ToolProgress(_) => EventName::TOOL_PROGRESS,
             Self::ToolCancel(_) => EventName::TOOL_CANCEL,
+            Self::ToolCancelRequest(_) => EventName::TOOL_CANCEL_REQUEST,
             Self::ToolCancelled(_) => EventName::TOOL_CANCELLED,
             Self::ToolDelegateProgress(_) => EventName::TOOL_DELEGATE_PROGRESS,
             Self::ExtensionStarting(_) => EventName::EXTENSION_STARTING,
@@ -3384,6 +3411,7 @@ impl Event {
             Self::ExtSessionContextPublish(_) => EventName::EXTENSION_SESSION_CONTEXT_PUBLISH,
             Self::ExtPromptFragmentPublish(_) => EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,
             Self::StartAgentRequest(_) => EventName::AGENT_START_REQUEST,
+            Self::StartAgentAccepted(_) => EventName::AGENT_START_ACCEPTED,
             Self::StartAgentResult(_) => EventName::AGENT_START_RESULT,
             Self::AgentMessage(_) => EventName::AGENT_MESSAGE,
             Self::ExtensionEvent(event) => event.name.clone(),
