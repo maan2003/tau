@@ -1434,6 +1434,9 @@ pub struct BackendMessage {
     pub subject: String,
     /// Message body text. Metadata-only fetches leave this empty.
     pub body_text: String,
+    /// Whether the backend deliberately fetched only a bounded prefix of the
+    /// source message.
+    pub source_truncated: bool,
     /// Minimal flags.
     pub flags: Vec<String>,
     /// Whether the message appears to have attachments.
@@ -2117,7 +2120,10 @@ impl<B: EmailBackend> Engine<B> {
                         "body_text",
                         CborValue::Text(safe_model_text(&truncate.body_text, READ_BODY_MAX_BYTES)),
                     ),
-                    ("body_truncated", CborValue::Bool(truncate.truncated)),
+                    (
+                        "body_truncated",
+                        CborValue::Bool(truncate.truncated || msg.source_truncated),
+                    ),
                     (
                         "body_total_lines",
                         CborValue::Integer(truncate.total_lines.into()),
@@ -2563,7 +2569,7 @@ impl<B: EmailBackend> Engine<B> {
             safe_display_join(&message.cc, ", "),
             safe_display_line(&message.date),
             safe_display_line(&message.subject),
-            truncate.truncated,
+            truncate.truncated || message.source_truncated,
             message.attachments.len(),
             safe_display_line(&attachment_names),
             safe_display_line(&approval.reason),

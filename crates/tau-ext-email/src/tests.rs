@@ -46,6 +46,7 @@ impl FakeBackend {
                     to: vec!["alice@company.com".to_owned()],
                     cc: Vec::new(),
                     subject: "secret subject".to_owned(),
+                    source_truncated: false,
                     body_text: "secret body".to_owned(),
                     flags: vec!["seen".to_owned()],
                     has_attachments: false,
@@ -61,6 +62,7 @@ impl FakeBackend {
                     to: vec!["alice@company.com".to_owned()],
                     cc: Vec::new(),
                     subject: "deploy notes".to_owned(),
+                    source_truncated: false,
                     body_text: "safe body".to_owned(),
                     flags: Vec::new(),
                     has_attachments: false,
@@ -796,6 +798,7 @@ fn single_message_engine(
             to: Vec::new(),
             cc: Vec::new(),
             subject: "must stay hidden until trusted auth".to_owned(),
+            source_truncated: false,
             body_text: "secret body".to_owned(),
             flags: Vec::new(),
             has_attachments: false,
@@ -965,6 +968,7 @@ fn folded_authentication_results_headers_are_parsed_without_exposure() {
         to: Vec::new(),
         cc: Vec::new(),
         subject: "fallback".to_owned(),
+        source_truncated: false,
         body_text: String::new(),
         flags: Vec::new(),
         has_attachments: false,
@@ -996,7 +1000,13 @@ fn imap_fetch_requests_avoid_structured_parser_failures() {
     assert!(!super::real_backend::FETCH_METADATA_ITEMS.contains("ENVELOPE"));
     assert!(!super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("ENVELOPE"));
     assert!(super::real_backend::FETCH_METADATA_ITEMS.contains("BODY.PEEK[HEADER]"));
-    assert!(super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("BODY.PEEK[]"));
+    assert!(super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("RFC822.SIZE"));
+    assert!(super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("BODY.PEEK[]<0.262144>"));
+    assert!(!super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("BODY.PEEK[])"));
+    assert_eq!(
+        super::real_backend::READ_MESSAGE_FETCH_MAX_BYTES,
+        256 * 1024
+    );
 }
 
 #[test]
@@ -1009,6 +1019,7 @@ fn rfc822_parser_extracts_text_and_attachment_metadata_without_network() {
         to: Vec::new(),
         cc: Vec::new(),
         subject: "fallback".to_owned(),
+        source_truncated: false,
         body_text: String::new(),
         flags: Vec::new(),
         has_attachments: false,
@@ -1046,6 +1057,7 @@ fn rfc822_parser_failure_omits_raw_message_body() {
         to: Vec::new(),
         cc: Vec::new(),
         subject: "fallback".to_owned(),
+        source_truncated: false,
         body_text: String::new(),
         flags: Vec::new(),
         has_attachments: true,
@@ -1057,6 +1069,9 @@ fn rfc822_parser_failure_omits_raw_message_body() {
         message_id: None,
         auth_results: Vec::new(),
     };
+    // A bounded partial IMAP fetch can cut the RFC822 source at a point that
+    // leaves it malformed. Fail closed with an omission marker instead of
+    // exposing any raw partial bytes.
     let raw = b":";
 
     let parsed = super::real_backend::parse_backend_message_from_rfc822(&fallback, raw);
@@ -1065,7 +1080,7 @@ fn rfc822_parser_failure_omits_raw_message_body() {
         parsed.body_text,
         "[message body omitted: RFC822 parse failed]"
     );
-    assert!(!parsed.body_text.contains("U0VDUkVU"));
+    assert!(!parsed.body_text.contains("secret.bin"));
     assert!(parsed.attachments.is_empty());
 }
 
@@ -1138,6 +1153,7 @@ fn unapproved_read_uses_metadata_without_fetching_full_body() {
         to: Vec::new(),
         cc: Vec::new(),
         subject: "redacted".to_owned(),
+        source_truncated: false,
         body_text: String::new(),
         flags: Vec::new(),
         has_attachments: false,
@@ -1146,6 +1162,7 @@ fn unapproved_read_uses_metadata_without_fetching_full_body() {
         auth_results: Vec::new(),
     };
     let body = BackendMessage {
+        source_truncated: false,
         body_text: "must not be fetched".to_owned(),
         ..metadata.clone()
     };
@@ -1184,6 +1201,7 @@ fn allowed_read_rejects_body_fetch_uidvalidity_mismatch() {
         to: Vec::new(),
         cc: Vec::new(),
         subject: "allowed".to_owned(),
+        source_truncated: false,
         body_text: String::new(),
         flags: Vec::new(),
         has_attachments: false,
@@ -1193,6 +1211,7 @@ fn allowed_read_rejects_body_fetch_uidvalidity_mismatch() {
     };
     let body = BackendMessage {
         uidvalidity: "uv2".to_owned(),
+        source_truncated: false,
         body_text: "stale body must not be returned".to_owned(),
         ..metadata.clone()
     };
@@ -1534,6 +1553,7 @@ fn action_outputs_escape_controls_and_row_forgery() {
             to: vec!["alice\ncc: forged@company.com".to_owned()],
             cc: Vec::new(),
             subject: "hello\nstatus: forged\u{1b}[31m".to_owned(),
+            source_truncated: false,
             body_text: "body\u{1b}[31m\nsubject: forged".to_owned(),
             flags: Vec::new(),
             has_attachments: true,
@@ -1653,6 +1673,7 @@ fn incoming_actions_list_redacts_for_agent_but_open_shows_user_content() {
             to: Vec::new(),
             cc: Vec::new(),
             subject: "visible after whitelist".to_owned(),
+            source_truncated: false,
             body_text: "friend body".to_owned(),
             flags: Vec::new(),
             has_attachments: false,
@@ -1945,6 +1966,7 @@ fn read_body_and_list_results_report_truncation_metadata() {
                 to: Vec::new(),
                 cc: Vec::new(),
                 subject: "long".to_owned(),
+                source_truncated: false,
                 body_text: long_body,
                 flags: Vec::new(),
                 has_attachments: false,
@@ -1960,6 +1982,7 @@ fn read_body_and_list_results_report_truncation_metadata() {
                 to: Vec::new(),
                 cc: Vec::new(),
                 subject: "next".to_owned(),
+                source_truncated: false,
                 body_text: "body".to_owned(),
                 flags: Vec::new(),
                 has_attachments: false,
@@ -2010,6 +2033,70 @@ fn read_body_and_list_results_report_truncation_metadata() {
 }
 
 #[test]
+fn source_truncated_read_and_open_report_body_truncated() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    engine.backend.messages.insert(
+        ("work".to_owned(), "INBOX".to_owned()),
+        vec![
+            BackendMessage {
+                uid: "20".to_owned(),
+                uidvalidity: "uv".to_owned(),
+                date: "d".to_owned(),
+                from: "team@company.com".to_owned(),
+                to: Vec::new(),
+                cc: Vec::new(),
+                subject: "source truncated".to_owned(),
+                source_truncated: true,
+                body_text: "small parsed prefix".to_owned(),
+                flags: Vec::new(),
+                has_attachments: false,
+                attachments: Vec::new(),
+                message_id: None,
+                auth_results: vec![trusted_dkim_pass("company.com")],
+            },
+            BackendMessage {
+                uid: "21".to_owned(),
+                uidvalidity: "uv".to_owned(),
+                date: "d".to_owned(),
+                from: "Mallory <mallory@evil.test>".to_owned(),
+                to: Vec::new(),
+                cc: Vec::new(),
+                subject: "needs approval".to_owned(),
+                source_truncated: true,
+                body_text: "small approval prefix".to_owned(),
+                flags: Vec::new(),
+                has_attachments: false,
+                attachments: Vec::new(),
+                message_id: None,
+                auth_results: Vec::new(),
+            },
+        ],
+    );
+
+    let read = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "20".to_owned(),
+    });
+    assert_eq!(data_field(&read, "body_truncated"), &CborValue::Bool(true));
+    assert!(format!("{read:?}").contains("small parsed prefix"));
+
+    let approval_required = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "21".to_owned(),
+    });
+    let id = match data_field(&approval_required, "approval_id") {
+        CborValue::Text(id) => id.clone(),
+        _ => panic!("approval id"),
+    };
+    let opened = engine.action_in_open(&id).expect("open");
+    assert!(opened.contains("body_truncated: true"));
+    assert!(opened.contains("small approval prefix"));
+}
+
+#[test]
 fn state_allowlist_load_save_and_policy_extension_disable() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let state = StateStore::open(temp.path().join("state")).expect("state");
@@ -2043,6 +2130,7 @@ fn state_allowlist_load_save_and_policy_extension_disable() {
             to: Vec::new(),
             cc: Vec::new(),
             subject: "state subject".to_owned(),
+            source_truncated: false,
             body_text: "state body".to_owned(),
             flags: Vec::new(),
             has_attachments: false,

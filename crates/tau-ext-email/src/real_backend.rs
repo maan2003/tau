@@ -27,12 +27,14 @@ use tokio_rustls::client::TlsStream;
 
 use super::{
     AuthMethod, AuthenticationResultsEvidence, BackendAttachment, BackendFolder, BackendMessage,
-    BackendMessagePage, EmailBackend, OutgoingMessage, TlsMode, ValidatedAuthConfig,
-    ValidatedConfig, ValidatedImapConfig, ValidatedSmtpConfig,
+    BackendMessagePage, EmailBackend, OutgoingMessage, READ_BODY_MAX_BYTES, TlsMode,
+    ValidatedAuthConfig, ValidatedConfig, ValidatedImapConfig, ValidatedSmtpConfig,
 };
 
+pub(super) const READ_MESSAGE_FETCH_MAX_BYTES: usize = READ_BODY_MAX_BYTES * 4;
 pub(super) const FETCH_METADATA_ITEMS: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER])";
-pub(super) const FETCH_FULL_MESSAGE_ITEMS: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[])";
+pub(super) const FETCH_FULL_MESSAGE_ITEMS: &str =
+    "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[]<0.262144>)";
 
 /// Production IMAP/SMTP backend for configured email accounts.
 pub struct RealEmailBackend {
@@ -344,7 +346,13 @@ async fn read_message_async(
             let body = fetch
                 .body()
                 .ok_or_else(|| "message_not_found: message body not found".to_owned())?;
-            parse_backend_message_from_rfc822(&metadata, body)
+            let source_truncated = fetch
+                .size
+                .map(|size| u64::from(size) > body.len() as u64)
+                .unwrap_or(body.len() >= READ_MESSAGE_FETCH_MAX_BYTES);
+            let mut message = parse_backend_message_from_rfc822(&metadata, body);
+            message.source_truncated = source_truncated;
+            message
         }
         None => return Err("message_not_found: message not found".to_owned()),
     };
@@ -502,6 +510,7 @@ fn metadata_from_fetch(fetch: &async_imap::types::Fetch, uidvalidity: &str) -> B
         cc: Vec::new(),
         subject: String::new(),
         body_text: String::new(),
+        source_truncated: false,
         flags: fetch.flags().map(flag_to_string).collect(),
         has_attachments: false,
         attachments: Vec::new(),
