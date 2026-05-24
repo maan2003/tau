@@ -28,6 +28,24 @@ pub(crate) struct EventRenderer {
     completion_data: tau_cli_term::CompletionData,
     action_state: ActionCommandState,
     theme: tau_themes::Theme,
+    /// Currently visible agent transcript. `None` means no agent has been
+    /// selected yet; the renderer starts on the main interactive agent.
+    current_agent_id: Option<String>,
+    /// Output and renderer bookkeeping for agents that are not currently
+    /// visible. The currently visible agent lives in the fields on this struct
+    /// so existing rendering code can stay direct and efficient.
+    agents_ui_state: HashMap<String, AgentUiState>,
+    /// Agent ids known to the UI for `/agent` completion.
+    known_agents: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Map side-query ids to the accepted agent id for routing prompt/provider
+    /// events whose originator only carries `query_id`.
+    query_agents: HashMap<String, String>,
+    /// Map provider prompt ids to the agent transcript they belong to.
+    prompt_agents: HashMap<String, String>,
+    /// Map tool call ids to the agent transcript they belong to.
+    tool_agents: HashMap<String, String>,
+    /// Shared current visible agent mirror for prompt submission.
+    current_agent_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Per-`session_prompt_id` UI state. An entry is created on
     /// `SessionPromptCreated` (or `ProviderPromptSubmitted` for prompts
     /// without an explicit creation event) and torn down on
@@ -205,6 +223,38 @@ pub(crate) struct EventRenderer {
     /// filtering so sub-agent activity protects Ctrl-D too.
     agent_in_progress: Arc<AtomicBool>,
     /// Detailed lifecycle bookkeeping backing [`Self::agent_in_progress`].
+    agent_activity: AgentActivity,
+}
+
+const MAIN_AGENT_ID: &str = "main";
+
+#[derive(Default)]
+struct AgentUiState {
+    output: tau_cli_term::OutputSnapshot,
+    prompts: HashMap<String, PromptState>,
+    compaction_blocks: HashMap<tau_proto::SessionId, tau_cli_term::BlockId>,
+    last_user_block: Option<(tau_cli_term::BlockId, String)>,
+    queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
+    tool_calls: HashMap<String, ToolCallState>,
+    shell_blocks: HashMap<String, ShellBlockState>,
+    model_status_block: Option<tau_cli_term::BlockId>,
+    diff_blocks: Vec<DiffBlockEntry>,
+    thinking_history: Vec<ThinkingBlockEntry>,
+    turn_stats_history: Vec<TurnStatsBlockEntry>,
+    tool_history: Vec<ToolBlockEntry>,
+    message_history: Vec<MessageBlockEntry>,
+    current_context_percent: Option<u8>,
+    current_context_input_tokens: Option<u64>,
+    current_context_window: Option<u64>,
+    main_tools_completed: u64,
+    main_tools_total: u64,
+    main_backgrounded_tools: HashSet<String>,
+    main_agent_turn_active: bool,
+    main_tools_visible: bool,
+    tool_summaries: HashMap<tau_cli_term::BlockId, ToolSummaryDisplay>,
+    prompt_tool_summary: Option<tau_cli_term::BlockId>,
+    prompt_tool_summary_active: bool,
+    cumulative_agent_latency: Duration,
     agent_activity: AgentActivity,
 }
 
@@ -857,6 +907,17 @@ impl EventRenderer {
             completion_data,
             action_state: ActionCommandState::new(std::iter::empty::<&str>()),
             theme,
+            current_agent_id: Some(MAIN_AGENT_ID.to_owned()),
+            agents_ui_state: HashMap::new(),
+            known_agents: std::sync::Arc::new(std::sync::Mutex::new(vec![
+                MAIN_AGENT_ID.to_owned(),
+            ])),
+            query_agents: HashMap::new(),
+            prompt_agents: HashMap::new(),
+            tool_agents: HashMap::new(),
+            current_agent_state: std::sync::Arc::new(std::sync::Mutex::new(Some(
+                MAIN_AGENT_ID.to_owned(),
+            ))),
             prompts: HashMap::new(),
             compaction_blocks: HashMap::new(),
             last_user_block: None,
@@ -928,9 +989,104 @@ impl EventRenderer {
         self.tool_timer = Some(timer);
     }
 
+    pub(crate) fn known_agents(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        self.known_agents.clone()
+    }
+
+    pub(crate) fn current_agent_state(&self) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
+        self.current_agent_state.clone()
+    }
+
+    pub(crate) fn switch_agent(&mut self, agent_id: String) {
+        self.remember_agent(agent_id.clone());
+        if self.current_agent_id.as_deref() == Some(agent_id.as_str()) {
+            return;
+        }
+        if let Some(current) = self.current_agent_id.clone() {
+            let state = self.take_visible_agent_state();
+            self.agents_ui_state.insert(current, state);
+        }
+        let state = self.agents_ui_state.remove(&agent_id).unwrap_or_default();
+        self.restore_visible_agent_state(state);
+        self.current_agent_id = Some(agent_id.clone());
+        if let Ok(mut current) = self.current_agent_state.lock() {
+            *current = Some(agent_id);
+        }
+        self.render_model_status();
+    }
+
     pub(crate) fn set_action_state(&mut self, action_state: ActionCommandState) {
         self.action_state = action_state;
         self.refresh_action_completions();
+    }
+
+    fn take_visible_agent_state(&mut self) -> AgentUiState {
+        AgentUiState {
+            output: self.handle.output_snapshot(),
+            prompts: std::mem::take(&mut self.prompts),
+            compaction_blocks: std::mem::take(&mut self.compaction_blocks),
+            last_user_block: self.last_user_block.take(),
+            queued_user_blocks: std::mem::take(&mut self.queued_user_blocks),
+            tool_calls: std::mem::take(&mut self.tool_calls),
+            shell_blocks: std::mem::take(&mut self.shell_blocks),
+            model_status_block: self.model_status_block.take(),
+            diff_blocks: std::mem::take(&mut self.diff_blocks),
+            thinking_history: std::mem::take(&mut self.thinking_history),
+            turn_stats_history: std::mem::take(&mut self.turn_stats_history),
+            tool_history: std::mem::take(&mut self.tool_history),
+            message_history: std::mem::take(&mut self.message_history),
+            current_context_percent: self.current_context_percent.take(),
+            current_context_input_tokens: self.current_context_input_tokens.take(),
+            current_context_window: self.current_context_window.take(),
+            main_tools_completed: std::mem::take(&mut self.main_tools_completed),
+            main_tools_total: std::mem::take(&mut self.main_tools_total),
+            main_backgrounded_tools: std::mem::take(&mut self.main_backgrounded_tools),
+            main_agent_turn_active: std::mem::take(&mut self.main_agent_turn_active),
+            main_tools_visible: std::mem::take(&mut self.main_tools_visible),
+            tool_summaries: std::mem::take(&mut self.tool_summaries),
+            prompt_tool_summary: self.prompt_tool_summary.take(),
+            prompt_tool_summary_active: std::mem::take(&mut self.prompt_tool_summary_active),
+            cumulative_agent_latency: std::mem::take(&mut self.cumulative_agent_latency),
+            agent_activity: std::mem::take(&mut self.agent_activity),
+        }
+    }
+
+    fn restore_visible_agent_state(&mut self, state: AgentUiState) {
+        self.handle.replace_output_snapshot(state.output);
+        self.prompts = state.prompts;
+        self.compaction_blocks = state.compaction_blocks;
+        self.last_user_block = state.last_user_block;
+        self.queued_user_blocks = state.queued_user_blocks;
+        self.tool_calls = state.tool_calls;
+        self.shell_blocks = state.shell_blocks;
+        self.model_status_block = state.model_status_block;
+        self.diff_blocks = state.diff_blocks;
+        self.thinking_history = state.thinking_history;
+        self.turn_stats_history = state.turn_stats_history;
+        self.tool_history = state.tool_history;
+        self.message_history = state.message_history;
+        self.current_context_percent = state.current_context_percent;
+        self.current_context_input_tokens = state.current_context_input_tokens;
+        self.current_context_window = state.current_context_window;
+        self.main_tools_completed = state.main_tools_completed;
+        self.main_tools_total = state.main_tools_total;
+        self.main_backgrounded_tools = state.main_backgrounded_tools;
+        self.main_agent_turn_active = state.main_agent_turn_active;
+        self.main_tools_visible = state.main_tools_visible;
+        self.tool_summaries = state.tool_summaries;
+        self.prompt_tool_summary = state.prompt_tool_summary;
+        self.prompt_tool_summary_active = state.prompt_tool_summary_active;
+        self.cumulative_agent_latency = state.cumulative_agent_latency;
+        self.agent_activity = state.agent_activity;
+    }
+
+    fn remember_agent(&mut self, agent_id: String) {
+        if let Ok(mut agents) = self.known_agents.lock()
+            && !agents.iter().any(|known| known == &agent_id)
+        {
+            agents.push(agent_id);
+            agents.sort();
+        }
     }
 
     fn save_cli_state(&self) {
@@ -1576,6 +1732,18 @@ impl EventRenderer {
                 format!("!{service_tier}"),
             );
         }
+        if let Some(agent_id) = self
+            .current_agent_id
+            .as_deref()
+            .filter(|agent_id| *agent_id != MAIN_AGENT_ID)
+        {
+            push_status_chip(
+                &mut themed,
+                session_style,
+                &mut needs_space,
+                format!("&{agent_id}"),
+            );
+        }
         if let Some(session_id) = self.current_session_id.as_ref() {
             push_status_chip(
                 &mut themed,
@@ -1966,6 +2134,139 @@ impl EventRenderer {
     }
 
     pub(crate) fn handle_recorded_at(&mut self, event: &Event, recorded_at: UnixMicros) {
+        self.learn_agent_metadata(event);
+        let target_agent_id = self.agent_id_for_event(event);
+        if self.current_agent_id.as_deref() == Some(target_agent_id.as_str()) {
+            self.handle_recorded_at_for_visible_agent(event, recorded_at);
+            return;
+        }
+
+        let visible_agent_id = self
+            .current_agent_id
+            .clone()
+            .unwrap_or_else(|| MAIN_AGENT_ID.to_owned());
+        let visible_state = self.take_visible_agent_state();
+        self.agents_ui_state
+            .insert(visible_agent_id.clone(), visible_state);
+        let target_state = self
+            .agents_ui_state
+            .remove(&target_agent_id)
+            .unwrap_or_default();
+        self.restore_visible_agent_state(target_state);
+        self.current_agent_id = Some(target_agent_id.clone());
+        self.handle_recorded_at_for_visible_agent(event, recorded_at);
+        let target_state = self.take_visible_agent_state();
+        self.agents_ui_state.insert(target_agent_id, target_state);
+        let visible_state = self
+            .agents_ui_state
+            .remove(&visible_agent_id)
+            .unwrap_or_default();
+        self.restore_visible_agent_state(visible_state);
+        self.current_agent_id = Some(visible_agent_id);
+    }
+
+    fn learn_agent_metadata(&mut self, event: &Event) {
+        match event {
+            Event::StartAgentRequest(request) => {
+                self.query_agents
+                    .insert(request.query_id.clone(), request.agent_id.clone());
+                self.remember_agent(request.agent_id.clone());
+            }
+            Event::StartAgentAccepted(accepted) => {
+                self.query_agents
+                    .insert(accepted.query_id.clone(), accepted.agent_id.clone());
+                self.remember_agent(accepted.agent_id.clone());
+            }
+            Event::SessionPromptCreated(prompt) => {
+                let agent_id = self.agent_id_for_originator(&prompt.originator);
+                self.prompt_agents
+                    .insert(prompt.session_prompt_id.to_string(), agent_id);
+            }
+            Event::ProviderResponseFinished(finished) => {
+                let agent_id = self.agent_id_for_originator(&finished.originator);
+                self.prompt_agents
+                    .insert(finished.session_prompt_id.to_string(), agent_id.clone());
+                for call in tool_calls_from_output_items(&finished.output_items) {
+                    self.tool_agents
+                        .insert(call.call_id.to_string(), agent_id.clone());
+                }
+            }
+            Event::AgentMessage(message) => {
+                if message.sender_id != "user" {
+                    self.remember_agent(message.sender_id.clone());
+                }
+                if message.recipient_id != "user" {
+                    self.remember_agent(message.recipient_id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn agent_id_for_event(&self, event: &Event) -> String {
+        match event {
+            Event::ToolRequest(request) => self
+                .tool_agents
+                .get(request.call_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::ToolStarted(started) => self
+                .tool_agents
+                .get(started.call_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::ToolProgress(progress) => self
+                .tool_agents
+                .get(progress.call_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::ToolResult(result) | Event::ProviderToolResult(result) => self
+                .tool_agents
+                .get(result.call_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| self.agent_id_for_originator(&result.originator)),
+            Event::ToolError(error) | Event::ProviderToolError(error) => self
+                .tool_agents
+                .get(error.call_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| self.agent_id_for_originator(&error.originator)),
+            Event::ToolBackgroundResult(result) => self
+                .tool_agents
+                .get(result.call_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::ToolBackgroundError(error) => self
+                .tool_agents
+                .get(error.call_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::ToolCancelled(cancelled) => self
+                .tool_agents
+                .get(cancelled.call_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::AgentMessage(message) if message.recipient_id == "user" => {
+                message.sender_id.clone()
+            }
+            Event::AgentMessage(message) if message.sender_id == "user" => {
+                message.recipient_id.clone()
+            }
+            _ => self.agent_id_for_originator(&originator_of(event)),
+        }
+    }
+
+    fn agent_id_for_originator(&self, originator: &tau_proto::PromptOriginator) -> String {
+        match originator {
+            tau_proto::PromptOriginator::User => MAIN_AGENT_ID.to_owned(),
+            tau_proto::PromptOriginator::Extension { query_id, .. } => self
+                .query_agents
+                .get(query_id)
+                .cloned()
+                .unwrap_or_else(|| query_id.clone()),
+        }
+    }
+
+    fn handle_recorded_at_for_visible_agent(&mut self, event: &Event, recorded_at: UnixMicros) {
         self.sync_agent_activity_for_lifecycle(event);
 
         if self.handle_compaction_event(event) {
@@ -1986,14 +2287,9 @@ impl EventRenderer {
             return;
         }
 
-        // Keep this filter immediately after the side-conversation tool-call
-        // learning above. Prompt lifecycle events from extension-owned side
-        // conversations share the bus with the user's interactive turn but
-        // must not paint into the user's chat window or perturb its
-        // pending-block bookkeeping.
-        if !originator_of(event).is_user() {
-            return;
-        }
+        // Events are routed to the owning agent transcript before reaching this
+        // point, so side-conversation events are rendered into their own hidden
+        // or visible state instead of being dropped.
 
         if self.handle_session_events(event)
             || self.handle_prompt_events(event)
@@ -2510,9 +2806,7 @@ impl EventRenderer {
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
     ) {
-        if !finished.originator.is_user() {
-            return;
-        }
+        // The event has already been routed into the owning agent transcript.
         // Only the main agent's tool calls land in the UI as their own blocks.
         // Sub-agent activity is summarized live under the parent's `delegate`
         // block via `DelegateProgress` instead, so the user sees one line per

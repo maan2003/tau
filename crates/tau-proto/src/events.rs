@@ -1623,6 +1623,10 @@ impl PromptMessageClass {
 pub struct UiPromptSubmitted {
     pub session_id: SessionId,
     pub text: String,
+    /// Target agent for this user-authored prompt. `None` means the main
+    /// interactive agent for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
     /// Whether this prompt text is user-authored or hidden internal control
     /// text.
     #[serde(default)]

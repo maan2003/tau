@@ -195,6 +195,7 @@ fn intercepted_prompt(text: &str) -> Frame {
         event: Box::new(Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
             session_id: "s1".into(),
             text: text.to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,

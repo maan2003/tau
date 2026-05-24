@@ -226,6 +226,7 @@ fn emits_start_and_end_user_var_in_order() {
         .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hello".into(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -281,6 +282,7 @@ fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
         .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hello".into(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -335,6 +337,7 @@ fn final_response_waits_for_background_tools_before_end_sound() {
         .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "run slow thing".into(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -392,6 +395,7 @@ fn new_prompt_does_not_forget_previous_background_tool() {
             .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: text.into(),
+                target_agent_id: None,
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
@@ -441,6 +445,7 @@ fn final_response_without_background_completion_does_not_emit_end_sound() {
         .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "run slow thing".into(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -991,6 +996,7 @@ fn user_prompt_during_idle_window_cancels_text_notification() {
         .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "another question".into(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -1042,6 +1048,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
         .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "delegate something".into(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -1079,6 +1086,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
         .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "side instruction".into(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::Extension {
                 name: "core-subagents".into(),
@@ -1144,6 +1152,7 @@ fn duplicate_ui_prompt_submitted_during_same_turn_emits_one_start_sound() {
         .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hello".into(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -1153,6 +1162,7 @@ fn duplicate_ui_prompt_submitted_during_same_turn_emits_one_start_sound() {
         .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "internal replay".into(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,

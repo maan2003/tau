@@ -20,7 +20,8 @@ pub use completion::{ArgCompleter, CommandName, CompletionData, CompletionItem, 
 #[cfg(test)]
 pub(crate) use tau_cli_term_raw::RawEvent as TestRawEvent;
 pub use tau_cli_term_raw::{
-    Align, BlockId, Cell, Color, CursorShape, Span, Style, StyledBlock, StyledText, TermHandle,
+    Align, BlockId, Cell, Color, CursorShape, OutputSnapshot, Span, Style, StyledBlock, StyledText,
+    TermHandle,
 };
 use tau_cli_term_raw::{Candidate, Event as RawEvent};
 use tau_themes::Theme;

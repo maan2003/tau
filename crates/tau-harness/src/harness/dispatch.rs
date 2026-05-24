@@ -68,6 +68,7 @@ impl Harness {
             Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
                 session_id,
                 text: prompt.text,
+                target_agent_id: None,
                 message_class: prompt.message_class,
                 originator,
                 ctx_id: None,

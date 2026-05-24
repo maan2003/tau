@@ -122,6 +122,7 @@ fn representative_events() -> Vec<Event> {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hello".to_owned(),
+            target_agent_id: None,
             message_class: PromptMessageClass::User,
             originator: PromptOriginator::User,
             ctx_id: None,
@@ -816,6 +817,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".to_owned(),
+            target_agent_id: None,
             message_class: PromptMessageClass::User,
             originator: PromptOriginator::User,
             ctx_id: None,

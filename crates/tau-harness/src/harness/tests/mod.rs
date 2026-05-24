@@ -72,6 +72,7 @@ fn append_user_message_via_event(h: &mut Harness, session_id: &str, text: &str) 
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: session_id.into(),
             text: text.to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,

@@ -615,6 +615,18 @@ pub enum Event {
     ExternalEditor,
 }
 
+/// Snapshot of terminal output zones, excluding prompt input/history state.
+#[derive(Clone, Debug, Default)]
+pub struct OutputSnapshot {
+    blocks: HashMap<BlockId, StyledBlock>,
+    block_debug_ids: HashMap<BlockId, String>,
+    history: Vec<BlockId>,
+    above_active: Vec<BlockId>,
+    above_sticky: Vec<BlockId>,
+    suggestions: Vec<BlockId>,
+    below: Vec<BlockId>,
+}
+
 /// A cloneable handle for mutating prompt zones from any thread.
 ///
 /// Setters update the shared state but do **not** trigger a redraw.
@@ -652,13 +664,34 @@ impl TermHandle {
     /// full repaint. The prompt, current input buffer, and input-line
     /// history are left intact.
     pub fn clear_output(&self) {
+        self.replace_output_snapshot(OutputSnapshot::default());
+    }
+
+    /// Returns a clone of all output blocks/zones, excluding prompt input and
+    /// prompt-history state.
+    pub fn output_snapshot(&self) -> OutputSnapshot {
+        let st = self.lock();
+        OutputSnapshot {
+            blocks: st.blocks.clone(),
+            block_debug_ids: st.block_debug_ids.clone(),
+            history: st.history.clone(),
+            above_active: st.above_active.clone(),
+            above_sticky: st.above_sticky.clone(),
+            suggestions: st.suggestions.clone(),
+            below: st.below.clone(),
+        }
+    }
+
+    /// Replaces all output blocks/zones, preserving prompt input and history.
+    pub fn replace_output_snapshot(&self, snapshot: OutputSnapshot) {
         let mut st = self.lock();
-        st.blocks.clear();
-        st.history.clear();
-        st.above_active.clear();
-        st.above_sticky.clear();
-        st.suggestions.clear();
-        st.below.clear();
+        st.blocks = snapshot.blocks;
+        st.block_debug_ids = snapshot.block_debug_ids;
+        st.history = snapshot.history;
+        st.above_active = snapshot.above_active;
+        st.above_sticky = snapshot.above_sticky;
+        st.suggestions = snapshot.suggestions;
+        st.below = snapshot.below;
         st.invalidate_screen = true;
         drop(st);
         self.redraw.notify();

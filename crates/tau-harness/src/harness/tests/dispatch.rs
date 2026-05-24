@@ -178,6 +178,7 @@ fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_pro
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: text.to_owned(),
+                target_agent_id: None,
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
@@ -245,6 +246,7 @@ fn seed_background_placeholder(state_dir: &Path, call_id: &str, tool_name: &str)
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: format!("run {tool_name}"),
+                target_agent_id: None,
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
@@ -576,6 +578,7 @@ fn disconnect_with_inflight_and_queued_tool_does_not_invoke_queued_on_dead_conne
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "run two slow tools".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -4146,6 +4149,7 @@ fn compaction_without_provider_usage_estimates_compacted_tokens_from_replacement
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "earlier question".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -4227,6 +4231,7 @@ fn failed_compaction_does_not_report_compacted_tokens_from_provider_usage() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "earlier question".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -4500,6 +4505,7 @@ fn intercepted_compaction_started_dispatches_summary_after_publish_idle() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "earlier question".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -4632,6 +4638,7 @@ fn start_background_tool_and_finish_placeholder_turn(
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: format!("run {tool_name}"),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -4873,6 +4880,7 @@ fn manual_compaction_drains_user_prompt_queued_while_compacting() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "earlier question".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -5323,6 +5331,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -5627,6 +5636,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -5762,6 +5772,7 @@ fn non_tool_start_agent_request_inherits_parent_branch() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "find the bug in foo.rs".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -6032,6 +6043,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "go".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -6236,6 +6248,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -6398,6 +6411,7 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "delegate slow work".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -6574,6 +6588,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "delegate slow work".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -6692,6 +6707,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "run fail".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -6912,6 +6928,7 @@ fn backgrounded_tool_progress_is_not_published() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "run slow".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -7455,6 +7472,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "fan out".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -7672,6 +7690,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -7871,6 +7890,7 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -8399,6 +8419,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -8645,6 +8666,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -8802,6 +8824,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
@@ -8955,6 +8978,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "ROOT: ask top delegate to delegate again".to_owned(),
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,

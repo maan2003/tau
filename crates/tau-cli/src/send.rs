@@ -107,6 +107,7 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
     Some(Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: session_id.into(),
         text: text.to_owned(),
+        target_agent_id: None,
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,

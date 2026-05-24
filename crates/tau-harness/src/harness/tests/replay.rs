@@ -67,6 +67,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: "before restart".to_owned(),
+                target_agent_id: None,
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,

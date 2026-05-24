@@ -3838,6 +3838,21 @@ impl Harness {
         &mut self,
         prompt: tau_proto::UiPromptSubmitted,
     ) -> Result<bool, HarnessError> {
+        if let Some(target_agent_id) = prompt.target_agent_id.as_deref()
+            && target_agent_id != "main"
+        {
+            let submission = self.submit_prompt_to_agent(
+                prompt.session_id.clone(),
+                target_agent_id,
+                prompt.text.clone(),
+            )?;
+            if matches!(submission, PromptSubmission::Queued) && !prompt.message_class.is_internal()
+            {
+                self.interrupt_active_waits();
+            }
+            return Ok(true);
+        }
+
         // Stash the correlation tag on the default conversation
         // before submission; `send_prompt_to_agent_for` will consume
         // it when it constructs the matching `SessionPromptCreated`.
@@ -5490,6 +5505,7 @@ impl Harness {
             Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
                 session_id,
                 text: query.instruction,
+                target_agent_id: None,
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::Extension {
                     name: extension_name.into(),
@@ -6036,6 +6052,38 @@ impl Harness {
         }
 
         self.dispatch_user_prompt(session_id, text)?;
+        Ok(PromptSubmission::Dispatched)
+    }
+
+    fn submit_prompt_to_agent(
+        &mut self,
+        session_id: SessionId,
+        agent_id: &str,
+        text: String,
+    ) -> Result<PromptSubmission, HarnessError> {
+        if session_id != self.current_session_id {
+            let reason = format!(
+                "harness is bound to session `{}`; prompt for `{}` rejected",
+                self.current_session_id.as_str(),
+                session_id.as_str()
+            );
+            self.emit_info(&reason);
+            return Ok(PromptSubmission::Rejected { reason });
+        }
+        let Some(cid) = self.agent_conversations.get(agent_id).cloned() else {
+            self.emit_info(&format!("unknown agent `{agent_id}`"));
+            return Ok(PromptSubmission::Rejected {
+                reason: format!("unknown agent `{agent_id}`"),
+            });
+        };
+        if self.dispatch_blocked_for(&cid) || !self.session_initialized(&session_id) {
+            if let Some(conv) = self.conversations.get_mut(&cid) {
+                conv.pending_prompts.push_back(PendingPrompt::user(text));
+            }
+            self.try_advance_queue();
+            return Ok(PromptSubmission::Queued);
+        }
+        self.dispatch_prompt_for_conversation(&cid, PendingPrompt::user(text))?;
         Ok(PromptSubmission::Dispatched)
     }
 
@@ -9014,6 +9062,7 @@ impl Harness {
             Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: user_message.to_owned(),
+                target_agent_id: None,
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,

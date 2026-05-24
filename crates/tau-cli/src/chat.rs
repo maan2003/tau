@@ -325,6 +325,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Leave the UI but keep the harness running for later reattach",
     ),
     ("/model", "Switch agent role (e.g. /model engineer)"),
+    ("/agent", "Switch visible agent transcript"),
     ("/role", "Switch, create, edit, or delete an agent role"),
     (
         "/new",
@@ -647,6 +648,12 @@ pub(crate) fn run_chat(
     let agent_in_progress = renderer.agent_in_progress_state();
     let fast_service_tier_state = renderer.fast_service_tier_state();
     let current_role_state = renderer.current_role_state();
+    let current_agent_state = renderer.current_agent_state();
+    let known_agents = renderer.known_agents();
+    completion_data.set_arg_completer(
+        tau_cli_term::CommandName::new("/agent"),
+        build_agent_arg_completer(known_agents.clone()),
+    );
     let roles_available = renderer.roles_available();
     let role_groups_available = renderer.role_groups_available();
     let role_group_memory = renderer.role_group_memory();
@@ -661,6 +668,7 @@ pub(crate) fn run_chat(
                 }
                 RendererCmd::RemoteDisconnect(reason) => renderer.handle_disconnect(reason),
                 RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
+                RendererCmd::SwitchAgent { agent_id } => renderer.switch_agent(agent_id),
                 RendererCmd::ToolTimerTick => renderer.handle_tool_timer_tick(),
             }
         }
@@ -691,6 +699,8 @@ pub(crate) fn run_chat(
         TerminalInputLoopCtx {
             fast_service_tier_state,
             current_role_state,
+            current_agent_state,
+            known_agents,
             roles_available,
             role_groups_available,
             role_group_memory,
@@ -800,6 +810,10 @@ enum RendererCmd {
         name: String,
         value: String,
     },
+    /// `/agent <agent_id>` — switch visible agent transcript.
+    SwitchAgent {
+        agent_id: String,
+    },
     Remote {
         event: Box<Event>,
         recorded_at: UnixMicros,
@@ -812,6 +826,8 @@ enum RendererCmd {
 struct TerminalInputLoopCtx {
     fast_service_tier_state: Arc<std::sync::atomic::AtomicBool>,
     current_role_state: Arc<Mutex<Option<String>>>,
+    current_agent_state: Arc<Mutex<Option<String>>>,
+    known_agents: Arc<Mutex<Vec<String>>>,
     roles_available: Arc<Mutex<Vec<String>>>,
     role_groups_available: Arc<Mutex<Vec<tau_proto::HarnessRoleGroup>>>,
     role_group_memory: Arc<Mutex<HashMap<String, String>>>,
@@ -1145,6 +1161,10 @@ impl<'a> TerminalInputSession<'a> {
             run_provider_auth("", &|message| output.system_info(message));
             return true;
         }
+        if text == "/agent" || text.starts_with("/agent ") {
+            self.handle_agent_command(text);
+            return true;
+        }
         if text == "/set" || text.starts_with("/set ") {
             let output = &self.output;
             handle_set_command(text, &self.ctx.renderer_tx, &|message| {
@@ -1154,6 +1174,36 @@ impl<'a> TerminalInputSession<'a> {
         }
 
         false
+    }
+
+    fn handle_agent_command(&self, text: &str) {
+        let arg = text.strip_prefix("/agent").unwrap_or("").trim();
+        if arg.is_empty() {
+            let current = self
+                .ctx
+                .current_agent_state
+                .lock()
+                .ok()
+                .and_then(|agent| agent.clone())
+                .unwrap_or_else(|| "main".to_owned());
+            let agents = self
+                .ctx
+                .known_agents
+                .lock()
+                .map(|a| a.clone())
+                .unwrap_or_default();
+            self.output.system_info(&format!(
+                "current agent: {current}; known: {}",
+                agents.join(", ")
+            ));
+            return;
+        }
+        if let Ok(mut current) = self.ctx.current_agent_state.lock() {
+            *current = Some(arg.to_owned());
+        }
+        let _ = self.ctx.renderer_tx.send(RendererCmd::SwitchAgent {
+            agent_id: arg.to_owned(),
+        });
     }
 
     fn handle_role_selection_command(&self, text: &str) -> bool {
@@ -1246,11 +1296,19 @@ impl<'a> TerminalInputSession<'a> {
         self.ctx
             .agent_in_progress
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        let target_agent_id = self
+            .ctx
+            .current_agent_state
+            .lock()
+            .ok()
+            .and_then(|agent| agent.clone())
+            .filter(|agent| agent != "main");
         if send_event(
             self.writer,
             &Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: self.session_id.as_str().into(),
                 text: text.to_owned(),
+                target_agent_id,
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
@@ -1401,6 +1459,29 @@ fn terminal_input_loop(
         output,
     }
     .run()
+}
+
+fn build_agent_arg_completer(agents: Arc<Mutex<Vec<String>>>) -> tau_cli_term::ArgCompleter {
+    use tau_cli_term::CompletionItem;
+
+    Arc::new(move |args: &[&str]| {
+        if 1 < args.len() {
+            return Vec::new();
+        }
+        let needle = args.first().copied().unwrap_or("").to_lowercase();
+        let agents = agents
+            .lock()
+            .map(|agents| agents.clone())
+            .unwrap_or_default();
+        agents
+            .into_iter()
+            .filter(|agent| {
+                let lower = agent.to_lowercase();
+                needle.is_empty() || lower.starts_with(&needle) || lower.contains(&needle)
+            })
+            .map(|agent| CompletionItem::new(agent, "agent"))
+            .collect()
+    })
 }
 
 /// Build the `/set` argument completer. The first arg is a setting

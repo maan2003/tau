@@ -115,6 +115,7 @@ fn submit_prompt(writer: &mut OneShotWriter, session_id: &str, prompt: String) -
         &Frame::Event(Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: session_id.into(),
             text: prompt,
+            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: PromptOriginator::User,
             ctx_id: None,

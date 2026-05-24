@@ -553,6 +553,7 @@ fn assemble_conversation_includes_tool_error_details() {
     let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
     tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
         text: "build firefox".to_owned(),
+        target_agent_id: None,
         message_class: tau_proto::PromptMessageClass::User,
         session_id: "session-1".into(),
         originator: tau_proto::PromptOriginator::default(),
@@ -641,6 +642,7 @@ fn assemble_conversation_preserves_agent_phase() {
     let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
     tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
         text: "hi".to_owned(),
+        target_agent_id: None,
         message_class: tau_proto::PromptMessageClass::User,
         session_id: "session-1".into(),
         originator: tau_proto::PromptOriginator::default(),
@@ -683,6 +685,7 @@ fn assemble_conversation_restarts_from_compacted_summary() {
     let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
     tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
         text: "first question".to_owned(),
+        target_agent_id: None,
         message_class: tau_proto::PromptMessageClass::User,
         session_id: "session-1".into(),
         originator: tau_proto::PromptOriginator::default(),
@@ -716,6 +719,7 @@ fn assemble_conversation_restarts_from_compacted_summary() {
         }));
     tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
         text: "continue".to_owned(),
+        target_agent_id: None,
         message_class: tau_proto::PromptMessageClass::User,
         session_id: "session-1".into(),
         originator: tau_proto::PromptOriginator::default(),
@@ -751,6 +755,7 @@ fn assemble_conversation_replays_reasoning_items_before_text() {
     let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
     tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
         text: "hi".to_owned(),
+        target_agent_id: None,
         message_class: tau_proto::PromptMessageClass::User,
         session_id: "session-1".into(),
         originator: tau_proto::PromptOriginator::default(),
@@ -799,6 +804,7 @@ fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
     let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
     tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
         text: "go".to_owned(),
+        target_agent_id: None,
         message_class: tau_proto::PromptMessageClass::User,
         session_id: "session-1".into(),
         originator: tau_proto::PromptOriginator::default(),
