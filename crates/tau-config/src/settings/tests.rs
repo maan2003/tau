@@ -227,7 +227,7 @@ fn harness_settings_load_role_tool_lists() {
             roleGroups: {
                 engineer: {
                     roles: {
-                        engineer: { tools: ["read", "grep"], disableTools: ["grep"] },
+                        engineer: { tools: ["read", "grep"], enableTools: ["web_search"], disableTools: ["grep"] },
                     },
                 },
             },
@@ -242,6 +242,10 @@ fn harness_settings_load_role_tool_lists() {
             tau_proto::ToolName::new("read"),
             tau_proto::ToolName::new("grep")
         ]
+    );
+    assert_eq!(
+        s.roles["engineer"].enable_tools,
+        vec![tau_proto::ToolName::new("web_search")]
     );
     assert_eq!(
         s.roles["engineer"].disable_tools,
@@ -308,7 +312,7 @@ fn harness_settings_load_role_group_default_tool_overrides_without_relisting_rol
         dir.join("harness.yaml"),
         r#"{
             roleGroups: {
-                engineer: { disableTools: ["email"] },
+                engineer: { enableTools: ["email_search"], disableTools: ["email"] },
             },
         }"#,
     )
@@ -316,6 +320,10 @@ fn harness_settings_load_role_group_default_tool_overrides_without_relisting_rol
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     for role_name in ["senior-engineer", "junior-engineer", "staff-engineer"] {
+        assert_eq!(
+            s.roles[role_name].enable_tools,
+            vec![tau_proto::ToolName::new("email_search")]
+        );
         assert_eq!(
             s.roles[role_name].disable_tools,
             vec![tau_proto::ToolName::new("email")]
@@ -843,6 +851,7 @@ fn harness_role_group_fields_apply_as_role_defaults() {
                 review: {
                     effort: "low",
                     tools: ["read"],
+                    enableTools: ["grep"],
                     promptFragments: [
                         { name: "review.shared", priority: 80, text: "Review carefully." },
                     ],
@@ -865,6 +874,7 @@ fn harness_role_group_fields_apply_as_role_defaults() {
     let quick = &s.roles["quick"];
     assert_eq!(quick.effort, Some(tau_proto::Effort::Low));
     assert_eq!(quick.tools, Some(vec![tau_proto::ToolName::new("read")]));
+    assert_eq!(quick.enable_tools, vec![tau_proto::ToolName::new("grep")]);
     assert!(
         quick
             .prompt_fragments

@@ -300,6 +300,9 @@ pub(crate) fn parse_role_setting_update(
         "tools" => Ok(tau_proto::UiRoleUpdateAction::SetTools {
             tools: parse_tool_list_update(value)?,
         }),
+        "enable-tools" => Ok(tau_proto::UiRoleUpdateAction::SetEnableTools {
+            enable_tools: parse_disable_tool_list_update(value)?,
+        }),
         "disable-tools" => Ok(tau_proto::UiRoleUpdateAction::SetDisableTools {
             disable_tools: parse_disable_tool_list_update(value)?,
         }),
@@ -1548,7 +1551,7 @@ fn handle_role_command(text: &str, writer: &WriterHandle, print_local: &impl Fn(
     let extra = parts.next();
     let Some(role) = role else {
         print_local(
-            "/role <role> [delete|model|effort|verbosity|thinking-summary|service-tier|compaction-threshold|tools|disable-tools] [value]",
+            "/role <role> [delete|model|effort|verbosity|thinking-summary|service-tier|compaction-threshold|tools|enable-tools|disable-tools] [value]",
         );
         return;
     };

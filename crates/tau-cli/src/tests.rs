@@ -375,6 +375,21 @@ fn role_setting_updates_are_typed_and_reset_aware() {
         }
     );
     assert!(parse_role_setting_update("compaction-threshold", "101").is_err());
+    assert_eq!(
+        parse_role_setting_update("enable-tools", "web_search,grep").expect("enable tools"),
+        UiRoleUpdateAction::SetEnableTools {
+            enable_tools: vec![
+                tau_proto::ToolName::new("web_search"),
+                tau_proto::ToolName::new("grep"),
+            ],
+        }
+    );
+    assert_eq!(
+        parse_role_setting_update("enable-tools", "reset").expect("reset enable tools"),
+        UiRoleUpdateAction::SetEnableTools {
+            enable_tools: Vec::new(),
+        }
+    );
 }
 
 #[test]

@@ -1734,6 +1734,13 @@ pub enum UiRoleUpdateAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tools: Option<Vec<ToolName>>,
     },
+    /// Set the role's additive tool allow-list.
+    SetEnableTools {
+        /// Internal tool names to enable in addition to defaults or the
+        /// explicit `tools` allow-list.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enable_tools: Vec<ToolName>,
+    },
     /// Set the role's explicit tool block-list.
     SetDisableTools {
         /// Internal tool names to disable even when enabled by default or

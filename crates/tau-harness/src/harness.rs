@@ -5748,6 +5748,9 @@ impl Harness {
             tau_proto::UiRoleUpdateAction::SetTools { tools } => {
                 next_role.tools = tools;
             }
+            tau_proto::UiRoleUpdateAction::SetEnableTools { enable_tools } => {
+                next_role.enable_tools = enable_tools;
+            }
             tau_proto::UiRoleUpdateAction::SetDisableTools { disable_tools } => {
                 next_role.disable_tools = disable_tools;
             }
@@ -7385,13 +7388,11 @@ impl Harness {
         let Some(role) = self.available_roles.get(role_name) else {
             return spec.enabled_by_default;
         };
-        if role.disable_tools.iter().any(|name| name == &spec.name) {
-            return false;
-        }
-        match role.tools.as_ref() {
+        let enabled = match role.tools.as_ref() {
             Some(tools) => tools.iter().any(|name| name == &spec.name),
             None => spec.enabled_by_default,
-        }
+        } || role.enable_tools.iter().any(|name| name == &spec.name);
+        enabled && !role.disable_tools.iter().any(|name| name == &spec.name)
     }
 
     fn maybe_emit_cache_miss_diagnostic(

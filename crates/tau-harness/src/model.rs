@@ -241,6 +241,19 @@ fn describe_role_inner(
             )
         })
         .unwrap_or_default();
+    let enable_tools = current
+        .filter(|r| !r.enable_tools.is_empty())
+        .map(|r| {
+            format!(
+                ", enable-tools={}",
+                r.enable_tools
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            )
+        })
+        .unwrap_or_default();
     let disable_tools = current
         .filter(|r| !r.disable_tools.is_empty())
         .map(|r| {
@@ -255,13 +268,14 @@ fn describe_role_inner(
         })
         .unwrap_or_default();
     format!(
-        "model={}, effort={}, verbosity={}, thinking-summary={}{}{}{}",
+        "model={}, effort={}, verbosity={}, thinking-summary={}{}{}{}{}",
         model,
         params.effort,
         params.verbosity,
         params.thinking_summary,
         service_tier,
         tools,
+        enable_tools,
         disable_tools
     )
 }

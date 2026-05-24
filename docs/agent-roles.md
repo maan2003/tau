@@ -14,7 +14,8 @@ A role can set:
 - `promptFragments`: role-specific prompt fragments
 - `promptOverride`: system prompt template name
 - `tools`: explicit internal tools enabled for this role
-- `disableTools`: internal tools disabled for this role
+- `enableTools`: internal tools added to the selected/default set
+- `disableTools`: internal tools removed from the selected/default set
 
 Top-level `promptFragments` in `harness.yaml` apply to every role. Use them for global style or policy instructions:
 
@@ -46,6 +47,7 @@ Roles live in `harness.yaml` under globally unique `roleGroups`. Each group has 
           effort: "medium",
           compactionThreshold: 85,
           tools: ["read", "grep"],
+          enableTools: ["web_search"],
         },
         "staff-engineer": {
           description: "Maximum-reasoning engineer",
@@ -69,7 +71,7 @@ Roles live in `harness.yaml` under globally unique `roleGroups`. Each group has 
 }
 ```
 
-Missing fields use group defaults first, then provider-published fallback knobs for the role's resolved model. When `compactionThreshold` is omitted, Tau uses its built-in automatic compaction threshold. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
+Missing fields use group defaults first, then provider-published fallback knobs for the role's resolved model. Tool filtering starts with `tools` when set, otherwise with each tool's default enablement; then `enableTools` adds tools, and `disableTools` removes tools. When `compactionThreshold` is omitted, Tau uses its built-in automatic compaction threshold. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
 
 Tau ships built-in `junior-engineer`, `senior-engineer`, `staff-engineer`, and `manager` roles, with `defaultRole: senior-engineer`. `junior-engineer` uses lower reasoning for straightforward engineering work, `senior-engineer` uses balanced individual-contributor defaults, and `staff-engineer` is the maximum-reasoning engineering variant. `manager` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `manager` prompt tells the model to use `delegate` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
 
@@ -86,7 +88,7 @@ Use `/model <role>` or `/role <role>`.
 Use:
 
 ```text
-/role <role> <delete|model|effort|verbosity|thinking-summary|service-tier|tools|disable-tools> [value]
+/role <role> <delete|model|effort|verbosity|thinking-summary|service-tier|tools|enable-tools|disable-tools> [value]
 ```
 
 Examples:
@@ -94,6 +96,7 @@ Examples:
 ```text
 /role engineer model chatgpt/gpt-5.3-codex
 /role manager effort xhigh
+/role engineer enable-tools web_search
 /role engineer disable-tools shell
 /role temporary model anthropic/claude-sonnet-4-20250514
 /role temporary delete

@@ -8053,6 +8053,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
                     },
                 ],
                 tools: Some(vec![ToolName::new("allowed_tool")]),
+                enable_tools: vec![ToolName::new("enabled_tool")],
                 disable_tools: vec![ToolName::new("denied_tool")],
                 ..Default::default()
             },
@@ -8076,6 +8077,48 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
                 "allowed_tool.instructions",
                 tau_proto::PromptPriority::new(10),
                 "ALLOWED TOOL PROMPT",
+            )),
+        },
+    );
+    h.registry.register_with_prompt_fragment(
+        "conn-enabled-tool",
+        tau_proto::ToolRegister {
+            tool: ToolSpec {
+                name: ToolName::new("enabled_tool"),
+                model_visible_name: None,
+                description: Some("enabled".to_owned()),
+                parameters: None,
+                tool_type: tau_proto::ToolType::Function,
+                format: None,
+                enabled_by_default: false,
+                execution_mode: ToolExecutionMode::Shared,
+                background_support: None,
+            },
+            prompt_fragment: Some(tau_proto::PromptFragment::new(
+                "enabled_tool.instructions",
+                tau_proto::PromptPriority::new(10),
+                "ENABLED TOOL PROMPT",
+            )),
+        },
+    );
+    h.registry.register_with_prompt_fragment(
+        "conn-default-tool",
+        tau_proto::ToolRegister {
+            tool: ToolSpec {
+                name: ToolName::new("default_tool"),
+                model_visible_name: None,
+                description: Some("default".to_owned()),
+                parameters: None,
+                tool_type: tau_proto::ToolType::Function,
+                format: None,
+                enabled_by_default: true,
+                execution_mode: ToolExecutionMode::Shared,
+                background_support: None,
+            },
+            prompt_fragment: Some(tau_proto::PromptFragment::new(
+                "default_tool.instructions",
+                tau_proto::PromptPriority::new(10),
+                "DEFAULT TOOL PROMPT",
             )),
         },
     );
@@ -8144,12 +8187,26 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
     assert!(prompt.system_prompt.contains("WORKER EXTRA PROMPT"));
     assert!(!prompt.system_prompt.contains("SMART ROLE PROMPT"));
     assert!(prompt.system_prompt.contains("ALLOWED TOOL PROMPT"));
+    assert!(prompt.system_prompt.contains("ENABLED TOOL PROMPT"));
+    assert!(!prompt.system_prompt.contains("DEFAULT TOOL PROMPT"));
     assert!(!prompt.system_prompt.contains("DENIED TOOL PROMPT"));
     assert!(
         prompt
             .tools
             .iter()
             .any(|tool| tool.name.as_str() == "allowed_tool")
+    );
+    assert!(
+        prompt
+            .tools
+            .iter()
+            .any(|tool| tool.name.as_str() == "enabled_tool")
+    );
+    assert!(
+        !prompt
+            .tools
+            .iter()
+            .any(|tool| tool.name.as_str() == "default_tool")
     );
     assert!(
         !prompt

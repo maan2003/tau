@@ -311,6 +311,7 @@ struct RoleCompletionDetails {
     thinking_summary: Option<String>,
     service_tier: Option<String>,
     tools: Option<String>,
+    enable_tools: Option<String>,
     disable_tools: Option<String>,
     role_description: Option<String>,
 }
@@ -330,6 +331,7 @@ impl RoleCompletionDetails {
             thinking_summary: None,
             service_tier: None,
             tools: None,
+            enable_tools: None,
             disable_tools: None,
             role_description: None,
         };
@@ -349,6 +351,7 @@ impl RoleCompletionDetails {
                 "thinking-summary" => details.thinking_summary = Some(value.to_owned()),
                 "service-tier" => details.service_tier = Some(value.to_owned()),
                 "tools" => details.tools = Some(value.to_owned()),
+                "enable-tools" => details.enable_tools = Some(value.to_owned()),
                 "disable-tools" => details.disable_tools = Some(value.to_owned()),
                 _ => {}
             }
@@ -376,6 +379,9 @@ impl RoleCompletionDetails {
         }
         if let Some(tools) = self.tools.as_deref() {
             parts.push(format!("tools={tools}"));
+        }
+        if let Some(enable_tools) = self.enable_tools.as_deref() {
+            parts.push(format!("et={enable_tools}"));
         }
         if let Some(disable_tools) = self.disable_tools.as_deref() {
             parts.push(format!("dt={disable_tools}"));
@@ -407,6 +413,7 @@ impl RoleCompletionDetails {
                 .to_owned(),
             "service-tier" => self.service_tier.as_deref().unwrap_or("unset").to_owned(),
             "tools" => self.tools.as_deref().unwrap_or("unset").to_owned(),
+            "enable-tools" => self.enable_tools.as_deref().unwrap_or("unset").to_owned(),
             "disable-tools" => self.disable_tools.as_deref().unwrap_or("unset").to_owned(),
             _ => "unset".to_owned(),
         }
@@ -448,6 +455,7 @@ fn empty_role_completion_details() -> RoleCompletionDetails {
         thinking_summary: None,
         service_tier: None,
         tools: None,
+        enable_tools: None,
         disable_tools: None,
         role_description: None,
     }
@@ -468,6 +476,7 @@ fn role_setting_completions(
         ),
         ("service-tier", details.current_description("service-tier")),
         ("tools", details.current_description("tools")),
+        ("enable-tools", details.current_description("enable-tools")),
         (
             "disable-tools",
             details.current_description("disable-tools"),
@@ -484,7 +493,7 @@ fn role_setting_value_completions(
     needle: &str,
 ) -> Vec<tau_cli_term::CompletionItem> {
     let values: &[&str] = match setting {
-        "model" | "tools" | "disable-tools" => &["reset"],
+        "model" | "tools" | "enable-tools" | "disable-tools" => &["reset"],
         "effort" => &["reset", "off", "minimal", "low", "medium", "high", "xhigh"],
         "verbosity" => &["reset", "low", "medium", "high"],
         "thinking-summary" => &["reset", "off", "auto", "concise", "detailed"],

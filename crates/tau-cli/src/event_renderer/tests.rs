@@ -116,12 +116,12 @@ fn agent_activity_tracks_side_conversation_prompts() {
 #[test]
 fn role_details_abbreviate_description() {
     let details = RoleCompletionDetails::from_description(
-        "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, tools=read_only",
+        "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, tools=read_only, enable-tools=web_search",
     );
 
     assert_eq!(
         details.short_description(),
-        "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off tools=read_only"
+        "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off tools=read_only et=web_search"
     );
 }
 
@@ -146,7 +146,7 @@ fn role_details_append_configured_role_description() {
 #[test]
 fn role_details_report_single_current_field() {
     let details = RoleCompletionDetails::from_description(
-        "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, service-tier=fast, tools=read_only",
+        "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, service-tier=fast, tools=read_only, enable-tools=web_search",
     );
 
     assert_eq!(details.current_description("model"), "codex-dpcpw/gpt-5.5");
@@ -155,6 +155,7 @@ fn role_details_report_single_current_field() {
     assert_eq!(details.current_description("thinking-summary"), "off");
     assert_eq!(details.current_description("service-tier"), "fast");
     assert_eq!(details.current_description("tools"), "read_only");
+    assert_eq!(details.current_description("enable-tools"), "web_search");
 }
 
 #[test]
