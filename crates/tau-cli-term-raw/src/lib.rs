@@ -196,6 +196,9 @@ struct SharedState {
     /// here via `TermHandle::print_terminal_escape` to ensure their
     /// bytes don't interleave with the active frame's render output.
     pending_raw: Vec<String>,
+    /// Nested redraw suppression counter used while the CLI renderer updates
+    /// an off-screen agent transcript snapshot.
+    redraw_suppression: u32,
     full_render_count: u64,
 }
 
@@ -230,6 +233,7 @@ impl SharedState {
             sync_requested: 0,
             sync_completed: 0,
             pending_raw: Vec::new(),
+            redraw_suppression: 0,
             full_render_count: 0,
         }
     }
@@ -643,6 +647,28 @@ impl TermHandle {
         self.state.lock().expect("term state mutex poisoned")
     }
 
+    fn notify_redraw(&self) {
+        if self.lock().redraw_suppression == 0 {
+            self.redraw.notify();
+        }
+    }
+
+    /// Run `f` while redraw notifications from this handle are suppressed.
+    /// Used to update off-screen output snapshots without repainting the
+    /// currently visible transcript.
+    pub fn with_redraw_suppressed<R>(&self, f: impl FnOnce() -> R) -> R {
+        {
+            let mut st = self.lock();
+            st.redraw_suppression = st.redraw_suppression.saturating_add(1);
+        }
+        let result = f();
+        {
+            let mut st = self.lock();
+            st.redraw_suppression = st.redraw_suppression.saturating_sub(1);
+        }
+        result
+    }
+
     /// Triggers a redraw of the terminal.
     ///
     /// Call this after updating one or more blocks/zones. Multiple
@@ -657,7 +683,7 @@ impl TermHandle {
     /// `README.md` § "When mutations need a full redraw" for the
     /// full rule.
     pub fn redraw(&self) {
-        self.redraw.notify();
+        self.notify_redraw();
     }
 
     /// Drops every rendered block from every output zone and forces a
@@ -684,6 +710,22 @@ impl TermHandle {
 
     /// Replaces all output blocks/zones, preserving prompt input and history.
     pub fn replace_output_snapshot(&self, snapshot: OutputSnapshot) {
+        self.replace_output_snapshot_inner(snapshot, true, true);
+    }
+
+    /// Replaces all output blocks/zones without invalidating or redrawing.
+    /// The caller must ensure the visible terminal still corresponds to the
+    /// restored snapshot.
+    pub fn replace_output_snapshot_quiet(&self, snapshot: OutputSnapshot) {
+        self.replace_output_snapshot_inner(snapshot, false, false);
+    }
+
+    fn replace_output_snapshot_inner(
+        &self,
+        snapshot: OutputSnapshot,
+        invalidate_screen: bool,
+        notify: bool,
+    ) {
         let mut st = self.lock();
         st.blocks = snapshot.blocks;
         st.block_debug_ids = snapshot.block_debug_ids;
@@ -692,9 +734,14 @@ impl TermHandle {
         st.above_sticky = snapshot.above_sticky;
         st.suggestions = snapshot.suggestions;
         st.below = snapshot.below;
-        st.invalidate_screen = true;
+        if invalidate_screen {
+            st.invalidate_screen = true;
+        }
+        let notify = notify && st.redraw_suppression == 0;
         drop(st);
-        self.redraw.notify();
+        if notify {
+            self.redraw.notify();
+        }
     }
 
     /// Forces the next redraw to take the full-render path: clear
@@ -712,7 +759,7 @@ impl TermHandle {
     /// `README.md` § "When mutations need a full redraw".
     pub fn invalidate_screen(&self) {
         self.lock().invalidate_screen = true;
-        self.redraw.notify();
+        self.notify_redraw();
     }
 
     /// Current terminal size tracked by the renderer.
@@ -882,8 +929,11 @@ impl TermHandle {
         st.block_debug_ids.insert(id, debug_id.clone());
         st.history.push(id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, debug_id, content_empty, zone = "history", "print output");
+        let notify = st.redraw_suppression == 0;
         drop(st);
-        self.redraw.notify();
+        if notify {
+            self.redraw.notify();
+        }
         id
     }
 

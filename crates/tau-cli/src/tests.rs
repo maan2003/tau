@@ -355,6 +355,39 @@ fn first_agent_event_does_not_force_full_redraw() {
 }
 
 #[test]
+fn hidden_agent_events_do_not_force_visible_full_redraw() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "main-sp", "s1",
+    )));
+    sync(&handle);
+    let full_render_count = handle.full_render_count();
+
+    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        query_id: "q-worker".to_owned(),
+        agent_id: "worker-1".to_owned(),
+    }));
+    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-subagents".into(),
+            query_id: "q-worker".to_owned(),
+        },
+        ..session_prompt_created("worker-sp", "s1")
+    }));
+    sync(&handle);
+    assert_eq!(handle.full_render_count(), full_render_count);
+}
+
+#[test]
 fn agent_switch_preserves_separate_transcripts() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(

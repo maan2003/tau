@@ -1058,7 +1058,19 @@ impl EventRenderer {
     }
 
     fn restore_visible_agent_state(&mut self, state: AgentUiState) {
-        self.handle.replace_output_snapshot(state.output);
+        self.restore_visible_agent_state_inner(state, true);
+    }
+
+    fn restore_hidden_agent_state(&mut self, state: AgentUiState) {
+        self.restore_visible_agent_state_inner(state, false);
+    }
+
+    fn restore_visible_agent_state_inner(&mut self, state: AgentUiState, redraw: bool) {
+        if redraw {
+            self.handle.replace_output_snapshot(state.output);
+        } else {
+            self.handle.replace_output_snapshot_quiet(state.output);
+        }
         self.prompts = state.prompts;
         self.compaction_blocks = state.compaction_blocks;
         self.last_user_block = state.last_user_block;
@@ -2166,16 +2178,19 @@ impl EventRenderer {
             .agents_ui_state
             .remove(&target_agent_id)
             .unwrap_or_default();
-        self.restore_visible_agent_state(target_state);
-        self.current_agent_id = Some(target_agent_id.clone());
-        self.handle_recorded_at_for_visible_agent(event, recorded_at);
-        let target_state = self.take_visible_agent_state();
-        self.agents_ui_state.insert(target_agent_id, target_state);
-        let visible_state = self
-            .agents_ui_state
-            .remove(&visible_agent_id)
-            .unwrap_or_default();
-        self.restore_visible_agent_state(visible_state);
+        let handle = self.handle.clone();
+        handle.with_redraw_suppressed(|| {
+            self.restore_hidden_agent_state(target_state);
+            self.current_agent_id = Some(target_agent_id.clone());
+            self.handle_recorded_at_for_visible_agent(event, recorded_at);
+            let target_state = self.take_visible_agent_state();
+            self.agents_ui_state.insert(target_agent_id, target_state);
+            let visible_state = self
+                .agents_ui_state
+                .remove(&visible_agent_id)
+                .unwrap_or_default();
+            self.restore_hidden_agent_state(visible_state);
+        });
         self.current_agent_id = Some(visible_agent_id);
     }
 
