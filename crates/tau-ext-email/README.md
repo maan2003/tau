@@ -23,9 +23,9 @@ Email is hostile input. Message bodies, subjects, display names, addresses, MIME
 
 ### Incoming email gating
 
-`email.list` returns bounded metadata. For messages that do not pass the incoming policy, it redacts sensitive metadata such as subject and attachments.
+`email.list` returns bounded metadata. For messages that do not pass the incoming policy, it redacts the full subject and attachment metadata, but includes a short lossy `subject_preview` containing only ASCII letters/digits, commas, semicolons, periods, spaces, and dashes.
 
-`email.read` first fetches bounded headers and makes a policy decision before body text is exposed to the model. If the message is not allowed, the tool creates an incoming approval and returns `approval_required` with a machine-readable `reason`; it does not return the body. The user can inspect the message with `/email in open <id>` and approve it with `/email in approve <id>`. After approval, the model must repeat the matching `email.read` call to fetch the content.
+`email.read` first fetches bounded headers and makes a policy decision before body text is exposed to the model. If the message is not allowed, the tool creates an incoming approval and returns `approval_required` with a machine-readable `reason` and the same sanitized `subject_preview`; it does not return the body. The user can inspect the message with `/email in open <id>` and approve it with `/email in approve <id>`. After approval, the model must repeat the matching `email.read` call to fetch the content.
 
 Incoming approval records are bound to account, folder, UID, UIDVALIDITY when available, normalized sender, date, and message-id. Approval is not just a free-floating id that can be reused for a different message.
 
@@ -77,7 +77,7 @@ The extension reduces accidental exposure, but it cannot make email content sema
 
 ### Display and output hardening
 
-The extension sanitizes model-facing and action-list text derived from email. Control characters, escape bytes, bidirectional formatting controls, newlines, and very long display fields are escaped or capped before display. This is important because approval lists and status messages may be rendered in a terminal.
+The extension sanitizes model-facing and action-list text derived from email. Control characters, escape bytes, bidirectional formatting controls, newlines, and very long display fields are escaped or capped before display. Unapproved subject previews are stricter: they are short, ASCII-only, and limited to letters/digits plus `,`, `;`, `.`, space, and `-`. This is important because approval lists and status messages may be rendered in a terminal.
 
 Model-visible incoming `From` values are normalized to the address instead of trusting arbitrary display names. Raw authentication headers are not exposed to the model. Backend errors are capped before being returned.
 

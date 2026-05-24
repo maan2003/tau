@@ -30,6 +30,7 @@ const MAX_ATTACHMENT_NAME_CHARS: usize = 256;
 const MAX_FLAGS: usize = 32;
 const MAX_RECIPIENTS: usize = 256;
 const MAX_BACKEND_ERROR_CHARS: usize = 512;
+const UNAPPROVED_SUBJECT_PREVIEW_MAX_CHARS: usize = 96;
 
 use tau_proto::{
     ACTION_SCHEMA_VERSION, Ack, ActionArg, ActionArgKind, ActionCommand, ActionError, ActionInvoke,
@@ -1367,6 +1368,15 @@ fn is_safe_persisted_line(value: &str, max_chars: usize) -> bool {
             .any(|ch| ch.is_control() || is_unsafe_format_control(ch))
 }
 
+fn is_unapproved_subject_preview_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, ',' | ';' | '.' | ' ' | '-')
+}
+
+fn is_safe_unapproved_subject_preview(value: &str) -> bool {
+    value.chars().count() <= UNAPPROVED_SUBJECT_PREVIEW_MAX_CHARS
+        && value.chars().all(is_unapproved_subject_preview_char)
+}
+
 fn validate_optional_persisted_line(
     value: Option<&String>,
     field: &str,
@@ -1416,6 +1426,7 @@ fn validate_incoming_approval(
         || !is_safe_persisted_line(&approval.uidvalidity, MAX_HEADER_VALUE_CHARS)
         || !is_safe_persisted_line(&approval.from, MAX_ADDRESS_CHARS)
         || !is_safe_persisted_line(&approval.date, MAX_HEADER_VALUE_CHARS)
+        || !is_safe_unapproved_subject_preview(&approval.subject_preview)
         || !is_safe_persisted_line(&approval.reason, MAX_HEADER_VALUE_CHARS)
     {
         return Err(format!(
@@ -1826,6 +1837,10 @@ pub struct IncomingApproval {
     pub message_id: Option<String>,
     /// Whether subject is redacted in the approval-required tool output.
     pub subject_redacted: bool,
+    /// Sanitized subject preview visible before approval. This is deliberately
+    /// lossy and does not participate in approval matching.
+    #[serde(default)]
+    pub subject_preview: String,
     /// Denial/approval reason.
     pub reason: String,
 }
@@ -2018,6 +2033,36 @@ fn safe_model_text(value: &str, max_chars: usize) -> String {
 
 fn safe_model_line(value: &str, max_chars: usize) -> String {
     safe_text(value, max_chars, false)
+}
+
+fn unapproved_subject_preview(value: &str) -> String {
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut last_was_space = false;
+    for ch in value.chars() {
+        if UNAPPROVED_SUBJECT_PREVIEW_MAX_CHARS <= chars {
+            break;
+        }
+        let ch = if is_unapproved_subject_preview_char(ch) {
+            ch
+        } else {
+            ' '
+        };
+        if ch == ' ' {
+            if out.is_empty() || last_was_space {
+                continue;
+            }
+            last_was_space = true;
+        } else {
+            last_was_space = false;
+        }
+        out.push(ch);
+        chars += 1;
+    }
+    if last_was_space {
+        out.pop();
+    }
+    out
 }
 
 fn safe_model_vec(values: Vec<String>, max_items: usize, max_chars: usize) -> Vec<String> {
@@ -2288,6 +2333,14 @@ impl<B: EmailBackend> Engine<B> {
                     },
                 ));
                 entries.push((
+                    "subject_preview",
+                    if decision.allowed {
+                        CborValue::Null
+                    } else {
+                        CborValue::Text(unapproved_subject_preview(&m.subject))
+                    },
+                ));
+                entries.push((
                     "has_attachments",
                     if decision.allowed {
                         CborValue::Bool(has_attachments)
@@ -2494,6 +2547,7 @@ impl<B: EmailBackend> Engine<B> {
             date: safe_model_line(&metadata.date, MAX_HEADER_VALUE_CHARS),
             message_id: incoming_approval_message_id(&metadata),
             subject_redacted: true,
+            subject_preview: unapproved_subject_preview(&metadata.subject),
             reason: decision.reason,
         };
         match self.state.pending_incoming(&approval) {
@@ -2515,6 +2569,7 @@ impl<B: EmailBackend> Engine<B> {
                     ("from", CborValue::Text(approval.from)),
                     ("date", CborValue::Text(approval.date)),
                     ("subject", CborValue::Null),
+                    ("subject_preview", CborValue::Text(approval.subject_preview)),
                     ("subject_redacted", CborValue::Bool(true)),
                     ("reason", CborValue::Text(approval.reason)),
                 ]),
@@ -2888,13 +2943,14 @@ impl<B: EmailBackend> Engine<B> {
         )];
         for approval in approvals {
             lines.push(format!(
-                "{} account={} folder={} uid={} from={} date={} reason={}",
+                "{} account={} folder={} uid={} from={} date={} subject_preview={} reason={}",
                 safe_display_line(&approval.id),
                 safe_display_line(&approval.account),
                 safe_display_line(&approval.folder),
                 safe_display_line(&approval.uid),
                 safe_display_line(&approval.from),
                 safe_display_line(&approval.date),
+                safe_display_line(&approval.subject_preview),
                 safe_display_line(&approval.reason)
             ));
         }
