@@ -123,6 +123,9 @@ pub struct AccountConfig {
     pub id: String,
     /// Per-account enable flag. Accounts are disabled unless explicitly
     /// enabled.
+    ///
+    /// `enabled` was a mistaken old spelling. Keep it as a little bandaid for
+    /// reading old config during migration.
     #[serde(alias = "enabled")]
     pub enable: bool,
     /// Optional display name for user-facing account lists.

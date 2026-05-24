@@ -127,7 +127,7 @@ roleGroups:
         description: Maximum-reasoning engineer
         effort: xhigh
       legacy-role:
-        enabled: false  # hide a lower-layer or built-in role without deleting it
+        enable: false  # hide a lower-layer or built-in role without deleting it
   manager:
     roles:
       manager:

@@ -485,7 +485,10 @@ type RawRoleGroups = IndexMap<String, RawRoleGroup>;
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 struct RawRoleGroup {
-    enabled: Option<bool>,
+    // `enabled` was a mistaken old spelling. Keep it as a little bandaid for
+    // reading old config during migration.
+    #[serde(alias = "enabled")]
+    enable: Option<bool>,
     description: Option<String>,
     model: Option<ModelId>,
     effort: Option<tau_proto::Effort>,
@@ -508,7 +511,7 @@ struct RawRoleGroup {
 impl RawRoleGroup {
     fn defaults(&self) -> AgentRole {
         AgentRole {
-            enabled: self.enabled,
+            enable: self.enable,
             description: self.description.clone(),
             model: self.model.clone(),
             effort: self.effort,
@@ -585,17 +588,17 @@ impl HarnessSettings {
             match override_ {
                 RoleCliOverride::Enable(role_name) => {
                     if let Some(role) = self.roles.get_mut(role_name) {
-                        role.enabled = Some(true);
+                        role.enable = Some(true);
                     }
                 }
                 RoleCliOverride::Disable(role_name) => {
                     if let Some(role) = self.roles.get_mut(role_name) {
-                        role.enabled = Some(false);
+                        role.enable = Some(false);
                     }
                 }
                 RoleCliOverride::DisableAll => {
                     for role in self.roles.values_mut() {
-                        role.enabled = Some(false);
+                        role.enable = Some(false);
                     }
                 }
             }
@@ -604,7 +607,7 @@ impl HarnessSettings {
 
     fn remove_disabled_roles(&mut self) {
         self.roles
-            .retain(|_role_name, role| role.enabled.unwrap_or(true));
+            .retain(|_role_name, role| role.enable.unwrap_or(true));
         for group in &mut self.role_groups {
             group
                 .roles
@@ -745,8 +748,11 @@ pub struct AgentRole {
     /// Whether this role is part of the effective runtime role set. Defaults to
     /// enabled; set to `false` in a higher-precedence config layer to hide a
     /// built-in or lower-layer role without deleting the rest of its settings.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
+    ///
+    /// `enabled` was a mistaken old spelling. Keep it as a little bandaid for
+    /// reading old config during migration.
+    #[serde(alias = "enabled", skip_serializing_if = "Option::is_none")]
+    pub enable: Option<bool>,
     /// Short free-form summary shown in role-selection completion menus.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -815,8 +821,8 @@ where
 
 impl AgentRole {
     fn apply_overrides_from(&mut self, override_role: &Self) {
-        if let Some(enabled) = override_role.enabled {
-            self.enabled = Some(enabled);
+        if let Some(enable) = override_role.enable {
+            self.enable = Some(enable);
         }
         if let Some(description) = &override_role.description {
             self.description = Some(description.clone());

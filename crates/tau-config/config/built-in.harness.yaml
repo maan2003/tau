@@ -12,21 +12,21 @@ roleGroups:
             Trust the `<instructions>`. When sent they always contain a carefully researched detailed plan. Do not waste time second guessing them. Focus on following them immediately and implementation details.
     roles:
       senior-engineer:
-        enabled: true
+        enable: true
         description: Capable individual contributor. Good default for most tasks.
         effort: medium
       junior-engineer:
-        enabled: true
+        enable: true
         description: Lower-reasoning but fast individual contributor. Best for straightforward coding tasks.
         effort: low
       staff-engineer:
-        enabled: true
+        enable: true
         description: Slow and expensive individual contributor using maximum reasoning. Best used only for hardest engineering problems.
         effort: xhigh
   manager:
     roles:
       manager:
-        enabled: true
+        enable: true
         description: Role focused on splitting and delegation of tasks to other sub-agents.
         effort: low
         promptFragments:

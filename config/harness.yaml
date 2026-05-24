@@ -43,7 +43,7 @@
 #       staff-engineer:
 #         effort: xhigh
 #       old-role:
-#         enabled: false  # hide a lower-layer or built-in role
+#         enable: false  # hide a lower-layer or built-in role
 
 # Optional built-in extension overrides.
 # extensions:

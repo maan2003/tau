@@ -456,7 +456,7 @@ fn harness_settings_role_cli_overrides_apply_in_order_after_config() {
             roleGroups: {
                 manager: {
                     roles: {
-                        manager: { enabled: false },
+                        manager: { enable: false },
                     },
                 },
             },
@@ -1075,8 +1075,8 @@ fn missing_user_files_load_the_built_in_baseline() {
 }
 
 #[test]
-fn harness_role_enabled_false_filters_built_in_roles_after_merging() {
-    // `enabled: false` is the merge-friendly way to remove a role supplied by a
+fn harness_role_enable_false_filters_built_in_roles_after_merging() {
+    // `enable: false` is the merge-friendly way to remove a role supplied by a
     // lower layer: the role can keep its inherited config shape, but disappears
     // from the effective role map and navigation groups after all layers merge.
     let td = TempDir::new().expect("tempdir");
@@ -1088,9 +1088,9 @@ fn harness_role_enabled_false_filters_built_in_roles_after_merging() {
             roleGroups: {
                 engineer: {
                     roles: {
-                        "junior-engineer": { enabled: false },
-                        "senior-engineer": { enabled: false },
-                        "staff-engineer": { enabled: false },
+                        "junior-engineer": { enable: false },
+                        "senior-engineer": { enable: false },
+                        "staff-engineer": { enable: false },
                     },
                 },
             },
@@ -1114,7 +1114,41 @@ fn harness_role_enabled_false_filters_built_in_roles_after_merging() {
 }
 
 #[test]
-fn harness_role_enabled_can_be_reenabled_by_later_layers() {
+fn harness_role_enabled_alias_is_kept_for_old_config() {
+    // `enabled` was a mistaken old spelling. Keep accepting it as a little
+    // bandaid so existing configs keep loading while users migrate to `enable`.
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            roleGroups: {
+                legacy: {
+                    enabled: false,
+                    roles: {
+                        old_on: { enabled: true },
+                        old_off: {},
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(s.roles["old_on"].enable, Some(true));
+    assert!(!s.roles.contains_key("old_off"));
+    assert_eq!(
+        s.role_groups
+            .iter()
+            .find(|group| group.name == "legacy")
+            .map(|group| group.roles.as_slice()),
+        Some(&["old_on".to_owned()][..])
+    );
+}
+
+#[test]
+fn harness_role_enable_can_be_reenabled_by_later_layers() {
     // Filtering happens after the complete domain merge, so a higher-priority
     // drop-in can re-enable a role disabled by the base user config.
     let td = TempDir::new().expect("tempdir");
@@ -1122,18 +1156,18 @@ fn harness_role_enabled_can_be_reenabled_by_later_layers() {
     std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir drop-ins");
     std::fs::write(
         dir.join("harness.yaml"),
-        r#"{ roleGroups: { engineer: { roles: { "staff-engineer": { enabled: false } } } } }"#,
+        r#"{ roleGroups: { engineer: { roles: { "staff-engineer": { enable: false } } } } }"#,
     )
     .expect("write base");
     std::fs::write(
         dir.join("harness.d/10-enable.yaml"),
-        r#"{ roleGroups: { engineer: { roles: { "staff-engineer": { enabled: true, effort: "xhigh" } } } } }"#,
+        r#"{ roleGroups: { engineer: { roles: { "staff-engineer": { enable: true, effort: "xhigh" } } } } }"#,
     )
     .expect("write drop-in");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     assert!(s.roles.contains_key("staff-engineer"));
-    assert_eq!(s.roles["staff-engineer"].enabled, Some(true));
+    assert_eq!(s.roles["staff-engineer"].enable, Some(true));
     assert!(
         s.role_groups.iter().any(|group| group.name == "engineer"
             && group.roles.iter().any(|role| role == "staff-engineer"))

@@ -750,14 +750,14 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
             roleGroups: {
                 engineer: {
                     roles: {
-                        "senior-engineer": { enabled: false },
-                        "junior-engineer": { enabled: false },
-                        "staff-engineer": { enabled: false },
+                        "senior-engineer": { enable: false },
+                        "junior-engineer": { enable: false },
+                        "staff-engineer": { enable: false },
                     },
                 },
                 manager: {
                     roles: {
-                        manager: { enabled: false },
+                        manager: { enable: false },
                     },
                 },
             },
