@@ -115,6 +115,87 @@ fn resolve_extensions_enables_disabled_std_email_builtin() {
 }
 
 #[test]
+fn resolve_extensions_cli_overrides_apply_after_user_config() {
+    let mut s = HarnessSettings::built_in();
+    s.extensions.insert(
+        "core-shell".into(),
+        ExtensionEntry {
+            enable: Some(false),
+            ..Default::default()
+        },
+    );
+    s.extensions.insert(
+        "test-dummy".into(),
+        ExtensionEntry {
+            enable: Some(false),
+            ..Default::default()
+        },
+    );
+
+    let resolved = resolve_extensions_with_cli_overrides(
+        &s,
+        builtins(),
+        &[
+            tau_config::settings::ExtensionCliOverride::EnableAll,
+            tau_config::settings::ExtensionCliOverride::Disable("std-websearch".to_owned()),
+            tau_config::settings::ExtensionCliOverride::Enable("test-dummy".to_owned()),
+        ],
+    )
+    .expect("resolve");
+    let names = resolved
+        .iter()
+        .map(|extension| extension.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"core-shell"));
+    assert!(names.contains(&"test-dummy"));
+    assert!(!names.contains(&"std-websearch"));
+}
+
+#[test]
+fn resolve_extensions_cli_can_enable_disabled_user_extension() {
+    let mut s = HarnessSettings::built_in();
+    s.extensions.insert(
+        "future-extension".into(),
+        ExtensionEntry {
+            command: Some(vec!["future-extension".to_owned()]),
+            enable: Some(false),
+            ..Default::default()
+        },
+    );
+
+    let resolved = resolve_extensions_with_cli_overrides(
+        &s,
+        builtins(),
+        &[tau_config::settings::ExtensionCliOverride::Enable(
+            "future-extension".to_owned(),
+        )],
+    )
+    .expect("resolve");
+
+    assert!(
+        resolved
+            .iter()
+            .any(|extension| extension.name == "future-extension")
+    );
+}
+
+#[test]
+fn resolve_extensions_cli_enable_unknown_extension_is_ignored() {
+    let s = HarnessSettings::built_in();
+    let resolved = resolve_extensions_with_cli_overrides(
+        &s,
+        builtins(),
+        &[tau_config::settings::ExtensionCliOverride::Enable(
+            "missing".to_owned(),
+        )],
+    )
+    .expect("resolve");
+
+    assert!(resolved.iter().all(|extension| extension.name != "missing"));
+}
+
+#[test]
 fn resolve_extensions_disable_drops_entry() {
     let mut s = HarnessSettings::built_in();
     s.extensions.insert(

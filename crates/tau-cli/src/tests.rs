@@ -58,6 +58,30 @@ fn role_cli_flags_accept_repeated_and_mixed_options() {
 }
 
 #[test]
+fn extension_cli_flags_accept_repeated_and_mixed_options() {
+    let cli = super::cli::Cli::parse_from([
+        "tau",
+        "--enable-extensions-all",
+        "--disable-extension",
+        "core-shell",
+        "--enable-extension",
+        "std-websearch",
+        "--disable-extensions-all",
+    ]);
+
+    assert_eq!(cli.extension_overrides.enable_extensions_all, 1);
+    assert_eq!(cli.extension_overrides.disable_extensions_all, 1);
+    assert_eq!(
+        cli.extension_overrides.enable_extension,
+        vec!["std-websearch"]
+    );
+    assert_eq!(
+        cli.extension_overrides.disable_extension,
+        vec!["core-shell"]
+    );
+}
+
+#[test]
 fn role_cli_overrides_preserve_argument_order() {
     let overrides = super::parse_role_cli_overrides([
         "tau",
@@ -76,6 +100,28 @@ fn role_cli_overrides_preserve_argument_order() {
             tau_config::settings::RoleCliOverride::DisableAll,
             tau_config::settings::RoleCliOverride::Enable("manager".to_owned()),
             tau_config::settings::RoleCliOverride::Enable("senior-engineer".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn extension_cli_overrides_preserve_argument_order() {
+    let overrides = super::parse_extension_cli_overrides([
+        "tau",
+        "--disable-extension",
+        "core-shell",
+        "--enable-extensions-all",
+        "--disable-extensions-all",
+        "--enable-extension=std-websearch",
+    ]);
+
+    assert_eq!(
+        overrides,
+        vec![
+            tau_config::settings::ExtensionCliOverride::Disable("core-shell".to_owned()),
+            tau_config::settings::ExtensionCliOverride::EnableAll,
+            tau_config::settings::ExtensionCliOverride::DisableAll,
+            tau_config::settings::ExtensionCliOverride::Enable("std-websearch".to_owned()),
         ]
     );
 }

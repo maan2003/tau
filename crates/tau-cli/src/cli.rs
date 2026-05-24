@@ -18,6 +18,9 @@ pub struct Cli {
     pub role_overrides: RoleOverrideArgs,
 
     #[command(flatten)]
+    pub extension_overrides: ExtensionOverrideArgs,
+
+    #[command(flatten)]
     pub run: RunArgs,
 
     #[command(subcommand)]
@@ -37,6 +40,25 @@ pub struct RoleOverrideArgs {
     /// Disable every configured role before later CLI role overrides.
     #[arg(long = "disable-roles-all", global = true, action = clap::ArgAction::Count)]
     pub disable_roles_all: u8,
+}
+
+#[derive(Args)]
+pub struct ExtensionOverrideArgs {
+    /// Enable every configured extension before later CLI extension overrides.
+    #[arg(long = "enable-extensions-all", global = true, action = clap::ArgAction::Count)]
+    pub enable_extensions_all: u8,
+
+    /// Disable every configured extension before later CLI extension overrides.
+    #[arg(long = "disable-extensions-all", global = true, action = clap::ArgAction::Count)]
+    pub disable_extensions_all: u8,
+
+    /// Enable a configured extension after all config files are loaded.
+    #[arg(long = "enable-extension", global = true)]
+    pub enable_extension: Vec<String>,
+
+    /// Disable a configured extension after all config files are loaded.
+    #[arg(long = "disable-extension", global = true)]
+    pub disable_extension: Vec<String>,
 }
 
 #[derive(Args)]

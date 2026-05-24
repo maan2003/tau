@@ -8,6 +8,7 @@ use crate::{CliError, mint_short_id};
 pub(crate) fn run_print_prompt(
     role: &str,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
+    extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
 ) -> Result<(), CliError> {
     let session_id = mint_short_id("print-prompt");
     let output = daemon_output_for_session(&session_id)?;
@@ -17,6 +18,7 @@ pub(crate) fn run_print_prompt(
         SessionLaunchStatus::New,
         Some(output),
         role_cli_overrides,
+        extension_cli_overrides,
     )?;
     let prompt = tau_harness::get_daemon_rendered_system_prompt(daemon.socket_path(), role)?;
 

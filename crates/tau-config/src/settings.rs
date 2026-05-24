@@ -538,6 +538,22 @@ pub enum RoleCliOverride {
     DisableAll,
 }
 
+/// One command-line extension availability override, applied after all config
+/// files and built-in extension defaults are merged.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum ExtensionCliOverride {
+    /// Enable a named extension in the effective extension set.
+    Enable(String),
+    /// Disable a named extension in the effective extension set.
+    Disable(String),
+    /// Enable all configured extensions before later command-line extension
+    /// overrides are applied.
+    EnableAll,
+    /// Disable all configured extensions before later command-line extension
+    /// overrides are applied.
+    DisableAll,
+}
+
 impl HarnessSettings {
     /// The fully-populated baseline that ships with tau, parsed from
     /// the embedded `built-in.harness.yaml`.

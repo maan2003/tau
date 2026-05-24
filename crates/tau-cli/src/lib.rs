@@ -305,6 +305,48 @@ where
     overrides
 }
 
+fn parse_extension_cli_overrides<I, S>(args: I) -> Vec<tau_config::settings::ExtensionCliOverride>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString>,
+{
+    let mut overrides = Vec::new();
+    let mut args = args.into_iter().map(Into::into);
+    let _program = args.next();
+    while let Some(arg) = args.next() {
+        let arg = arg.to_string_lossy();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--enable-extensions-all" {
+            overrides.push(tau_config::settings::ExtensionCliOverride::EnableAll);
+        } else if arg == "--disable-extensions-all" {
+            overrides.push(tau_config::settings::ExtensionCliOverride::DisableAll);
+        } else if let Some(extension) = arg.strip_prefix("--enable-extension=") {
+            overrides.push(tau_config::settings::ExtensionCliOverride::Enable(
+                extension.to_owned(),
+            ));
+        } else if arg == "--enable-extension" {
+            if let Some(extension) = args.next() {
+                overrides.push(tau_config::settings::ExtensionCliOverride::Enable(
+                    extension.to_string_lossy().into_owned(),
+                ));
+            }
+        } else if let Some(extension) = arg.strip_prefix("--disable-extension=") {
+            overrides.push(tau_config::settings::ExtensionCliOverride::Disable(
+                extension.to_owned(),
+            ));
+        } else if arg == "--disable-extension"
+            && let Some(extension) = args.next()
+        {
+            overrides.push(tau_config::settings::ExtensionCliOverride::Disable(
+                extension.to_string_lossy().into_owned(),
+            ));
+        }
+    }
+    overrides
+}
+
 /// Describes how an `ext` component gets its global tracing subscriber.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComponentLogging {
@@ -340,9 +382,11 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
 
     let run = || -> Result<(), CliError> {
         let role_cli_overrides = parse_role_cli_overrides(std::env::args_os());
+        let extension_cli_overrides = parse_extension_cli_overrides(std::env::args_os());
         let cli::Cli {
             version,
             role_overrides: _,
+            extension_overrides: _,
             run,
             command,
         } = cli::Cli::parse();
@@ -381,7 +425,13 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 } else {
                     resolve_run_session_id(resume.as_deref())?
                 };
-                run_chat(&session_id, attach, session_status, &role_cli_overrides)
+                run_chat(
+                    &session_id,
+                    attach,
+                    session_status,
+                    &role_cli_overrides,
+                    &extension_cli_overrides,
+                )
             }
 
             cli::Command::SessionList { sessions_dir } => {
@@ -422,9 +472,11 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     println!("wrote {}", out.display());
                     Ok(())
                 }
-                cli::DevCommand::PrintPrompt { role } => {
-                    print_prompt::run_print_prompt(&role, &role_cli_overrides)
-                }
+                cli::DevCommand::PrintPrompt { role } => print_prompt::run_print_prompt(
+                    &role,
+                    &role_cli_overrides,
+                    &extension_cli_overrides,
+                ),
             },
 
             cli::Command::Ext { name } => {

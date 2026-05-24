@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use tau_config::settings::{
-    ExtensionEntry, ExtensionSecretEntry, HarnessSettings, RoleCliOverride,
+    ExtensionCliOverride, ExtensionEntry, ExtensionSecretEntry, HarnessSettings, RoleCliOverride,
 };
 
 /// The resolved harness configuration handed to the daemon.
@@ -126,6 +126,14 @@ pub fn resolve_extensions(
     settings: &HarnessSettings,
     builtins: Vec<BuiltinExtension>,
 ) -> Result<Vec<ExtensionConfig>, ResolveExtensionsError> {
+    resolve_extensions_with_cli_overrides(settings, builtins, &[])
+}
+
+pub fn resolve_extensions_with_cli_overrides(
+    settings: &HarnessSettings,
+    builtins: Vec<BuiltinExtension>,
+    cli_overrides: &[ExtensionCliOverride],
+) -> Result<Vec<ExtensionConfig>, ResolveExtensionsError> {
     use std::collections::HashMap;
 
     // Pass 1: seed an indexed map with built-ins, in order.
@@ -184,13 +192,7 @@ pub fn resolve_extensions(
                 }
             }
             None => {
-                if user.enable == Some(false) {
-                    continue;
-                }
                 let command = user.command.clone().unwrap_or_default();
-                if command.is_empty() {
-                    return Err(ResolveExtensionsError::EmptyCommand(name.clone()));
-                }
                 order.push(name.clone());
                 entries.insert(
                     name.clone(),
@@ -211,7 +213,34 @@ pub fn resolve_extensions(
         }
     }
 
-    // Pass 3: produce ExtensionConfigs in declared order, dropping
+    // Pass 3: apply command-line availability overrides in argument order.
+    // Unknown named extensions are ignored, matching role CLI override behavior.
+    for override_ in cli_overrides {
+        match override_ {
+            ExtensionCliOverride::Enable(extension_name) => {
+                if let Some(entry) = entries.get_mut(extension_name) {
+                    entry.enable = true;
+                }
+            }
+            ExtensionCliOverride::Disable(extension_name) => {
+                if let Some(entry) = entries.get_mut(extension_name) {
+                    entry.enable = false;
+                }
+            }
+            ExtensionCliOverride::EnableAll => {
+                for entry in entries.values_mut() {
+                    entry.enable = true;
+                }
+            }
+            ExtensionCliOverride::DisableAll => {
+                for entry in entries.values_mut() {
+                    entry.enable = false;
+                }
+            }
+        }
+    }
+
+    // Pass 4: produce ExtensionConfigs in declared order, dropping
     // disabled entries. argv = prefix ++ command ++ suffix; argv[0]
     // is the executable, rest are args.
     let mut out = Vec::new();
@@ -269,6 +298,7 @@ fn merge_json(base: serde_json::Value, over: serde_json::Value) -> serde_json::V
 /// user-configured extension and the only symptom is "my extension
 /// isn't running" with no clue why.
 pub const ROLE_CLI_OVERRIDES_ENV: &str = "TAU_ROLE_CLI_OVERRIDES";
+pub const EXTENSION_CLI_OVERRIDES_ENV: &str = "TAU_EXTENSION_CLI_OVERRIDES";
 
 pub(crate) fn load_harness_settings_or_warn(
     dirs: &tau_config::settings::TauDirs,
@@ -286,6 +316,13 @@ pub(crate) fn load_harness_settings_or_warn(
 
 fn role_cli_overrides_from_env() -> Vec<RoleCliOverride> {
     std::env::var(ROLE_CLI_OVERRIDES_ENV)
+        .ok()
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or_default()
+}
+
+fn extension_cli_overrides_from_env() -> Vec<ExtensionCliOverride> {
+    std::env::var(EXTENSION_CLI_OVERRIDES_ENV)
         .ok()
         .and_then(|value| serde_json::from_str(&value).ok())
         .unwrap_or_default()
@@ -394,7 +431,12 @@ pub(crate) fn resolve_config(
     // on stderr so the user can see why their config is being
     // ignored.
     let (settings, _) = load_harness_settings_or_warn(&tau_config::settings::TauDirs::default());
-    let extensions = resolve_extensions(&settings, builtin_extensions())?;
+    let extension_overrides = extension_cli_overrides_from_env();
+    let extensions = resolve_extensions_with_cli_overrides(
+        &settings,
+        builtin_extensions(),
+        &extension_overrides,
+    )?;
     Ok(Config {
         core: CoreConfig {
             mode: CoreMode::Embedded,

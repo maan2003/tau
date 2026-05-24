@@ -437,6 +437,7 @@ pub(crate) fn run_chat(
     attach: bool,
     session_status: SessionLaunchStatus,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
+    extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
 ) -> Result<(), CliError> {
     use tau_cli_term::{HighTerm, SlashCommand};
 
@@ -464,6 +465,7 @@ pub(crate) fn run_chat(
         session_status,
         daemon_output,
         role_cli_overrides,
+        extension_cli_overrides,
     )?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness daemon resolved");
     let socket_path = daemon.socket_path();
