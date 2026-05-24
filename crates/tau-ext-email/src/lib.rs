@@ -968,20 +968,30 @@ impl StateStore {
 
     /// Return an existing pending incoming approval or create it atomically.
     pub fn pending_incoming(&self, request: &IncomingApproval) -> Result<String, String> {
-        let path = self.approval_path("incoming", "pending", &request.id)?;
-        if !path.exists() {
-            atomic_json_write(&path, request)?;
+        for approval in self.list_pending_incoming()? {
+            if incoming_approval_matches_target(&approval, request) {
+                return Ok(approval.id);
+            }
         }
-        Ok(request.id.clone())
+        let mut request = request.clone();
+        request.id = self.next_approval_id("incoming")?;
+        let path = self.approval_path("incoming", "pending", &request.id)?;
+        atomic_json_write(&path, &request)?;
+        Ok(request.id)
     }
 
     /// Return an existing pending outgoing approval or create it atomically.
     pub fn pending_outgoing(&self, request: &OutgoingApproval) -> Result<String, String> {
-        let path = self.approval_path("outgoing", "pending", &request.id)?;
-        if !path.exists() {
-            atomic_json_write(&path, request)?;
+        for approval in self.list_pending_outgoing()? {
+            if outgoing_approval_matches_message(&approval, request) {
+                return Ok(approval.id);
+            }
         }
-        Ok(request.id.clone())
+        let mut request = request.clone();
+        request.id = self.next_approval_id("outgoing")?;
+        let path = self.approval_path("outgoing", "pending", &request.id)?;
+        atomic_json_write(&path, &request)?;
+        Ok(request.id)
     }
 
     /// Mark an incoming approval ID as approved by moving/writing it to
@@ -1016,23 +1026,25 @@ impl StateStore {
     }
 
     fn incoming_approved_exact(&self, target: &IncomingTarget) -> bool {
-        let id = incoming_id(target);
-        self.approval_path("incoming", "approved", &id)
-            .is_ok_and(|path| path.exists())
+        self.list_approvals::<IncomingApproval>("incoming", "approved")
+            .is_ok_and(|approvals| {
+                approvals
+                    .iter()
+                    .any(|approval| incoming_approval_matches_target_tuple(approval, target))
+            })
     }
 
     fn outgoing_approved_exact(&self, message: &OutgoingMessage) -> bool {
-        let id = outgoing_id(message);
-        self.approval_path("outgoing", "approved", &id)
-            .is_ok_and(|path| path.exists())
+        self.list_approvals::<OutgoingApproval>("outgoing", "approved")
+            .is_ok_and(|approvals| {
+                approvals
+                    .iter()
+                    .any(|approval| outgoing_approval_matches_outgoing_message(approval, message))
+            })
     }
 
     fn approval_path(&self, kind: &str, status: &str, id: &str) -> Result<PathBuf, String> {
-        let prefix = match kind {
-            "incoming" => "in",
-            "outgoing" => "out",
-            _ => return Err(format!("invalid approval kind `{kind}`")),
-        };
+        let prefix = approval_prefix(kind)?;
         validate_approval_id(id, prefix)?;
         Ok(self
             .state_dir
@@ -1041,11 +1053,44 @@ impl StateStore {
             .join(status)
             .join(format!("{id}.json")))
     }
+
+    fn next_approval_id(&self, kind: &str) -> Result<String, String> {
+        let mut max_id = 0_u64;
+        for status in ["pending", "approved", "denied"] {
+            let dir = self.state_dir.join("approvals").join(kind).join(status);
+            for entry in fs::read_dir(&dir)
+                .map_err(|error| format!("failed to read {}: {error}", dir.display()))?
+            {
+                let path = entry.map_err(|error| error.to_string())?.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+                if let Ok(id) = stem.parse::<u64>() {
+                    max_id = max_id.max(id);
+                }
+            }
+        }
+        Ok((max_id + 1).to_string())
+    }
+}
+
+fn approval_prefix(kind: &str) -> Result<&'static str, String> {
+    match kind {
+        "incoming" => Ok("in"),
+        "outgoing" => Ok("out"),
+        _ => Err(format!("invalid approval kind `{kind}`")),
+    }
 }
 
 fn validate_approval_id(id: &str, prefix: &str) -> Result<(), String> {
     if id.is_empty() || id.contains(['/', '\\', '\0']) {
         return Err(format!("invalid approval id `{id}`"));
+    }
+    if id.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(());
     }
     let Some(suffix) = id.strip_prefix(&format!("{prefix}_")) else {
         return Err(format!("invalid approval id `{id}`"));
@@ -1058,6 +1103,50 @@ fn validate_approval_id(id: &str, prefix: &str) -> Result<(), String> {
         return Err(format!("invalid approval id `{id}`"));
     }
     Ok(())
+}
+
+fn incoming_approval_matches_target(left: &IncomingApproval, right: &IncomingApproval) -> bool {
+    left.account == right.account
+        && left.folder == right.folder
+        && left.uid == right.uid
+        && left.uidvalidity == right.uidvalidity
+}
+
+fn incoming_approval_matches_target_tuple(
+    approval: &IncomingApproval,
+    target: &IncomingTarget,
+) -> bool {
+    approval.account == target.account
+        && approval.folder == target.folder
+        && approval.uid == target.uid
+        && approval.uidvalidity == target.uidvalidity
+}
+
+fn outgoing_approval_matches_message(left: &OutgoingApproval, right: &OutgoingApproval) -> bool {
+    left.account == right.account
+        && left.from == right.from
+        && left.to == right.to
+        && left.cc == right.cc
+        && left.bcc == right.bcc
+        && left.subject == right.subject
+        && left.body_text == right.body_text
+        && left.reply_to == right.reply_to
+        && left.in_reply_to == right.in_reply_to
+}
+
+fn outgoing_approval_matches_outgoing_message(
+    approval: &OutgoingApproval,
+    message: &OutgoingMessage,
+) -> bool {
+    approval.account == message.account
+        && approval.from == message.from
+        && approval.to == message.to
+        && approval.cc == message.cc
+        && approval.bcc == message.bcc
+        && approval.subject == message.subject
+        && approval.body_text == message.body_text
+        && approval.reply_to == message.reply_to
+        && approval.in_reply_to == message.in_reply_to
 }
 
 fn validate_approval_record(
@@ -1224,7 +1313,7 @@ pub struct IncomingTarget {
 }
 
 /// Persisted incoming approval record.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IncomingApproval {
     /// Schema version.
     pub schema: u32,
@@ -1277,7 +1366,7 @@ pub struct OutgoingMessage {
 }
 
 /// Persisted outgoing approval record.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OutgoingApproval {
     /// Schema version.
     pub schema: u32,
@@ -1309,14 +1398,6 @@ pub struct OutgoingApproval {
     pub blocked_recipients: Vec<String>,
     /// Denial/approval reason.
     pub reason: String,
-}
-
-fn incoming_id(target: &IncomingTarget) -> String {
-    stable_id("in", target)
-}
-
-fn outgoing_id(message: &OutgoingMessage) -> String {
-    stable_id("out", message)
 }
 
 fn outgoing_approval_message(approval: &OutgoingApproval) -> OutgoingMessage {
@@ -1754,7 +1835,7 @@ impl<B: EmailBackend> Engine<B> {
         }
         let approval = IncomingApproval {
             schema: 1,
-            id: incoming_id(&target),
+            id: String::new(),
             kind: "incoming_read".to_owned(),
             status: "pending".to_owned(),
             account: account_id.to_owned(),
@@ -1902,7 +1983,7 @@ impl<B: EmailBackend> Engine<B> {
         }
         let approval = OutgoingApproval {
             schema: 1,
-            id: outgoing_id(&message),
+            id: String::new(),
             kind: "outgoing_send".to_owned(),
             status: "pending".to_owned(),
             account: message.account.clone(),

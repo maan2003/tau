@@ -350,7 +350,7 @@ fn publishes_email_action_schema_at_startup() {
     );
     assert_eq!(
         schema
-            .parse_line("/email out approve out_0123456789abcdef01234567")
+            .parse_line("/email out approve 1")
             .expect("parse")
             .action_id,
         "email.out.approve"
@@ -1037,6 +1037,7 @@ fn outgoing_actions_list_open_approve_and_whitelist_drive_policy() {
         CborValue::Text(id) => id.clone(),
         _ => panic!("approval id"),
     };
+    assert_eq!(id, "1");
 
     let listed = engine
         .dispatch_action("email.out.list", &[])
@@ -1112,6 +1113,7 @@ fn incoming_actions_list_redacts_for_agent_but_open_shows_user_content() {
         CborValue::Text(id) => id.clone(),
         _ => panic!("approval id"),
     };
+    assert_eq!(id, "1");
 
     let listed = engine
         .dispatch_action("email.in.list", &[])
@@ -1422,12 +1424,14 @@ fn approval_ids_reject_path_components_and_wrong_shapes() {
         "in_abc",
         "out_0123456789abcdef01234567",
         "in_0123456789ABCDEF01234567",
+        "12x",
     ] {
         assert!(
             state.approve_incoming(id).is_err(),
             "{id} should be rejected"
         );
     }
+    assert!(validate_approval_id("1", "in").is_ok());
     assert!(validate_approval_id("in_0123456789abcdef01234567", "in").is_ok());
 }
 
