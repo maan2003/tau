@@ -26,6 +26,8 @@ fn message_variant(msg: &Message) -> &'static str {
         Message::SessionPromptCreatedResult(_) => "SessionPromptCreatedResult",
         Message::GetRenderedSystemPrompt(_) => "GetRenderedSystemPrompt",
         Message::RenderedSystemPromptResult(_) => "RenderedSystemPromptResult",
+        Message::GetRenderedToolDefinitions(_) => "GetRenderedToolDefinitions",
+        Message::RenderedToolDefinitionsResult(_) => "RenderedToolDefinitionsResult",
         Message::LogEvent(_) => "LogEvent",
         Message::Ack(_) => "Ack",
     }

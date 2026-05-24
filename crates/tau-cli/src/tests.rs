@@ -41,6 +41,19 @@ fn dev_print_prompt_parses_role_flag() {
 }
 
 #[test]
+fn dev_print_tools_parses_role_flag() {
+    // `tau dev print-tools -r <role>` mirrors print-prompt, but prints the
+    // role-filtered tool definitions advertised to the provider.
+    let cli = super::cli::Cli::parse_from(["tau", "dev", "print-tools", "-r", "engineer"]);
+    match cli.command {
+        Some(super::cli::Command::Dev {
+            command: super::cli::DevCommand::PrintTools { role },
+        }) => assert_eq!(role, "engineer"),
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
 fn startup_role_flag_is_parsed_for_default_run() {
     let cli = super::cli::Cli::parse_from(["tau", "--role", "manager"]);
 

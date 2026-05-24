@@ -152,6 +152,80 @@ fn daemon_mode_renders_system_prompt_for_requested_role() {
 }
 
 #[test]
+fn daemon_mode_renders_tool_definitions_for_requested_role() {
+    // `tau dev print-tools` asks the daemon for the same tool definitions the
+    // harness would include in provider prompts. Cover the socket endpoint so
+    // role filtering stays shared with actual agent turns.
+    let td = TempDir::new().expect("tempdir");
+    let sock = td.path().join("daemon.sock");
+    let sp = td.path().join("state");
+
+    let server = thread::spawn({
+        let sock = sock.clone();
+        let sp = sp.clone();
+        move || {
+            run_daemon_with_echo(
+                sock,
+                sp,
+                "s1",
+                ServeOptions::builder().max_clients(1).build(),
+            )
+        }
+    });
+
+    wait_for_socket(&sock);
+
+    let tools = get_daemon_rendered_tool_definitions(&sock, "senior-engineer")
+        .expect("render tool definitions");
+    assert!(!tools.is_empty());
+    let read_tool = tools
+        .iter()
+        .find(|tool| tool.name.as_str() == "read")
+        .expect("read tool should be available");
+    assert!(
+        read_tool
+            .description
+            .as_deref()
+            .is_some_and(|d| d.contains("Reads a file"))
+    );
+    assert!(read_tool.parameters.is_some());
+
+    server.join().expect("join").expect("daemon clean exit");
+}
+
+#[test]
+fn daemon_mode_reports_unknown_role_for_rendered_tool_definitions_request() {
+    // Tool diagnostics should fail in-band for role typos, matching prompt
+    // diagnostics and avoiding a misleading dump for the selected fallback role.
+    let td = TempDir::new().expect("tempdir");
+    let sock = td.path().join("daemon.sock");
+    let sp = td.path().join("state");
+
+    let server = thread::spawn({
+        let sock = sock.clone();
+        let sp = sp.clone();
+        move || {
+            run_daemon_with_echo(
+                sock,
+                sp,
+                "s1",
+                ServeOptions::builder().max_clients(1).build(),
+            )
+        }
+    });
+
+    wait_for_socket(&sock);
+
+    let error =
+        get_daemon_rendered_tool_definitions(&sock, "missing-role").expect_err("unknown role");
+    assert!(
+        matches!(error, HarnessError::Participant(message) if message.contains("unknown role"))
+    );
+
+    server.join().expect("join").expect("daemon clean exit");
+}
+
+#[test]
 fn daemon_mode_reports_unknown_role_for_rendered_system_prompt_request() {
     // The debug prompt endpoint must fail in-band with a participant error for
     // typos, instead of silently falling back to the selected role and printing

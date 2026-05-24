@@ -47,10 +47,10 @@ pub use tau_core::{SessionEntry, SessionMeta, SessionTree, list_session_metas, s
 pub use crate::conversation::ConversationId;
 pub use crate::daemon::{
     EmbeddedOptions, InteractionOutcome, ServeOptions, SessionLaunchStatus,
-    get_daemon_rendered_system_prompt, run_component, run_component_with_internal_tools,
-    run_daemon, run_daemon_with_config, run_embedded_message, run_embedded_message_with_options,
-    run_embedded_message_with_trace, run_harness_daemon, run_harness_daemon_with_internal_tools,
-    send_daemon_message, send_daemon_message_with_trace,
+    get_daemon_rendered_system_prompt, get_daemon_rendered_tool_definitions, run_component,
+    run_component_with_internal_tools, run_daemon, run_daemon_with_config, run_embedded_message,
+    run_embedded_message_with_options, run_embedded_message_with_trace, run_harness_daemon,
+    run_harness_daemon_with_internal_tools, send_daemon_message, send_daemon_message_with_trace,
 };
 #[cfg(any(test, feature = "echo-agent"))]
 pub use crate::daemon::{run_daemon_with_echo, run_embedded_message_with_echo};

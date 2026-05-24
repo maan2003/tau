@@ -2799,6 +2799,32 @@ impl Harness {
         );
     }
 
+    fn send_rendered_tool_definitions_result(
+        &mut self,
+        connection_id: &str,
+        request: tau_proto::GetRenderedToolDefinitions,
+    ) {
+        let (tools, error) = if !self.available_roles.contains_key(&request.role) {
+            (None, Some(format!("unknown role: {}", request.role)))
+        } else {
+            (
+                Some(self.gather_tool_definitions_for_role(&request.role)),
+                None,
+            )
+        };
+        let _ = self.bus.send_to(
+            connection_id,
+            None,
+            Frame::Message(Message::RenderedToolDefinitionsResult(Box::new(
+                tau_proto::RenderedToolDefinitionsResult {
+                    request_id: request.request_id,
+                    tools,
+                    error,
+                },
+            ))),
+        );
+    }
+
     fn should_stage_extension_capabilities(&self, source_id: &str) -> bool {
         self.extensions
             .get(source_id)
@@ -3222,9 +3248,11 @@ impl Harness {
             Message::Configure(_)
             | Message::Disconnect(_)
             | Message::GetRenderedSystemPrompt(_)
+            | Message::GetRenderedToolDefinitions(_)
             | Message::InterceptRequest(_)
             | Message::SessionPromptCreatedResult(_)
             | Message::RenderedSystemPromptResult(_)
+            | Message::RenderedToolDefinitionsResult(_)
             | Message::LogEvent(_) => {}
         }
         Ok(())
@@ -3634,6 +3662,10 @@ impl Harness {
                 self.send_rendered_system_prompt_result(client_id, request);
                 Ok(true)
             }
+            Message::GetRenderedToolDefinitions(request) => {
+                self.send_rendered_tool_definitions_result(client_id, request);
+                Ok(true)
+            }
             // Other messages from clients are ignored (Configure, Ack,
             // LogEvent, InterceptRequest, InterceptReply, Emit,
             // ConfigError, Intercept).
@@ -3646,6 +3678,7 @@ impl Harness {
             | Message::Ready(_)
             | Message::SessionPromptCreatedResult(_)
             | Message::RenderedSystemPromptResult(_)
+            | Message::RenderedToolDefinitionsResult(_)
             | Message::LogEvent(_)
             | Message::Emit(_) => Ok(true),
         }

@@ -19,7 +19,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CborValue, ClientKind, Event, EventSelector, ExtensionName, InterceptionPriority};
+use crate::{
+    CborValue, ClientKind, Event, EventSelector, ExtensionName, InterceptionPriority,
+    ToolDefinition,
+};
 
 // ---------------------------------------------------------------------------
 // Lifecycle messages
@@ -325,6 +328,30 @@ pub struct RenderedSystemPromptResult {
     pub error: Option<String>,
 }
 
+/// Request that the harness report the effective tools for one role.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GetRenderedToolDefinitions {
+    /// Request correlation id echoed by [`RenderedToolDefinitionsResult`].
+    pub request_id: String,
+    /// Role name whose resolved tool list should be reported.
+    pub role: String,
+}
+
+/// Response to [`GetRenderedToolDefinitions`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RenderedToolDefinitionsResult {
+    /// Request correlation id copied from the request.
+    pub request_id: String,
+    /// Effective provider-facing tool definitions for the requested role.
+    /// Exactly one of `tools` and `error` should be present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolDefinition>>,
+    /// Human-readable failure when the role is unknown.
+    /// Exactly one of `tools` and `error` should be present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Receiver → sender acknowledgement that all log events with id
 /// `<= up_to` have been processed. Cumulative — newer acks supersede
 /// older ones.
@@ -360,6 +387,8 @@ pub enum Message {
     SessionPromptCreatedResult(Box<SessionPromptCreatedResult>),
     GetRenderedSystemPrompt(GetRenderedSystemPrompt),
     RenderedSystemPromptResult(Box<RenderedSystemPromptResult>),
+    GetRenderedToolDefinitions(GetRenderedToolDefinitions),
+    RenderedToolDefinitionsResult(Box<RenderedToolDefinitionsResult>),
     LogEvent(LogEvent),
     Ack(Ack),
 }

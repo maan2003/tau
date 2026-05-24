@@ -8,6 +8,7 @@ mod chat;
 mod daemon;
 mod event_renderer;
 mod print_prompt;
+mod print_tools;
 mod prompt_history;
 mod send;
 mod settings_registry;
@@ -475,6 +476,11 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     Ok(())
                 }
                 cli::DevCommand::PrintPrompt { role } => print_prompt::run_print_prompt(
+                    &role,
+                    &role_cli_overrides,
+                    &extension_cli_overrides,
+                ),
+                cli::DevCommand::PrintTools { role } => print_tools::run_print_tools(
                     &role,
                     &role_cli_overrides,
                     &extension_cli_overrides,

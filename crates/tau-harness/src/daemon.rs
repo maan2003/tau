@@ -494,13 +494,8 @@ pub fn get_daemon_rendered_system_prompt(
     socket_path: impl Into<PathBuf>,
     role: &str,
 ) -> Result<String, HarnessError> {
-    let request_id = next_rendered_prompt_request_id();
-    let mut peer = SocketPeer::connect(socket_path)?;
-    peer.send(&Frame::Message(Message::Hello(Hello {
-        protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-print-prompt".into(),
-        client_kind: ClientKind::Ui,
-    })))?;
+    let request_id = next_render_request_id("tau-rendered-system-prompt");
+    let mut peer = connect_daemon_helper(socket_path, "tau-print-prompt")?;
     peer.send(&Frame::Message(Message::GetRenderedSystemPrompt(
         tau_proto::GetRenderedSystemPrompt {
             request_id: request_id.clone(),
@@ -545,11 +540,77 @@ pub fn get_daemon_rendered_system_prompt(
     }
 }
 
-fn next_rendered_prompt_request_id() -> String {
+/// Requests the effective provider-facing tool definitions for `role` from a
+/// running harness daemon.
+pub fn get_daemon_rendered_tool_definitions(
+    socket_path: impl Into<PathBuf>,
+    role: &str,
+) -> Result<Vec<tau_proto::ToolDefinition>, HarnessError> {
+    let request_id = next_render_request_id("tau-rendered-tools");
+    let mut peer = connect_daemon_helper(socket_path, "tau-print-tools")?;
+    peer.send(&Frame::Message(Message::GetRenderedToolDefinitions(
+        tau_proto::GetRenderedToolDefinitions {
+            request_id: request_id.clone(),
+            role: role.to_owned(),
+        },
+    )))?;
+
+    let started_at = Instant::now();
+    loop {
+        if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
+            let _ = peer.send(&Frame::Message(Message::Disconnect(Disconnect {
+                reason: Some("done".to_owned()),
+            })));
+            return Err(HarnessError::ResponseTimeout);
+        }
+        if let Some(frame) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
+            let (_log_id, frame) = frame.peel_log();
+            match frame {
+                Frame::Message(Message::RenderedToolDefinitionsResult(result))
+                    if result.request_id == request_id =>
+                {
+                    let _ = peer.send(&Frame::Message(Message::Disconnect(Disconnect {
+                        reason: Some("done".to_owned()),
+                    })));
+                    if let Some(error) = result.error {
+                        return Err(HarnessError::Participant(error));
+                    }
+                    return result.tools.ok_or_else(|| {
+                        HarnessError::Participant(
+                            "daemon returned no rendered tool definitions".to_owned(),
+                        )
+                    });
+                }
+                Frame::Message(Message::Disconnect(d)) => {
+                    return Err(HarnessError::Participant(
+                        d.reason.unwrap_or_else(|| "daemon disconnected".to_owned()),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn connect_daemon_helper(
+    socket_path: impl Into<PathBuf>,
+    client_name: &str,
+) -> Result<SocketPeer, HarnessError> {
+    let mut peer = SocketPeer::connect(socket_path)?;
+    peer.send(&Frame::Message(Message::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+        client_name: client_name.into(),
+        client_kind: ClientKind::Ui,
+    })))?;
+    Ok(peer)
+}
+
+fn next_render_request_id(prefix: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     format!(
-        "tau-rendered-system-prompt-{}-{}",
+        "{}-{}-{}",
+        prefix,
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )

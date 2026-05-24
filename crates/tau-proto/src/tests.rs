@@ -370,6 +370,22 @@ fn representative_messages() -> Vec<Message> {
             prompt: Some("You are helpful.".to_owned()),
             error: None,
         })),
+        Message::GetRenderedToolDefinitions(GetRenderedToolDefinitions {
+            request_id: "render-tools-1".to_owned(),
+            role: "engineer".to_owned(),
+        }),
+        Message::RenderedToolDefinitionsResult(Box::new(RenderedToolDefinitionsResult {
+            request_id: "render-tools-1".to_owned(),
+            tools: Some(vec![ToolDefinition {
+                name: ToolName::new("read"),
+                model_visible_name: None,
+                description: Some("Read a file".to_owned()),
+                tool_type: ToolType::Function,
+                parameters: Some(serde_json::json!({"type": "object"})),
+                format: None,
+            }]),
+            error: None,
+        })),
         Message::LogEvent(LogEvent {
             id: LogEventId::new(42),
             recorded_at: UnixMicros::new(1_700_000_000_000_000),

@@ -183,4 +183,11 @@ pub enum DevCommand {
         #[arg(short = 'r', long = "role")]
         role: String,
     },
+
+    /// Print the effective tool definitions for a role.
+    PrintTools {
+        /// Role name whose tools should be printed.
+        #[arg(short = 'r', long = "role")]
+        role: String,
+    },
 }
