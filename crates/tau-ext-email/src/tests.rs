@@ -214,6 +214,24 @@ fn trusted_dkim_pass(domain: &str) -> AuthenticationResultsEvidence {
     }
 }
 
+fn trusted_dkim_fail(domain: &str) -> AuthenticationResultsEvidence {
+    AuthenticationResultsEvidence {
+        authserv_id: "mx.company.com".to_owned(),
+        dkim_result: Some("fail".to_owned()),
+        dkim_header_d: Some(domain.to_owned()),
+        ..Default::default()
+    }
+}
+
+fn untrusted_dkim_pass(domain: &str) -> AuthenticationResultsEvidence {
+    AuthenticationResultsEvidence {
+        authserv_id: "attacker.example".to_owned(),
+        dkim_result: Some("pass".to_owned()),
+        dkim_header_d: Some(domain.to_owned()),
+        ..Default::default()
+    }
+}
+
 fn cfg() -> EmailExtensionConfig {
     EmailExtensionConfig {
         enable: true,
@@ -875,6 +893,64 @@ fn incoming_allow_requires_trusted_aligned_dkim_by_default() {
     });
     assert_eq!(cbor_text_field(&result, "status"), Some("ok"));
     assert!(format!("{result:?}").contains("secret body"));
+}
+
+#[test]
+fn incoming_auth_ignores_forged_lower_authentication_results() {
+    // Attackers can inject Authentication-Results before delivery. The trusted
+    // MTA normally prepends its own header above those forged headers, so the
+    // policy must not search lower headers for a more favorable result.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = single_message_engine(
+        &temp,
+        "team@company.com",
+        vec![
+            trusted_dkim_fail("company.com"),
+            trusted_dkim_pass("company.com"),
+        ],
+    );
+    let result = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "99".to_owned(),
+    });
+
+    assert_eq!(
+        cbor_text_field(&result, "status"),
+        Some("approval_required")
+    );
+    assert_eq!(read_reason(&result), Some("auth failed".to_owned()));
+    assert!(!format!("{result:?}").contains("secret body"));
+}
+
+#[test]
+fn incoming_auth_requires_topmost_authentication_results_from_trusted_server() {
+    // If another server's Authentication-Results header is newest, fail closed
+    // instead of trusting a lower header that might have been forged upstream.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = single_message_engine(
+        &temp,
+        "team@company.com",
+        vec![
+            untrusted_dkim_pass("company.com"),
+            trusted_dkim_pass("company.com"),
+        ],
+    );
+    let result = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "99".to_owned(),
+    });
+
+    assert_eq!(
+        cbor_text_field(&result, "status"),
+        Some("approval_required")
+    );
+    assert_eq!(
+        read_reason(&result),
+        Some("untrusted auth server".to_owned())
+    );
+    assert!(!format!("{result:?}").contains("secret body"));
 }
 
 #[test]

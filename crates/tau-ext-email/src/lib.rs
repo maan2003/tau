@@ -828,41 +828,39 @@ fn incoming_auth_decision(
     }) else {
         return PolicyDecision::denied("auth unaligned");
     };
-    let trusted = message
-        .auth_results
-        .iter()
-        .filter(|evidence| {
-            policy
-                .trusted_authserv_ids
-                .contains(&evidence.authserv_id.to_ascii_lowercase())
-        })
-        .collect::<Vec<_>>();
-    if trusted.is_empty() {
+    // Authentication-Results headers below the newest one are attacker-controlled
+    // unless the trusted MTA strips them. Trust only the topmost parsed header so
+    // a forged lower header cannot override the server's result.
+    let Some(evidence) = message.auth_results.first() else {
+        return PolicyDecision::denied("auth missing");
+    };
+    if !policy
+        .trusted_authserv_ids
+        .contains(&evidence.authserv_id.to_ascii_lowercase())
+    {
         return PolicyDecision::denied("untrusted auth server");
     }
 
     let mut saw_pass = false;
     let mut saw_aligned_dmarc = false;
-    for evidence in &trusted {
-        if evidence.dmarc_result.as_deref() == Some("pass") {
-            saw_pass = true;
-            if evidence
-                .dmarc_header_from
-                .as_deref()
-                .is_some_and(|domain| domain.eq_ignore_ascii_case(&visible_domain))
-            {
-                saw_aligned_dmarc = true;
-            }
+    if evidence.dmarc_result.as_deref() == Some("pass") {
+        saw_pass = true;
+        if evidence
+            .dmarc_header_from
+            .as_deref()
+            .is_some_and(|domain| domain.eq_ignore_ascii_case(&visible_domain))
+        {
+            saw_aligned_dmarc = true;
         }
-        if evidence.dkim_result.as_deref() == Some("pass") {
-            saw_pass = true;
-            if evidence
-                .dkim_header_d
-                .as_deref()
-                .is_some_and(|domain| domain.eq_ignore_ascii_case(&visible_domain))
-            {
-                return PolicyDecision::allowed(Some("auth".to_owned()));
-            }
+    }
+    if evidence.dkim_result.as_deref() == Some("pass") {
+        saw_pass = true;
+        if evidence
+            .dkim_header_d
+            .as_deref()
+            .is_some_and(|domain| domain.eq_ignore_ascii_case(&visible_domain))
+        {
+            return PolicyDecision::allowed(Some("auth".to_owned()));
         }
     }
     if policy.allow_dmarc_only && saw_aligned_dmarc {
@@ -1441,7 +1439,8 @@ pub struct BackendMessage {
     pub attachments: Vec<BackendAttachment>,
     /// Optional Message-ID header.
     pub message_id: Option<String>,
-    /// Parsed Authentication-Results evidence from trusted IMAP server fetches.
+    /// Parsed Authentication-Results evidence in header order, newest first.
+    /// Raw auth headers are never exposed to model-visible output.
     pub auth_results: Vec<AuthenticationResultsEvidence>,
 }
 
