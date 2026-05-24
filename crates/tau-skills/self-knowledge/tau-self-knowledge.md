@@ -22,6 +22,7 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 - `tau-self-knowledge` — overview of built-in Tau-specific skills.
 - `tau-self-knowledge-architecture` — high-level overview of Tau architecture and core components.
 - `tau-self-knowledge-config` — directories, important config files, and provider setup commands.
+- `tau-self-knowledge-email` — secure configuration for the built-in `std-email` extension.
 - `tau-self-knowledge-source-code` — where to fetch Tau source code for debugging or detailed understanding.
 - `tau-self-knowledge-community` — places to ask questions or talk about Tau.
 - `tau-self-knowledge-debugging` — debugging workflow for Tau sessions, daemon behavior, logs, state, and provider request captures.

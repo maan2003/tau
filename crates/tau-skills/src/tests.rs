@@ -507,6 +507,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             "tau-self-knowledge",
             "tau-self-knowledge-architecture",
             "tau-self-knowledge-config",
+            "tau-self-knowledge-email",
             "tau-self-knowledge-source-code",
             "tau-self-knowledge-community",
             "tau-self-knowledge-debugging",
@@ -531,6 +532,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     );
     assert!(skill.content.contains("tau-self-knowledge-architecture"));
     assert!(skill.content.contains("tau-self-knowledge-config"));
+    assert!(skill.content.contains("tau-self-knowledge-email"));
     assert!(skill.content.contains("tau-self-knowledge-source-code"));
     assert!(skill.content.contains("tau-self-knowledge-community"));
     assert!(skill.content.contains("tau-self-knowledge-debugging"));
@@ -548,6 +550,15 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .expect("built-in config skill");
     assert!(!config.add_to_prompt);
     assert!(config.content.contains("tau provider add"));
+
+    let email = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-email")
+        .expect("built-in email skill");
+    assert!(!email.add_to_prompt);
+    assert!(email.content.contains("std-email"));
+    assert!(email.content.contains("trusted_authserv_ids"));
+    assert!(email.content.contains("Authentication-Results"));
 
     let source_code = skills
         .iter()
