@@ -1056,6 +1056,11 @@ fn background_cancel_drains_update_queued_behind_exclusive() {
         h.pending_tool_providers
             .contains_key("queued-update-after-cancel")
     );
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled)
+            if cancelled.call_id.as_str() == "bg-exclusive-cancel-running"
+    )));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ToolBackgroundResult(result)

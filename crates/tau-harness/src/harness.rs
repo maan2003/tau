@@ -3485,7 +3485,7 @@ impl Harness {
                     return Ok(());
                 }
                 if self.tool_turn.is_backgrounded(&cancelled.call_id) {
-                    self.handle_background_tool_cancelled(cancelled);
+                    self.handle_background_tool_cancelled(source_id, cancelled);
                 } else if let Some(cid) = self.tool_conversations.get(&cancelled.call_id).cloned() {
                     let call_id = cancelled.call_id.to_string();
                     if let Some(tool) = self.pending_tools.get(&cancelled.call_id) {
@@ -8297,10 +8297,17 @@ impl Harness {
         );
     }
 
-    fn handle_background_tool_cancelled(&mut self, cancelled: ToolCancelled) {
+    fn handle_background_tool_cancelled(&mut self, source_id: &str, cancelled: ToolCancelled) {
         let call_id = cancelled.call_id.clone();
-        self.finish_tool_call_runtime_state(call_id.as_str());
+        let owner = self.finish_tool_call_runtime_state(call_id.as_str());
         self.record_wait_tool_cancelled(&std::collections::HashSet::from([call_id.clone()]));
+        if let Some(cid) = owner {
+            self.publish_for_conversation_from(
+                &cid,
+                Some(source_id),
+                Event::ToolCancelled(cancelled),
+            );
+        }
         self.drain_pending_tool_invocations_or_report();
         self.clear_tool_call_tracking(call_id.as_str());
     }
