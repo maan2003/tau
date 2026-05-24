@@ -7547,9 +7547,13 @@ impl Harness {
             PendingCompactionResume::None => {
                 if folded_background_prompts {
                     self.dispatch_prompt_after_publish_idle(&pending.target_cid);
-                } else {
-                    self.try_advance_queue();
                 }
+                // Manual compaction has no built-in follow-up prompt, but a
+                // user may have queued one while the target conversation was in
+                // `Compacting`. Always give the queue a chance to drain after
+                // restoring the target to `Idle`; otherwise the queued prompt
+                // can remain parked until some unrelated state change occurs.
+                self.try_advance_queue();
                 Ok(())
             }
         }
