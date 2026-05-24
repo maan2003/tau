@@ -180,6 +180,7 @@ pub(crate) fn dispatch_user_shell_command(
                     session_id: cmd.session_id,
                     command: cmd.command,
                     include_in_context: cmd.include_in_context,
+                    target_agent_id: cmd.target_agent_id,
                     output: format!("failed to start shell command: {err}"),
                     exit_code: None,
                     cancelled: false,
@@ -199,6 +200,7 @@ pub(crate) fn dispatch_user_shell_command(
         mut pipe: R,
         stream: tau_proto::ShellStream,
         command_id: tau_proto::ShellCommandId,
+        target_agent_id: Option<String>,
         tx: mpsc::Sender<Frame>,
     ) -> std::thread::JoinHandle<String> {
         std::thread::spawn(move || {
@@ -215,6 +217,7 @@ pub(crate) fn dispatch_user_shell_command(
                                 command_id: command_id.clone(),
                                 stream,
                                 chunk,
+                                target_agent_id: target_agent_id.clone(),
                             },
                         )));
                     }
@@ -231,6 +234,7 @@ pub(crate) fn dispatch_user_shell_command(
             p,
             tau_proto::ShellStream::Stdout,
             cmd.command_id.clone(),
+            cmd.target_agent_id.clone(),
             tx.clone(),
         )
     });
@@ -239,6 +243,7 @@ pub(crate) fn dispatch_user_shell_command(
             p,
             tau_proto::ShellStream::Stderr,
             cmd.command_id.clone(),
+            cmd.target_agent_id.clone(),
             tx.clone(),
         )
     });
@@ -323,6 +328,7 @@ pub(crate) fn dispatch_user_shell_command(
             session_id: cmd.session_id,
             command: cmd.command,
             include_in_context: cmd.include_in_context,
+            target_agent_id: cmd.target_agent_id,
             output: truncated.content,
             exit_code,
             cancelled,

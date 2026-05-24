@@ -958,6 +958,7 @@ impl<'a> TerminalInputSession<'a> {
             self.writer,
             &Event::UiRecallQueuedPrompt(tau_proto::UiRecallQueuedPrompt {
                 session_id: self.session_id.as_str().into(),
+                target_agent_id: self.selected_side_agent_id(),
             }),
         );
     }
@@ -1070,12 +1071,24 @@ impl<'a> TerminalInputSession<'a> {
             self.writer,
             &Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
                 session_id: self.session_id.as_str().into(),
-                // Broadcast cancel — abort whatever's in flight, regardless of
-                // spid. The targeted variant is used by the harness for
-                // surgical preempts.
+                target_agent_id: self.selected_side_agent_id(),
+                // Broadcast cancel within the selected agent conversation — abort
+                // whatever is in flight there, regardless of spid. The targeted
+                // variant is used by the harness for surgical preempts.
                 session_prompt_id: None,
             }),
         );
+    }
+
+    fn selected_side_agent_id(&self) -> Option<String> {
+        let selected_agent = self
+            .ctx
+            .current_agent_state
+            .lock()
+            .ok()
+            .and_then(|agent| agent.clone())
+            .unwrap_or_else(|| "main".to_owned());
+        (selected_agent != "main").then_some(selected_agent)
     }
 
     fn handle_tree_or_compact_command(&self, text: &str) -> bool {
@@ -1301,7 +1314,21 @@ impl<'a> TerminalInputSession<'a> {
         if command.is_empty() {
             return Ok(());
         }
-        send_shell_command(self.writer, self.session_id, command, include_in_context)
+        let selected_agent = self
+            .ctx
+            .current_agent_state
+            .lock()
+            .ok()
+            .and_then(|agent| agent.clone())
+            .unwrap_or_else(|| "main".to_owned());
+        let target_agent_id = (selected_agent != "main").then_some(selected_agent);
+        send_shell_command(
+            self.writer,
+            self.session_id,
+            command,
+            include_in_context,
+            target_agent_id,
+        )
     }
 
     fn submit_prompt(&self, text: &str) -> Option<InputLoopExit> {
@@ -1728,6 +1755,7 @@ fn send_shell_command(
     session_id: &str,
     command: &str,
     include_in_context: bool,
+    target_agent_id: Option<String>,
 ) -> io::Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let command_id = format!(
@@ -1744,6 +1772,7 @@ fn send_shell_command(
             command_id: command_id.into(),
             command: command.to_owned(),
             include_in_context,
+            target_agent_id,
         }),
     )
 }

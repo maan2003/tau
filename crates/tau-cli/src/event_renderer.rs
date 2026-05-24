@@ -46,6 +46,8 @@ pub(crate) struct EventRenderer {
     prompt_agents: HashMap<String, String>,
     /// Map tool call ids to the agent transcript they belong to.
     tool_agents: HashMap<String, String>,
+    /// Map user-shell command ids to the agent transcript where they started.
+    shell_agents: HashMap<String, String>,
     /// Shared current visible agent mirror for prompt submission.
     current_agent_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Per-`session_prompt_id` UI state. An entry is created on
@@ -900,6 +902,7 @@ impl EventRenderer {
             query_agents: HashMap::new(),
             prompt_agents: HashMap::new(),
             tool_agents: HashMap::new(),
+            shell_agents: HashMap::new(),
             current_agent_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
             prompts: HashMap::new(),
             compaction_blocks: HashMap::new(),
@@ -1666,6 +1669,7 @@ impl EventRenderer {
         self.query_agents.clear();
         self.prompt_agents.clear();
         self.tool_agents.clear();
+        self.shell_agents.clear();
         if let Ok(mut agents) = self.known_agents.lock() {
             *agents = vec![MAIN_AGENT_ID.to_owned()];
         }
@@ -2279,6 +2283,41 @@ impl EventRenderer {
                     self.mark_agent_stopped(&agent_id);
                 }
             }
+            Event::UiPromptSubmitted(prompt) => {
+                if let Some(agent_id) = prompt.target_agent_id.as_deref() {
+                    self.remember_agent(agent_id.to_owned());
+                    if let tau_proto::PromptOriginator::Extension { query_id, .. } =
+                        &prompt.originator
+                    {
+                        self.query_agents
+                            .insert(query_id.clone(), agent_id.to_owned());
+                    }
+                }
+            }
+            Event::UiShellCommand(command) => {
+                if let Some(agent_id) = command.target_agent_id.as_deref() {
+                    self.remember_agent(agent_id.to_owned());
+                    self.shell_agents
+                        .insert(command.command_id.to_string(), agent_id.to_owned());
+                } else {
+                    self.shell_agents
+                        .insert(command.command_id.to_string(), MAIN_AGENT_ID.to_owned());
+                }
+            }
+            Event::ShellCommandProgress(progress) => {
+                if let Some(agent_id) = progress.target_agent_id.as_deref() {
+                    self.remember_agent(agent_id.to_owned());
+                    self.shell_agents
+                        .insert(progress.command_id.to_string(), agent_id.to_owned());
+                }
+            }
+            Event::ShellCommandFinished(finished) => {
+                if let Some(agent_id) = finished.target_agent_id.as_deref() {
+                    self.remember_agent(agent_id.to_owned());
+                    self.shell_agents
+                        .insert(finished.command_id.to_string(), agent_id.to_owned());
+                }
+            }
             Event::SessionPromptCreated(prompt) => {
                 let agent_id = self.agent_id_for_originator(&prompt.originator);
                 self.prompt_agents
@@ -2318,6 +2357,11 @@ impl EventRenderer {
                 .cloned()
                 .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
             Event::ToolProgress(progress) => self
+                .tool_agents
+                .get(progress.call_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::ToolDelegateProgress(progress) => self
                 .tool_agents
                 .get(progress.call_id.as_str())
                 .cloned()
@@ -2369,6 +2413,28 @@ impl EventRenderer {
             Event::SessionPromptSteered(steered) => steered
                 .target_agent_id
                 .clone()
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::UiCancelPrompt(cancel) => cancel
+                .target_agent_id
+                .clone()
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::UiRecallQueuedPrompt(recall) => recall
+                .target_agent_id
+                .clone()
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::UiShellCommand(command) => command
+                .target_agent_id
+                .clone()
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::ShellCommandProgress(progress) => progress
+                .target_agent_id
+                .clone()
+                .or_else(|| self.shell_agents.get(progress.command_id.as_str()).cloned())
+                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::ShellCommandFinished(finished) => finished
+                .target_agent_id
+                .clone()
+                .or_else(|| self.shell_agents.get(finished.command_id.as_str()).cloned())
                 .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
             Event::SessionPromptCreated(prompt) => self.agent_id_for_originator(&prompt.originator),
             Event::SessionPromptTerminated(terminated) => {
@@ -3671,14 +3737,19 @@ impl EventRenderer {
     }
 
     fn handle_shell_command_finished(&mut self, finished: &tau_proto::ShellCommandFinished) {
-        let Some(state) = self.shell_blocks.remove(finished.command_id.as_str()) else {
-            return;
-        };
-        // Use the final, post-truncation output from the extension rather than
-        // our streaming buffer so the UI matches what the harness injected into
-        // context.
-        self.handle.remove_block(state.block_id);
-        let suffix = Self::shell_finished_suffix(finished, state.include_in_context);
+        let include_in_context =
+            if let Some(state) = self.shell_blocks.remove(finished.command_id.as_str()) {
+                // Use the final, post-truncation output from the extension rather
+                // than our streaming buffer so the UI matches what the harness
+                // injected into context.
+                self.handle.remove_block(state.block_id);
+                state.include_in_context
+            } else {
+                // Session replay may contain only the durable terminal event. Render
+                // it from the self-contained payload instead of dropping it.
+                finished.include_in_context
+            };
+        let suffix = Self::shell_finished_suffix(finished, include_in_context);
         let block = render_shell_block(
             &self.theme,
             &finished.command,
@@ -3686,6 +3757,7 @@ impl EventRenderer {
             Some(&suffix),
         );
         self.handle.print_output("shell-finished", block);
+        self.shell_agents.remove(finished.command_id.as_str());
     }
 
     fn shell_finished_suffix(

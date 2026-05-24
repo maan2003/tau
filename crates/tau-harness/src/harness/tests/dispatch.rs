@@ -1803,8 +1803,11 @@ fn cancel_publishes_tool_cancel_request() {
     })
     .expect("tool call routed");
 
-    let session_id: tau_proto::SessionId = "s1".into();
-    h.handle_cancel_prompt(&session_id);
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: None,
+        session_prompt_id: None,
+    });
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -1860,8 +1863,11 @@ fn cancel_clears_active_wait_state() {
         vec![target_call_id.clone(), wait_call_id.clone()],
     );
 
-    let session_id: tau_proto::SessionId = "s1".into();
-    h.handle_cancel_prompt(&session_id);
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: None,
+        session_prompt_id: None,
+    });
 
     let second_wait_call = AgentToolCall {
         id: "wait-call-2".into(),
@@ -5396,6 +5402,12 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
             .all(|conv| conv.pending_prompts.is_empty()),
         "side prompt must dispatch immediately"
     );
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::UiPromptSubmitted(prompt)
+            if prompt.text == "side task"
+                && prompt.target_agent_id.as_deref() == Some("test-agent-q1")
+    )));
     assert!(matches!(h.turn_state, TurnState::Idle));
 
     let side_spid = h

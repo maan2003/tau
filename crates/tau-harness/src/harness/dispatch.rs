@@ -55,8 +55,15 @@ impl Harness {
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let prompt = prompt.into();
-        let (session_id, originator) = match self.conversations.get(cid) {
-            Some(c) => (c.session_id.clone(), c.originator.clone()),
+        let (session_id, originator, target_agent_id) = match self.conversations.get(cid) {
+            Some(c) => (
+                c.session_id.clone(),
+                c.originator.clone(),
+                c.agent_id
+                    .as_ref()
+                    .filter(|agent_id| agent_id.as_str() != "main")
+                    .cloned(),
+            ),
             None => {
                 return Err(HarnessError::Participant(format!(
                     "publish_pending_prompt_for_conversation: unknown conversation `{cid}`"
@@ -68,7 +75,7 @@ impl Harness {
             Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
                 session_id,
                 text: prompt.text,
-                target_agent_id: None,
+                target_agent_id,
                 message_class: prompt.message_class,
                 originator,
                 ctx_id: None,

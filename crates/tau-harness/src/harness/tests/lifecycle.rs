@@ -2008,6 +2008,7 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
         "ui",
         Frame::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
             session_id: "s1".into(),
+            target_agent_id: None,
             session_prompt_id: None,
         })),
     )
@@ -2109,6 +2110,7 @@ fn cancel_during_tools_terminalizes_inflight_and_queued_calls() {
         "ui",
         Frame::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
             session_id: "s1".into(),
+            target_agent_id: None,
             session_prompt_id: None,
         })),
     )

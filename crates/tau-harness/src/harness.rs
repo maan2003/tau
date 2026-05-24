@@ -2518,6 +2518,9 @@ impl Harness {
             Event::ToolBackgroundError(error) => self.session_id_for_tool_call(&error.call_id),
             Event::ToolCancelled(cancelled) => self.session_id_for_tool_call(&cancelled.call_id),
             Event::ToolProgress(progress) => self.session_id_for_tool_call(&progress.call_id),
+            Event::ToolDelegateProgress(progress) => {
+                self.session_id_for_tool_call(&progress.call_id)
+            }
             Event::ShellCommandFinished(finished) => Some(finished.session_id.clone()),
             Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_) => {
                 Some(self.current_session_id.clone())
@@ -3708,11 +3711,11 @@ impl Harness {
             Event::UiNavigateTree(req) => self.handle_ui_navigate_tree(client_id, req),
             Event::UiCompactRequest(req) => self.handle_ui_compact_request(client_id, req),
             Event::UiCancelPrompt(req) => {
-                self.handle_cancel_prompt(&req.session_id);
+                self.handle_cancel_prompt(&req);
                 Ok(true)
             }
             Event::UiRecallQueuedPrompt(req) => {
-                self.handle_recall_queued_prompt(&req.session_id);
+                self.handle_recall_queued_prompt(&req);
                 Ok(true)
             }
             other => {
@@ -3930,38 +3933,59 @@ impl Harness {
         Ok(true)
     }
 
-    fn handle_recall_queued_prompt(&mut self, session_id: &SessionId) {
-        if session_id != &self.current_session_id {
+    fn conversation_id_for_target_agent(
+        &self,
+        target_agent_id: Option<&str>,
+    ) -> Option<ConversationId> {
+        match target_agent_id {
+            Some(agent_id) if agent_id != "main" => self.agent_conversations.get(agent_id).cloned(),
+            _ => Some(self.default_conversation_id.clone()),
+        }
+    }
+
+    fn target_agent_id_for_conversation(&self, cid: &ConversationId) -> Option<String> {
+        self.conversations
+            .get(cid)
+            .and_then(|conv| conv.agent_id.as_ref())
+            .filter(|agent_id| agent_id.as_str() != "main")
+            .cloned()
+    }
+
+    fn handle_recall_queued_prompt(&mut self, req: &tau_proto::UiRecallQueuedPrompt) {
+        if req.session_id != self.current_session_id {
             return;
         }
-        let Some(prompt) = self
-            .conversations
-            .get_mut(&self.default_conversation_id)
-            .and_then(|conv| {
-                let index = conv
-                    .pending_prompts
-                    .iter()
-                    .rposition(|prompt| !prompt.is_internal())?;
-                conv.pending_prompts.remove(index)
-            })
+        let Some(cid) = self.conversation_id_for_target_agent(req.target_agent_id.as_deref())
         else {
+            return;
+        };
+        let Some(prompt) = self.conversations.get_mut(&cid).and_then(|conv| {
+            let index = conv
+                .pending_prompts
+                .iter()
+                .rposition(|prompt| !prompt.is_internal())?;
+            conv.pending_prompts.remove(index)
+        }) else {
             return;
         };
         self.publish_event(
             None,
             Event::SessionPromptRecalled(SessionPromptRecalled {
-                session_id: session_id.clone(),
+                session_id: req.session_id.clone(),
                 text: prompt.text,
-                target_agent_id: None,
+                target_agent_id: self.target_agent_id_for_conversation(&cid),
             }),
         );
     }
 
-    fn handle_cancel_prompt(&mut self, session_id: &SessionId) {
-        if session_id != &self.current_session_id {
+    fn handle_cancel_prompt(&mut self, req: &UiCancelPrompt) {
+        if req.session_id != self.current_session_id {
             return;
         }
-        let cid = self.default_conversation_id.clone();
+        let Some(cid) = self.conversation_id_for_target_agent(req.target_agent_id.as_deref())
+        else {
+            return;
+        };
         let Some(conv) = self.conversations.get_mut(&cid) else {
             return;
         };
@@ -3979,7 +4003,8 @@ impl Harness {
             self.publish_event(
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {
-                    session_id: session_id.clone(),
+                    session_id: req.session_id.clone(),
+                    target_agent_id: self.target_agent_id_for_conversation(&cid),
                     session_prompt_id: Some(prompt_id),
                 }),
             );
@@ -4192,6 +4217,7 @@ impl Harness {
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {
                     session_id,
+                    target_agent_id: self.target_agent_id_for_conversation(&cid),
                     session_prompt_id: Some(spid),
                 }),
             );
@@ -5473,7 +5499,8 @@ impl Harness {
         conv.delegate_execution_mode = delegate_execution_mode;
         conv.chain_anchor = initial_chain_anchor;
         conv.pending_prompts = pending_agent_messages;
-        self.agent_conversations.insert(agent_id, cid.clone());
+        self.agent_conversations
+            .insert(agent_id.clone(), cid.clone());
         self.conversations.insert(cid.clone(), conv);
         self.active_start_agent_requests
             .insert(cid.clone(), ActiveStartAgentRequest { execution_mode });
@@ -5507,7 +5534,7 @@ impl Harness {
             Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
                 session_id,
                 text: query.instruction,
-                target_agent_id: None,
+                target_agent_id: Some(agent_id.clone()),
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::Extension {
                     name: extension_name.into(),
@@ -6179,6 +6206,7 @@ impl Harness {
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {
                     session_id: session_id.clone(),
+                    target_agent_id: self.target_agent_id_for_conversation(cid),
                     session_prompt_id: Some(spid.clone()),
                 }),
             );
@@ -6913,14 +6941,19 @@ impl Harness {
             message_class: tau_proto::PromptMessageClass::User,
         });
         // When the shell output belongs to the bound session, stamp
-        // the publish with the default conversation so the fold
-        // lands on the user's main branch (and the post-commit hook
-        // syncs `c.head`). Other sessions: best-effort plain
-        // publish; nothing on this harness instance is reading
-        // their tree.
+        // the publish with the target conversation so the fold lands
+        // on the branch whose transcript owned the command (and the
+        // post-commit hook syncs `c.head`). Other sessions:
+        // best-effort plain publish; nothing on this harness instance
+        // is reading their tree.
         if finished.session_id == self.current_session_id {
-            let cid = self.default_conversation_id.clone();
-            self.publish_event_for_conversation(&cid, None, event);
+            if let Some(cid) =
+                self.conversation_id_for_target_agent(finished.target_agent_id.as_deref())
+            {
+                self.publish_event_for_conversation(&cid, None, event);
+            } else {
+                self.publish_event(None, event);
+            }
         } else {
             self.publish_event(None, event);
         }

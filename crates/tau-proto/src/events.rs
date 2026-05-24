@@ -1795,8 +1795,9 @@ pub struct UiCompactRequest {
 /// conversations when a user prompt arrives. The optional
 /// [`Self::session_prompt_id`] disambiguates the two cases:
 ///
-/// - `None` — broadcast cancel (the legacy `/cancel` semantics). The harness
-///   clears the default conversation; the agent aborts whatever prompt it's
+/// - `None` — broadcast cancel for the selected target conversation. The
+///   harness clears `target_agent_id`'s conversation, defaulting to main when
+///   `target_agent_id` is absent; the agent aborts whatever prompt it's
 ///   currently retry-sleeping on.
 /// - `Some(spid)` — targeted cancel. The agent only aborts if the in-flight
 ///   prompt's spid matches; otherwise the frame is left in the retry-loop's
@@ -1808,6 +1809,10 @@ pub struct UiCompactRequest {
 pub struct UiCancelPrompt {
     /// Session whose active or queued prompt should be cancelled.
     pub session_id: SessionId,
+    /// Target agent conversation to cancel. `None` means the main interactive
+    /// conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
     /// Optional target. See struct doc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_prompt_id: Option<SessionPromptId>,
@@ -1817,8 +1822,12 @@ pub struct UiCancelPrompt {
 /// prompt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiRecallQueuedPrompt {
-    /// Session whose default conversation queue should be recalled from.
+    /// Session whose conversation queue should be recalled from.
     pub session_id: SessionId,
+    /// Target agent conversation to recall from. `None` means the main
+    /// interactive conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
 }
 
 /// Which stream a [`ShellCommandProgress`] chunk came from.
@@ -1842,6 +1851,10 @@ pub struct UiShellCommand {
     pub command_id: crate::ShellCommandId,
     pub command: String,
     pub include_in_context: bool,
+    /// Target agent for this user-authored shell command. `None` means the
+    /// main interactive agent for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
 }
 
 /// A chunk of output from a running user-initiated shell command.
@@ -1851,6 +1864,10 @@ pub struct ShellCommandProgress {
     pub command_id: crate::ShellCommandId,
     pub stream: ShellStream,
     pub chunk: String,
+    /// Target agent for this user-authored shell command. `None` means the
+    /// main interactive agent for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
 }
 
 /// A user-initiated shell command completed (exited or was cancelled).
@@ -1865,6 +1882,10 @@ pub struct ShellCommandFinished {
     pub session_id: SessionId,
     pub command: String,
     pub include_in_context: bool,
+    /// Target agent for this user-authored shell command. `None` means the
+    /// main interactive agent for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
     /// Interleaved stdout + stderr (truncated), the same shape the
     /// `shell` tool returns.
     pub output: String,

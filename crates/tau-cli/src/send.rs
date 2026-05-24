@@ -50,6 +50,7 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
     if text == "/cancel" {
         return Some(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
             session_id: session_id.into(),
+            target_agent_id: None,
             session_prompt_id: None,
         }));
     }
@@ -163,6 +164,7 @@ fn shell_command(session_id: &str, command: &str, include_in_context: bool) -> E
         command_id: command_id.into(),
         command: command.to_owned(),
         include_in_context,
+        target_agent_id: None,
     })
 }
 

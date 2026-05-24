@@ -506,6 +506,238 @@ fn switched_agent_shows_its_tool_usage() {
 }
 
 #[test]
+fn delegate_progress_routes_to_hidden_tool_owner() {
+    let (_term, handle, vt) = setup(90, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        query_id: "q-worker".to_owned(),
+        agent_id: "worker-1".to_owned(),
+    }));
+    let originator = tau_proto::PromptOriginator::Extension {
+        name: "core-subagents".into(),
+        query_id: "q-worker".to_owned(),
+    };
+    let delegate_args = CborValue::Map(vec![(
+        CborValue::Text("task_name".into()),
+        CborValue::Text("nested".into()),
+    )]);
+
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        originator,
+        ..finished_response(
+            "worker-sp",
+            vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "worker-delegate".into(),
+                name: tau_proto::ToolName::new("delegate"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: delegate_args.clone(),
+            })],
+        )
+    }));
+    renderer.handle(&tool_started("worker-delegate", "delegate", delegate_args));
+    renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
+        call_id: "worker-delegate".into(),
+        task_name: "nested".into(),
+        role: Some("engineer".to_owned()),
+        execution_mode: Some(tau_proto::ToolExecutionMode::Shared),
+        ctx_percent: None,
+        ctx_input_tokens: None,
+        ctx_window: None,
+        tools_in_flight: 1,
+        tools_total: 2,
+        display: Some(tau_proto::ToolDisplay {
+            args: "nested".into(),
+            progress_counters: vec![tau_proto::ProgressCounter {
+                label: Some("tools".into()),
+                unit: tau_proto::ProgressUnit::Count,
+                complete: Some(1),
+                total: Some(2),
+            }],
+            status: tau_proto::ToolDisplayStatus::InProgress,
+            status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
+            ..Default::default()
+        }),
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(90, "%1/2"));
+
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(90, "%1/2"));
+}
+
+#[test]
+fn shell_progress_routes_to_command_owner_after_agent_switch() {
+    let (_term, handle, vt) = setup(90, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.switch_agent("worker-1".to_owned());
+    renderer.handle(&Event::UiShellCommand(tau_proto::UiShellCommand {
+        session_id: "s1".into(),
+        command_id: "ui-sh-1".into(),
+        command: "printf worker-output".into(),
+        include_in_context: false,
+        target_agent_id: Some("worker-1".to_owned()),
+    }));
+    renderer.switch_agent("main".to_owned());
+
+    renderer.handle(&Event::ShellCommandProgress(
+        tau_proto::ShellCommandProgress {
+            command_id: "ui-sh-1".into(),
+            stream: tau_proto::ShellStream::Stdout,
+            chunk: "worker-output".into(),
+            target_agent_id: Some("worker-1".to_owned()),
+        },
+    ));
+    renderer.handle(&Event::ShellCommandFinished(
+        tau_proto::ShellCommandFinished {
+            command_id: "ui-sh-1".into(),
+            session_id: "s1".into(),
+            command: "printf worker-output".into(),
+            include_in_context: false,
+            target_agent_id: Some("worker-1".to_owned()),
+            output: "worker-output".into(),
+            exit_code: Some(0),
+            cancelled: false,
+        },
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(90, "worker-output"));
+
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(90, "worker-output"));
+}
+
+#[test]
+fn shell_command_target_field_survives_switch_before_echo_and_replay() {
+    let (_term, handle, vt) = setup(90, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.switch_agent("main".to_owned());
+
+    // Regression: the durable event's target must own the command even if the
+    // selected transcript is main by the time the renderer processes the echo.
+    renderer.handle(&Event::UiShellCommand(tau_proto::UiShellCommand {
+        session_id: "s1".into(),
+        command_id: "ui-sh-race".into(),
+        command: "printf race-output".into(),
+        include_in_context: false,
+        target_agent_id: Some("worker-1".to_owned()),
+    }));
+    renderer.handle(&Event::ShellCommandFinished(
+        tau_proto::ShellCommandFinished {
+            command_id: "ui-sh-race".into(),
+            session_id: "s1".into(),
+            command: "printf race-output".into(),
+            include_in_context: false,
+            target_agent_id: Some("worker-1".to_owned()),
+            output: "race-output".into(),
+            exit_code: Some(0),
+            cancelled: false,
+        },
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(90, "race-output"));
+
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(90, "race-output"));
+
+    let (_term, handle, vt) = setup(90, 24);
+    let mut replay = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    replay.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    replay.handle(&Event::ShellCommandFinished(
+        tau_proto::ShellCommandFinished {
+            command_id: "ui-sh-replay".into(),
+            session_id: "s1".into(),
+            command: "printf replay-output".into(),
+            include_in_context: false,
+            target_agent_id: Some("worker-1".to_owned()),
+            output: "replay-output".into(),
+            exit_code: Some(0),
+            cancelled: false,
+        },
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(90, "replay-output"));
+
+    replay.switch_agent("worker-1".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(90, "replay-output"));
+}
+
+#[test]
+fn replay_learns_side_agent_from_durable_ui_prompt_submission() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+
+    let originator = tau_proto::PromptOriginator::Extension {
+        name: "core-subagents".into(),
+        query_id: "q-worker".to_owned(),
+    };
+    renderer.handle(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "side task".to_owned(),
+        target_agent_id: Some("worker-1".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: originator.clone(),
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        originator,
+        ..finished_response(
+            "worker-sp",
+            vec![assistant_message_item("worker replay answer")],
+        )
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "worker replay answer"));
+
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "worker replay answer"));
+    assert!(!vt.screen_contains(80, "&q-worker"));
+}
+
+#[test]
 fn agent_switch_preserves_separate_transcripts() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
