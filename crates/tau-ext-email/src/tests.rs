@@ -1413,6 +1413,58 @@ fn outgoing_reply_to_and_from_spoofing_are_policy_checked() {
 }
 
 #[test]
+fn allowed_read_normalizes_from_display_for_model_visible_output() {
+    // Even after DKIM allows a message, the display name in From is still
+    // attacker-controlled. Model-visible read output should use only addr-spec.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = single_message_engine(
+        &temp,
+        "CEO <team@company.com>",
+        vec![trusted_dkim_pass("company.com")],
+    );
+
+    let result = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "99".to_owned(),
+    });
+
+    assert_eq!(cbor_text_field(&result, "status"), Some("ok"));
+    let headers = map_get(map_get(&result, "data").expect("data"), "headers").expect("headers");
+    assert_eq!(
+        text_field(headers, "from"),
+        Some("team@company.com".to_owned())
+    );
+    assert!(!format!("{result:?}").contains("CEO"));
+}
+
+#[test]
+fn outgoing_addresses_with_controls_are_rejected() {
+    // Address policy and approval output assume addresses are single safe
+    // tokens. Reject control/format characters before policy or persistence.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+
+    let result = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["bad\u{1b}@evil.test".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "hi".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+
+    assert_eq!(
+        cbor_nested_text_field(&result, "error", "code"),
+        Some("invalid_input")
+    );
+    assert!(!format!("{result:?}").contains('\u{1b}'));
+}
+
+#[test]
 fn outgoing_success_outputs_do_not_leak_bcc() {
     // BCC recipients are hidden from the agent transcript even for successful
     // immediate sends and idempotent already-sent responses.

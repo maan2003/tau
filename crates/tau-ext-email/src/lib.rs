@@ -893,6 +893,9 @@ pub fn normalize_address(input: &str) -> Option<String> {
     if local.is_empty()
         || domain.is_empty()
         || candidate.contains(char::is_whitespace)
+        || candidate
+            .chars()
+            .any(|ch| ch.is_control() || is_unsafe_format_control(ch))
         || candidate.matches('@').count() != 1
     {
         return None;
@@ -1585,12 +1588,12 @@ fn truncate_body(body: &str) -> BodyTruncation {
             truncated = true;
             break;
         }
-        if shown.len().saturating_add(line.len()) > READ_BODY_MAX_BYTES {
+        if READ_BODY_MAX_BYTES < shown.len().saturating_add(line.len()) {
             let remaining = READ_BODY_MAX_BYTES.saturating_sub(shown.len());
             let mut boundary = 0usize;
             for (idx, ch) in line.char_indices() {
                 let next = idx + ch.len_utf8();
-                if next > remaining {
+                if remaining < next {
                     break;
                 }
                 boundary = next;
@@ -2040,6 +2043,7 @@ impl<B: EmailBackend> Engine<B> {
             if msg.uid != metadata.uid || msg.uidvalidity != metadata.uidvalidity {
                 return error_envelope(Some("read"), "message_not_found", "message not found");
             }
+            let from = normalize_address(&msg.from).unwrap_or_else(|| msg.from.clone());
             let truncate = truncate_body(&msg.body_text);
             let attachments = msg
                 .attachments
@@ -2065,7 +2069,7 @@ impl<B: EmailBackend> Engine<B> {
                         cbor_map(vec![
                             (
                                 "from",
-                                CborValue::Text(safe_model_line(&msg.from, MAX_ADDRESS_CHARS)),
+                                CborValue::Text(safe_model_line(&from, MAX_ADDRESS_CHARS)),
                             ),
                             (
                                 "to",
@@ -2268,7 +2272,10 @@ impl<B: EmailBackend> Engine<B> {
                     "sent",
                     cbor_map(vec![
                         ("account", CborValue::Text(account_id)),
-                        ("message_id", CborValue::Text(id)),
+                        (
+                            "message_id",
+                            CborValue::Text(safe_model_line(&id, MAX_HEADER_VALUE_CHARS)),
+                        ),
                         (
                             "accepted_recipients",
                             CborValue::Array(
@@ -2338,13 +2345,24 @@ impl<B: EmailBackend> Engine<B> {
                     cbor_map(vec![
                         ("approval_id", CborValue::Text(id)),
                         ("kind", CborValue::Text("outgoing_send".to_owned())),
-                        ("account", CborValue::Text(message.account)),
+                        (
+                            "account",
+                            CborValue::Text(safe_model_line(
+                                &message.account,
+                                MAX_HEADER_VALUE_CHARS,
+                            )),
+                        ),
                         (
                             "blocked_recipients",
                             CborValue::Array(
                                 blocked_recipients
                                     .into_iter()
-                                    .map(CborValue::Text)
+                                    .map(|recipient| {
+                                        CborValue::Text(safe_model_line(
+                                            &recipient,
+                                            MAX_ADDRESS_CHARS,
+                                        ))
+                                    })
                                     .collect(),
                             ),
                         ),
@@ -2353,7 +2371,12 @@ impl<B: EmailBackend> Engine<B> {
                             CborValue::Array(
                                 allowed_recipients
                                     .into_iter()
-                                    .map(CborValue::Text)
+                                    .map(|recipient| {
+                                        CborValue::Text(safe_model_line(
+                                            &recipient,
+                                            MAX_ADDRESS_CHARS,
+                                        ))
+                                    })
                                     .collect(),
                             ),
                         ),
@@ -2446,7 +2469,11 @@ impl<B: EmailBackend> Engine<B> {
         match self.state.pending_outgoing_by_id(id) {
             Ok(approval) => {
                 let message = outgoing_approval_message(&approval);
-                let message_id = self.backend.send_message(&message)?;
+                let message_id = self
+                    .backend
+                    .send_message(&message)
+                    .map_err(|message| backend_error_text(&message))?;
+                let message_id = safe_display_line(&message_id);
                 match self.state.approve_outgoing(id) {
                     Ok(()) => Ok(format!(
                         "Sent approved outgoing email {id}. message_id={message_id} subject={} to={}",
@@ -2454,7 +2481,8 @@ impl<B: EmailBackend> Engine<B> {
                         safe_display_join(&approval.to, ",")
                     )),
                     Err(error) => Ok(format!(
-                        "Sent approved outgoing email {id}, but failed to record approval: {error}. message_id={message_id} subject={} to={}",
+                        "Sent approved outgoing email {id}, but failed to record approval: {}. message_id={message_id} subject={} to={}",
+                        safe_display_line(&error),
                         safe_display_line(&approval.subject),
                         safe_display_join(&approval.to, ",")
                     )),
