@@ -131,6 +131,18 @@ fn drain_startup(reader: &mut FrameReader<BufReader<UnixStream>>) -> ToolSpec {
     }
 }
 
+fn drain_action_schema(reader: &mut FrameReader<BufReader<UnixStream>>) -> ActionSchema {
+    loop {
+        match reader.read_frame().expect("read").expect("frame") {
+            Frame::Event(Event::ActionSchemaPublished(published)) => return published.schema,
+            Frame::Message(Message::Ready(_)) => {
+                panic!("action schema should be published before ready")
+            }
+            _ => {}
+        }
+    }
+}
+
 fn cfg() -> EmailExtensionConfig {
     EmailExtensionConfig {
         enable: true,
@@ -165,6 +177,19 @@ fn cfg() -> EmailExtensionConfig {
 fn engine(temp: &tempfile::TempDir) -> Engine<FakeBackend> {
     Engine {
         config: cfg().validate().expect("valid config"),
+        state: StateStore::open(temp.path().join("email-state")).expect("state"),
+        backend: FakeBackend::with_work_mail(),
+    }
+}
+
+fn engine_with_state_policy_extensions(
+    temp: &tempfile::TempDir,
+    allow_state_policy_extensions: bool,
+) -> Engine<FakeBackend> {
+    let mut config = cfg();
+    config.policy.allow_state_policy_extensions = allow_state_policy_extensions;
+    Engine {
+        config: config.validate().expect("valid config"),
         state: StateStore::open(temp.path().join("email-state")).expect("state"),
         backend: FakeBackend::with_work_mail(),
     }
@@ -213,6 +238,34 @@ fn registers_single_email_tool() {
     assert_eq!(tool.name.as_str(), TOOL_NAME);
     assert_eq!(tool.execution_mode, ToolExecutionMode::Exclusive);
     assert!(tool.parameters.is_some());
+}
+
+#[test]
+fn publishes_email_action_schema_at_startup() {
+    let mut pair = spawn_extension();
+    let _tool = drain_startup(&mut pair.reader);
+    let schema = drain_action_schema(&mut pair.reader);
+    schema.validate().expect("email action schema validates");
+    assert_eq!(
+        schema.executable_action_ids().expect("ids"),
+        vec![
+            "email.out.list".to_owned(),
+            "email.out.open".to_owned(),
+            "email.out.approve".to_owned(),
+            "email.out.whitelist".to_owned(),
+            "email.in.list".to_owned(),
+            "email.in.open".to_owned(),
+            "email.in.approve".to_owned(),
+            "email.in.whitelist".to_owned(),
+        ]
+    );
+    assert_eq!(
+        schema
+            .parse_line("/email out approve out_0123456789abcdef01234567")
+            .expect("parse")
+            .action_id,
+        "email.out.approve"
+    );
 }
 
 #[test]
@@ -443,6 +496,281 @@ fn outgoing_whitelisted_sends_and_mixed_recipients_queue_whole_message() {
         !format!("{queued:?}").contains("hidden@example.net"),
         "approval-required output must not leak bcc"
     );
+}
+
+#[test]
+fn outgoing_actions_list_open_approve_and_whitelist_drive_policy() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    let queued = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: Some("alice@company.com".to_owned()),
+        to: vec!["external@example.net".to_owned()],
+        cc: Vec::new(),
+        bcc: vec!["hidden@example.net".to_owned()],
+        subject: "proposal".to_owned(),
+        body_text: "full draft body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    let id = match data_field(&queued, "approval_id") {
+        CborValue::Text(id) => id.clone(),
+        _ => panic!("approval id"),
+    };
+
+    let listed = engine
+        .dispatch_action("email.out.list", &[])
+        .expect("list action");
+    assert!(listed.contains(&id));
+    assert!(listed.contains("external@example.net"));
+    assert!(!listed.contains("hidden@example.net"));
+    let opened = engine
+        .dispatch_action("email.out.open", &[id.clone()])
+        .expect("open action");
+    assert!(opened.contains("hidden@example.net"));
+    assert!(opened.contains("full draft body"));
+
+    engine
+        .dispatch_action("email.out.approve", &[id.clone()])
+        .expect("approve action");
+    let approved_record = engine
+        .state
+        .approved_outgoing_by_id(&id)
+        .expect("approved record");
+    assert_eq!(approved_record.status, "approved");
+    assert!(engine.state.pending_outgoing_by_id(&id).is_err());
+    let approve_again = engine
+        .dispatch_action("email.out.approve", &[id.clone()])
+        .expect("approve action is idempotent");
+    assert!(approve_again.contains("already approved"));
+    let sent = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: Some("alice@company.com".to_owned()),
+        to: vec!["external@example.net".to_owned()],
+        cc: Vec::new(),
+        bcc: vec!["hidden@example.net".to_owned()],
+        subject: "proposal".to_owned(),
+        body_text: "full draft body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    assert_eq!(cbor_text_field(&sent, "status"), Some("sent"));
+
+    engine
+        .dispatch_action("email.out.whitelist", &["*@new.test".to_owned()])
+        .expect("whitelist action");
+    let whitelisted = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: Some("alice@company.com".to_owned()),
+        to: vec!["person@new.test".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "hi".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    assert_eq!(cbor_text_field(&whitelisted, "status"), Some("sent"));
+}
+
+#[test]
+fn incoming_actions_list_open_approve_and_whitelist_drive_policy_without_leaks() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    let queued = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "1".to_owned(),
+    });
+    let id = match data_field(&queued, "approval_id") {
+        CborValue::Text(id) => id.clone(),
+        _ => panic!("approval id"),
+    };
+
+    let listed = engine
+        .dispatch_action("email.in.list", &[])
+        .expect("list action");
+    assert!(listed.contains(&id));
+    assert!(listed.contains("mallory@evil.test"));
+    assert!(!listed.contains("secret subject"));
+    assert!(!listed.contains("secret body"));
+    let opened = engine
+        .dispatch_action("email.in.open", &[id.clone()])
+        .expect("open action");
+    assert!(opened.contains("subject_redacted: true"));
+    assert!(!opened.contains("secret subject"));
+    assert!(!opened.contains("secret body"));
+
+    engine
+        .dispatch_action("email.in.approve", &[id.clone()])
+        .expect("approve action");
+    let approved_record = engine
+        .state
+        .approved_incoming_by_id(&id)
+        .expect("approved record");
+    assert_eq!(approved_record.status, "approved");
+    assert!(engine.state.pending_incoming_by_id(&id).is_err());
+    let approve_again = engine
+        .dispatch_action("email.in.approve", &[id.clone()])
+        .expect("approve action is idempotent");
+    assert!(approve_again.contains("already approved"));
+    let approved = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "1".to_owned(),
+    });
+    assert_eq!(cbor_text_field(&approved, "status"), Some("ok"));
+    assert!(format!("{approved:?}").contains("secret body"));
+
+    engine.backend.messages.insert(
+        ("work".to_owned(), "INBOX".to_owned()),
+        vec![BackendMessage {
+            uid: "3".to_owned(),
+            uidvalidity: "uv1".to_owned(),
+            date: "d".to_owned(),
+            from: "friend@new.test".to_owned(),
+            to: Vec::new(),
+            cc: Vec::new(),
+            subject: "visible after whitelist".to_owned(),
+            body_text: "friend body".to_owned(),
+            flags: Vec::new(),
+        }],
+    );
+    engine
+        .dispatch_action("email.in.whitelist", &["*@new.test".to_owned()])
+        .expect("whitelist action");
+    let read = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "3".to_owned(),
+    });
+    assert_eq!(cbor_text_field(&read, "status"), Some("ok"));
+    assert!(format!("{read:?}").contains("friend body"));
+}
+
+#[test]
+fn whitelist_actions_reject_when_state_policy_extensions_are_disabled() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine_with_state_policy_extensions(&temp, false);
+
+    let outgoing_error = engine
+        .dispatch_action("email.out.whitelist", &["*@new.test".to_owned()])
+        .expect_err("outgoing whitelist should be rejected");
+    assert!(outgoing_error.contains("state policy extensions are disabled"));
+    assert!(
+        engine
+            .state
+            .load_outgoing_allow()
+            .expect("out allow")
+            .is_empty()
+    );
+
+    let incoming_error = engine
+        .dispatch_action("email.in.whitelist", &["*@new.test".to_owned()])
+        .expect_err("incoming whitelist should be rejected");
+    assert!(incoming_error.contains("state policy extensions are disabled"));
+    assert!(
+        engine
+            .state
+            .load_incoming_allow()
+            .expect("in allow")
+            .is_empty()
+    );
+}
+
+#[test]
+fn whitelist_actions_reject_invalid_patterns_without_writing_state() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    for pattern in ["", "re:(", "not-an-address"] {
+        assert!(
+            engine
+                .dispatch_action("email.out.whitelist", &[pattern.to_owned()])
+                .is_err(),
+            "outgoing pattern {pattern:?} should fail"
+        );
+        assert!(
+            engine
+                .dispatch_action("email.in.whitelist", &[pattern.to_owned()])
+                .is_err(),
+            "incoming pattern {pattern:?} should fail"
+        );
+    }
+
+    assert!(
+        engine
+            .state
+            .load_outgoing_allow()
+            .expect("out allow")
+            .is_empty()
+    );
+    assert!(
+        engine
+            .state
+            .load_incoming_allow()
+            .expect("in allow")
+            .is_empty()
+    );
+}
+
+#[test]
+fn invalid_email_actions_return_errors() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    assert!(engine.dispatch_action("email.out.nope", &[]).is_err());
+    assert!(
+        engine
+            .dispatch_action(
+                "email.out.approve",
+                &["in_0123456789abcdef01234567".to_owned()]
+            )
+            .is_err()
+    );
+    assert!(
+        engine
+            .dispatch_action(
+                "email.out.open",
+                &["out_0123456789abcdef01234567/../../x".to_owned()]
+            )
+            .is_err()
+    );
+    assert!(
+        engine
+            .dispatch_action(
+                "email.in.approve",
+                &["in_0123456789ABCDEF01234567".to_owned()]
+            )
+            .is_err()
+    );
+    assert!(
+        engine
+            .dispatch_action("email.in.open", &["in_0123456789abcdef01234567".to_owned()])
+            .is_err()
+    );
+}
+
+#[test]
+fn runtime_action_invoke_returns_action_error_for_bad_id() {
+    let mut runtime = RuntimeState {
+        config_state: ConfigState::Rejected {
+            reason: "bad config".to_owned(),
+        },
+    };
+    let event = runtime.dispatch_action(ActionInvoke {
+        invocation_id: tau_proto::ActionInvocationId::new("invoke-1"),
+        session_id: tau_proto::SessionId::new("session-1"),
+        extension_name: tau_proto::ExtensionName::new("tau-ext-email"),
+        instance_id: tau_proto::ExtensionInstanceId::from(1),
+        action_id: "email.in.list".to_owned(),
+        raw_line: "/email in list".to_owned(),
+        argv: Vec::new(),
+        arguments: CborValue::Map(Vec::new()),
+    });
+    let Event::ActionError(error) = event else {
+        panic!("expected action error")
+    };
+    assert_eq!(error.action_id, "email.in.list");
+    assert!(error.message.contains("bad config"));
 }
 
 #[test]

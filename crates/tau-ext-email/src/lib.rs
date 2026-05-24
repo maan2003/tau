@@ -1,9 +1,9 @@
 //! Standard email extension policy, state, and fake-backend core.
 //!
 //! This crate intentionally keeps Phase B email behavior pure and testable: no
-//! IMAP/SMTP network dependencies are used, and no CLI action injection is
-//! implemented yet. Tool commands are routed through the same policy/state core
-//! that tests exercise with an in-memory backend.
+//! IMAP/SMTP network dependencies are used. Tool commands and `/email ...` UI
+//! actions are routed through the same policy/state core that tests exercise
+//! with an in-memory backend.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -19,9 +19,10 @@ const READ_BODY_MAX_LINES: usize = 1000;
 const LIST_MAX_LIMIT: usize = 100;
 
 use tau_proto::{
-    Ack, CborValue, ConfigError, Event, Frame, FrameReader, FrameWriter, LogEventId, Message,
-    ToolDisplay, ToolDisplayStatus, ToolError, ToolExecutionMode, ToolResult, ToolSpec,
-    ToolStarted,
+    ACTION_SCHEMA_VERSION, Ack, ActionArg, ActionArgKind, ActionCommand, ActionError, ActionInvoke,
+    ActionOutput, ActionResult, ActionSchema, CborValue, ConfigError, Event, Frame, FrameReader,
+    FrameWriter, LogEventId, Message, ToolDisplay, ToolDisplayStatus, ToolError, ToolExecutionMode,
+    ToolResult, ToolSpec, ToolStarted,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -47,8 +48,12 @@ where
     let mut runtime = RuntimeState::default();
 
     tau_extension::Handshake::tool("tau-ext-email")
-        .subscribe([tau_proto::EventName::TOOL_STARTED])
+        .subscribe([
+            tau_proto::EventName::TOOL_STARTED,
+            tau_proto::EventName::ACTION_INVOKE,
+        ])
         .register_tool(email_tool_spec())
+        .publish_actions(email_action_schema())
         .ready_message("email extension ready")
         .run(&mut writer)?;
 
@@ -65,6 +70,11 @@ where
             }
             Frame::Event(Event::ToolStarted(invoke)) if invoke.tool_name.as_str() == TOOL_NAME => {
                 let event = runtime.dispatch(invoke);
+                writer.write_frame(&Frame::Event(event))?;
+                writer.flush()?;
+            }
+            Frame::Event(Event::ActionInvoke(invoke)) => {
+                let event = runtime.dispatch_action(invoke);
                 writer.write_frame(&Frame::Event(event))?;
                 writer.flush()?;
             }
@@ -521,7 +531,62 @@ impl StateStore {
         self.save_allow_file("outgoing-allow.json", records)
     }
 
+    /// Append one persisted incoming allow pattern record.
+    pub fn append_incoming_allow_record(&self, record: StatePattern) -> Result<(), String> {
+        let mut records = self.load_allow_records("incoming-allow.json")?;
+        records.push(record);
+        self.save_incoming_allow_records(&records)
+    }
+
+    /// Append one persisted outgoing allow pattern record.
+    pub fn append_outgoing_allow_record(&self, record: StatePattern) -> Result<(), String> {
+        let mut records = self.load_allow_records("outgoing-allow.json")?;
+        records.push(record);
+        self.save_outgoing_allow_records(&records)
+    }
+
+    /// Load pending incoming read approvals in deterministic order.
+    pub fn list_pending_incoming(&self) -> Result<Vec<IncomingApproval>, String> {
+        self.list_approvals("incoming", "pending")
+    }
+
+    /// Load pending outgoing send approvals in deterministic order.
+    pub fn list_pending_outgoing(&self) -> Result<Vec<OutgoingApproval>, String> {
+        self.list_approvals("outgoing", "pending")
+    }
+
+    /// Load one pending incoming read approval by id.
+    pub fn pending_incoming_by_id(&self, id: &str) -> Result<IncomingApproval, String> {
+        self.load_approval("incoming", "pending", id)
+    }
+
+    /// Load one pending outgoing send approval by id.
+    pub fn pending_outgoing_by_id(&self, id: &str) -> Result<OutgoingApproval, String> {
+        self.load_approval("outgoing", "pending", id)
+    }
+
+    /// Load one approved incoming read approval by id.
+    pub fn approved_incoming_by_id(&self, id: &str) -> Result<IncomingApproval, String> {
+        self.load_approval("incoming", "approved", id)
+    }
+
+    /// Load one approved outgoing send approval by id.
+    pub fn approved_outgoing_by_id(&self, id: &str) -> Result<OutgoingApproval, String> {
+        self.load_approval("outgoing", "approved", id)
+    }
+
     fn load_allow_file(&self, name: &str) -> Result<Vec<AddressPattern>, String> {
+        self.load_allow_records(name)?
+            .iter()
+            .map(|record| match record.kind.as_str() {
+                "exact" | "glob" => AddressPattern::compile(&record.pattern),
+                "regex" => AddressPattern::compile(&format!("re:{}", record.pattern)),
+                other => Err(format!("unsupported policy pattern kind `{other}`")),
+            })
+            .collect()
+    }
+
+    fn load_allow_records(&self, name: &str) -> Result<Vec<StatePattern>, String> {
         let path = self.state_dir.join("policy").join(name);
         if !path.exists() {
             return Ok(Vec::new());
@@ -535,14 +600,7 @@ impl StateStore {
                 path.display()
             ));
         }
-        file.patterns
-            .iter()
-            .map(|record| match record.kind.as_str() {
-                "exact" | "glob" => AddressPattern::compile(&record.pattern),
-                "regex" => AddressPattern::compile(&format!("re:{}", record.pattern)),
-                other => Err(format!("unsupported policy pattern kind `{other}`")),
-            })
-            .collect()
+        Ok(file.patterns)
     }
 
     fn save_allow_file(&self, name: &str, records: &[StatePattern]) -> Result<(), String> {
@@ -551,6 +609,45 @@ impl StateStore {
             patterns: records.to_vec(),
         };
         atomic_json_write(&self.state_dir.join("policy").join(name), &file)
+    }
+
+    fn list_approvals<T: for<'de> Deserialize<'de>>(
+        &self,
+        kind: &str,
+        status: &str,
+    ) -> Result<Vec<T>, String> {
+        let dir = self.state_dir.join("approvals").join(kind).join(status);
+        let mut paths = fs::read_dir(&dir)
+            .map_err(|error| format!("failed to read {}: {error}", dir.display()))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        paths.sort();
+        paths
+            .into_iter()
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .map(|path| {
+                serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+                    .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+            })
+            .collect()
+    }
+
+    fn load_approval<T: for<'de> Deserialize<'de>>(
+        &self,
+        kind: &str,
+        status: &str,
+        id: &str,
+    ) -> Result<T, String> {
+        let path = self.approval_path(kind, status, id)?;
+        if !path.exists() {
+            return Err(format!("approval `{id}` not found"));
+        }
+        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("failed to parse {}: {error}", path.display()))
     }
 
     /// Return an existing pending incoming approval or create it atomically.
@@ -588,7 +685,13 @@ impl StateStore {
         let from = self.approval_path(kind, "pending", id)?;
         let to = self.approval_path(kind, "approved", id)?;
         if from.exists() {
-            fs::rename(&from, &to).map_err(|error| error.to_string())
+            let mut record: serde_json::Value =
+                serde_json::from_slice(&fs::read(&from).map_err(|error| error.to_string())?)
+                    .map_err(|error| format!("failed to parse {}: {error}", from.display()))?;
+            validate_approval_record(&record, kind, "pending", id)?;
+            record["status"] = serde_json::Value::String("approved".to_owned());
+            atomic_json_write(&to, &record)?;
+            fs::remove_file(&from).map_err(|error| error.to_string())
         } else if to.exists() {
             Ok(())
         } else {
@@ -637,6 +740,30 @@ fn validate_approval_id(id: &str, prefix: &str) -> Result<(), String> {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     {
         return Err(format!("invalid approval id `{id}`"));
+    }
+    Ok(())
+}
+
+fn validate_approval_record(
+    record: &serde_json::Value,
+    kind: &str,
+    expected_status: &str,
+    id: &str,
+) -> Result<(), String> {
+    let expected_kind = match kind {
+        "incoming" => "incoming_read",
+        "outgoing" => "outgoing_send",
+        _ => return Err(format!("invalid approval kind `{kind}`")),
+    };
+    let field = |name: &str| record.get(name).and_then(serde_json::Value::as_str);
+    if field("id") != Some(id) {
+        return Err(format!("approval `{id}` has mismatched embedded id"));
+    }
+    if field("kind") != Some(expected_kind) {
+        return Err(format!("approval `{id}` has mismatched embedded kind"));
+    }
+    if field("status") != Some(expected_status) {
+        return Err(format!("approval `{id}` has mismatched embedded status"));
     }
     Ok(())
 }
@@ -1378,6 +1505,185 @@ impl<B: EmailBackend> Engine<B> {
         }
     }
 
+    fn dispatch_action(&mut self, action_id: &str, argv: &[String]) -> Result<String, String> {
+        match action_id {
+            "email.out.list" => require_no_args(argv).and_then(|()| self.action_out_list()),
+            "email.out.open" => require_one_arg(argv).and_then(|id| self.action_out_open(id)),
+            "email.out.approve" => require_one_arg(argv).and_then(|id| self.action_out_approve(id)),
+            "email.out.whitelist" => {
+                require_one_arg(argv).and_then(|pattern| self.action_out_whitelist(pattern))
+            }
+            "email.in.list" => require_no_args(argv).and_then(|()| self.action_in_list()),
+            "email.in.open" => require_one_arg(argv).and_then(|id| self.action_in_open(id)),
+            "email.in.approve" => require_one_arg(argv).and_then(|id| self.action_in_approve(id)),
+            "email.in.whitelist" => {
+                require_one_arg(argv).and_then(|pattern| self.action_in_whitelist(pattern))
+            }
+            _ => Err(format!("unsupported email action `{action_id}`")),
+        }
+    }
+
+    fn action_out_list(&self) -> Result<String, String> {
+        let approvals = self.state.list_pending_outgoing()?;
+        if approvals.is_empty() {
+            return Ok("No pending outgoing email approvals.".to_owned());
+        }
+        let mut lines = vec![format!(
+            "{} pending outgoing email approval(s):",
+            approvals.len()
+        )];
+        for approval in approvals {
+            let visible_blocked = approval
+                .blocked_recipients
+                .iter()
+                .filter(|recipient| !approval.bcc.contains(recipient))
+                .cloned()
+                .collect::<Vec<_>>();
+            lines.push(format!(
+                "{} account={} to={} cc={} blocked={} subject={}",
+                approval.id,
+                approval.account,
+                approval.to.join(","),
+                approval.cc.join(","),
+                visible_blocked.join(","),
+                approval.subject
+            ));
+        }
+        Ok(lines.join("\n"))
+    }
+
+    fn action_out_open(&self, id: &str) -> Result<String, String> {
+        validate_approval_id(id, "out")?;
+        let approval = self.state.pending_outgoing_by_id(id)?;
+        Ok(format!(
+            "Outgoing approval {id}\nstatus: {}\naccount: {}\nfrom: {}\nto: {}\ncc: {}\nbcc: {}\nsubject: {}\nreply_to: {}\nin_reply_to: {}\nblocked: {}\nreason: {}\n\n{}",
+            approval.status,
+            approval.account,
+            approval.from,
+            approval.to.join(", "),
+            approval.cc.join(", "),
+            approval.bcc.join(", "),
+            approval.subject,
+            approval.reply_to.as_deref().unwrap_or(""),
+            approval.in_reply_to.as_deref().unwrap_or(""),
+            approval.blocked_recipients.join(", "),
+            approval.reason,
+            approval.body_text
+        ))
+    }
+
+    fn action_out_approve(&mut self, id: &str) -> Result<String, String> {
+        validate_approval_id(id, "out")?;
+        match self.state.pending_outgoing_by_id(id) {
+            Ok(approval) => {
+                self.state.approve_outgoing(id)?;
+                Ok(format!(
+                    "Approved outgoing email {id}; repeat the matching email.send to send it. subject={} to={}",
+                    approval.subject,
+                    approval.to.join(",")
+                ))
+            }
+            Err(_) => {
+                let approval = self.state.approved_outgoing_by_id(id)?;
+                Ok(format!(
+                    "Outgoing email {id} is already approved; repeat the matching email.send to send it. subject={} to={}",
+                    approval.subject,
+                    approval.to.join(",")
+                ))
+            }
+        }
+    }
+
+    fn action_out_whitelist(&self, pattern: &str) -> Result<String, String> {
+        self.ensure_state_policy_extensions_enabled()?;
+        let record = allow_record(pattern, "approved from /email out whitelist")?;
+        self.state.append_outgoing_allow_record(record)?;
+        Ok(format!(
+            "Added outgoing email whitelist pattern `{pattern}`."
+        ))
+    }
+
+    fn action_in_list(&self) -> Result<String, String> {
+        let approvals = self.state.list_pending_incoming()?;
+        if approvals.is_empty() {
+            return Ok("No pending incoming email read approvals.".to_owned());
+        }
+        let mut lines = vec![format!(
+            "{} pending incoming email read approval(s):",
+            approvals.len()
+        )];
+        for approval in approvals {
+            lines.push(format!(
+                "{} account={} folder={} uid={} from={} date={} reason={}",
+                approval.id,
+                approval.account,
+                approval.folder,
+                approval.uid,
+                approval.from,
+                approval.date,
+                approval.reason
+            ));
+        }
+        Ok(lines.join("\n"))
+    }
+
+    fn action_in_open(&self, id: &str) -> Result<String, String> {
+        validate_approval_id(id, "in")?;
+        let approval = self.state.pending_incoming_by_id(id)?;
+        Ok(format!(
+            "Incoming approval {id}\nstatus: {}\naccount: {}\nfolder: {}\nuid: {}\nuidvalidity: {}\nfrom: {}\ndate: {}\nsubject_redacted: {}\nreason: {}\n\nContent is hidden until this read approval is approved or the sender is whitelisted.",
+            approval.status,
+            approval.account,
+            approval.folder,
+            approval.uid,
+            approval.uidvalidity,
+            approval.from,
+            approval.date,
+            approval.subject_redacted,
+            approval.reason
+        ))
+    }
+
+    fn action_in_approve(&mut self, id: &str) -> Result<String, String> {
+        validate_approval_id(id, "in")?;
+        match self.state.pending_incoming_by_id(id) {
+            Ok(approval) => {
+                self.state.approve_incoming(id)?;
+                Ok(format!(
+                    "Approved incoming email read {id}; repeat the matching email.read for account={} folder={} uid={} to fetch content.",
+                    approval.account, approval.folder, approval.uid
+                ))
+            }
+            Err(_) => {
+                let approval = self.state.approved_incoming_by_id(id)?;
+                Ok(format!(
+                    "Incoming email read {id} is already approved; repeat the matching email.read for account={} folder={} uid={} to fetch content.",
+                    approval.account, approval.folder, approval.uid
+                ))
+            }
+        }
+    }
+
+    fn action_in_whitelist(&self, pattern: &str) -> Result<String, String> {
+        self.ensure_state_policy_extensions_enabled()?;
+        let record = allow_record(pattern, "approved from /email in whitelist")?;
+        self.state.append_incoming_allow_record(record)?;
+        Ok(format!(
+            "Added incoming email whitelist pattern `{pattern}`."
+        ))
+    }
+
+    fn ensure_state_policy_extensions_enabled(&self) -> Result<(), String> {
+        if self.config.policy.allow_state_policy_extensions {
+            Ok(())
+        } else {
+            Err(
+                "state policy extensions are disabled; whitelist actions cannot add active policy"
+                    .to_owned(),
+            )
+        }
+    }
+
     fn incoming_decision(&self, message: &BackendMessage) -> PolicyDecision {
         self.address_decision(
             &message.from,
@@ -1445,6 +1751,44 @@ impl<B: EmailBackend> Engine<B> {
             .cloned()
             .collect()
     }
+}
+
+fn require_no_args(argv: &[String]) -> Result<(), String> {
+    if argv.is_empty() {
+        Ok(())
+    } else {
+        Err("this email action does not accept arguments".to_owned())
+    }
+}
+
+fn require_one_arg(argv: &[String]) -> Result<&str, String> {
+    match argv {
+        [value] if !value.trim().is_empty() => Ok(value),
+        [_] => Err("action argument must not be empty".to_owned()),
+        [] => Err("missing required action argument".to_owned()),
+        _ => Err("too many action arguments".to_owned()),
+    }
+}
+
+fn allow_record(pattern: &str, note: &str) -> Result<StatePattern, String> {
+    let compiled = AddressPattern::compile(pattern)?;
+    let kind = match compiled {
+        AddressPattern::Exact { .. } => "exact",
+        AddressPattern::Glob { .. } => "glob",
+        AddressPattern::Regex { .. } => "regex",
+    };
+    let pattern = if let Some(regex) = pattern.strip_prefix("re:") {
+        regex.to_owned()
+    } else {
+        pattern.to_owned()
+    };
+    Ok(StatePattern {
+        kind: kind.to_owned(),
+        pattern,
+        created_at: "now".to_owned(),
+        created_by: "cli".to_owned(),
+        note: Some(note.to_owned()),
+    })
 }
 
 #[derive(Default)]
@@ -1531,6 +1875,33 @@ impl RuntimeState {
             }
         }
     }
+
+    fn dispatch_action(&mut self, invoke: ActionInvoke) -> Event {
+        let result = match &mut self.config_state {
+            ConfigState::Configured(engine) => {
+                engine.dispatch_action(&invoke.action_id, &invoke.argv)
+            }
+            ConfigState::Unconfigured => {
+                Err("Configure.state_dir has not been received".to_owned())
+            }
+            ConfigState::Rejected { reason } => Err(format!(
+                "email extension configuration was rejected: {reason}"
+            )),
+        };
+        match result {
+            Ok(text) => Event::ActionResult(ActionResult {
+                invocation_id: invoke.invocation_id,
+                action_id: invoke.action_id,
+                output: ActionOutput::Text { text },
+            }),
+            Err(message) => Event::ActionError(ActionError {
+                invocation_id: invoke.invocation_id,
+                action_id: invoke.action_id,
+                message,
+                details: None,
+            }),
+        }
+    }
 }
 
 fn ack_log_event<W: Write>(
@@ -1557,6 +1928,109 @@ fn email_tool_spec() -> ToolSpec {
         enabled_by_default: true,
         execution_mode: ToolExecutionMode::Exclusive,
         background_support: None,
+    }
+}
+
+fn email_action_schema() -> ActionSchema {
+    fn string_arg(name: &str, description: &str) -> ActionArg {
+        ActionArg {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            required: true,
+            kind: ActionArgKind::String,
+        }
+    }
+    fn leaf(name: &str, action_id: &str, description: &str, args: Vec<ActionArg>) -> ActionCommand {
+        ActionCommand {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            action_id: Some(action_id.to_owned()),
+            args,
+            children: Vec::new(),
+        }
+    }
+    fn group(name: &str, description: &str, children: Vec<ActionCommand>) -> ActionCommand {
+        ActionCommand {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            action_id: None,
+            args: Vec::new(),
+            children,
+        }
+    }
+
+    let id_arg = || string_arg("id", "approval id");
+    let pattern_arg = || string_arg("pattern", "glob or email address");
+    ActionSchema {
+        version: ACTION_SCHEMA_VERSION,
+        roots: vec![ActionCommand {
+            name: "/email".to_owned(),
+            description: "Review and approve email access".to_owned(),
+            action_id: None,
+            args: Vec::new(),
+            children: vec![
+                group(
+                    "out",
+                    "Outgoing email approval actions",
+                    vec![
+                        leaf(
+                            "list",
+                            "email.out.list",
+                            "List pending outgoing approvals",
+                            Vec::new(),
+                        ),
+                        leaf(
+                            "open",
+                            "email.out.open",
+                            "Inspect an outgoing draft",
+                            vec![id_arg()],
+                        ),
+                        leaf(
+                            "approve",
+                            "email.out.approve",
+                            "Approve an outgoing draft",
+                            vec![id_arg()],
+                        ),
+                        leaf(
+                            "whitelist",
+                            "email.out.whitelist",
+                            "Allow outgoing recipients matching a pattern",
+                            vec![pattern_arg()],
+                        ),
+                    ],
+                ),
+                group(
+                    "in",
+                    "Incoming email read approval actions",
+                    vec![
+                        leaf(
+                            "list",
+                            "email.in.list",
+                            "List pending incoming read approvals",
+                            Vec::new(),
+                        ),
+                        leaf(
+                            "open",
+                            "email.in.open",
+                            "Inspect safe incoming approval metadata",
+                            vec![id_arg()],
+                        ),
+                        leaf(
+                            "approve",
+                            "email.in.approve",
+                            "Approve an incoming read",
+                            vec![id_arg()],
+                        ),
+                        leaf(
+                            "whitelist",
+                            "email.in.whitelist",
+                            "Allow incoming senders matching a pattern",
+                            vec![pattern_arg()],
+                        ),
+                    ],
+                ),
+            ],
+        }],
     }
 }
 
