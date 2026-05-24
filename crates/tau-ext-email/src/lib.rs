@@ -9,6 +9,7 @@ use std::error::Error;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use globset::{Glob, GlobMatcher};
 use regex::Regex;
@@ -736,6 +737,12 @@ impl AddressPattern {
         if input.trim().is_empty() {
             return Err("allow pattern must not be empty".to_owned());
         }
+        if input
+            .chars()
+            .any(|ch| ch.is_control() || is_unsafe_format_control(ch))
+        {
+            return Err("allow pattern must not contain control characters".to_owned());
+        }
         if let Some(regex) = input.strip_prefix("re:") {
             let compiled = Regex::new(&format!("^(?:{regex})$"))
                 .map_err(|error| format!("invalid regex pattern `{input}`: {error}"))?;
@@ -818,6 +825,9 @@ fn incoming_auth_decision(
     message: &BackendMessage,
     policy: &ValidatedIncomingAuthPolicy,
 ) -> PolicyDecision {
+    if message.source_truncated && message.body_text.is_empty() {
+        return PolicyDecision::denied("auth truncated");
+    }
     if message.auth_results.is_empty() {
         return PolicyDecision::denied("auth missing");
     }
@@ -918,6 +928,18 @@ fn validate_folder_pattern(pattern: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_mailbox_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty()
+        || MAX_HEADER_VALUE_CHARS < name.chars().count()
+        || name
+            .chars()
+            .any(|ch| ch.is_control() || is_unsafe_format_control(ch))
+    {
+        return Err("folder name is invalid".to_owned());
+    }
+    Ok(())
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct PolicyFile {
     schema: u32,
@@ -953,9 +975,11 @@ impl StateStore {
         for dir in [
             "policy",
             "approvals/incoming/pending",
+            "approvals/incoming/sending",
             "approvals/incoming/approved",
             "approvals/incoming/denied",
             "approvals/outgoing/pending",
+            "approvals/outgoing/sending",
             "approvals/outgoing/approved",
             "approvals/outgoing/denied",
         ] {
@@ -1004,32 +1028,32 @@ impl StateStore {
 
     /// Load pending incoming read approvals in deterministic order.
     pub fn list_pending_incoming(&self) -> Result<Vec<IncomingApproval>, String> {
-        self.list_approvals("incoming", "pending")
+        self.list_incoming_approvals("pending")
     }
 
     /// Load pending outgoing send approvals in deterministic order.
     pub fn list_pending_outgoing(&self) -> Result<Vec<OutgoingApproval>, String> {
-        self.list_approvals("outgoing", "pending")
+        self.list_outgoing_approvals("pending")
     }
 
     /// Load one pending incoming read approval by id.
     pub fn pending_incoming_by_id(&self, id: &str) -> Result<IncomingApproval, String> {
-        self.load_approval("incoming", "pending", id)
+        self.load_incoming_approval("pending", id)
     }
 
     /// Load one pending outgoing send approval by id.
     pub fn pending_outgoing_by_id(&self, id: &str) -> Result<OutgoingApproval, String> {
-        self.load_approval("outgoing", "pending", id)
+        self.load_outgoing_approval("pending", id)
     }
 
     /// Load one approved incoming read approval by id.
     pub fn approved_incoming_by_id(&self, id: &str) -> Result<IncomingApproval, String> {
-        self.load_approval("incoming", "approved", id)
+        self.load_incoming_approval("approved", id)
     }
 
     /// Load one approved outgoing send approval by id.
     pub fn approved_outgoing_by_id(&self, id: &str) -> Result<OutgoingApproval, String> {
-        self.load_approval("outgoing", "approved", id)
+        self.load_outgoing_approval("approved", id)
     }
 
     fn load_allow_file(&self, name: &str) -> Result<Vec<AddressPattern>, String> {
@@ -1107,32 +1131,78 @@ impl StateStore {
             .map_err(|error| format!("failed to parse {}: {error}", path.display()))
     }
 
+    fn list_incoming_approvals(&self, status: &str) -> Result<Vec<IncomingApproval>, String> {
+        self.list_approvals::<IncomingApproval>("incoming", status)?
+            .into_iter()
+            .map(|approval| {
+                validate_incoming_approval(&approval, status, None)?;
+                Ok(approval)
+            })
+            .collect()
+    }
+
+    fn list_outgoing_approvals(&self, status: &str) -> Result<Vec<OutgoingApproval>, String> {
+        self.list_approvals::<OutgoingApproval>("outgoing", status)?
+            .into_iter()
+            .map(|approval| {
+                validate_outgoing_approval(&approval, status, None)?;
+                Ok(approval)
+            })
+            .collect()
+    }
+
+    fn load_incoming_approval(&self, status: &str, id: &str) -> Result<IncomingApproval, String> {
+        let approval = self.load_approval("incoming", status, id)?;
+        validate_incoming_approval(&approval, status, Some(id))?;
+        Ok(approval)
+    }
+
+    fn load_outgoing_approval(&self, status: &str, id: &str) -> Result<OutgoingApproval, String> {
+        let approval = self.load_approval("outgoing", status, id)?;
+        validate_outgoing_approval(&approval, status, Some(id))?;
+        Ok(approval)
+    }
+
+    fn sending_outgoing_by_id(&self, id: &str) -> Result<OutgoingApproval, String> {
+        self.load_outgoing_approval("sending", id)
+    }
+
     /// Return an existing pending incoming approval or create it atomically.
     pub fn pending_incoming(&self, request: &IncomingApproval) -> Result<String, String> {
-        for approval in self.list_pending_incoming()? {
-            if incoming_approval_matches_target(&approval, request) {
-                return Ok(approval.id);
+        loop {
+            for approval in self.list_pending_incoming()? {
+                if incoming_approval_matches_target(&approval, request) {
+                    return Ok(approval.id);
+                }
+            }
+            let mut request = request.clone();
+            request.id = self.next_approval_id("incoming")?;
+            let path = self.approval_path("incoming", "pending", &request.id)?;
+            match atomic_json_create_new(&path, &request) {
+                Ok(()) => return Ok(request.id),
+                Err(CreateNewJsonError::AlreadyExists) => continue,
+                Err(CreateNewJsonError::Other(message)) => return Err(message),
             }
         }
-        let mut request = request.clone();
-        request.id = self.next_approval_id("incoming")?;
-        let path = self.approval_path("incoming", "pending", &request.id)?;
-        atomic_json_write(&path, &request)?;
-        Ok(request.id)
     }
 
     /// Return an existing pending outgoing approval or create it atomically.
     pub fn pending_outgoing(&self, request: &OutgoingApproval) -> Result<String, String> {
-        for approval in self.list_pending_outgoing()? {
-            if outgoing_approval_matches_message(&approval, request) {
-                return Ok(approval.id);
+        loop {
+            for approval in self.list_pending_outgoing()? {
+                if outgoing_approval_matches_message(&approval, request) {
+                    return Ok(approval.id);
+                }
+            }
+            let mut request = request.clone();
+            request.id = self.next_approval_id("outgoing")?;
+            let path = self.approval_path("outgoing", "pending", &request.id)?;
+            match atomic_json_create_new(&path, &request) {
+                Ok(()) => return Ok(request.id),
+                Err(CreateNewJsonError::AlreadyExists) => continue,
+                Err(CreateNewJsonError::Other(message)) => return Err(message),
             }
         }
-        let mut request = request.clone();
-        request.id = self.next_approval_id("outgoing")?;
-        let path = self.approval_path("outgoing", "pending", &request.id)?;
-        atomic_json_write(&path, &request)?;
-        Ok(request.id)
     }
 
     /// Mark an incoming approval ID as approved by moving/writing it to
@@ -1147,6 +1217,47 @@ impl StateStore {
         self.approve("outgoing", id)
     }
 
+    fn outgoing_pending_exists(&self, id: &str) -> Result<bool, String> {
+        Ok(self.approval_path("outgoing", "pending", id)?.exists())
+    }
+
+    fn outgoing_sending_exists(&self, id: &str) -> Result<bool, String> {
+        Ok(self.approval_path("outgoing", "sending", id)?.exists())
+    }
+
+    fn claim_outgoing(&self, id: &str) -> Result<OutgoingApproval, String> {
+        let approval = self.pending_outgoing_by_id(id)?;
+        let mut sending = approval.clone();
+        sending.status = "sending".to_owned();
+        let sending_path = self.approval_path("outgoing", "sending", id)?;
+        match atomic_json_create_new(&sending_path, &sending) {
+            Ok(()) => {}
+            Err(CreateNewJsonError::AlreadyExists) => {
+                return Err(format!("approval `{id}` is already being sent"));
+            }
+            Err(CreateNewJsonError::Other(message)) => return Err(message),
+        }
+        let pending_path = self.approval_path("outgoing", "pending", id)?;
+        if let Err(error) = fs::remove_file(&pending_path) {
+            let _ = fs::remove_file(&sending_path);
+            return Err(error.to_string());
+        }
+        Ok(approval)
+    }
+
+    fn complete_outgoing(&self, id: &str, message_id: &str) -> Result<(), String> {
+        let mut approval = self.sending_outgoing_by_id(id)?;
+        approval.status = "approved".to_owned();
+        approval.sent_message_id = Some(safe_model_line(message_id, MAX_HEADER_VALUE_CHARS));
+        let approved_path = self.approval_path("outgoing", "approved", id)?;
+        match atomic_json_create_new(&approved_path, &approval) {
+            Ok(()) | Err(CreateNewJsonError::AlreadyExists) => {}
+            Err(CreateNewJsonError::Other(message)) => return Err(message),
+        }
+        fs::remove_file(self.approval_path("outgoing", "sending", id)?)
+            .map_err(|error| error.to_string())
+    }
+
     fn approve(&self, kind: &str, id: &str) -> Result<(), String> {
         validate_approval_id(id)?;
         let from = self.approval_path(kind, "pending", id)?;
@@ -1157,8 +1268,15 @@ impl StateStore {
                     .map_err(|error| format!("failed to parse {}: {error}", from.display()))?;
             validate_approval_record(&record, kind, "pending", id)?;
             record["status"] = serde_json::Value::String("approved".to_owned());
-            atomic_json_write(&to, &record)?;
-            fs::remove_file(&from).map_err(|error| error.to_string())
+            match atomic_json_create_new(&to, &record) {
+                Ok(()) | Err(CreateNewJsonError::AlreadyExists) => {}
+                Err(CreateNewJsonError::Other(message)) => return Err(message),
+            }
+            match fs::remove_file(&from) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.to_string()),
+            }
         } else if to.exists() {
             Ok(())
         } else {
@@ -1166,17 +1284,18 @@ impl StateStore {
         }
     }
 
-    fn incoming_approved_exact(&self, target: &IncomingTarget) -> bool {
-        self.list_approvals::<IncomingApproval>("incoming", "approved")
+    fn incoming_approved_exact(&self, target: &IncomingTarget, metadata: &BackendMessage) -> bool {
+        self.list_incoming_approvals("approved")
             .is_ok_and(|approvals| {
-                approvals
-                    .iter()
-                    .any(|approval| incoming_approval_matches_target_tuple(approval, target))
+                approvals.iter().any(|approval| {
+                    incoming_approval_matches_target_tuple(approval, target)
+                        && incoming_approval_matches_message_metadata(approval, metadata)
+                })
             })
     }
 
     fn outgoing_approved_exact(&self, message: &OutgoingMessage) -> bool {
-        self.list_approvals::<OutgoingApproval>("outgoing", "approved")
+        self.list_outgoing_approvals("approved")
             .is_ok_and(|approvals| {
                 approvals
                     .iter()
@@ -1197,7 +1316,7 @@ impl StateStore {
 
     fn next_approval_id(&self, kind: &str) -> Result<String, String> {
         let mut max_id = 0_u64;
-        for status in ["pending", "approved", "denied"] {
+        for status in ["pending", "sending", "approved", "denied"] {
             let dir = self.state_dir.join("approvals").join(kind).join(status);
             for entry in fs::read_dir(&dir)
                 .map_err(|error| format!("failed to read {}: {error}", dir.display()))?
@@ -1209,8 +1328,10 @@ impl StateStore {
                 let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
                     continue;
                 };
-                if let Ok(id) = stem.parse::<u64>() {
-                    max_id = max_id.max(id);
+                if let Ok(id) = stem.parse::<u64>()
+                    && max_id < id
+                {
+                    max_id = id;
                 }
             }
         }
@@ -1227,8 +1348,153 @@ fn approval_prefix(kind: &str) -> Result<&'static str, String> {
 }
 
 fn validate_approval_id(id: &str) -> Result<(), String> {
-    if id.is_empty() || id.contains(['/', '\\', '\0']) || !id.bytes().all(|b| b.is_ascii_digit()) {
+    let Ok(value) = id.parse::<u64>() else {
         return Err(format!("invalid approval id `{id}`"));
+    };
+    if value == 0 || id.contains(['/', '\\', '\0']) || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("invalid approval id `{id}`"));
+    }
+    Ok(())
+}
+
+fn is_safe_persisted_line(value: &str, max_chars: usize) -> bool {
+    value.chars().count() <= max_chars
+        && !value
+            .chars()
+            .any(|ch| ch.is_control() || is_unsafe_format_control(ch))
+}
+
+fn validate_optional_persisted_line(
+    value: Option<&String>,
+    field: &str,
+    max_chars: usize,
+) -> Result<(), String> {
+    if let Some(value) = value
+        && !is_safe_persisted_line(value, max_chars)
+    {
+        return Err(format!("approval field `{field}` contains unsafe text"));
+    }
+    Ok(())
+}
+
+fn validate_incoming_approval(
+    approval: &IncomingApproval,
+    expected_status: &str,
+    expected_id: Option<&str>,
+) -> Result<(), String> {
+    if approval.schema != 1 {
+        return Err(format!("approval `{}` has unsupported schema", approval.id));
+    }
+    validate_approval_id(&approval.id)?;
+    if let Some(expected_id) = expected_id
+        && approval.id != expected_id
+    {
+        return Err(format!(
+            "approval `{expected_id}` has mismatched embedded id"
+        ));
+    }
+    if approval.kind != "incoming_read" {
+        return Err(format!(
+            "approval `{}` has mismatched embedded kind",
+            approval.id
+        ));
+    }
+    if approval.status != expected_status {
+        return Err(format!(
+            "approval `{}` has mismatched embedded status",
+            approval.id
+        ));
+    }
+    if approval.account.trim().is_empty()
+        || approval.folder.trim().is_empty()
+        || !is_single_uid(&approval.uid)
+        || !is_safe_persisted_line(&approval.account, MAX_HEADER_VALUE_CHARS)
+        || !is_safe_persisted_line(&approval.folder, MAX_HEADER_VALUE_CHARS)
+        || !is_safe_persisted_line(&approval.uidvalidity, MAX_HEADER_VALUE_CHARS)
+        || !is_safe_persisted_line(&approval.from, MAX_ADDRESS_CHARS)
+        || !is_safe_persisted_line(&approval.date, MAX_HEADER_VALUE_CHARS)
+        || !is_safe_persisted_line(&approval.reason, MAX_HEADER_VALUE_CHARS)
+    {
+        return Err(format!(
+            "approval `{}` contains unsafe metadata",
+            approval.id
+        ));
+    }
+    validate_optional_persisted_line(
+        approval.message_id.as_ref(),
+        "message_id",
+        MAX_HEADER_VALUE_CHARS,
+    )
+}
+
+fn validate_outgoing_approval(
+    approval: &OutgoingApproval,
+    expected_status: &str,
+    expected_id: Option<&str>,
+) -> Result<(), String> {
+    if approval.schema != 1 {
+        return Err(format!("approval `{}` has unsupported schema", approval.id));
+    }
+    validate_approval_id(&approval.id)?;
+    if let Some(expected_id) = expected_id
+        && approval.id != expected_id
+    {
+        return Err(format!(
+            "approval `{expected_id}` has mismatched embedded id"
+        ));
+    }
+    if approval.kind != "outgoing_send" {
+        return Err(format!(
+            "approval `{}` has mismatched embedded kind",
+            approval.id
+        ));
+    }
+    if approval.status != expected_status {
+        return Err(format!(
+            "approval `{}` has mismatched embedded status",
+            approval.id
+        ));
+    }
+    if approval.account.trim().is_empty()
+        || approval.from.trim().is_empty()
+        || approval.to.is_empty()
+        || !is_safe_persisted_line(&approval.account, MAX_HEADER_VALUE_CHARS)
+        || !is_safe_persisted_line(&approval.from, MAX_HEADER_VALUE_CHARS)
+        || !is_safe_persisted_line(&approval.subject, MAX_HEADER_VALUE_CHARS)
+        || !is_safe_persisted_line(&approval.reason, MAX_HEADER_VALUE_CHARS)
+        || READ_BODY_MAX_BYTES < approval.body_text.len()
+        || READ_BODY_MAX_LINES < approval.body_text.lines().count()
+    {
+        return Err(format!(
+            "approval `{}` contains unsafe metadata",
+            approval.id
+        ));
+    }
+    validate_optional_persisted_line(approval.reply_to.as_ref(), "reply_to", MAX_ADDRESS_CHARS)?;
+    validate_optional_persisted_line(
+        approval.in_reply_to.as_ref(),
+        "in_reply_to",
+        MAX_HEADER_VALUE_CHARS,
+    )?;
+    validate_optional_persisted_line(
+        approval.sent_message_id.as_ref(),
+        "sent_message_id",
+        MAX_HEADER_VALUE_CHARS,
+    )?;
+    validate_recipient_values(&approval.to)?;
+    validate_recipient_values(&approval.cc)?;
+    validate_recipient_values(&approval.bcc)?;
+    validate_recipient_values(&approval.blocked_recipients)
+}
+
+fn validate_recipient_values(values: &[String]) -> Result<(), String> {
+    if MAX_RECIPIENTS < values.len() {
+        return Err("approval contains too many recipients".to_owned());
+    }
+    for value in values {
+        if normalize_address(value).is_none() || !is_safe_persisted_line(value, MAX_ADDRESS_CHARS) {
+            return Err("approval contains an invalid recipient".to_owned());
+        }
     }
     Ok(())
 }
@@ -1238,16 +1504,42 @@ fn incoming_approval_matches_target(left: &IncomingApproval, right: &IncomingApp
         && left.folder == right.folder
         && left.uid == right.uid
         && left.uidvalidity == right.uidvalidity
+        && left.from == right.from
+        && left.date == right.date
+        && left.message_id == right.message_id
 }
 
 fn incoming_approval_matches_target_tuple(
     approval: &IncomingApproval,
     target: &IncomingTarget,
 ) -> bool {
-    approval.account == target.account
-        && approval.folder == target.folder
-        && approval.uid == target.uid
-        && approval.uidvalidity == target.uidvalidity
+    approval.account == safe_model_line(&target.account, MAX_HEADER_VALUE_CHARS)
+        && approval.folder == safe_model_line(&target.folder, MAX_HEADER_VALUE_CHARS)
+        && approval.uid == safe_model_line(&target.uid, MAX_HEADER_VALUE_CHARS)
+        && approval.uidvalidity == safe_model_line(&target.uidvalidity, MAX_HEADER_VALUE_CHARS)
+}
+
+fn incoming_approval_matches_message_metadata(
+    approval: &IncomingApproval,
+    metadata: &BackendMessage,
+) -> bool {
+    approval.from == incoming_approval_from(metadata)
+        && approval.date == safe_model_line(&metadata.date, MAX_HEADER_VALUE_CHARS)
+        && approval.message_id == incoming_approval_message_id(metadata)
+}
+
+fn incoming_approval_from(message: &BackendMessage) -> String {
+    safe_model_line(
+        &normalize_address(&message.from).unwrap_or_else(|| message.from.clone()),
+        MAX_ADDRESS_CHARS,
+    )
+}
+
+fn incoming_approval_message_id(message: &BackendMessage) -> Option<String> {
+    message
+        .message_id
+        .as_deref()
+        .map(|message_id| safe_model_line(message_id, MAX_HEADER_VALUE_CHARS))
 }
 
 fn outgoing_approval_matches_message(left: &OutgoingApproval, right: &OutgoingApproval) -> bool {
@@ -1288,6 +1580,9 @@ fn validate_approval_record(
         "outgoing" => "outgoing_send",
         _ => return Err(format!("invalid approval kind `{kind}`")),
     };
+    if record.get("schema").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err(format!("approval `{id}` has unsupported schema"));
+    }
     let field = |name: &str| record.get(name).and_then(serde_json::Value::as_str);
     if field("id") != Some(id) {
         return Err(format!("approval `{id}` has mismatched embedded id"));
@@ -1301,24 +1596,61 @@ fn validate_approval_record(
     Ok(())
 }
 
-fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+#[derive(Debug)]
+enum CreateNewJsonError {
+    AlreadyExists,
+    Other(String),
+}
+
+fn temp_json_path(parent: &Path, path: &Path) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!(
+        ".{}.tmp-{}-{nonce}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("state"),
+        std::process::id()
+    ))
+}
+
+fn write_json_temp<T: Serialize>(path: &Path, value: &T) -> Result<PathBuf, String> {
     let parent = path
         .parent()
         .ok_or_else(|| "state path has no parent".to_owned())?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let tmp = parent.join(format!(
-        ".{}.tmp-{}",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("state"),
-        std::process::id()
-    ));
+    let tmp = temp_json_path(parent, path);
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
     {
         let mut file = fs::File::create(&tmp).map_err(|error| error.to_string())?;
         file.write_all(&bytes).map_err(|error| error.to_string())?;
         file.sync_all().map_err(|error| error.to_string())?;
     }
+    Ok(tmp)
+}
+
+fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let tmp = write_json_temp(path, value)?;
     fs::rename(&tmp, path).map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn atomic_json_create_new<T: Serialize>(path: &Path, value: &T) -> Result<(), CreateNewJsonError> {
+    let tmp = write_json_temp(path, value).map_err(CreateNewJsonError::Other)?;
+    match fs::hard_link(&tmp, path) {
+        Ok(()) => {
+            let _ = fs::remove_file(&tmp);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(&tmp);
+            Err(CreateNewJsonError::AlreadyExists)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            Err(CreateNewJsonError::Other(error.to_string()))
+        }
+    }
 }
 
 /// Minimal backend abstraction used by command handlers.
@@ -1434,8 +1766,8 @@ pub struct BackendMessage {
     pub subject: String,
     /// Message body text. Metadata-only fetches leave this empty.
     pub body_text: String,
-    /// Whether the backend could not inspect the complete source message, such
-    /// as after a bounded fetch or RFC822 parse failure.
+    /// Whether the backend could not inspect the complete source message or
+    /// metadata headers, such as after a bounded fetch or RFC822 parse failure.
     pub source_truncated: bool,
     /// Minimal flags.
     pub flags: Vec<String>,
@@ -1486,6 +1818,9 @@ pub struct IncomingApproval {
     pub from: String,
     /// Message date.
     pub date: String,
+    /// Optional Message-ID captured to detect stale or overwritten approvals.
+    #[serde(default)]
+    pub message_id: Option<String>,
     /// Whether subject is redacted in the approval-required tool output.
     pub subject_redacted: bool,
     /// Denial/approval reason.
@@ -1549,6 +1884,9 @@ pub struct OutgoingApproval {
     pub blocked_recipients: Vec<String>,
     /// Denial/approval reason.
     pub reason: String,
+    /// SMTP Message-ID recorded after a successful approval send.
+    #[serde(default)]
+    pub sent_message_id: Option<String>,
 }
 
 fn outgoing_approval_message(approval: &OutgoingApproval) -> OutgoingMessage {
@@ -1620,18 +1958,6 @@ fn truncate_body(body: &str) -> BodyTruncation {
         total_lines: total_lines as u64,
         total_bytes: total_bytes as u64,
     }
-}
-
-fn cap_chars(value: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (index, ch) in value.chars().enumerate() {
-        if index == max_chars {
-            out.push('…');
-            break;
-        }
-        out.push(ch);
-    }
-    out
 }
 
 fn is_unsafe_format_control(ch: char) -> bool {
@@ -1721,7 +2047,8 @@ fn parse_cursor(cursor: Option<&str>) -> Result<usize, String> {
 }
 
 fn is_single_uid(uid: &str) -> bool {
-    !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit())
+    uid.parse::<u32>()
+        .is_ok_and(|value| 0 < value && uid.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 struct Engine<B> {
@@ -1888,6 +2215,9 @@ impl<B: EmailBackend> Engine<B> {
             Ok(a) => a,
             Err(e) => return e,
         };
+        if let Err(message) = validate_mailbox_name(folder) {
+            return error_envelope(Some("list"), "invalid_input", &message);
+        }
         if !account.folders.allows(folder) {
             return error_envelope(
                 Some("list"),
@@ -1993,6 +2323,9 @@ impl<B: EmailBackend> Engine<B> {
             Ok(a) => a,
             Err(e) => return e,
         };
+        if let Err(message) = validate_mailbox_name(folder) {
+            return error_envelope(Some("read"), "invalid_input", &message);
+        }
         if !account.folders.allows(folder) {
             return error_envelope(
                 Some("read"),
@@ -2028,7 +2361,7 @@ impl<B: EmailBackend> Engine<B> {
             uidvalidity: metadata.uidvalidity.clone(),
         };
         let mut decision = self.incoming_decision(&metadata);
-        if !decision.allowed && self.state.incoming_approved_exact(&target) {
+        if !decision.allowed && self.state.incoming_approved_exact(&target, &metadata) {
             decision = PolicyDecision::allowed(Some("approval".to_owned()));
         }
         if decision.allowed {
@@ -2150,15 +2483,13 @@ impl<B: EmailBackend> Engine<B> {
             id: String::new(),
             kind: "incoming_read".to_owned(),
             status: "pending".to_owned(),
-            account: cap_chars(account_id, MAX_HEADER_VALUE_CHARS),
-            folder: cap_chars(folder, MAX_HEADER_VALUE_CHARS),
-            uid: cap_chars(uid, MAX_HEADER_VALUE_CHARS),
-            uidvalidity: cap_chars(&target.uidvalidity, MAX_HEADER_VALUE_CHARS),
-            from: safe_model_line(
-                &normalize_address(&metadata.from).unwrap_or(metadata.from),
-                MAX_ADDRESS_CHARS,
-            ),
+            account: safe_model_line(account_id, MAX_HEADER_VALUE_CHARS),
+            folder: safe_model_line(folder, MAX_HEADER_VALUE_CHARS),
+            uid: safe_model_line(uid, MAX_HEADER_VALUE_CHARS),
+            uidvalidity: safe_model_line(&target.uidvalidity, MAX_HEADER_VALUE_CHARS),
+            from: incoming_approval_from(&metadata),
             date: safe_model_line(&metadata.date, MAX_HEADER_VALUE_CHARS),
+            message_id: incoming_approval_message_id(&metadata),
             subject_redacted: true,
             reason: decision.reason,
         };
@@ -2229,6 +2560,14 @@ impl<B: EmailBackend> Engine<B> {
             );
         }
         let from_identity = account_cfg.from_identity.clone();
+        let recipient_count = to
+            .len()
+            .saturating_add(cc.len())
+            .saturating_add(bcc.len())
+            .saturating_add(usize::from(reply_to.is_some()));
+        if MAX_RECIPIENTS < recipient_count {
+            return error_envelope(Some("send"), "invalid_input", "too many recipients");
+        }
         let mut invalid = Vec::new();
         for r in to
             .iter()
@@ -2236,7 +2575,10 @@ impl<B: EmailBackend> Engine<B> {
             .chain(bcc.iter())
             .chain(reply_to.iter())
         {
-            if normalize_address(r).is_none() {
+            if normalize_address(r).is_none()
+                || MAX_ADDRESS_CHARS < r.chars().count()
+                || !is_safe_persisted_line(r, MAX_ADDRESS_CHARS)
+            {
                 invalid.push(r.clone());
             }
         }
@@ -2247,28 +2589,39 @@ impl<B: EmailBackend> Engine<B> {
                 "recipient address is invalid",
             );
         }
+        if MAX_HEADER_VALUE_CHARS < subject.chars().count()
+            || !is_safe_persisted_line(&subject, MAX_HEADER_VALUE_CHARS)
+        {
+            return error_envelope(
+                Some("send"),
+                "invalid_input",
+                "subject is too large or contains unsafe characters",
+            );
+        }
+        if READ_BODY_MAX_BYTES < body_text.len() || READ_BODY_MAX_LINES < body_text.lines().count()
+        {
+            return error_envelope(Some("send"), "invalid_input", "body_text is too large");
+        }
+        if let Some(value) = &in_reply_to
+            && (MAX_HEADER_VALUE_CHARS < value.chars().count()
+                || !is_safe_persisted_line(value, MAX_HEADER_VALUE_CHARS))
+        {
+            return error_envelope(
+                Some("send"),
+                "invalid_input",
+                "in_reply_to is too large or contains unsafe characters",
+            );
+        }
         let message = OutgoingMessage {
             account: account_id.clone(),
             from: from_identity,
-            to: to
-                .into_iter()
-                .take(MAX_RECIPIENTS)
-                .map(|value| cap_chars(&value, MAX_ADDRESS_CHARS))
-                .collect(),
-            cc: cc
-                .into_iter()
-                .take(MAX_RECIPIENTS)
-                .map(|value| cap_chars(&value, MAX_ADDRESS_CHARS))
-                .collect(),
-            bcc: bcc
-                .into_iter()
-                .take(MAX_RECIPIENTS)
-                .map(|value| cap_chars(&value, MAX_ADDRESS_CHARS))
-                .collect(),
-            subject: cap_chars(&subject, MAX_HEADER_VALUE_CHARS),
-            body_text: truncate_body(&body_text).body_text,
-            reply_to: reply_to.map(|value| cap_chars(&value, MAX_ADDRESS_CHARS)),
-            in_reply_to: in_reply_to.map(|value| cap_chars(&value, MAX_HEADER_VALUE_CHARS)),
+            to,
+            cc,
+            bcc,
+            subject,
+            body_text,
+            reply_to,
+            in_reply_to,
         };
         let blocked = self.blocked_recipients(&message);
         if blocked.is_empty() {
@@ -2332,6 +2685,7 @@ impl<B: EmailBackend> Engine<B> {
             in_reply_to: message.in_reply_to.clone(),
             blocked_recipients: blocked.clone(),
             reason: "recipient_not_whitelisted".to_owned(),
+            sent_message_id: None,
         };
         match self.state.pending_outgoing(&approval) {
             Ok(id) => {
@@ -2472,37 +2826,42 @@ impl<B: EmailBackend> Engine<B> {
 
     fn action_out_approve(&mut self, id: &str) -> Result<String, String> {
         validate_approval_id(id)?;
-        match self.state.pending_outgoing_by_id(id) {
-            Ok(approval) => {
-                let message = outgoing_approval_message(&approval);
-                let message_id = self
-                    .backend
-                    .send_message(&message)
-                    .map_err(|message| backend_error_text(&message))?;
-                let message_id = safe_display_line(&message_id);
-                match self.state.approve_outgoing(id) {
-                    Ok(()) => Ok(format!(
-                        "Sent approved outgoing email {id}. message_id={message_id} subject={} to={}",
-                        safe_display_line(&approval.subject),
-                        safe_display_join(&approval.to, ",")
-                    )),
-                    Err(error) => Ok(format!(
-                        "Sent approved outgoing email {id}, but failed to record approval: {}. message_id={message_id} subject={} to={}",
-                        safe_display_line(&error),
-                        safe_display_line(&approval.subject),
-                        safe_display_join(&approval.to, ",")
-                    )),
-                }
-            }
-            Err(_) => {
-                let approval = self.state.approved_outgoing_by_id(id)?;
-                Ok(format!(
-                    "Outgoing email {id} is already approved/sent. subject={} to={}",
+        if self.state.outgoing_pending_exists(id)? {
+            let pending = self.state.pending_outgoing_by_id(id)?;
+            self.validate_outgoing_approval_for_send(&pending)?;
+            let approval = self.state.claim_outgoing(id)?;
+            self.validate_outgoing_approval_for_send(&approval)?;
+            let message = outgoing_approval_message(&approval);
+            let message_id = self
+                .backend
+                .send_message(&message)
+                .map_err(|message| backend_error_text(&message))?;
+            let display_message_id = safe_display_line(&message_id);
+            return match self.state.complete_outgoing(id, &message_id) {
+                Ok(()) => Ok(format!(
+                    "Sent approved outgoing email {id}. message_id={display_message_id} subject={} to={}",
                     safe_display_line(&approval.subject),
                     safe_display_join(&approval.to, ",")
-                ))
-            }
+                )),
+                Err(error) => Ok(format!(
+                    "Sent approved outgoing email {id}, but failed to record approval: {}. message_id={display_message_id} subject={} to={}",
+                    safe_display_line(&error),
+                    safe_display_line(&approval.subject),
+                    safe_display_join(&approval.to, ",")
+                )),
+            };
         }
+        if self.state.outgoing_sending_exists(id)? {
+            return Err(format!(
+                "Outgoing email {id} is already being sent or needs manual recovery."
+            ));
+        }
+        let approval = self.state.approved_outgoing_by_id(id)?;
+        Ok(format!(
+            "Outgoing email {id} is already approved/sent. subject={} to={}",
+            safe_display_line(&approval.subject),
+            safe_display_join(&approval.to, ",")
+        ))
     }
 
     fn action_out_whitelist(&self, pattern: &str) -> Result<String, String> {
@@ -2546,10 +2905,13 @@ impl<B: EmailBackend> Engine<B> {
             .backend
             .read_message(&approval.account, &approval.folder, &approval.uid)
             .map_err(|message| backend_error_text(&message))?;
-        if message.uid != approval.uid || message.uidvalidity != approval.uidvalidity {
+        if safe_model_line(&message.uid, MAX_HEADER_VALUE_CHARS) != approval.uid
+            || safe_model_line(&message.uidvalidity, MAX_HEADER_VALUE_CHARS) != approval.uidvalidity
+        {
             return Err("message not found".to_owned());
         }
         let truncate = truncate_body(&message.body_text);
+        let from = incoming_approval_from(&message);
         let attachment_names = message
             .attachments
             .iter()
@@ -2564,7 +2926,7 @@ impl<B: EmailBackend> Engine<B> {
             safe_display_line(&approval.folder),
             safe_display_line(&approval.uid),
             safe_display_line(&approval.uidvalidity),
-            safe_display_line(&message.from),
+            safe_display_line(&from),
             safe_display_join(&message.to, ", "),
             safe_display_join(&message.cc, ", "),
             safe_display_line(&message.date),
@@ -2707,6 +3069,32 @@ impl<B: EmailBackend> Engine<B> {
             .filter(|r| self.recipient_allowed(r))
             .cloned()
             .collect()
+    }
+
+    fn validate_outgoing_approval_for_send(
+        &self,
+        approval: &OutgoingApproval,
+    ) -> Result<(), String> {
+        let account = self
+            .config
+            .accounts
+            .get(&approval.account)
+            .ok_or_else(|| "approval account not found".to_owned())?;
+        if !self.config.enable || !account.enable {
+            return Err("approval account is disabled".to_owned());
+        }
+        if !account.smtp_configured() {
+            return Err("approval account has no SMTP configuration".to_owned());
+        }
+        if approval.from != account.from_identity {
+            return Err("approval from identity does not match configured account".to_owned());
+        }
+        let message = outgoing_approval_message(approval);
+        let recomputed_blocked = self.blocked_recipients(&message);
+        if recomputed_blocked != approval.blocked_recipients {
+            return Err("approval recipients no longer match current policy".to_owned());
+        }
+        Ok(())
     }
 }
 
@@ -3474,7 +3862,10 @@ fn email_error_message(details: &CborValue) -> String {
         return message.to_owned();
     };
     match cbor_text_field(details, "command") {
-        Some(command) => format!("email {command} failed ({code}): {message}"),
+        Some(command) => format!(
+            "email {} failed ({code}): {message}",
+            safe_model_line(command, MAX_HEADER_VALUE_CHARS)
+        ),
         None => format!("email failed ({code}): {message}"),
     }
 }
@@ -3598,13 +3989,16 @@ fn policy_cbor(decision: &PolicyDecision) -> CborValue {
     cbor_map(vec![
         ("incoming_allowed", CborValue::Bool(decision.allowed)),
         ("allowed", CborValue::Bool(decision.allowed)),
-        ("reason", CborValue::Text(decision.reason.clone())),
+        (
+            "reason",
+            CborValue::Text(safe_model_line(&decision.reason, MAX_HEADER_VALUE_CHARS)),
+        ),
         (
             "matched_pattern",
             decision
                 .matched_pattern
-                .clone()
-                .map(CborValue::Text)
+                .as_deref()
+                .map(|pattern| CborValue::Text(safe_model_line(pattern, MAX_HEADER_VALUE_CHARS)))
                 .unwrap_or(CborValue::Null),
         ),
     ])

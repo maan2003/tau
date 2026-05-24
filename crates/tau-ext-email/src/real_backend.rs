@@ -32,7 +32,8 @@ use super::{
 };
 
 pub(super) const READ_MESSAGE_FETCH_MAX_BYTES: usize = READ_BODY_MAX_BYTES * 4;
-pub(super) const FETCH_METADATA_ITEMS: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER])";
+pub(super) const METADATA_HEADER_FETCH_MAX_BYTES: usize = 32 * 1024;
+pub(super) const FETCH_METADATA_ITEMS: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER]<0.32768>)";
 pub(super) const FETCH_FULL_MESSAGE_ITEMS: &str =
     "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[]<0.262144>)";
 
@@ -251,20 +252,8 @@ async fn list_messages_page_async(
         .uid_validity
         .map(|value| value.to_string())
         .unwrap_or_default();
-    let mut uids = session
-        .uid_search("ALL")
-        .await
-        .map_err(imap_error)?
-        .into_iter()
-        .collect::<Vec<_>>();
-    uids.sort_unstable_by(|left, right| right.cmp(left));
-    let truncated = uids.len() > offset.saturating_add(limit);
-    let selected = uids
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect::<Vec<_>>();
-    if selected.is_empty() {
+    let exists = mailbox.exists as usize;
+    if exists <= offset || limit == 0 {
         let _ = session.logout().await;
         return Ok(BackendMessagePage {
             messages: Vec::new(),
@@ -272,31 +261,32 @@ async fn list_messages_page_async(
             truncated: false,
         });
     }
+    let remaining = exists - offset;
+    let fetch_count = remaining.min(limit);
+    let high_seq = exists - offset;
+    let low_seq = high_seq - fetch_count + 1;
+    let sequence_set = format!("{low_seq}:{high_seq}");
 
-    let uid_set = selected
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
     let mut fetches = session
-        .uid_fetch(uid_set, FETCH_METADATA_ITEMS)
+        .fetch(sequence_set, FETCH_METADATA_ITEMS)
         .await
         .map_err(imap_error)?;
-    let mut by_uid = BTreeMap::new();
+    let mut messages = Vec::new();
     while let Some(fetch) = fetches.try_next().await.map_err(imap_error)? {
-        let message = metadata_from_fetch(&fetch, &uidvalidity);
-        by_uid.insert(message.uid.clone(), message);
+        messages.push(metadata_from_fetch(&fetch, &uidvalidity));
     }
     drop(fetches);
     let _ = session.logout().await;
 
-    let messages = selected
-        .into_iter()
-        .filter_map(|uid| by_uid.remove(&uid.to_string()))
-        .collect();
+    messages.sort_unstable_by(|left, right| {
+        let left_uid = left.uid.parse::<u32>().unwrap_or(0);
+        let right_uid = right.uid.parse::<u32>().unwrap_or(0);
+        right_uid.cmp(&left_uid)
+    });
+    let truncated = offset.saturating_add(fetch_count) < exists;
     Ok(BackendMessagePage {
         messages,
-        next_cursor: truncated.then(|| offset.saturating_add(limit).to_string()),
+        next_cursor: truncated.then(|| offset.saturating_add(fetch_count).to_string()),
         truncated,
     })
 }
@@ -312,13 +302,17 @@ async fn message_metadata_async(
         .uid_validity
         .map(|value| value.to_string())
         .unwrap_or_default();
+    let requested_uid = validated_uid_arg(uid)?;
+    let uid_arg = requested_uid.to_string();
     let mut fetches = session
-        .uid_fetch(uid, FETCH_METADATA_ITEMS)
+        .uid_fetch(&uid_arg, FETCH_METADATA_ITEMS)
         .await
         .map_err(imap_error)?;
     let message = match fetches.try_next().await.map_err(imap_error)? {
-        Some(fetch) => metadata_from_fetch(&fetch, &uidvalidity),
-        None => return Err("message_not_found: message not found".to_owned()),
+        Some(fetch) if fetch.uid == Some(requested_uid) => {
+            metadata_from_fetch(&fetch, &uidvalidity)
+        }
+        Some(_) | None => return Err("message_not_found: message not found".to_owned()),
     };
     drop(fetches);
     let _ = session.logout().await;
@@ -336,25 +330,27 @@ async fn read_message_async(
         .uid_validity
         .map(|value| value.to_string())
         .unwrap_or_default();
+    let requested_uid = validated_uid_arg(uid)?;
+    let uid_arg = requested_uid.to_string();
     let mut fetches = session
-        .uid_fetch(uid, FETCH_FULL_MESSAGE_ITEMS)
+        .uid_fetch(&uid_arg, FETCH_FULL_MESSAGE_ITEMS)
         .await
         .map_err(imap_error)?;
     let message = match fetches.try_next().await.map_err(imap_error)? {
-        Some(fetch) => {
+        Some(fetch) if fetch.uid == Some(requested_uid) => {
             let metadata = metadata_from_fetch(&fetch, &uidvalidity);
             let body = fetch
                 .body()
                 .ok_or_else(|| "message_not_found: message body not found".to_owned())?;
             let source_truncated = fetch
                 .size
-                .map(|size| u64::from(size) > body.len() as u64)
-                .unwrap_or(body.len() >= READ_MESSAGE_FETCH_MAX_BYTES);
+                .map(|size| (body.len() as u64) < u64::from(size))
+                .unwrap_or(READ_MESSAGE_FETCH_MAX_BYTES <= body.len());
             let mut message = parse_backend_message_from_rfc822(&metadata, body);
             message.source_truncated = message.source_truncated || source_truncated;
             message
         }
-        None => return Err("message_not_found: message not found".to_owned()),
+        Some(_) | None => return Err("message_not_found: message not found".to_owned()),
     };
     drop(fetches);
     let _ = session.logout().await;
@@ -467,6 +463,13 @@ fn smtp_tls(host: &str, mode: TlsMode) -> Result<Tls, String> {
     }
 }
 
+fn validated_uid_arg(uid: &str) -> Result<u32, String> {
+    uid.parse::<u32>()
+        .ok()
+        .filter(|value| 0 < *value && uid.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or_else(|| "invalid_input: uid must be a positive integer".to_owned())
+}
+
 async fn resolve_password(
     auth: Option<&ValidatedAuthConfig>,
     secrets: &BTreeMap<String, tau_proto::SecretValue>,
@@ -519,7 +522,13 @@ fn metadata_from_fetch(fetch: &async_imap::types::Fetch, uidvalidity: &str) -> B
     };
     fetch
         .header()
-        .map(|header| parse_backend_message_metadata_from_rfc822(&fallback, header))
+        .map(|header| {
+            let mut message = parse_backend_message_metadata_from_rfc822(&fallback, header);
+            if METADATA_HEADER_FETCH_MAX_BYTES <= header.len() {
+                message.source_truncated = true;
+            }
+            message
+        })
         .unwrap_or(fallback)
 }
 

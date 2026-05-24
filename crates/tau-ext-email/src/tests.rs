@@ -674,6 +674,22 @@ fn successful_email_tool_results_show_command_scope_and_counts() {
 }
 
 #[test]
+fn invalid_email_command_sanitizes_tool_error_message() {
+    // Unsupported command names can be produced by a confused model. Keep raw
+    // controls out of ToolError.message because UIs and logs may render it.
+    let invoke = tool_started("read\nforged: yes\u{1b}[31m", Vec::new());
+    let error = parse_command(&invoke.arguments).expect_err("invalid command");
+
+    let Event::ToolError(error) = tool_error(invoke, error) else {
+        panic!("invalid command should be a tool error")
+    };
+
+    assert!(!error.message.contains('\n'));
+    assert!(!error.message.contains('\u{1b}'));
+    assert!(error.message.contains("read\\nforged: yes\\e[31m"));
+}
+
+#[test]
 fn failed_email_tool_results_show_invoked_command_scope() {
     // Parser errors can lack result data, so error displays should fall back to
     // the original tool invocation arguments.
@@ -999,7 +1015,8 @@ fn imap_fetch_requests_avoid_structured_parser_failures() {
     assert!(!super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("BODYSTRUCTURE"));
     assert!(!super::real_backend::FETCH_METADATA_ITEMS.contains("ENVELOPE"));
     assert!(!super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("ENVELOPE"));
-    assert!(super::real_backend::FETCH_METADATA_ITEMS.contains("BODY.PEEK[HEADER]"));
+    assert!(super::real_backend::FETCH_METADATA_ITEMS.contains("BODY.PEEK[HEADER]<0.32768>"));
+    assert!(!super::real_backend::FETCH_METADATA_ITEMS.contains("BODY.PEEK[HEADER])"));
     assert!(super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("RFC822.SIZE"));
     assert!(super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("BODY.PEEK[]<0.262144>"));
     assert!(!super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("BODY.PEEK[])"));
@@ -1121,6 +1138,32 @@ fn read_approval_creation_repeat_stability_and_exact_approval() {
     assert_eq!(cbor_text_field(&approved, "status"), Some("ok"));
     assert!(format!("{approved:?}").contains("secret body"));
 
+    let original_message = engine
+        .backend
+        .read_message("work", "INBOX", "1")
+        .expect("original msg");
+    let changed_sender = BackendMessage {
+        from: "Other <other@evil.test>".to_owned(),
+        ..original_message.clone()
+    };
+    engine.backend.messages.insert(
+        ("work".to_owned(), "INBOX".to_owned()),
+        vec![changed_sender],
+    );
+    let changed = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "1".to_owned(),
+    });
+    assert_eq!(
+        cbor_text_field(&changed, "status"),
+        Some("approval_required")
+    );
+
+    engine.backend.messages.insert(
+        ("work".to_owned(), "INBOX".to_owned()),
+        vec![original_message.clone()],
+    );
     let changed_uidvalidity = BackendMessage {
         uidvalidity: "uv2".to_owned(),
         ..engine
@@ -1378,6 +1421,45 @@ fn outgoing_actions_list_open_approve_and_whitelist_drive_policy() {
 }
 
 #[test]
+fn outgoing_approve_revalidates_persisted_pending_draft_before_smtp() {
+    // Pending approval JSON is mutable local state. Approval must validate the
+    // stored draft against current account identity and policy before SMTP.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    let queued = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["external@example.net".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "proposal".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    let id = match data_field(&queued, "approval_id") {
+        CborValue::Text(id) => id.clone(),
+        _ => panic!("approval id"),
+    };
+    let path = engine
+        .state
+        .approval_path("outgoing", "pending", &id)
+        .expect("approval path");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read approval")).expect("json");
+    json["from"] = serde_json::Value::String("Mallory <mallory@evil.test>".to_owned());
+    std::fs::write(&path, serde_json::to_vec_pretty(&json).expect("json bytes"))
+        .expect("write approval");
+
+    let error = engine
+        .dispatch_action("email.out.approve", &[id])
+        .expect_err("tampered draft must be rejected");
+
+    assert!(error.contains("from identity"));
+    assert!(engine.backend.sent.borrow().is_empty());
+}
+
+#[test]
 fn outgoing_reply_to_and_from_spoofing_are_policy_checked() {
     // Reply-To is recipient-like: an allowlisted To must not smuggle replies to
     // an untrusted address. The From display name is account-controlled so the
@@ -1456,6 +1538,63 @@ fn allowed_read_normalizes_from_display_for_model_visible_output() {
         Some("team@company.com".to_owned())
     );
     assert!(!format!("{result:?}").contains("CEO"));
+}
+
+#[test]
+fn outgoing_oversized_or_unsafe_send_inputs_are_rejected() {
+    // Sending must not silently drop recipients or truncate headers/body: the
+    // approved/sent message must be exactly what the caller requested.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+
+    let unsafe_subject = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["bob@company.com".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "hi\nforged: yes".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    assert_eq!(
+        cbor_nested_text_field(&unsafe_subject, "error", "code"),
+        Some("invalid_input")
+    );
+
+    let long_body = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["bob@company.com".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "hi".to_owned(),
+        body_text: "x".repeat(READ_BODY_MAX_BYTES + 1),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    assert_eq!(
+        cbor_nested_text_field(&long_body, "error", "code"),
+        Some("invalid_input")
+    );
+
+    let too_many = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["bob@company.com".to_owned(); MAX_RECIPIENTS + 1],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "hi".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    assert_eq!(
+        cbor_nested_text_field(&too_many, "error", "code"),
+        Some("invalid_input")
+    );
+    assert!(engine.backend.sent.borrow().is_empty());
 }
 
 #[test]
@@ -1595,7 +1734,7 @@ fn action_outputs_escape_controls_and_row_forgery() {
         to: vec!["external@example.net".to_owned()],
         cc: Vec::new(),
         bcc: Vec::new(),
-        subject: "draft\nblocked=forged\u{1b}[31m".to_owned(),
+        subject: "draft blocked".to_owned(),
         body_text: "draft body\u{1b}[31m".to_owned(),
         reply_to: None,
         in_reply_to: None,
@@ -1610,7 +1749,7 @@ fn action_outputs_escape_controls_and_row_forgery() {
         .expect("open");
     assert!(!listed.contains('\u{1b}'));
     assert!(!opened.contains('\u{1b}'));
-    assert!(listed.contains("draft\\nblocked=forged\\e[31m"));
+    assert!(listed.contains("draft blocked"));
     assert!(opened.contains("draft body\\e[31m"));
 }
 
@@ -1639,6 +1778,8 @@ fn incoming_actions_list_redacts_for_agent_but_open_shows_user_content() {
     let opened = engine
         .dispatch_action("email.in.open", std::slice::from_ref(&id))
         .expect("open action");
+    assert!(opened.contains("from: mallory@evil.test"));
+    assert!(!opened.contains("from: Mallory <mallory@evil.test>"));
     assert!(opened.contains("subject: secret subject"));
     assert!(opened.contains("secret body"));
     assert!(!opened.contains("Content is hidden"));
@@ -1723,6 +1864,20 @@ fn whitelist_actions_reject_when_state_policy_extensions_are_disabled() {
             .expect("in allow")
             .is_empty()
     );
+}
+
+#[test]
+fn policy_patterns_reject_controls_and_policy_output_is_sanitized() {
+    // Policy patterns can later appear as matched_pattern in model-visible
+    // output. Reject new unsafe patterns and sanitize legacy/state values.
+    assert!(AddressPattern::compile("re:.*@example\\.com\nforged: yes").is_err());
+
+    let decision = PolicyDecision::allowed(Some("legacy\npattern\u{1b}[31m".to_owned()));
+    let policy = policy_cbor(&decision);
+    let matched = text_field(&policy, "matched_pattern").expect("pattern");
+    assert!(!matched.contains('\n'));
+    assert!(!matched.contains('\u{1b}'));
+    assert_eq!(matched, "legacy\\npattern\\e[31m");
 }
 
 #[test]
@@ -1927,6 +2082,30 @@ fn send_rejects_non_empty_attachments_deliberately() {
         cbor_nested_text_field(&error, "error", "code"),
         Some("invalid_input")
     );
+}
+
+#[test]
+fn approval_file_creation_refuses_to_overwrite_existing_ids() {
+    // Approval IDs are shown to the user before approval. Creating a pending
+    // record must not overwrite an existing ID if another session raced us.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let state = StateStore::open(temp.path().join("state")).expect("state");
+    let path = state
+        .approval_path("outgoing", "pending", "1")
+        .expect("path");
+    let first = serde_json::json!({"schema": 1, "id": "1"});
+    let second = serde_json::json!({"schema": 1, "id": "1", "subject": "other"});
+
+    atomic_json_create_new(&path, &first).expect("first create");
+    let second_result = atomic_json_create_new(&path, &second);
+
+    assert!(matches!(
+        second_result,
+        Err(CreateNewJsonError::AlreadyExists)
+    ));
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read")).expect("json");
+    assert!(stored.get("subject").is_none());
 }
 
 #[test]
