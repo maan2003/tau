@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 pub enum EventCategory {
     /// Tool execution events.
     Tool,
+    /// Extension-provided UI action events.
+    Action,
     /// Harness-owned side/sub-agent command events.
     Agent,
     /// Extension lifecycle and publication events.
@@ -45,6 +47,7 @@ impl EventCategory {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Tool => "tool",
+            Self::Action => "action",
             Self::Agent => "agent",
             Self::Extension => "extension",
             Self::Provider => "provider",
@@ -63,6 +66,7 @@ impl EventCategory {
     pub fn from_wire(s: &str) -> Self {
         match s {
             "tool" => Self::Tool,
+            "action" => Self::Action,
             "agent" => Self::Agent,
             "extension" => Self::Extension,
             "provider" => Self::Provider,
@@ -197,6 +201,12 @@ impl EventName {
     pub const TOOL_CANCELLED: Self = Self::from_static(EventCategory::Tool, "cancelled");
     pub const TOOL_DELEGATE_PROGRESS: Self =
         Self::from_static(EventCategory::Tool, "delegate_progress");
+
+    pub const ACTION_SCHEMA_PUBLISHED: Self =
+        Self::from_static(EventCategory::Action, "schema_published");
+    pub const ACTION_INVOKE: Self = Self::from_static(EventCategory::Action, "invoke");
+    pub const ACTION_RESULT: Self = Self::from_static(EventCategory::Action, "result");
+    pub const ACTION_ERROR: Self = Self::from_static(EventCategory::Action, "error");
 
     pub const EXTENSION_STARTING: Self = Self::from_static(EventCategory::Extension, "starting");
     pub const EXTENSION_READY: Self = Self::from_static(EventCategory::Extension, "ready");
@@ -383,6 +393,8 @@ pub enum ClientKind {
     Provider,
     /// Tool execution events.
     Tool,
+    /// Extension-provided UI action events.
+    Action,
     /// User-interface request events.
     Ui,
     /// Harness/core protocol participant.

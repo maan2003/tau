@@ -10,9 +10,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CborValue, ContextItem, DiffSummary, EventName, ExtensionName, ModelId, PromptFragment,
-    ProviderTokenUsage, SessionContextKey, SessionId, SessionPromptId, SkillName, ToolCallId,
-    ToolDefinition, ToolName,
+    ActionInvocationId, CborValue, ContextItem, DiffSummary, EventName, ExtensionInstanceId,
+    ExtensionName, ModelId, PromptFragment, ProviderTokenUsage, SessionContextKey, SessionId,
+    SessionPromptId, SkillName, ToolCallId, ToolDefinition, ToolName,
 };
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -858,6 +858,88 @@ impl BackgroundSupport {
     pub const fn default_effective() -> Self {
         Self::MinForegroundSeconds(5)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Action events
+// ---------------------------------------------------------------------------
+
+/// Harness-stamped action schema currently provided by one extension instance.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ActionSchemaPublished {
+    /// Extension name owning this schema. Stamped by the harness.
+    pub extension_name: ExtensionName,
+    /// Extension instance id owning this schema. Stamped by the harness.
+    pub instance_id: ExtensionInstanceId,
+    /// Full slash-action schema published by the extension.
+    pub schema: tau_actions::ActionSchema,
+}
+
+/// UI request to invoke an extension-provided action.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionInvoke {
+    /// Client-minted id used to route the matching result/error.
+    pub invocation_id: ActionInvocationId,
+    /// Active Tau session from which the action was invoked.
+    pub session_id: SessionId,
+    /// Extension name selected by the UI's schema snapshot.
+    pub extension_name: ExtensionName,
+    /// Extension instance id selected by the UI's schema snapshot.
+    pub instance_id: ExtensionInstanceId,
+    /// Stable action id selected by the parsed command line.
+    pub action_id: String,
+    /// Original slash command line submitted by the user.
+    pub raw_line: String,
+    /// Positional arguments in schema order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
+    /// Typed/named argument map encoded as CBOR values.
+    pub arguments: CborValue,
+}
+
+/// UI-visible successful action output.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionResult {
+    /// Invocation id copied from [`ActionInvoke`].
+    pub invocation_id: ActionInvocationId,
+    /// Stable action id that produced this result.
+    pub action_id: String,
+    /// Output the UI should render.
+    pub output: ActionOutput,
+}
+
+/// UI-visible action failure.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionError {
+    /// Invocation id copied from [`ActionInvoke`].
+    pub invocation_id: ActionInvocationId,
+    /// Stable action id that failed.
+    pub action_id: String,
+    /// Human-readable error message.
+    pub message: String,
+    /// Optional structured diagnostic details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<CborValue>,
+}
+
+/// Output shape for a successful extension action.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ActionOutput {
+    /// Plain text output rendered by the UI.
+    Text {
+        /// Text to display.
+        text: String,
+    },
+    /// Text buffer that a UI may open in an editor in a later phase.
+    EditorBuffer {
+        /// Short title for the buffer.
+        title: String,
+        /// Buffer contents.
+        text: String,
+        /// Whether the UI may let the user edit this buffer.
+        editable: bool,
+    },
 }
 
 /// Per-prompt knob telling the provider whether the model is allowed
@@ -2462,6 +2544,16 @@ pub enum Event {
     #[serde(rename = "tool.delegate_progress")]
     ToolDelegateProgress(DelegateProgress),
 
+    // Extension-provided UI actions
+    #[serde(rename = "action.schema_published")]
+    ActionSchemaPublished(ActionSchemaPublished),
+    #[serde(rename = "action.invoke")]
+    ActionInvoke(ActionInvoke),
+    #[serde(rename = "action.result")]
+    ActionResult(ActionResult),
+    #[serde(rename = "action.error")]
+    ActionError(ActionError),
+
     // Extension supervision
     #[serde(rename = "extension.starting")]
     ExtensionStarting(ExtensionStarting),
@@ -2621,6 +2713,10 @@ impl Event {
             Self::ToolCancelRequest(_) => EventName::TOOL_CANCEL_REQUEST,
             Self::ToolCancelled(_) => EventName::TOOL_CANCELLED,
             Self::ToolDelegateProgress(_) => EventName::TOOL_DELEGATE_PROGRESS,
+            Self::ActionSchemaPublished(_) => EventName::ACTION_SCHEMA_PUBLISHED,
+            Self::ActionInvoke(_) => EventName::ACTION_INVOKE,
+            Self::ActionResult(_) => EventName::ACTION_RESULT,
+            Self::ActionError(_) => EventName::ACTION_ERROR,
             Self::ExtensionStarting(_) => EventName::EXTENSION_STARTING,
             Self::ExtensionReady(_) => EventName::EXTENSION_READY,
             Self::ExtensionExited(_) => EventName::EXTENSION_EXITED,
@@ -2701,6 +2797,10 @@ impl Event {
                 | Self::ProviderPromptSubmitted(_)
                 | Self::ToolProgress(_)
                 | Self::ToolDelegateProgress(_)
+                | Self::ActionSchemaPublished(_)
+                | Self::ActionInvoke(_)
+                | Self::ActionResult(_)
+                | Self::ActionError(_)
                 | Self::ShellCommandProgress(_)
                 | Self::SessionPromptQueued(_)
                 | Self::SessionPromptRecalled(_)

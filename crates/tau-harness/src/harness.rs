@@ -9,11 +9,12 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use tau_core::{
-    Connection, ConnectionMetadata, ConnectionOrigin, DefaultSubscriptionPolicy, EventBus,
-    PolicyStore, RouteError, SessionStore, SessionStoreError, ToolRegistry, ToolRouteError,
-    ToolRouteTarget, validate_tool_arguments,
+    ActionRegistry, Connection, ConnectionMetadata, ConnectionOrigin, DefaultSubscriptionPolicy,
+    EventBus, PolicyStore, RouteError, SessionStore, SessionStoreError, ToolRegistry,
+    ToolRouteError, ToolRouteTarget, validate_tool_arguments,
 };
 use tau_proto::{
+    ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished,
     BackgroundSupport, CborValue, ClientKind, ContentPart, ContextItem, ContextRole, Disconnect,
     Event, EventSelector, ExtensionName, Frame, HarnessContextUsageChanged, HarnessRoleSelected,
     Message, MessageItem, ModelId, PreviousResponseCandidate, PromptFragment, PromptOriginator,
@@ -690,6 +691,13 @@ struct ActiveStartAgentRequest {
 }
 
 #[derive(Clone, Debug)]
+struct PendingActionInvocation {
+    provider_connection_id: tau_proto::ConnectionId,
+    requester_client_id: tau_proto::ConnectionId,
+    action_id: String,
+}
+
+#[derive(Clone, Debug)]
 struct StagedExtensionPublish {
     /// Event payload withheld until the source extension reaches `Ready`.
     event: Event,
@@ -703,6 +711,9 @@ struct ExtensionActivationStage {
     tool_registrations: Vec<ToolRegister>,
     /// Provider model snapshots received before `Ready`, in wire order.
     provider_model_updates: Vec<tau_proto::ProviderModelsUpdated>,
+    /// Action schema received before `Ready`. Schema publishing is a
+    /// replacement, so only the latest staged schema matters.
+    action_schema: Option<tau_actions::ActionSchema>,
     /// Skill announcements received before `Ready`, in wire order.
     skill_announcements: Vec<tau_proto::ExtSkillAvailable>,
     /// AGENTS.md announcements received before `Ready`, in wire order.
@@ -767,6 +778,8 @@ pub struct Harness {
     /// `ToolRequest` into either a broadcast `ToolStarted`
     /// or a broadcast `ToolRejected`.
     pub(crate) registry: ToolRegistry,
+    /// Maps extension-provided UI actions to their owning extension connection.
+    pub(crate) action_registry: ActionRegistry,
     /// Injected handlers for tools implemented inside the harness process.
     pub(crate) internal_tool_handlers: InternalToolHandlers,
     /// Runtime state root for this harness. Extension-specific persistent
@@ -803,6 +816,9 @@ pub struct Harness {
     /// right provider.
     pub(crate) pending_tool_providers:
         std::collections::HashMap<ToolCallId, tau_proto::ConnectionId>,
+    /// `invocation_id` → action provider/requester pair for UI-directed
+    /// action result routing and source validation.
+    pending_action_invocations: HashMap<ActionInvocationId, PendingActionInvocation>,
     /// Append-only ring of recent protocol events. Client follower
     /// threads tail this log on connect to replay state and stay live.
     pub(crate) event_log: std::sync::Arc<EventLog>,
@@ -1379,6 +1395,7 @@ impl Harness {
             rx,
             bus,
             registry: ToolRegistry::new(),
+            action_registry: ActionRegistry::new(),
             internal_tool_handlers: Vec::new(),
             state_dir: state_dir.clone(),
             store,
@@ -1387,6 +1404,7 @@ impl Harness {
             pending_tools: std::collections::HashMap::new(),
             completed_tool_calls: std::collections::HashSet::new(),
             pending_tool_providers: std::collections::HashMap::new(),
+            pending_action_invocations: HashMap::new(),
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
@@ -1615,6 +1633,7 @@ impl Harness {
             rx,
             bus,
             registry: ToolRegistry::new(),
+            action_registry: ActionRegistry::new(),
             internal_tool_handlers: Vec::new(),
             state_dir: state_dir.clone(),
             store,
@@ -1623,6 +1642,7 @@ impl Harness {
             pending_tools: std::collections::HashMap::new(),
             completed_tool_calls: std::collections::HashSet::new(),
             pending_tool_providers: std::collections::HashMap::new(),
+            pending_action_invocations: HashMap::new(),
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
@@ -2863,6 +2883,10 @@ impl Harness {
             .push(StagedExtensionPublish { event, transient });
     }
 
+    fn stage_action_schema(&mut self, source_id: &str, schema: tau_actions::ActionSchema) {
+        self.extension_activation_stage_mut(source_id).action_schema = Some(schema);
+    }
+
     fn register_extension_tool(&mut self, source_id: &str, registration: ToolRegister) {
         let internal_name = registration.tool.name.clone();
         let visible_name = self.tool_model_visible_name(&registration.tool).clone();
@@ -2969,6 +2993,45 @@ impl Harness {
         self.set_provider_models(source_id, update.models);
     }
 
+    fn extension_action_owner(
+        &self,
+        source_id: &str,
+    ) -> (ExtensionName, tau_proto::ExtensionInstanceId) {
+        if let Some(extension) = self.extensions.get(source_id) {
+            return (
+                ExtensionName::from(extension.name.clone()),
+                extension.instance_id,
+            );
+        }
+        self.bus.connection(source_id).map_or_else(
+            || (ExtensionName::from(source_id.to_owned()), 0.into()),
+            |metadata| (ExtensionName::from(metadata.name.clone()), 0.into()),
+        )
+    }
+
+    fn publish_action_schema(&mut self, source_id: &str, schema: tau_actions::ActionSchema) {
+        let (extension_name, instance_id) = self.extension_action_owner(source_id);
+        if let Err(error) = self.action_registry.register_schema(
+            source_id,
+            extension_name.clone(),
+            instance_id,
+            schema.clone(),
+        ) {
+            self.emit_info(&format!(
+                "extension {extension_name} published invalid action schema: {error}"
+            ));
+            return;
+        }
+        self.publish_event(
+            Some(source_id),
+            Event::ActionSchemaPublished(ActionSchemaPublished {
+                extension_name,
+                instance_id,
+                schema,
+            }),
+        );
+    }
+
     fn publish_session_context_publish(
         &mut self,
         source_id: &str,
@@ -3017,6 +3080,9 @@ impl Harness {
         }
         for update in stage.provider_model_updates {
             self.publish_provider_models_update(source_id, update);
+        }
+        if let Some(schema) = stage.action_schema {
+            self.publish_action_schema(source_id, schema);
         }
         for skill in stage.skill_announcements {
             self.publish_extension_skill_available(source_id, skill);
@@ -3101,6 +3167,16 @@ impl Harness {
             }
             Message::Emit(emit) => {
                 let event = *emit.event;
+                if matches!(
+                    event,
+                    Event::ActionSchemaPublished(_)
+                        | Event::ActionInvoke(_)
+                        | Event::ActionResult(_)
+                        | Event::ActionError(_)
+                ) {
+                    self.handle_extension_event_inner(source_id, event)?;
+                    return Ok(());
+                }
                 if event.name().category == tau_proto::EventCategory::Provider
                     || Self::requires_tool_event_intake(&event)
                     || matches!(event, Event::AgentMessage(_))
@@ -3152,6 +3228,20 @@ impl Harness {
                     self.register_extension_tool(source_id, registration);
                 }
             }
+            Event::ActionSchemaPublished(published) => {
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_action_schema(source_id, published.schema);
+                } else {
+                    self.publish_action_schema(source_id, published.schema);
+                }
+            }
+            Event::ActionResult(result) => {
+                self.handle_action_result(source_id, result);
+            }
+            Event::ActionError(error) => {
+                self.handle_action_error(source_id, error);
+            }
+            Event::ActionInvoke(_) => {}
             Event::ToolUnregister(unregister) => {
                 self.remove_staged_tool_registration(source_id, &unregister.tool_name);
                 if self.should_stage_extension_capabilities(source_id) {
@@ -3554,6 +3644,10 @@ impl Harness {
             Event::UiRoleSelect(select) => self.handle_ui_role_select(select),
             Event::UiRoleUpdate(req) => self.handle_ui_role_update(req),
             Event::UiPromptSubmitted(prompt) => self.handle_ui_prompt_submitted(prompt),
+            Event::ActionInvoke(invoke) => self.handle_action_invoke(client_id, invoke),
+            Event::ActionSchemaPublished(_) | Event::ActionResult(_) | Event::ActionError(_) => {
+                Ok(true)
+            }
             Event::UiSwitchSession(req) => self.handle_ui_switch_session(client_id, req),
             Event::UiTreeRequest(req) => self.handle_ui_tree_request(client_id, req),
             Event::UiNavigateTree(req) => self.handle_ui_navigate_tree(client_id, req),
@@ -4050,8 +4144,10 @@ impl Harness {
         });
         if is_extension {
             self.unregister_connection_tools_for_disconnect(connection_id);
+            self.action_registry.unregister_connection(connection_id);
         }
 
+        self.fail_pending_action_invocations_for_connection(connection_id);
         self.fail_pending_tool_calls_for_connection(connection_id);
         self.pending_provider_prompts
             .retain(|_, provider_id| provider_id.as_str() != connection_id);
@@ -4253,6 +4349,218 @@ impl Harness {
             self.maybe_complete_agent_turn_for(&cid, call_id.as_str());
         }
         self.try_advance_queue();
+    }
+
+    fn send_action_error_to_client(
+        &mut self,
+        client_id: &str,
+        invocation_id: ActionInvocationId,
+        action_id: String,
+        message: String,
+    ) {
+        let _ = self.bus.send_to(
+            client_id,
+            Some(HARNESS_CONNECTION_ID),
+            Frame::Event(Event::ActionError(ActionError {
+                invocation_id,
+                action_id,
+                message,
+                details: None,
+            })),
+        );
+    }
+
+    fn handle_action_invoke(
+        &mut self,
+        client_id: &str,
+        invoke: ActionInvoke,
+    ) -> Result<bool, HarnessError> {
+        if self
+            .bus
+            .connection(client_id)
+            .is_none_or(|metadata| metadata.kind != ClientKind::Ui)
+        {
+            self.send_action_error_to_client(
+                client_id,
+                invoke.invocation_id,
+                invoke.action_id,
+                "only UI clients may invoke extension actions".to_owned(),
+            );
+            return Ok(true);
+        }
+        if invoke.session_id != self.current_session_id {
+            self.send_action_error_to_client(
+                client_id,
+                invoke.invocation_id,
+                invoke.action_id,
+                format!(
+                    "action invocation targets session `{}` but current session is `{}`",
+                    invoke.session_id, self.current_session_id
+                ),
+            );
+            return Ok(true);
+        }
+        if self
+            .pending_action_invocations
+            .contains_key(&invoke.invocation_id)
+        {
+            self.send_action_error_to_client(
+                client_id,
+                invoke.invocation_id,
+                invoke.action_id,
+                "duplicate pending action invocation id".to_owned(),
+            );
+            return Ok(true);
+        }
+
+        let provider_connection_id = match self.action_registry.route_action_invoke(&invoke) {
+            Ok(provider_connection_id) => provider_connection_id,
+            Err(error) => {
+                self.send_action_error_to_client(
+                    client_id,
+                    invoke.invocation_id,
+                    invoke.action_id,
+                    error.to_string(),
+                );
+                return Ok(true);
+            }
+        };
+
+        match self.bus.send_to(
+            provider_connection_id.as_str(),
+            Some(client_id),
+            Frame::Event(Event::ActionInvoke(invoke.clone())),
+        ) {
+            Ok(report) if !report.delivered_to.is_empty() => {
+                self.pending_action_invocations.insert(
+                    invoke.invocation_id.clone(),
+                    PendingActionInvocation {
+                        provider_connection_id,
+                        requester_client_id: client_id.into(),
+                        action_id: invoke.action_id,
+                    },
+                );
+            }
+            Ok(report) => {
+                tracing::warn!(
+                    target: "tau_harness",
+                    invocation_id = %invoke.invocation_id,
+                    ?report,
+                    "action invocation route did not deliver"
+                );
+                self.send_action_error_to_client(
+                    client_id,
+                    invoke.invocation_id,
+                    invoke.action_id,
+                    "action provider is unavailable".to_owned(),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "tau_harness",
+                    invocation_id = %invoke.invocation_id,
+                    %error,
+                    "action invocation route failed"
+                );
+                self.send_action_error_to_client(
+                    client_id,
+                    invoke.invocation_id,
+                    invoke.action_id,
+                    "action provider is unavailable".to_owned(),
+                );
+            }
+        }
+        Ok(true)
+    }
+
+    fn handle_action_result(&mut self, source_id: &str, result: ActionResult) {
+        let Some(pending) = self
+            .pending_action_invocations
+            .get(&result.invocation_id)
+            .cloned()
+        else {
+            return;
+        };
+        if pending.provider_connection_id.as_str() != source_id
+            || pending.action_id != result.action_id
+        {
+            tracing::warn!(
+                target: "tau_harness",
+                invocation_id = %result.invocation_id,
+                source_id,
+                expected_provider = %pending.provider_connection_id,
+                expected_action = %pending.action_id,
+                action_id = %result.action_id,
+                "discarding action result from non-owning or mismatched source"
+            );
+            return;
+        }
+        self.pending_action_invocations
+            .remove(&result.invocation_id);
+        let _ = self.bus.send_to(
+            pending.requester_client_id.as_str(),
+            Some(source_id),
+            Frame::Event(Event::ActionResult(result)),
+        );
+    }
+
+    fn handle_action_error(&mut self, source_id: &str, error: ActionError) {
+        let Some(pending) = self
+            .pending_action_invocations
+            .get(&error.invocation_id)
+            .cloned()
+        else {
+            return;
+        };
+        if pending.provider_connection_id.as_str() != source_id
+            || pending.action_id != error.action_id
+        {
+            tracing::warn!(
+                target: "tau_harness",
+                invocation_id = %error.invocation_id,
+                source_id,
+                expected_provider = %pending.provider_connection_id,
+                expected_action = %pending.action_id,
+                action_id = %error.action_id,
+                "discarding action error from non-owning or mismatched source"
+            );
+            return;
+        }
+        self.pending_action_invocations.remove(&error.invocation_id);
+        let _ = self.bus.send_to(
+            pending.requester_client_id.as_str(),
+            Some(source_id),
+            Frame::Event(Event::ActionError(error)),
+        );
+    }
+
+    fn fail_pending_action_invocations_for_connection(&mut self, connection_id: &str) {
+        let mut failed: Vec<_> = self
+            .pending_action_invocations
+            .iter()
+            .filter_map(|(invocation_id, pending)| {
+                (pending.provider_connection_id.as_str() == connection_id)
+                    .then_some((invocation_id.clone(), pending.clone()))
+            })
+            .collect();
+        failed.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+        for (invocation_id, pending) in failed {
+            self.pending_action_invocations.remove(&invocation_id);
+            if pending.requester_client_id.as_str() == connection_id {
+                continue;
+            }
+            self.send_action_error_to_client(
+                pending.requester_client_id.as_str(),
+                invocation_id,
+                pending.action_id.clone(),
+                format!(
+                    "action `{}` was interrupted because extension disconnected",
+                    pending.action_id
+                ),
+            );
+        }
+        self.pending_action_invocations
+            .retain(|_, pending| pending.requester_client_id.as_str() != connection_id);
     }
 
     fn try_respawn_supervised_extension(
@@ -5898,6 +6206,7 @@ impl Harness {
         self.tool_conversations.clear();
         self.pending_tools.clear();
         self.pending_tool_providers.clear();
+        self.pending_action_invocations.clear();
         self.prompt_conversations.clear();
         self.pending_provider_prompts.clear();
         self.pending_compactions.clear();

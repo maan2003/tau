@@ -1741,6 +1741,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tau-actions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "tau-blocking-notify-channel"
 version = "0.1.0"
 
@@ -1758,6 +1765,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "tau-actions",
  "tau-cli-picker",
  "tau-cli-term",
  "tau-cli-term-raw",
@@ -1832,6 +1840,7 @@ dependencies = [
  "fs2",
  "serde",
  "serde_json",
+ "tau-actions",
  "tau-proto",
  "tempfile",
 ]
@@ -1950,6 +1959,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "tau-actions",
  "tau-config",
  "tau-core",
  "tau-ext-shell",
@@ -1980,6 +1990,7 @@ dependencies = [
  "indexmap",
  "serde",
  "serde_json",
+ "tau-actions",
  "tracing",
 ]
 

@@ -192,6 +192,7 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
                 use tau_proto::EventCategory as C;
                 match category {
                     C::Tool
+                    | C::Action
                     | C::Agent
                     | C::Extension
                     | C::Provider

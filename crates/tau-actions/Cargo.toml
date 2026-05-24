@@ -1,5 +1,5 @@
 [package]
-name = "tau-proto"
+name = "tau-actions"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -15,9 +15,4 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-ciborium.workspace = true
-indexmap.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-tau-actions.workspace = true
-tracing.workspace = true

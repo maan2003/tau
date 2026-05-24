@@ -10,10 +10,12 @@ use std::time::{Duration, Instant};
 use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
-    ClientKind, Disconnect, Event, EventName, EventSelector, Frame, FrameReader, FrameWriter,
-    Hello, Message, PROTOCOL_VERSION, Subscribe, UiPromptDraft, UiPromptSubmitted, UnixMicros,
+    CborValue, ClientKind, Disconnect, Event, EventName, EventSelector, Frame, FrameReader,
+    FrameWriter, Hello, Message, PROTOCOL_VERSION, Subscribe, UiPromptDraft, UiPromptSubmitted,
+    UnixMicros,
 };
 
+use crate::action_commands::ActionCommandState;
 use crate::daemon::{daemon_output_for_session, resolve_daemon};
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState};
 use crate::prompt_history::PromptHistoryStore;
@@ -296,6 +298,37 @@ pub(crate) fn parse_role_setting_update(
 const DRAFT_DEBOUNCE: Duration = Duration::from_secs(1);
 const EOF_DURING_AGENT_NOTICE: &str =
     "An agent is still running; use /quit to terminate the session in progress.";
+const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/quit", "Exit the chat session"),
+    ("/cancel", "Cancel the current in-flight prompt"),
+    (
+        "/detach",
+        "Leave the UI but keep the harness running for later reattach",
+    ),
+    ("/model", "Switch agent role (e.g. /model engineer)"),
+    ("/role", "Switch, create, edit, or delete an agent role"),
+    (
+        "/new",
+        "Start a fresh session in this harness (current session is left as-is on disk)",
+    ),
+    (
+        "/tree",
+        "Print the session tree (`/tree <id>` rewinds head to that node)",
+    ),
+    (
+        "/compact",
+        "Force a provider-side compaction pass on the current session",
+    ),
+    ("/fast", "Toggle Fast mode"),
+    (
+        "/set",
+        "Set a UI setting (e.g. /set show-diff true); Tab cycles names + values",
+    ),
+    (
+        "/provider-auth",
+        "Add or replace a provider profile (runs `tau provider add [kind]`)",
+    ),
+];
 
 /// Single-slot mailbox the input loop pushes the latest prompt
 /// snapshot into; the debounce thread drains it. `pending = None` +
@@ -360,6 +393,15 @@ pub(crate) fn should_send_draft_snapshot(handle: &(Mutex<DraftSlot>, Condvar), e
     let (mtx, _cv) = handle;
     let g = locked(mtx);
     !g.done && g.epoch == epoch
+}
+
+pub(crate) fn invalidate_pending_draft(handle: &(Mutex<DraftSlot>, Condvar)) {
+    let (mtx, cv) = handle;
+    if let Ok(mut g) = mtx.lock() {
+        g.epoch = g.epoch.wrapping_add(1);
+        g.pending = None;
+        cv.notify_one();
+    }
 }
 
 fn encode_binding_action(action: &CliBindingAction) -> String {
@@ -434,6 +476,7 @@ pub(crate) fn run_chat(
         &Frame::Message(Message::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Prefix("ui.".to_owned()),
+                EventSelector::Prefix("action.".to_owned()),
                 EventSelector::Exact(EventName::AGENT_MESSAGE),
                 EventSelector::Prefix("session.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
@@ -488,37 +531,12 @@ pub(crate) fn run_chat(
     });
 
     // Terminal setup.
-    let commands = vec![
-        SlashCommand::new("/quit", "Exit the chat session"),
-        SlashCommand::new("/cancel", "Cancel the current in-flight prompt"),
-        SlashCommand::new(
-            "/detach",
-            "Leave the UI but keep the harness running for later reattach",
-        ),
-        SlashCommand::new("/model", "Switch agent role (e.g. /model engineer)"),
-        SlashCommand::new("/role", "Switch, create, edit, or delete an agent role"),
-        SlashCommand::new(
-            "/new",
-            "Start a fresh session in this harness (current session is left as-is on disk)",
-        ),
-        SlashCommand::new(
-            "/tree",
-            "Print the session tree (`/tree <id>` rewinds head to that node)",
-        ),
-        SlashCommand::new(
-            "/compact",
-            "Force a provider-side compaction pass on the current session",
-        ),
-        SlashCommand::new("/fast", "Toggle Fast mode"),
-        SlashCommand::new(
-            "/set",
-            "Set a UI setting (e.g. /set show-diff true); Tab cycles names + values",
-        ),
-        SlashCommand::new(
-            "/provider-auth",
-            "Add or replace a provider profile (runs `tau provider add [kind]`)",
-        ),
-    ];
+    let commands: Vec<SlashCommand> = BUILTIN_SLASH_COMMANDS
+        .iter()
+        .map(|(name, description)| SlashCommand::new(*name, *description))
+        .collect();
+    let action_state =
+        ActionCommandState::new(BUILTIN_SLASH_COMMANDS.iter().map(|(name, _)| *name));
     // Fail fast on a malformed `cli.yaml`. The fields here drive
     // keybindings, prompt symbol, cursor shape, and theme — silently
     // falling back to defaults would leave the user with broken
@@ -589,6 +607,7 @@ pub(crate) fn run_chat(
         settings.prompt_symbol.clone(),
         settings.submitted_prompt_symbol,
     );
+    renderer.set_action_state(action_state.clone());
     let tool_timer = ToolTimerNotifier::new();
     renderer.set_tool_timer(tool_timer.clone());
     let timer_tx = event_tx.clone();
@@ -656,6 +675,7 @@ pub(crate) fn run_chat(
             agent_in_progress,
             renderer_tx: event_tx,
             editor_context,
+            action_state,
             draft_handle: draft_handle.clone(),
             prompt_history,
         },
@@ -776,6 +796,7 @@ struct TerminalInputLoopCtx {
     agent_in_progress: Arc<std::sync::atomic::AtomicBool>,
     renderer_tx: mpsc::Sender<RendererCmd>,
     editor_context: Arc<Mutex<tau_cli_term::EditorContext>>,
+    action_state: ActionCommandState,
     draft_handle: DraftHandle,
     prompt_history: PromptHistoryStore,
 }
@@ -908,7 +929,7 @@ impl<'a> TerminalInputSession<'a> {
         // recorded before command handling, and local slash commands are echoed
         // before they produce validation errors or exit the loop.
         self.record_prompt_line(line, text);
-        if is_local_slash_command(text) {
+        if is_local_slash_command(text) || self.ctx.action_state.is_known_action_line(text) {
             self.output.command_echo(text);
         }
         self.handle_recorded_line(text)
@@ -916,7 +937,11 @@ impl<'a> TerminalInputSession<'a> {
 
     fn handle_recorded_line(&mut self, text: &str) -> Result<Option<InputLoopExit>, CliError> {
         match self.handle_known_command(text)? {
-            CommandOutcome::NotHandled => Ok(self.submit_prompt(text)),
+            CommandOutcome::NotHandled => match self.handle_dynamic_action(text) {
+                CommandOutcome::NotHandled => Ok(self.submit_prompt(text)),
+                CommandOutcome::Continue => Ok(None),
+                CommandOutcome::Exit(exit) => Ok(Some(exit)),
+            },
             CommandOutcome::Continue => Ok(None),
             CommandOutcome::Exit(exit) => Ok(Some(exit)),
         }
@@ -1134,6 +1159,36 @@ impl<'a> TerminalInputSession<'a> {
         false
     }
 
+    fn handle_dynamic_action(&self, text: &str) -> CommandOutcome {
+        let Some(dispatch) = self.ctx.action_state.parse_line(text) else {
+            return CommandOutcome::NotHandled;
+        };
+        let dispatch = match dispatch {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                self.output.system_info(&error.to_string());
+                return CommandOutcome::Continue;
+            }
+        };
+        let parsed = dispatch.parsed;
+        self.invalidate_pending_draft();
+        let event = Event::ActionInvoke(tau_proto::ActionInvoke {
+            invocation_id: crate::mint_short_id("action").into(),
+            session_id: self.session_id.as_str().into(),
+            extension_name: dispatch.extension_name,
+            instance_id: dispatch.instance_id,
+            action_id: parsed.action_id.clone(),
+            raw_line: text.to_owned(),
+            argv: parsed.argv.clone(),
+            arguments: parsed_action_arguments(&parsed.named_args),
+        });
+        if send_event(self.writer, &event).is_err() {
+            CommandOutcome::Exit(InputLoopExit::Quit)
+        } else {
+            CommandOutcome::Continue
+        }
+    }
+
     fn handle_shell_shortcut(&self, text: &str) -> bool {
         // `!!<cmd>` / `!<cmd>`: run a shell command locally.
         // `!!` excludes the result from the agent's context;
@@ -1163,17 +1218,7 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn submit_prompt(&self, text: &str) -> Option<InputLoopExit> {
-        // Submission terminates the in-flight draft window —
-        // the buffer just got cleared by the user pressing
-        // Enter, so any pending draft is now stale. Invalidate
-        // before sending the submission so a debounce thread that
-        // already took an older snapshot can't emit it afterward.
-        let (mtx, cv) = &*self.ctx.draft_handle;
-        if let Ok(mut g) = mtx.lock() {
-            g.epoch = g.epoch.wrapping_add(1);
-            g.pending = None;
-            cv.notify_one();
-        }
+        self.invalidate_pending_draft();
 
         self.ctx
             .agent_in_progress
@@ -1194,6 +1239,14 @@ impl<'a> TerminalInputSession<'a> {
         }
 
         None
+    }
+
+    fn invalidate_pending_draft(&self) {
+        // Submission terminates the in-flight draft window — the buffer just
+        // got cleared by the user pressing Enter, so any pending draft is now
+        // stale. Invalidate before sending the submission/action so a debounce
+        // thread that already took an older snapshot can't emit it afterward.
+        invalidate_pending_draft(&self.ctx.draft_handle);
     }
 
     fn handle_eof(&self) -> Option<InputLoopExit> {
@@ -1381,6 +1434,24 @@ fn build_set_arg_completer(
         }
         _ => Vec::new(),
     })
+}
+
+fn parsed_action_arguments(
+    args: &std::collections::BTreeMap<String, tau_actions::ParsedArgValue>,
+) -> CborValue {
+    CborValue::Map(
+        args.iter()
+            .map(|(name, value)| {
+                let value = match value {
+                    tau_actions::ParsedArgValue::String(value) => CborValue::Text(value.clone()),
+                    tau_actions::ParsedArgValue::Integer(value) => {
+                        CborValue::Integer((*value).into())
+                    }
+                };
+                (CborValue::Text(name.clone()), value)
+            })
+            .collect(),
+    )
 }
 
 pub(crate) fn is_local_slash_command(text: &str) -> bool {

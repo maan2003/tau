@@ -31,9 +31,9 @@
 use std::io::Write;
 
 use tau_proto::{
-    ClientKind, EncodeError, Event, EventName, EventSelector, ExtensionName, Frame, FrameWriter,
-    Hello, Intercept, InterceptionPriority, Message, PROTOCOL_VERSION, PromptFragment, Ready,
-    Subscribe, ToolRegister, ToolSpec,
+    ActionSchema, ActionSchemaPublished, ClientKind, EncodeError, Event, EventName, EventSelector,
+    ExtensionName, Frame, FrameWriter, Hello, Intercept, InterceptionPriority, Message,
+    PROTOCOL_VERSION, PromptFragment, Ready, Subscribe, ToolRegister, ToolSpec,
 };
 
 /// Builder for the opening frame sequence an extension sends to the
@@ -126,6 +126,18 @@ impl Handshake {
                 prompt_fragment: None,
             }));
         self
+    }
+
+    /// Announce an extension-provided action schema before `Ready`.
+    ///
+    /// The owner fields in the wire event are placeholders; the harness stamps
+    /// the real extension name and instance id before broadcasting the schema.
+    pub fn publish_actions(self, schema: ActionSchema) -> Self {
+        self.announce_event(Event::ActionSchemaPublished(ActionSchemaPublished {
+            extension_name: ExtensionName::default(),
+            instance_id: 0.into(),
+            schema,
+        }))
     }
 
     /// Announce one startup event before the terminal `Ready` frame.

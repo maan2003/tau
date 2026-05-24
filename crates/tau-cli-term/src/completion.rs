@@ -92,19 +92,35 @@ impl CompletionItem {
 /// closure internally.
 pub type ArgCompleter = Arc<dyn Fn(&[&str]) -> Vec<CompletionItem> + Send + Sync>;
 
-/// Thread-safe storage for dynamic argument completions.
+/// Mutable completion state shared with background renderer updates.
+#[derive(Default)]
+struct CompletionInner {
+    arg_completers: HashMap<CommandName, ArgCompleter>,
+    dynamic_commands: Vec<SlashCommand>,
+}
+
+/// Thread-safe storage for dynamic slash-command and argument completions.
 ///
 /// Clone this handle and pass it to background threads that need to
 /// update available completions (e.g. when the harness sends a model
-/// list).
+/// list or an extension publishes an action schema).
 #[derive(Clone, Default)]
 pub struct CompletionData {
-    inner: Arc<Mutex<HashMap<CommandName, ArgCompleter>>>,
+    inner: Arc<Mutex<CompletionInner>>,
 }
 
 impl CompletionData {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Replaces extension-provided root slash commands shown alongside the
+    /// static command registry.
+    pub fn set_dynamic_commands(&self, commands: Vec<SlashCommand>) {
+        self.inner
+            .lock()
+            .expect("completion data lock")
+            .dynamic_commands = commands;
     }
 
     /// Sets a flat, single-arg completion list for a slash command.
@@ -146,6 +162,7 @@ impl CompletionData {
         self.inner
             .lock()
             .expect("completion data lock")
+            .arg_completers
             .insert(command, completer);
     }
 
@@ -156,6 +173,7 @@ impl CompletionData {
         self.inner
             .lock()
             .expect("completion data lock")
+            .arg_completers
             .insert(command, completer);
     }
 
@@ -163,8 +181,17 @@ impl CompletionData {
         self.inner
             .lock()
             .expect("completion data lock")
+            .arg_completers
             .get(command)
             .cloned()
+    }
+
+    fn dynamic_commands(&self) -> Vec<SlashCommand> {
+        self.inner
+            .lock()
+            .expect("completion data lock")
+            .dynamic_commands
+            .clone()
     }
 }
 
@@ -207,13 +234,20 @@ pub(crate) fn build_candidates_with_home(
         let rest = &buffer[space_pos + 1..];
         build_arg_candidates(data, cmd, rest)
     } else {
-        build_cmd_candidates(commands, buffer)
+        build_cmd_candidates(commands, &data.dynamic_commands(), buffer)
     }
 }
 
-fn build_cmd_candidates(commands: &[SlashCommand], prefix: &str) -> Vec<Candidate> {
-    commands
+fn build_cmd_candidates(
+    static_commands: &[SlashCommand],
+    dynamic_commands: &[SlashCommand],
+    prefix: &str,
+) -> Vec<Candidate> {
+    let mut seen = std::collections::HashSet::new();
+    static_commands
         .iter()
+        .chain(dynamic_commands)
+        .filter(|cmd| seen.insert(cmd.name.to_string()))
         .filter(|cmd| cmd.name.as_str().starts_with(prefix))
         .map(|cmd| Candidate {
             label: cmd.name.to_string(),

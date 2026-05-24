@@ -527,6 +527,7 @@ fn shell_command_args_keeps_short_first_line() {
     );
 }
 
+mod action;
 mod dedup;
 mod dispatch;
 mod format;

@@ -98,6 +98,21 @@ fn submit_typed(term: &mut HighTerm, input_tx: &std::sync::mpsc::Sender<TestRawE
 }
 
 #[test]
+fn dynamic_slash_commands_are_in_root_completion_menu() {
+    let data = CompletionData::new();
+    data.set_dynamic_commands(vec![SlashCommand::new("/email", "Email approvals")]);
+
+    let candidates =
+        completion::build_candidates(&[SlashCommand::new("/quit", "Exit")], &data, "/", 1);
+
+    let labels: Vec<_> = candidates
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect();
+    assert_eq!(labels, vec!["/quit", "/email"]);
+}
+
+#[test]
 fn typed_history_item_matching_completion_needs_one_up_per_item() {
     let (mut term, handle, input_tx) = new_test_term(vec![
         SlashCommand::new("/model", "Switch model"),

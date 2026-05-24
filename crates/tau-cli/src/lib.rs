@@ -3,6 +3,7 @@
 
 pub mod cli;
 
+mod action_commands;
 mod chat;
 mod daemon;
 mod event_renderer;

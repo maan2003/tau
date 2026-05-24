@@ -11,6 +11,7 @@ use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem, ToolCallItem, UnixMicros,
 };
 
+use crate::action_commands::ActionCommandState;
 use crate::build_banner;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
@@ -25,6 +26,7 @@ use crate::tool_render::{
 pub(crate) struct EventRenderer {
     handle: tau_cli_term::TermHandle,
     completion_data: tau_cli_term::CompletionData,
+    action_state: ActionCommandState,
     theme: tau_themes::Theme,
     /// Per-`session_prompt_id` UI state. An entry is created on
     /// `SessionPromptCreated` (or `ProviderPromptSubmitted` for prompts
@@ -845,6 +847,7 @@ impl EventRenderer {
         Self {
             handle,
             completion_data,
+            action_state: ActionCommandState::new(std::iter::empty::<&str>()),
             theme,
             prompts: HashMap::new(),
             compaction_blocks: HashMap::new(),
@@ -915,6 +918,11 @@ impl EventRenderer {
 
     pub(crate) fn set_tool_timer(&mut self, timer: ToolTimerNotifier) {
         self.tool_timer = Some(timer);
+    }
+
+    pub(crate) fn set_action_state(&mut self, action_state: ActionCommandState) {
+        self.action_state = action_state;
+        self.refresh_action_completions();
     }
 
     fn save_cli_state(&self) {
@@ -1984,6 +1992,7 @@ impl EventRenderer {
             || self.handle_provider_response_events(event)
             || self.handle_tool_events(event, recorded_at)
             || self.handle_shell_events(event)
+            || self.handle_action_events(event)
             || self.handle_extension_events(event)
             || self.handle_harness_status_events(event)
             || self.handle_harness_role_events(event)
@@ -3261,6 +3270,69 @@ impl EventRenderer {
         }
     }
 
+    fn handle_action_events(&mut self, event: &Event) -> bool {
+        match event {
+            Event::ActionSchemaPublished(published) => {
+                self.action_state.apply_schema_published(published);
+                self.refresh_action_completions();
+                true
+            }
+            Event::ActionResult(result) => {
+                self.handle_action_result(result);
+                true
+            }
+            Event::ActionError(error) => {
+                self.handle_action_error(error);
+                true
+            }
+            Event::ActionInvoke(_) => true,
+            _ => false,
+        }
+    }
+
+    fn refresh_action_completions(&self) {
+        self.completion_data
+            .set_dynamic_commands(self.action_state.dynamic_slash_commands());
+    }
+
+    fn handle_action_result(&mut self, result: &tau_proto::ActionResult) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        let text = match &result.output {
+            tau_proto::ActionOutput::Text { text } => text.clone(),
+            tau_proto::ActionOutput::EditorBuffer {
+                title,
+                text,
+                editable,
+            } => {
+                let mut rendered = format!("{title}\n{text}");
+                if *editable {
+                    rendered.push_str("\n[editable buffer]");
+                }
+                rendered
+            }
+        };
+        self.handle.print_output(
+            "action-result",
+            themed_block(&self.theme, names::SYSTEM_INFO, text),
+        );
+    }
+
+    fn handle_action_error(&mut self, error: &tau_proto::ActionError) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        self.handle.print_output(
+            "action-error",
+            themed_block(
+                &self.theme,
+                names::SYSTEM_INFO,
+                format!("{}: {}", error.action_id, error.message),
+            ),
+        );
+    }
+
     fn handle_extension_events(&mut self, event: &Event) -> bool {
         match event {
             Event::ExtensionStarting(starting) => {
@@ -3272,6 +3344,9 @@ impl EventRenderer {
                 true
             }
             Event::ExtensionExited(exited) => {
+                self.action_state
+                    .remove_extension(&exited.extension_name, exited.instance_id);
+                self.refresh_action_completions();
                 self.handle_extension_exited(exited);
                 true
             }

@@ -33,6 +33,7 @@ pub use frame::Frame;
 pub use interception::*;
 pub use messages::*;
 pub use prompt_fragment::*;
+pub use tau_actions::*;
 pub use token_usage::*;
 
 /// First protocol version implemented by this crate.
@@ -105,6 +106,8 @@ string_newtype!(/// Session identifier.
 // ToolName is defined manually below with validation.
 string_newtype!(/// Tool call identifier.
     ToolCallId);
+string_newtype!(/// User-interface action invocation identifier.
+    ActionInvocationId);
 string_newtype!(/// Connection identifier.
     ConnectionId);
 string_newtype!(/// Unique identifier for one prompt within a session.

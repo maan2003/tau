@@ -10,6 +10,31 @@ fn user_text_item(text: &str) -> ContextItem {
     })
 }
 
+fn action_schema_fixture() -> ActionSchema {
+    ActionSchema {
+        version: tau_actions::ACTION_SCHEMA_VERSION,
+        roots: vec![ActionCommand {
+            name: "/email".to_owned(),
+            description: "Review email approvals".to_owned(),
+            action_id: None,
+            args: Vec::new(),
+            children: vec![ActionCommand {
+                name: "out".to_owned(),
+                description: "Outgoing approvals".to_owned(),
+                action_id: None,
+                args: Vec::new(),
+                children: vec![ActionCommand {
+                    name: "list".to_owned(),
+                    description: "List queued outgoing email".to_owned(),
+                    action_id: Some("email.out.list".to_owned()),
+                    args: Vec::new(),
+                    children: Vec::new(),
+                }],
+            }],
+        }],
+    }
+}
+
 fn representative_events() -> Vec<Event> {
     vec![
         Event::ToolRegister(ToolRegister {
@@ -65,6 +90,34 @@ fn representative_events() -> Vec<Event> {
                 current: Some(1),
                 total: Some(10),
             }),
+        }),
+        Event::ActionSchemaPublished(ActionSchemaPublished {
+            extension_name: "std-email".into(),
+            instance_id: 7.into(),
+            schema: action_schema_fixture(),
+        }),
+        Event::ActionInvoke(ActionInvoke {
+            invocation_id: "act-1".into(),
+            session_id: "s1".into(),
+            extension_name: "std-email".into(),
+            instance_id: 7.into(),
+            action_id: "email.out.list".to_owned(),
+            raw_line: "/email out list".to_owned(),
+            argv: Vec::new(),
+            arguments: CborValue::Map(Vec::new()),
+        }),
+        Event::ActionResult(ActionResult {
+            invocation_id: "act-1".into(),
+            action_id: "email.out.list".to_owned(),
+            output: ActionOutput::Text {
+                text: "no queued mail".to_owned(),
+            },
+        }),
+        Event::ActionError(ActionError {
+            invocation_id: "act-2".into(),
+            action_id: "email.out.list".to_owned(),
+            message: "approval queue unavailable".to_owned(),
+            details: None,
         }),
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -652,6 +705,34 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             tool_name: ToolName::new("shell"),
             message: Some("running".to_owned()),
             progress: None,
+        }),
+        Event::ActionSchemaPublished(ActionSchemaPublished {
+            extension_name: "std-email".into(),
+            instance_id: 7.into(),
+            schema: action_schema_fixture(),
+        }),
+        Event::ActionInvoke(ActionInvoke {
+            invocation_id: "act-1".into(),
+            session_id: "s1".into(),
+            extension_name: "std-email".into(),
+            instance_id: 7.into(),
+            action_id: "email.out.list".to_owned(),
+            raw_line: "/email out list".to_owned(),
+            argv: Vec::new(),
+            arguments: CborValue::Map(Vec::new()),
+        }),
+        Event::ActionResult(ActionResult {
+            invocation_id: "act-1".into(),
+            action_id: "email.out.list".to_owned(),
+            output: ActionOutput::Text {
+                text: "ok".to_owned(),
+            },
+        }),
+        Event::ActionError(ActionError {
+            invocation_id: "act-2".into(),
+            action_id: "email.out.list".to_owned(),
+            message: "nope".to_owned(),
+            details: None,
         }),
         Event::UiPromptDraft(UiPromptDraft {
             session_id: "s1".into(),

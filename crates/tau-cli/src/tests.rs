@@ -15,7 +15,9 @@ use tau_proto::{
     UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
 };
 
-use super::chat::{DraftSlot, is_local_slash_command, should_send_draft_snapshot};
+use super::chat::{
+    DraftSlot, invalidate_pending_draft, is_local_slash_command, should_send_draft_snapshot,
+};
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
     CompactionStatus, ToolStatus, build_delegate_completion_display, build_osc1337_set_user_var,
@@ -293,6 +295,29 @@ fn role_setting_updates_are_typed_and_reset_aware() {
             service_tier: Some(ServiceTier::Fast),
         }
     );
+}
+
+#[test]
+fn action_submission_invalidates_pending_draft_like_prompt_submission() {
+    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    {
+        let (mtx, _cv) = &handle;
+        let mut slot = super::locked(mtx);
+        slot.pending = Some((
+            slot.epoch,
+            tau_proto::UiPromptDraft {
+                session_id: "s1".into(),
+                text: "/email list".into(),
+            },
+        ));
+    }
+
+    invalidate_pending_draft(&handle);
+
+    let (mtx, _cv) = &handle;
+    let slot = super::locked(mtx);
+    assert_eq!(slot.epoch, 1);
+    assert!(slot.pending.is_none());
 }
 
 #[test]

@@ -4,6 +4,7 @@
 //! socket, and in-memory test clients can all plug into the same bus through a
 //! small [`ConnectionSink`] interface.
 
+mod action_registry;
 mod bus;
 mod connection;
 mod memory;
@@ -15,6 +16,9 @@ mod tool_registry;
 #[cfg(test)]
 mod tests;
 
+pub use action_registry::{
+    ActionProviderSchema, ActionRegistry, ActionRegistryError, ActionRouteError,
+};
 pub use bus::EventBus;
 pub use connection::{
     AllowAll, Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError,

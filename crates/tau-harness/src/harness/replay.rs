@@ -14,8 +14,8 @@
 //!   same banners and indicators as one that was here from the start.
 
 use tau_proto::{
-    Event, EventSelector, Frame, HarnessContextUsageChanged, HarnessModelsAvailable,
-    HarnessRoleSelected, HarnessRolesAvailable, Message,
+    ActionSchemaPublished, Event, EventSelector, Frame, HarnessContextUsageChanged,
+    HarnessModelsAvailable, HarnessRoleSelected, HarnessRolesAvailable, Message,
 };
 
 use crate::harness::{Harness, selector_matches_event};
@@ -88,6 +88,21 @@ impl Harness {
                     client_id,
                     Some(source_id.as_str()),
                     Frame::Event(provider_event),
+                );
+            }
+        }
+
+        for published in self.action_registry.published_schemas() {
+            let action_event = Event::ActionSchemaPublished(ActionSchemaPublished {
+                extension_name: published.extension_name,
+                instance_id: published.instance_id,
+                schema: published.schema,
+            });
+            if selector_matches_event(selectors, &action_event) {
+                let _ = self.bus.send_to(
+                    client_id,
+                    Some(published.connection_id.as_str()),
+                    Frame::Event(action_event),
                 );
             }
         }
