@@ -20,10 +20,11 @@
 # Optional grouped role defaults. Role names are globally unique across all
 # groups. Tab cycles between groups; Shift-Tab cycles within the selected
 # role's group. Group-level fields are defaults for every role in `roles`.
-# `description` is shown in `/role ...` completions. Per-role
-# `promptFragments` add instructions only for that role. `promptOverride`
-# selects a system prompt template. `tools` and `disableTools` customize
-# internal tool availability for the role.
+# `description` is shown in `/role ...` completions. `compactionThreshold`
+# sets the context-window percentage (0-100) where automatic compaction starts.
+# Per-role `promptFragments` add instructions only for that role.
+# `promptOverride` selects a system prompt template. `tools` and `disableTools`
+# customize internal tool availability for the role.
 # roleGroups:
 #   engineer:
 #     promptFragments:
@@ -36,6 +37,7 @@
 #       senior-engineer:
 #         description: Balanced coding engineer.
 #         model: chatgpt/gpt-5.5
+#         compactionThreshold: 85
 #         tools: [read, grep]
 #         disableTools: [shell]
 #       staff-engineer:

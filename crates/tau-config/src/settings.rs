@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use indexmap::IndexMap;
-use serde::de::Error as _;
-use serde::{Deserialize, Serialize};
+use serde::de::{Error as _, Unexpected};
+use serde::{Deserialize, Deserializer, Serialize};
 use tau_proto::{ModelId, PromptContent, PromptPriority, ToolName};
 
 // ---------------------------------------------------------------------------
@@ -494,6 +494,8 @@ struct RawRoleGroup {
     thinking_summary: Option<tau_proto::ThinkingSummary>,
     #[serde(rename = "serviceTier")]
     service_tier: Option<tau_proto::ServiceTier>,
+    #[serde(default, deserialize_with = "deserialize_optional_percent")]
+    compaction_threshold: Option<u8>,
     prompt_fragments: Vec<RolePromptFragment>,
     #[serde(rename = "promptOverride")]
     prompt_override: Option<String>,
@@ -513,6 +515,7 @@ impl RawRoleGroup {
             verbosity: self.verbosity,
             thinking_summary: self.thinking_summary,
             service_tier: self.service_tier,
+            compaction_threshold: self.compaction_threshold,
             prompt_fragments: self.prompt_fragments.clone(),
             prompt_override: self.prompt_override.clone(),
             tools: self.tools.clone(),
@@ -762,6 +765,15 @@ pub struct AgentRole {
     /// Provider service tier preferred by this role.
     #[serde(skip_serializing_if = "Option::is_none", rename = "serviceTier")]
     pub service_tier: Option<tau_proto::ServiceTier>,
+    /// Context-window percentage at which automatic compaction should start.
+    /// Missing values use Tau's default threshold.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "compactionThreshold",
+        deserialize_with = "deserialize_optional_percent"
+    )]
+    pub compaction_threshold: Option<u8>,
     /// Prompt fragments contributed by this role. Fragments are rendered as
     /// Handlebars templates and ordered together with tool/extension fragments.
     #[serde(skip_serializing_if = "Vec::is_empty", rename = "promptFragments")]
@@ -783,6 +795,22 @@ pub struct AgentRole {
         rename = "disableTools"
     )]
     pub disable_tools: Vec<ToolName>,
+}
+
+fn deserialize_optional_percent<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<u8>::deserialize(deserializer)?;
+    if let Some(percent) = value
+        && percent > 100
+    {
+        return Err(D::Error::invalid_value(
+            Unexpected::Unsigned(u64::from(percent)),
+            &"a percentage from 0 to 100",
+        ));
+    }
+    Ok(value)
 }
 
 impl AgentRole {
@@ -807,6 +835,9 @@ impl AgentRole {
         }
         if let Some(service_tier) = override_role.service_tier {
             self.service_tier = Some(service_tier);
+        }
+        if let Some(compaction_threshold) = override_role.compaction_threshold {
+            self.compaction_threshold = Some(compaction_threshold);
         }
         for prompt_fragment in &override_role.prompt_fragments {
             if !self.prompt_fragments.contains(prompt_fragment) {

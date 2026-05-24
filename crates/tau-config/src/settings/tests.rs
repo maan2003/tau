@@ -250,6 +250,57 @@ fn harness_settings_load_role_tool_lists() {
 }
 
 #[test]
+fn harness_settings_load_role_compaction_threshold() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            roleGroups: {
+                engineer: {
+                    compactionThreshold: 70,
+                    roles: {
+                        engineer: { compactionThreshold: 80 },
+                        reviewer: {},
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(s.roles["engineer"].compaction_threshold, Some(80));
+    assert_eq!(s.roles["reviewer"].compaction_threshold, Some(70));
+}
+
+#[test]
+fn harness_settings_rejects_invalid_role_compaction_threshold() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            roleGroups: {
+                engineer: {
+                    roles: {
+                        engineer: { compactionThreshold: 101 },
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let error = load_harness_settings_in(&dirs_with_config(dir))
+        .expect_err("reject invalid compaction threshold");
+    assert!(
+        error.to_string().contains("percentage from 0 to 100"),
+        "error should mention valid percentage range: {error}"
+    );
+}
+
+#[test]
 fn harness_settings_load_role_group_default_tool_overrides_without_relisting_roles() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();

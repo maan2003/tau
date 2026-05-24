@@ -1720,6 +1720,13 @@ pub enum UiRoleUpdateAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         service_tier: Option<ServiceTier>,
     },
+    /// Set or clear the role's automatic compaction threshold percentage.
+    SetCompactionThreshold {
+        /// Context-window percentage at which automatic compaction should
+        /// start, or `None` to use Tau's default threshold.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction_threshold: Option<u8>,
+    },
     /// Set or clear the role's explicit tool allow-list.
     SetTools {
         /// Internal tool names to allow, or `None` to use default tool

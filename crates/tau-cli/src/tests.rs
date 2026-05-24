@@ -296,6 +296,19 @@ fn role_setting_updates_are_typed_and_reset_aware() {
             service_tier: Some(ServiceTier::Fast),
         }
     );
+    assert_eq!(
+        parse_role_setting_update("compaction-threshold", "85").expect("threshold 85"),
+        UiRoleUpdateAction::SetCompactionThreshold {
+            compaction_threshold: Some(85),
+        }
+    );
+    assert_eq!(
+        parse_role_setting_update("compaction-threshold", "reset").expect("threshold reset"),
+        UiRoleUpdateAction::SetCompactionThreshold {
+            compaction_threshold: None,
+        }
+    );
+    assert!(parse_role_setting_update("compaction-threshold", "101").is_err());
 }
 
 #[test]

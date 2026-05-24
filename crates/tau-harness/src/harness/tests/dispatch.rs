@@ -5154,6 +5154,44 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
 }
 
 #[test]
+fn auto_compaction_uses_conversation_role_threshold() {
+    // Roles can opt into earlier compaction than Tau's default threshold. The
+    // decision must use the role bound to the active conversation, including
+    // delegate side conversations, rather than only the global selected role.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.available_roles.insert(
+        "early-compact".to_owned(),
+        tau_config::settings::AgentRole {
+            compaction_threshold: Some(70),
+            ..Default::default()
+        },
+    );
+
+    let side_cid = ConversationId::new("start-agent-__harness__-delegate-early");
+    let mut side_conv = Conversation::new(
+        side_cid.clone(),
+        "s1".into(),
+        tau_proto::PromptOriginator::Extension {
+            name: HARNESS_CONNECTION_ID.into(),
+            query_id: "delegate-early".to_owned(),
+        },
+        None,
+        Some(HARNESS_CONNECTION_ID.into()),
+    );
+    side_conv.parent_tool_call_id = Some("call-delegate".into());
+    side_conv.role = Some("early-compact".to_owned());
+    side_conv.context_percent_used = Some(75);
+    h.conversations.insert(side_cid.clone(), side_conv);
+
+    assert!(h.should_auto_compact_for_conversation(&side_cid));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn side_conversation_auto_compaction_ignores_default_context_signal() {
     // Regression for session fedimint-1hj5h9: a delegate side
     // conversation must not inherit the main/default context percent.

@@ -229,6 +229,19 @@ fn parse_disable_tool_list_update(value: &str) -> Result<Vec<tau_proto::ToolName
     Ok(parse_tool_list_update(value)?.unwrap_or_default())
 }
 
+fn parse_compaction_threshold_update(value: &str) -> Result<Option<u8>, String> {
+    if is_reset_value(value) {
+        return Ok(None);
+    }
+    let threshold = value
+        .parse::<u8>()
+        .map_err(|_| "compaction-threshold must be a percentage from 0 to 100".to_owned())?;
+    if threshold > 100 {
+        return Err("compaction-threshold must be a percentage from 0 to 100".to_owned());
+    }
+    Ok(Some(threshold))
+}
+
 pub(crate) fn parse_role_setting_update(
     setting: &str,
     value: &str,
@@ -280,6 +293,9 @@ pub(crate) fn parse_role_setting_update(
         }),
         "service-tier" => Ok(tau_proto::UiRoleUpdateAction::SetServiceTier {
             service_tier: parse_service_tier_update(value)?,
+        }),
+        "compaction-threshold" => Ok(tau_proto::UiRoleUpdateAction::SetCompactionThreshold {
+            compaction_threshold: parse_compaction_threshold_update(value)?,
         }),
         "tools" => Ok(tau_proto::UiRoleUpdateAction::SetTools {
             tools: parse_tool_list_update(value)?,
@@ -1528,7 +1544,7 @@ fn handle_role_command(text: &str, writer: &WriterHandle, print_local: &impl Fn(
     let extra = parts.next();
     let Some(role) = role else {
         print_local(
-            "/role <role> [delete|model|effort|verbosity|thinking-summary|service-tier|tools|disable-tools] [value]",
+            "/role <role> [delete|model|effort|verbosity|thinking-summary|service-tier|compaction-threshold|tools|disable-tools] [value]",
         );
         return;
     };

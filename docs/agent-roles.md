@@ -10,6 +10,7 @@ A role can set:
 - `verbosity`: `low`, `medium`, or `high`
 - `thinkingSummary`: `off`, `auto`, `concise`, or `detailed`
 - `serviceTier`: `fast` or `flex`
+- `compactionThreshold`: context-window percentage (0-100) at which automatic compaction starts for the role
 - `promptFragments`: role-specific prompt fragments
 - `promptOverride`: system prompt template name
 - `tools`: explicit internal tools enabled for this role
@@ -43,6 +44,7 @@ Roles live in `harness.yaml` under globally unique `roleGroups`. Each group has 
           description: "Balanced coding engineer",
           model: "chatgpt/gpt-5.3-codex",
           effort: "medium",
+          compactionThreshold: 85,
           tools: ["read", "grep"],
         },
         "staff-engineer": {
@@ -67,7 +69,7 @@ Roles live in `harness.yaml` under globally unique `roleGroups`. Each group has 
 }
 ```
 
-Missing fields use group defaults first, then provider-published fallback knobs for the role's resolved model. Set `enabled: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
+Missing fields use group defaults first, then provider-published fallback knobs for the role's resolved model. When `compactionThreshold` is omitted, Tau uses its built-in automatic compaction threshold. Set `enabled: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
 
 Tau ships built-in `junior-engineer`, `senior-engineer`, `staff-engineer`, and `manager` roles, with `defaultRole: senior-engineer`. `junior-engineer` uses lower reasoning for straightforward engineering work, `senior-engineer` uses balanced individual-contributor defaults, and `staff-engineer` is the maximum-reasoning engineering variant. `manager` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `manager` prompt tells the model to use `delegate` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
 

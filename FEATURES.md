@@ -140,8 +140,9 @@ roleGroups:
 Roles can include a `description` shown after the model/knob summary in
 `/role ...` completions. Top-level `promptFragments` apply to every role;
 group-level fields apply as defaults to that group's roles; per-role
-`promptFragments` apply only to that role. Roles can also use `tools` and
-`disableTools` to customize internal tool availability.
+`promptFragments` apply only to that role. Roles can set
+`compactionThreshold` to choose when automatic compaction starts, and can also
+use `tools` and `disableTools` to customize internal tool availability.
 
 `defaultRole` selects the startup role; if it is omitted Tau starts on the
 first role in `roleGroups` order. `/model <role>` switches roles for the current

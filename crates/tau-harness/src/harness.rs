@@ -5632,7 +5632,16 @@ impl Harness {
                     .then_some(self.current_session_state.context_percent_used)
                     .flatten()
             });
-        current_percent.is_some_and(|p| AUTO_COMPACTION_CONTEXT_PERCENT <= p)
+        let threshold = self.compaction_threshold_for_conversation(cid);
+        current_percent.is_some_and(|p| threshold <= p)
+    }
+
+    fn compaction_threshold_for_conversation(&self, cid: &ConversationId) -> u8 {
+        let role_name = self.role_name_for_conversation_id(cid);
+        self.available_roles
+            .get(&role_name)
+            .and_then(|role| role.compaction_threshold)
+            .unwrap_or(AUTO_COMPACTION_CONTEXT_PERCENT)
     }
 
     fn selected_model_supports_compaction(&self) -> bool {
@@ -5697,6 +5706,11 @@ impl Harness {
             }
             tau_proto::UiRoleUpdateAction::SetServiceTier { service_tier } => {
                 next_role.service_tier = service_tier;
+            }
+            tau_proto::UiRoleUpdateAction::SetCompactionThreshold {
+                compaction_threshold,
+            } => {
+                next_role.compaction_threshold = compaction_threshold;
             }
             tau_proto::UiRoleUpdateAction::SetTools { tools } => {
                 next_role.tools = tools;
