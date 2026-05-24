@@ -388,6 +388,60 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
 }
 
 #[test]
+fn switched_agent_shows_its_tool_usage() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        query_id: "q-worker".to_owned(),
+        agent_id: "worker-1".to_owned(),
+    }));
+    let originator = tau_proto::PromptOriginator::Extension {
+        name: "core-subagents".into(),
+        query_id: "q-worker".to_owned(),
+    };
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        originator: originator.clone(),
+        ..finished_response(
+            "worker-sp",
+            vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "worker-call".into(),
+                name: tau_proto::ToolName::new("read"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".into()),
+                    CborValue::Text("src/lib.rs".into()),
+                )]),
+            })],
+        )
+    }));
+    renderer.handle_recorded_at(
+        &tool_started(
+            "worker-call",
+            "read",
+            CborValue::Map(vec![(
+                CborValue::Text("path".into()),
+                CborValue::Text("src/lib.rs".into()),
+            )]),
+        ),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "read src/lib.rs"));
+
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "read src/lib.rs 0s …"));
+}
+
+#[test]
 fn agent_switch_preserves_separate_transcripts() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(

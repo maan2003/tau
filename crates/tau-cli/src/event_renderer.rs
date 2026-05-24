@@ -2128,24 +2128,6 @@ impl EventRenderer {
         );
     }
 
-    fn learn_side_conversation_tool_calls(&mut self, event: &Event) {
-        let Event::ProviderResponseFinished(finished) = event else {
-            return;
-        };
-        if finished.originator.is_user() {
-            return;
-        }
-        for call in tool_calls_from_output_items(&finished.output_items) {
-            self.tool_calls.insert(
-                call.call_id.to_string(),
-                ToolCallState {
-                    is_sub_agent: true,
-                    ..ToolCallState::default()
-                },
-            );
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn handle(&mut self, event: &Event) {
         self.handle_recorded_at(event, UnixMicros::now());
@@ -2303,14 +2285,6 @@ impl EventRenderer {
         }
 
         self.sync_main_tools_visibility_for_prompt_lifecycle(event);
-
-        // Side-conversation `ProviderResponseFinished` events get filtered
-        // out by `originator_of(event).is_user()` below — but we still
-        // need to learn which `call_id`s those side conversations emit,
-        // so later `ToolResult` / `ToolError` / `ToolProgress` events
-        // (which carry no originator) can be suppressed before they leak
-        // into the user's transcript.
-        self.learn_side_conversation_tool_calls(event);
 
         if self.handle_agent_message_event(event) {
             return;
