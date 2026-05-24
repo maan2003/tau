@@ -10,6 +10,7 @@ use async_imap::imap_proto::types::NameAttribute;
 use async_imap::types::Flag;
 use async_imap::{Client, Session};
 use futures_util::TryStreamExt;
+use lettre::message::Mailbox;
 use lettre::message::header::ContentType as LettreContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{CertificateStore, Tls, TlsParameters};
@@ -589,38 +590,21 @@ fn parsed_body_text(parsed: &mail_parser::Message<'_>) -> String {
 
 fn build_lettre_message(outgoing: &OutgoingMessage, message_id: &str) -> Result<Message, String> {
     let mut builder = Message::builder()
-        .from(
-            outgoing
-                .from
-                .parse()
-                .map_err(|_| "invalid_input: invalid From address".to_owned())?,
-        )
+        .from(parse_mailbox_header(&outgoing.from, "From")?)
         .subject(outgoing.subject.clone())
         .message_id(Some(message_id.to_owned()))
         .header(LettreContentType::TEXT_PLAIN);
     for recipient in &outgoing.to {
-        builder = builder.to(recipient
-            .parse()
-            .map_err(|_| "invalid_input: invalid To address".to_owned())?);
+        builder = builder.to(parse_mailbox_header(recipient, "To")?);
     }
     for recipient in &outgoing.cc {
-        builder = builder.cc(recipient
-            .parse()
-            .map_err(|_| "invalid_input: invalid Cc address".to_owned())?);
+        builder = builder.cc(parse_mailbox_header(recipient, "Cc")?);
     }
     for recipient in &outgoing.bcc {
-        builder = builder.bcc(
-            recipient
-                .parse()
-                .map_err(|_| "invalid_input: invalid Bcc address".to_owned())?,
-        );
+        builder = builder.bcc(parse_mailbox_header(recipient, "Bcc")?);
     }
     if let Some(reply_to) = &outgoing.reply_to {
-        builder = builder.reply_to(
-            reply_to
-                .parse()
-                .map_err(|_| "invalid_input: invalid Reply-To address".to_owned())?,
-        );
+        builder = builder.reply_to(parse_mailbox_header(reply_to, "Reply-To")?);
     }
     if let Some(in_reply_to) = &outgoing.in_reply_to {
         builder = builder.in_reply_to(in_reply_to.clone());
@@ -628,6 +612,25 @@ fn build_lettre_message(outgoing: &OutgoingMessage, message_id: &str) -> Result<
     builder
         .body(outgoing.body_text.clone())
         .map_err(|_| "smtp_error: failed to build email message".to_owned())
+}
+
+pub(crate) fn parse_mailbox_header(input: &str, field: &str) -> Result<Mailbox, String> {
+    let raw = input.trim();
+    if let (Some(start), Some(end)) = (raw.rfind('<'), raw.rfind('>'))
+        && start < end
+    {
+        let name = raw[..start].trim().trim_matches('"').trim();
+        let address = raw[start + 1..end].trim().trim_matches('"').trim();
+        let (local, domain) = address
+            .split_once('@')
+            .ok_or_else(|| format!("invalid_input: invalid {field} address"))?;
+        let email = lettre::Address::new(local, domain)
+            .map_err(|_| format!("invalid_input: invalid {field} address"))?;
+        let name = (!name.is_empty()).then(|| name.to_owned());
+        return Ok(Mailbox::new(name, email));
+    }
+    raw.parse()
+        .map_err(|_| format!("invalid_input: invalid {field} address"))
 }
 
 fn generate_message_id(host: &str, outgoing: &OutgoingMessage) -> String {

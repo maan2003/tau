@@ -1365,6 +1365,24 @@ fn outgoing_exact_message_approval_matching() {
 }
 
 #[test]
+fn lettre_mailbox_parser_accepts_unicode_display_names() {
+    // User/account display names can contain non-ASCII characters. Lettre's
+    // FromStr parser rejects some such headers, so the SMTP backend must split
+    // display name from addr-spec and let lettre encode the name later.
+    let mailbox = super::real_backend::parse_mailbox_header(
+        "Dawid Ciężarkiewicz (tau agent) <dpc@dpc.pw>",
+        "From",
+    )
+    .expect("unicode display name should parse");
+
+    assert_eq!(
+        mailbox.name.as_deref(),
+        Some("Dawid Ciężarkiewicz (tau agent)")
+    );
+    assert_eq!(mailbox.email.to_string(), "dpc@dpc.pw");
+}
+
+#[test]
 fn send_rejects_non_empty_attachments_deliberately() {
     let parsed = parse_command(&command_args(
         "send",
