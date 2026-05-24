@@ -66,7 +66,7 @@ impl FakeBackend {
                     has_attachments: false,
                     attachments: Vec::new(),
                     message_id: None,
-                    auth_results: vec![trusted_dmarc_pass("company.com")],
+                    auth_results: vec![trusted_dkim_pass("company.com")],
                 },
             ],
         );
@@ -247,6 +247,7 @@ fn cfg() -> EmailExtensionConfig {
             incoming_auth: IncomingAuthPolicyConfig {
                 require: true,
                 trusted_authserv_ids: vec!["mx.company.com".to_owned()],
+                allow_dmarc_only: false,
             },
             outgoing_allow: vec![
                 "bob@company.com".to_owned(),
@@ -714,25 +715,25 @@ fn approval_required_send_displays_as_success_for_agent() {
 }
 
 #[test]
-fn backend_errors_keep_backend_context_for_agent_debugging() {
-    let error = backend_error_envelope(
-        Some("list"),
-        "network_error",
-        "network_error: IMAP connection to imap.example.com:993 failed: connection refused",
+fn backend_errors_keep_sanitized_backend_context_for_agent_debugging() {
+    // Remote IMAP/SMTP diagnostics are attacker-influenced and model-visible in
+    // tool errors, so keep only bounded text with terminal controls escaped.
+    let raw = format!(
+        "network_error: IMAP failed\nforged: yes\u{1b}[31m{}",
+        "x".repeat(MAX_BACKEND_ERROR_CHARS * 2)
     );
+    let error = backend_error_envelope(Some("list"), "network_error", &raw);
 
     assert_eq!(
         email_error_message(&error),
-        "email list failed (network_error): IMAP connection to imap.example.com:993 failed: connection refused"
+        "email list failed (network_error): IMAP failed"
     );
     let details = map_get(map_get(&error, "error").expect("error"), "details").expect("details");
-    assert_eq!(
-        text_field(details, "backend_message"),
-        Some(
-            "network_error: IMAP connection to imap.example.com:993 failed: connection refused"
-                .to_owned()
-        )
-    );
+    let backend_message = text_field(details, "backend_message").expect("backend message");
+    assert!(!backend_message.contains('\u{1b}'));
+    assert!(backend_message.contains("\\e[31m"));
+    assert!(backend_message.contains("\\nforged: yes"));
+    assert!(backend_message.chars().count() < MAX_BACKEND_ERROR_CHARS + 32);
 }
 
 #[test]
@@ -839,24 +840,41 @@ fn incoming_allow_requires_trusted_aligned_authentication() {
 }
 
 #[test]
-fn incoming_allow_accepts_trusted_dmarc_or_aligned_dkim() {
-    // Trusted server Authentication-Results may unlock an already-whitelisted
-    // visible From domain only when DMARC/DKIM evidence aligns exactly.
-    for auth_results in [
+fn incoming_allow_requires_trusted_aligned_dkim_by_default() {
+    // DMARC/SPF-style alignment alone is not enough for default auto-read:
+    // unaware users must get the stronger stable DKIM requirement unless they
+    // explicitly opt into DMARC-only trust.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut dmarc_only = single_message_engine(
+        &temp,
+        "team@company.com",
         vec![trusted_dmarc_pass("company.com")],
-        vec![trusted_dkim_pass("company.com")],
-    ] {
-        let temp = tempfile::TempDir::new().expect("tempdir");
-        let mut engine = single_message_engine(&temp, "team@company.com", auth_results);
-        let result = engine.dispatch(EmailCommand::Read {
-            account: "work".to_owned(),
-            folder: "INBOX".to_owned(),
-            uid: "99".to_owned(),
-        });
+    );
+    let result = dmarc_only.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "99".to_owned(),
+    });
+    assert_eq!(
+        cbor_text_field(&result, "status"),
+        Some("approval_required")
+    );
+    assert_eq!(read_reason(&result), Some("dkim missing".to_owned()));
+    assert!(!format!("{result:?}").contains("secret body"));
 
-        assert_eq!(cbor_text_field(&result, "status"), Some("ok"));
-        assert!(format!("{result:?}").contains("secret body"));
-    }
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut dkim = single_message_engine(
+        &temp,
+        "team@company.com",
+        vec![trusted_dkim_pass("company.com")],
+    );
+    let result = dkim.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "99".to_owned(),
+    });
+    assert_eq!(cbor_text_field(&result, "status"), Some("ok"));
+    assert!(format!("{result:?}").contains("secret body"));
 }
 
 #[test]
@@ -1095,7 +1113,7 @@ fn allowed_read_rejects_body_fetch_uidvalidity_mismatch() {
         has_attachments: false,
         attachments: Vec::new(),
         message_id: None,
-        auth_results: vec![trusted_dmarc_pass("company.com")],
+        auth_results: vec![trusted_dkim_pass("company.com")],
     };
     let body = BackendMessage {
         uidvalidity: "uv2".to_owned(),
@@ -1143,6 +1161,10 @@ fn outgoing_whitelisted_sends_and_mixed_recipients_queue_whole_message() {
     });
     assert_eq!(cbor_text_field(&sent, "status"), Some("sent"));
     assert_eq!(engine.backend.sent.borrow().len(), 1);
+    assert_eq!(
+        engine.backend.sent.borrow()[0].from,
+        "Alice <alice@company.com>"
+    );
 
     let queued = engine.dispatch(EmailCommand::Send {
         account: Some("work".to_owned()),
@@ -1260,6 +1282,190 @@ fn outgoing_actions_list_open_approve_and_whitelist_drive_policy() {
 }
 
 #[test]
+fn outgoing_reply_to_and_from_spoofing_are_policy_checked() {
+    // Reply-To is recipient-like: an allowlisted To must not smuggle replies to
+    // an untrusted address. The From display name is account-controlled so the
+    // model cannot impersonate arbitrary names using the configured addr-spec.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+
+    let queued = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["bob@company.com".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "hi".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: Some("attacker@evil.test".to_owned()),
+        in_reply_to: None,
+    });
+    assert_eq!(
+        cbor_text_field(&queued, "status"),
+        Some("approval_required")
+    );
+    assert!(format!("{queued:?}").contains("attacker@evil.test"));
+
+    let sent = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["bob@company.com".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "hi".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: Some("ops@trusted.test".to_owned()),
+        in_reply_to: None,
+    });
+    assert_eq!(cbor_text_field(&sent, "status"), Some("sent"));
+
+    let spoofed = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: Some("CEO <alice@company.com>".to_owned()),
+        to: vec!["bob@company.com".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "hi".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    assert_eq!(
+        cbor_nested_text_field(&spoofed, "error", "code"),
+        Some("policy_denied")
+    );
+}
+
+#[test]
+fn outgoing_success_outputs_do_not_leak_bcc() {
+    // BCC recipients are hidden from the agent transcript even for successful
+    // immediate sends and idempotent already-sent responses.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    let sent = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["bob@company.com".to_owned()],
+        cc: Vec::new(),
+        bcc: vec!["secret@trusted.test".to_owned()],
+        subject: "hi".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    assert_eq!(cbor_text_field(&sent, "status"), Some("sent"));
+    assert!(!format!("{sent:?}").contains("secret@trusted.test"));
+
+    let queued = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["external@example.net".to_owned()],
+        cc: Vec::new(),
+        bcc: vec!["hidden@example.net".to_owned()],
+        subject: "proposal".to_owned(),
+        body_text: "full draft body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    let id = match data_field(&queued, "approval_id") {
+        CborValue::Text(id) => id.clone(),
+        _ => panic!("approval id"),
+    };
+    engine
+        .dispatch_action("email.out.approve", &[id])
+        .expect("approve");
+    let repeated = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["external@example.net".to_owned()],
+        cc: Vec::new(),
+        bcc: vec!["hidden@example.net".to_owned()],
+        subject: "proposal".to_owned(),
+        body_text: "full draft body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    assert_eq!(cbor_text_field(&repeated, "status"), Some("already_sent"));
+    assert!(!format!("{repeated:?}").contains("hidden@example.net"));
+}
+
+#[test]
+fn action_outputs_escape_controls_and_row_forgery() {
+    // Approval actions render attacker-controlled email fields in a terminal UI.
+    // Newlines, ESC, and bidi controls must be visible/neutralized in metadata
+    // rows so they cannot forge extra approval or header lines.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    engine.backend.messages.insert(
+        ("work".to_owned(), "INBOX".to_owned()),
+        vec![BackendMessage {
+            uid: "77".to_owned(),
+            uidvalidity: "uv\u{1b}[31m".to_owned(),
+            date: "today\nstatus: forged".to_owned(),
+            from: "Mallory\u{202e} <mallory@evil.test>".to_owned(),
+            to: vec!["alice\ncc: forged@company.com".to_owned()],
+            cc: Vec::new(),
+            subject: "hello\nstatus: forged\u{1b}[31m".to_owned(),
+            body_text: "body\u{1b}[31m\nsubject: forged".to_owned(),
+            flags: Vec::new(),
+            has_attachments: true,
+            attachments: vec![BackendAttachment {
+                filename: Some("file\nreason: forged\u{202e}.txt".to_owned()),
+                content_type: Some("text/plain".to_owned()),
+                size_bytes: Some(1),
+            }],
+            message_id: None,
+            auth_results: Vec::new(),
+        }],
+    );
+
+    let incoming = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "77".to_owned(),
+    });
+    let incoming_id = match data_field(&incoming, "approval_id") {
+        CborValue::Text(id) => id.clone(),
+        _ => panic!("approval id"),
+    };
+    let listed = engine.dispatch_action("email.in.list", &[]).expect("list");
+    let opened = engine
+        .dispatch_action("email.in.open", &[incoming_id])
+        .expect("open");
+    for output in [&listed, &opened] {
+        assert!(!output.contains('\u{1b}'));
+        assert!(!output.contains('\u{202e}'));
+    }
+    assert!(listed.contains("today\\nstatus: forged"));
+    assert!(opened.contains("subject: hello\\nstatus: forged\\e[31m"));
+    assert!(opened.contains("file\\nreason: forged\\u{202e}.txt"));
+
+    let outgoing = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["external@example.net".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "draft\nblocked=forged\u{1b}[31m".to_owned(),
+        body_text: "draft body\u{1b}[31m".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    let outgoing_id = match data_field(&outgoing, "approval_id") {
+        CborValue::Text(id) => id.clone(),
+        _ => panic!("approval id"),
+    };
+    let listed = engine.dispatch_action("email.out.list", &[]).expect("list");
+    let opened = engine
+        .dispatch_action("email.out.open", &[outgoing_id])
+        .expect("open");
+    assert!(!listed.contains('\u{1b}'));
+    assert!(!opened.contains('\u{1b}'));
+    assert!(listed.contains("draft\\nblocked=forged\\e[31m"));
+    assert!(opened.contains("draft body\\e[31m"));
+}
+
+#[test]
 fn incoming_actions_list_redacts_for_agent_but_open_shows_user_content() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
@@ -1324,7 +1530,7 @@ fn incoming_actions_list_redacts_for_agent_but_open_shows_user_content() {
             has_attachments: false,
             attachments: Vec::new(),
             message_id: None,
-            auth_results: vec![trusted_dmarc_pass("new.test")],
+            auth_results: vec![trusted_dkim_pass("new.test")],
         }],
     );
     engine
@@ -1616,7 +1822,7 @@ fn read_body_and_list_results_report_truncation_metadata() {
                 has_attachments: false,
                 attachments: Vec::new(),
                 message_id: None,
-                auth_results: vec![trusted_dmarc_pass("company.com")],
+                auth_results: vec![trusted_dkim_pass("company.com")],
             },
             BackendMessage {
                 uid: "11".to_owned(),
@@ -1631,7 +1837,7 @@ fn read_body_and_list_results_report_truncation_metadata() {
                 has_attachments: false,
                 attachments: Vec::new(),
                 message_id: None,
-                auth_results: vec![trusted_dmarc_pass("company.com")],
+                auth_results: vec![trusted_dkim_pass("company.com")],
             },
         ],
     );

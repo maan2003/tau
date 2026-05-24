@@ -22,6 +22,13 @@ const READ_BODY_MAX_LINES: usize = 1000;
 const LIST_MAX_LIMIT: usize = 100;
 const DEFAULT_LIST_LIMIT: u32 = LIST_MAX_LIMIT as u32;
 const DEFAULT_FOLDER: &str = "INBOX";
+const MAX_DISPLAY_LINE_CHARS: usize = 256;
+const MAX_HEADER_VALUE_CHARS: usize = 512;
+const MAX_ADDRESS_CHARS: usize = 320;
+const MAX_ATTACHMENT_NAME_CHARS: usize = 256;
+const MAX_FLAGS: usize = 32;
+const MAX_RECIPIENTS: usize = 256;
+const MAX_BACKEND_ERROR_CHARS: usize = 512;
 
 use tau_proto::{
     ACTION_SCHEMA_VERSION, Ack, ActionArg, ActionArgKind, ActionCommand, ActionError, ActionInvoke,
@@ -288,6 +295,9 @@ pub struct IncomingAuthPolicyConfig {
     /// Exact authserv-id values whose server-provided `Authentication-Results`
     /// headers may be trusted for incoming auto-read decisions.
     pub trusted_authserv_ids: Vec<String>,
+    /// Whether trusted aligned DMARC pass alone may satisfy incoming auth.
+    /// Defaults to false so unaware users require an aligned DKIM pass.
+    pub allow_dmarc_only: bool,
 }
 
 impl Default for IncomingAuthPolicyConfig {
@@ -295,6 +305,7 @@ impl Default for IncomingAuthPolicyConfig {
         Self {
             require: true,
             trusted_authserv_ids: Vec::new(),
+            allow_dmarc_only: false,
         }
     }
 }
@@ -605,6 +616,7 @@ fn validate_incoming_auth_policy(
     Ok(ValidatedIncomingAuthPolicy {
         require: config.require,
         trusted_authserv_ids,
+        allow_dmarc_only: config.allow_dmarc_only,
     })
 }
 
@@ -701,6 +713,8 @@ pub struct ValidatedIncomingAuthPolicy {
     pub require: bool,
     /// Lowercase trusted authserv-id values.
     pub trusted_authserv_ids: BTreeSet<String>,
+    /// Whether aligned DMARC pass alone can satisfy incoming auth.
+    pub allow_dmarc_only: bool,
 }
 
 /// A normalized address pattern.
@@ -828,6 +842,7 @@ fn incoming_auth_decision(
     }
 
     let mut saw_pass = false;
+    let mut saw_aligned_dmarc = false;
     for evidence in &trusted {
         if evidence.dmarc_result.as_deref() == Some("pass") {
             saw_pass = true;
@@ -836,7 +851,7 @@ fn incoming_auth_decision(
                 .as_deref()
                 .is_some_and(|domain| domain.eq_ignore_ascii_case(&visible_domain))
             {
-                return PolicyDecision::allowed(Some("auth".to_owned()));
+                saw_aligned_dmarc = true;
             }
         }
         if evidence.dkim_result.as_deref() == Some("pass") {
@@ -850,7 +865,12 @@ fn incoming_auth_decision(
             }
         }
     }
-    if saw_pass {
+    if policy.allow_dmarc_only && saw_aligned_dmarc {
+        return PolicyDecision::allowed(Some("auth".to_owned()));
+    }
+    if saw_aligned_dmarc {
+        PolicyDecision::denied("dkim missing")
+    } else if saw_pass {
         PolicyDecision::denied("auth unaligned")
     } else {
         PolicyDecision::denied("auth failed")
@@ -1597,6 +1617,95 @@ fn truncate_body(body: &str) -> BodyTruncation {
     }
 }
 
+fn cap_chars(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index == max_chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn is_unsafe_format_control(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}'
+    )
+}
+
+fn push_escaped_char(out: &mut String, ch: char, multiline: bool) {
+    match ch {
+        '\n' if multiline => out.push('\n'),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        '\u{1b}' => out.push_str("\\e"),
+        '\u{7f}' => out.push_str("\\x7f"),
+        ch if (ch as u32) <= 0x1f || (0x80..=0x9f).contains(&(ch as u32)) => {
+            out.push_str(&format!("\\u{{{:04x}}}", ch as u32));
+        }
+        ch if is_unsafe_format_control(ch) => {
+            out.push_str(&format!("\\u{{{:04x}}}", ch as u32));
+        }
+        ch => out.push(ch),
+    }
+}
+
+fn safe_text(value: &str, max_chars: usize, multiline: bool) -> String {
+    let mut out = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index == max_chars {
+            out.push('…');
+            break;
+        }
+        push_escaped_char(&mut out, ch, multiline);
+    }
+    out
+}
+
+fn safe_display_line(value: &str) -> String {
+    safe_text(value, MAX_DISPLAY_LINE_CHARS, false)
+}
+
+fn safe_display_text(value: &str) -> String {
+    safe_text(value, READ_BODY_MAX_BYTES, true)
+}
+
+fn safe_model_text(value: &str, max_chars: usize) -> String {
+    safe_text(value, max_chars, true)
+}
+
+fn safe_model_line(value: &str, max_chars: usize) -> String {
+    safe_text(value, max_chars, false)
+}
+
+fn safe_model_vec(values: Vec<String>, max_items: usize, max_chars: usize) -> Vec<String> {
+    values
+        .into_iter()
+        .take(max_items)
+        .map(|value| safe_model_line(&value, max_chars))
+        .collect()
+}
+
+fn visible_recipients<'a>(message: &'a OutgoingMessage) -> impl Iterator<Item = &'a String> {
+    message.to.iter().chain(message.cc.iter())
+}
+
+fn safe_display_join<'a>(values: impl IntoIterator<Item = &'a String>, separator: &str) -> String {
+    values
+        .into_iter()
+        .map(|value| safe_display_line(value))
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
 fn parse_cursor(cursor: Option<&str>) -> Result<usize, String> {
     match cursor {
         Some(cursor) => cursor
@@ -1734,8 +1843,17 @@ impl<B: EmailBackend> Engine<B> {
                     .filter(|f| account.folders.allows(&f.name))
                     .map(|f| {
                         cbor_map(vec![
-                            ("name", CborValue::Text(f.name)),
-                            ("delimiter", CborValue::Text(f.delimiter)),
+                            (
+                                "name",
+                                CborValue::Text(safe_model_line(&f.name, MAX_HEADER_VALUE_CHARS)),
+                            ),
+                            (
+                                "delimiter",
+                                CborValue::Text(safe_model_line(
+                                    &f.delimiter,
+                                    MAX_HEADER_VALUE_CHARS,
+                                )),
+                            ),
                             ("selectable", CborValue::Bool(f.selectable)),
                         ])
                     })
@@ -1744,7 +1862,10 @@ impl<B: EmailBackend> Engine<B> {
                     "list_folders",
                     "ok",
                     cbor_map(vec![
-                        ("account", CborValue::Text(account_id.to_owned())),
+                        (
+                            "account",
+                            CborValue::Text(safe_model_line(account_id, MAX_HEADER_VALUE_CHARS)),
+                        ),
                         ("folders", CborValue::Array(visible)),
                     ]),
                 )
@@ -1793,15 +1914,29 @@ impl<B: EmailBackend> Engine<B> {
                 let decision = self.incoming_decision(&m);
                 let has_attachments = m.has_attachments || !m.attachments.is_empty();
                 let mut entries = vec![
-                    ("uid", CborValue::Text(m.uid)),
-                    ("date", CborValue::Text(m.date)),
+                    (
+                        "uid",
+                        CborValue::Text(safe_model_line(&m.uid, MAX_HEADER_VALUE_CHARS)),
+                    ),
+                    (
+                        "date",
+                        CborValue::Text(safe_model_line(&m.date, MAX_HEADER_VALUE_CHARS)),
+                    ),
                     (
                         "from",
-                        CborValue::Text(normalize_address(&m.from).unwrap_or(m.from)),
+                        CborValue::Text(safe_model_line(
+                            &normalize_address(&m.from).unwrap_or(m.from),
+                            MAX_ADDRESS_CHARS,
+                        )),
                     ),
                     (
                         "flags",
-                        CborValue::Array(m.flags.into_iter().map(CborValue::Text).collect()),
+                        CborValue::Array(
+                            safe_model_vec(m.flags, MAX_FLAGS, MAX_HEADER_VALUE_CHARS)
+                                .into_iter()
+                                .map(CborValue::Text)
+                                .collect(),
+                        ),
                     ),
                     ("subject_redacted", CborValue::Bool(!decision.allowed)),
                     ("policy", policy_cbor(&decision)),
@@ -1809,7 +1944,7 @@ impl<B: EmailBackend> Engine<B> {
                 entries.push((
                     "subject",
                     if decision.allowed {
-                        CborValue::Text(m.subject)
+                        CborValue::Text(safe_model_line(&m.subject, MAX_HEADER_VALUE_CHARS))
                     } else {
                         CborValue::Null
                     },
@@ -1829,8 +1964,14 @@ impl<B: EmailBackend> Engine<B> {
             "list",
             "ok",
             cbor_map(vec![
-                ("account", CborValue::Text(account_id.to_owned())),
-                ("folder", CborValue::Text(folder.to_owned())),
+                (
+                    "account",
+                    CborValue::Text(safe_model_line(account_id, MAX_HEADER_VALUE_CHARS)),
+                ),
+                (
+                    "folder",
+                    CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
+                ),
                 ("messages", CborValue::Array(data)),
                 ("next_cursor", next_cursor),
                 ("truncated", CborValue::Bool(truncated)),
@@ -1911,32 +2052,68 @@ impl<B: EmailBackend> Engine<B> {
                 "read",
                 "ok",
                 cbor_map(vec![
-                    ("account", CborValue::Text(account_id.to_owned())),
-                    ("folder", CborValue::Text(folder.to_owned())),
+                    (
+                        "account",
+                        CborValue::Text(safe_model_line(account_id, MAX_HEADER_VALUE_CHARS)),
+                    ),
+                    (
+                        "folder",
+                        CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
+                    ),
                     ("uid", CborValue::Text(uid.to_owned())),
                     (
                         "headers",
                         cbor_map(vec![
-                            ("from", CborValue::Text(msg.from)),
+                            (
+                                "from",
+                                CborValue::Text(safe_model_line(&msg.from, MAX_ADDRESS_CHARS)),
+                            ),
                             (
                                 "to",
-                                CborValue::Array(msg.to.into_iter().map(CborValue::Text).collect()),
+                                CborValue::Array(
+                                    safe_model_vec(msg.to, MAX_RECIPIENTS, MAX_ADDRESS_CHARS)
+                                        .into_iter()
+                                        .map(CborValue::Text)
+                                        .collect(),
+                                ),
                             ),
                             (
                                 "cc",
-                                CborValue::Array(msg.cc.into_iter().map(CborValue::Text).collect()),
+                                CborValue::Array(
+                                    safe_model_vec(msg.cc, MAX_RECIPIENTS, MAX_ADDRESS_CHARS)
+                                        .into_iter()
+                                        .map(CborValue::Text)
+                                        .collect(),
+                                ),
                             ),
-                            ("date", CborValue::Text(msg.date)),
-                            ("subject", CborValue::Text(msg.subject)),
+                            (
+                                "date",
+                                CborValue::Text(safe_model_line(&msg.date, MAX_HEADER_VALUE_CHARS)),
+                            ),
+                            (
+                                "subject",
+                                CborValue::Text(safe_model_line(
+                                    &msg.subject,
+                                    MAX_HEADER_VALUE_CHARS,
+                                )),
+                            ),
                             (
                                 "message_id",
                                 msg.message_id
-                                    .map(CborValue::Text)
+                                    .map(|message_id| {
+                                        CborValue::Text(safe_model_line(
+                                            &message_id,
+                                            MAX_HEADER_VALUE_CHARS,
+                                        ))
+                                    })
                                     .unwrap_or(CborValue::Null),
                             ),
                         ]),
                     ),
-                    ("body_text", CborValue::Text(truncate.body_text)),
+                    (
+                        "body_text",
+                        CborValue::Text(safe_model_text(&truncate.body_text, READ_BODY_MAX_BYTES)),
+                    ),
                     ("body_truncated", CborValue::Bool(truncate.truncated)),
                     (
                         "body_total_lines",
@@ -1964,12 +2141,15 @@ impl<B: EmailBackend> Engine<B> {
             id: String::new(),
             kind: "incoming_read".to_owned(),
             status: "pending".to_owned(),
-            account: account_id.to_owned(),
-            folder: folder.to_owned(),
-            uid: uid.to_owned(),
-            uidvalidity: target.uidvalidity,
-            from: normalize_address(&metadata.from).unwrap_or(metadata.from),
-            date: metadata.date,
+            account: cap_chars(account_id, MAX_HEADER_VALUE_CHARS),
+            folder: cap_chars(folder, MAX_HEADER_VALUE_CHARS),
+            uid: cap_chars(uid, MAX_HEADER_VALUE_CHARS),
+            uidvalidity: cap_chars(&target.uidvalidity, MAX_HEADER_VALUE_CHARS),
+            from: safe_model_line(
+                &normalize_address(&metadata.from).unwrap_or(metadata.from),
+                MAX_ADDRESS_CHARS,
+            ),
+            date: safe_model_line(&metadata.date, MAX_HEADER_VALUE_CHARS),
             subject_redacted: true,
             reason: decision.reason,
         };
@@ -1981,8 +2161,14 @@ impl<B: EmailBackend> Engine<B> {
                     ("approval_id", CborValue::Text(id)),
                     ("kind", CborValue::Text("incoming_read".to_owned())),
                     ("account", CborValue::Text(account_id.to_owned())),
-                    ("folder", CborValue::Text(folder.to_owned())),
-                    ("uid", CborValue::Text(uid.to_owned())),
+                    (
+                        "folder",
+                        CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
+                    ),
+                    (
+                        "uid",
+                        CborValue::Text(safe_model_line(uid, MAX_HEADER_VALUE_CHARS)),
+                    ),
                     ("from", CborValue::Text(approval.from)),
                     ("date", CborValue::Text(approval.date)),
                     ("subject", CborValue::Null),
@@ -2022,9 +2208,10 @@ impl<B: EmailBackend> Engine<B> {
                 "account has no SMTP configuration",
             );
         }
-        let from_identity = from.unwrap_or_else(|| account_cfg.from_identity.clone());
-        if normalize_address(&from_identity).as_deref()
-            != Some(account_cfg.from_normalized.as_str())
+        if let Some(from) = from.as_deref()
+            && from.trim() != account_cfg.from_identity
+            && (from.contains(['<', '>'])
+                || normalize_address(from).as_deref() != Some(account_cfg.from_normalized.as_str()))
         {
             return error_envelope(
                 Some("send"),
@@ -2032,8 +2219,14 @@ impl<B: EmailBackend> Engine<B> {
                 "from identity does not match configured account",
             );
         }
+        let from_identity = account_cfg.from_identity.clone();
         let mut invalid = Vec::new();
-        for r in to.iter().chain(cc.iter()).chain(bcc.iter()) {
+        for r in to
+            .iter()
+            .chain(cc.iter())
+            .chain(bcc.iter())
+            .chain(reply_to.iter())
+        {
             if normalize_address(r).is_none() {
                 invalid.push(r.clone());
             }
@@ -2048,13 +2241,25 @@ impl<B: EmailBackend> Engine<B> {
         let message = OutgoingMessage {
             account: account_id.clone(),
             from: from_identity,
-            to,
-            cc,
-            bcc,
-            subject,
-            body_text,
-            reply_to,
-            in_reply_to,
+            to: to
+                .into_iter()
+                .take(MAX_RECIPIENTS)
+                .map(|value| cap_chars(&value, MAX_ADDRESS_CHARS))
+                .collect(),
+            cc: cc
+                .into_iter()
+                .take(MAX_RECIPIENTS)
+                .map(|value| cap_chars(&value, MAX_ADDRESS_CHARS))
+                .collect(),
+            bcc: bcc
+                .into_iter()
+                .take(MAX_RECIPIENTS)
+                .map(|value| cap_chars(&value, MAX_ADDRESS_CHARS))
+                .collect(),
+            subject: cap_chars(&subject, MAX_HEADER_VALUE_CHARS),
+            body_text: truncate_body(&body_text).body_text,
+            reply_to: reply_to.map(|value| cap_chars(&value, MAX_ADDRESS_CHARS)),
+            in_reply_to: in_reply_to.map(|value| cap_chars(&value, MAX_HEADER_VALUE_CHARS)),
         };
         let blocked = self.blocked_recipients(&message);
         if blocked.is_empty() {
@@ -2068,12 +2273,8 @@ impl<B: EmailBackend> Engine<B> {
                         (
                             "accepted_recipients",
                             CborValue::Array(
-                                message
-                                    .to
-                                    .iter()
-                                    .chain(message.cc.iter())
-                                    .chain(message.bcc.iter())
-                                    .cloned()
+                                visible_recipients(&message)
+                                    .map(|recipient| safe_model_line(recipient, MAX_ADDRESS_CHARS))
                                     .map(CborValue::Text)
                                     .collect(),
                             ),
@@ -2093,12 +2294,8 @@ impl<B: EmailBackend> Engine<B> {
                     (
                         "accepted_recipients",
                         CborValue::Array(
-                            message
-                                .to
-                                .iter()
-                                .chain(message.cc.iter())
-                                .chain(message.bcc.iter())
-                                .cloned()
+                            visible_recipients(&message)
+                                .map(|recipient| safe_model_line(recipient, MAX_ADDRESS_CHARS))
                                 .map(CborValue::Text)
                                 .collect(),
                         ),
@@ -2214,12 +2411,12 @@ impl<B: EmailBackend> Engine<B> {
                 .collect::<Vec<_>>();
             lines.push(format!(
                 "{} account={} to={} cc={} blocked={} subject={}",
-                approval.id,
-                approval.account,
-                approval.to.join(","),
-                approval.cc.join(","),
-                visible_blocked.join(","),
-                approval.subject
+                safe_display_line(&approval.id),
+                safe_display_line(&approval.account),
+                safe_display_join(&approval.to, ","),
+                safe_display_join(&approval.cc, ","),
+                safe_display_join(&visible_blocked, ","),
+                safe_display_line(&approval.subject)
             ));
         }
         Ok(lines.join("\n"))
@@ -2230,18 +2427,18 @@ impl<B: EmailBackend> Engine<B> {
         let approval = self.state.pending_outgoing_by_id(id)?;
         Ok(format!(
             "Outgoing approval {id}\nstatus: {}\naccount: {}\nfrom: {}\nto: {}\ncc: {}\nbcc: {}\nsubject: {}\nreply_to: {}\nin_reply_to: {}\nblocked: {}\nreason: {}\n\n{}",
-            approval.status,
-            approval.account,
-            approval.from,
-            approval.to.join(", "),
-            approval.cc.join(", "),
-            approval.bcc.join(", "),
-            approval.subject,
-            approval.reply_to.as_deref().unwrap_or(""),
-            approval.in_reply_to.as_deref().unwrap_or(""),
-            approval.blocked_recipients.join(", "),
-            approval.reason,
-            approval.body_text
+            safe_display_line(&approval.status),
+            safe_display_line(&approval.account),
+            safe_display_line(&approval.from),
+            safe_display_join(&approval.to, ", "),
+            safe_display_join(&approval.cc, ", "),
+            safe_display_join(&approval.bcc, ", "),
+            safe_display_line(&approval.subject),
+            safe_display_line(approval.reply_to.as_deref().unwrap_or("")),
+            safe_display_line(approval.in_reply_to.as_deref().unwrap_or("")),
+            safe_display_join(&approval.blocked_recipients, ", "),
+            safe_display_line(&approval.reason),
+            safe_display_text(&approval.body_text)
         ))
     }
 
@@ -2254,13 +2451,13 @@ impl<B: EmailBackend> Engine<B> {
                 match self.state.approve_outgoing(id) {
                     Ok(()) => Ok(format!(
                         "Sent approved outgoing email {id}. message_id={message_id} subject={} to={}",
-                        approval.subject,
-                        approval.to.join(",")
+                        safe_display_line(&approval.subject),
+                        safe_display_join(&approval.to, ",")
                     )),
                     Err(error) => Ok(format!(
                         "Sent approved outgoing email {id}, but failed to record approval: {error}. message_id={message_id} subject={} to={}",
-                        approval.subject,
-                        approval.to.join(",")
+                        safe_display_line(&approval.subject),
+                        safe_display_join(&approval.to, ",")
                     )),
                 }
             }
@@ -2268,8 +2465,8 @@ impl<B: EmailBackend> Engine<B> {
                 let approval = self.state.approved_outgoing_by_id(id)?;
                 Ok(format!(
                     "Outgoing email {id} is already approved/sent. subject={} to={}",
-                    approval.subject,
-                    approval.to.join(",")
+                    safe_display_line(&approval.subject),
+                    safe_display_join(&approval.to, ",")
                 ))
             }
         }
@@ -2280,7 +2477,8 @@ impl<B: EmailBackend> Engine<B> {
         let record = allow_record(pattern, "approved from /email out whitelist")?;
         self.state.append_outgoing_allow_record(record)?;
         Ok(format!(
-            "Added outgoing email whitelist pattern `{pattern}`."
+            "Added outgoing email whitelist pattern `{}`.",
+            safe_display_line(pattern)
         ))
     }
 
@@ -2296,13 +2494,13 @@ impl<B: EmailBackend> Engine<B> {
         for approval in approvals {
             lines.push(format!(
                 "{} account={} folder={} uid={} from={} date={} reason={}",
-                approval.id,
-                approval.account,
-                approval.folder,
-                approval.uid,
-                approval.from,
-                approval.date,
-                approval.reason
+                safe_display_line(&approval.id),
+                safe_display_line(&approval.account),
+                safe_display_line(&approval.folder),
+                safe_display_line(&approval.uid),
+                safe_display_line(&approval.from),
+                safe_display_line(&approval.date),
+                safe_display_line(&approval.reason)
             ));
         }
         Ok(lines.join("\n"))
@@ -2322,26 +2520,27 @@ impl<B: EmailBackend> Engine<B> {
         let attachment_names = message
             .attachments
             .iter()
-            .filter_map(|attachment| attachment.filename.as_deref())
+            .filter_map(|attachment| attachment.filename.as_ref())
+            .map(|filename| safe_display_line(filename))
             .collect::<Vec<_>>()
             .join(", ");
         Ok(format!(
             "Incoming approval {id}\nstatus: {}\naccount: {}\nfolder: {}\nuid: {}\nuidvalidity: {}\nfrom: {}\nto: {}\ncc: {}\ndate: {}\nsubject: {}\nbody_truncated: {}\nattachments: {}\nattachment_names: {}\nreason: {}\n\n{}",
-            approval.status,
-            approval.account,
-            approval.folder,
-            approval.uid,
-            approval.uidvalidity,
-            message.from,
-            message.to.join(", "),
-            message.cc.join(", "),
-            message.date,
-            message.subject,
+            safe_display_line(&approval.status),
+            safe_display_line(&approval.account),
+            safe_display_line(&approval.folder),
+            safe_display_line(&approval.uid),
+            safe_display_line(&approval.uidvalidity),
+            safe_display_line(&message.from),
+            safe_display_join(&message.to, ", "),
+            safe_display_join(&message.cc, ", "),
+            safe_display_line(&message.date),
+            safe_display_line(&message.subject),
             truncate.truncated,
             message.attachments.len(),
-            attachment_names,
-            approval.reason,
-            truncate.body_text
+            safe_display_line(&attachment_names),
+            safe_display_line(&approval.reason),
+            safe_display_text(&truncate.body_text)
         ))
     }
 
@@ -2352,14 +2551,18 @@ impl<B: EmailBackend> Engine<B> {
                 self.state.approve_incoming(id)?;
                 Ok(format!(
                     "Approved incoming email read {id}; repeat the matching email.read for account={} folder={} uid={} to fetch content.",
-                    approval.account, approval.folder, approval.uid
+                    safe_display_line(&approval.account),
+                    safe_display_line(&approval.folder),
+                    safe_display_line(&approval.uid)
                 ))
             }
             Err(_) => {
                 let approval = self.state.approved_incoming_by_id(id)?;
                 Ok(format!(
                     "Incoming email read {id} is already approved; repeat the matching email.read for account={} folder={} uid={} to fetch content.",
-                    approval.account, approval.folder, approval.uid
+                    safe_display_line(&approval.account),
+                    safe_display_line(&approval.folder),
+                    safe_display_line(&approval.uid)
                 ))
             }
         }
@@ -2370,7 +2573,8 @@ impl<B: EmailBackend> Engine<B> {
         let record = allow_record(pattern, "approved from /email in whitelist")?;
         self.state.append_incoming_allow_record(record)?;
         Ok(format!(
-            "Added incoming email whitelist pattern `{pattern}`."
+            "Added incoming email whitelist pattern `{}`.",
+            safe_display_line(pattern)
         ))
     }
 
@@ -2454,6 +2658,7 @@ impl<B: EmailBackend> Engine<B> {
             .iter()
             .chain(message.cc.iter())
             .chain(message.bcc.iter())
+            .chain(message.reply_to.iter())
             .filter(|r| !self.recipient_allowed(r))
             .cloned()
             .collect()
@@ -2465,6 +2670,7 @@ impl<B: EmailBackend> Engine<B> {
             .iter()
             .chain(message.cc.iter())
             .chain(message.bcc.iter())
+            .chain(message.reply_to.iter())
             .filter(|r| self.recipient_allowed(r))
             .cloned()
             .collect()
@@ -2759,7 +2965,7 @@ fn email_action_schema() -> ActionSchema {
                         leaf(
                             "open",
                             "email.in.open",
-                            "Inspect safe incoming approval metadata",
+                            "Open a pending incoming message for user review; may display email content",
                             vec![id_arg()],
                         ),
                         leaf(
@@ -3277,7 +3483,7 @@ fn backend_error_envelope(command: Option<&str>, default_code: &str, message: &s
                 &text,
                 cbor_map(vec![(
                     "backend_message",
-                    CborValue::Text(message.to_owned()),
+                    CborValue::Text(safe_model_line(message, MAX_BACKEND_ERROR_CHARS)),
                 )]),
             ),
         ),
@@ -3310,7 +3516,7 @@ fn backend_error_text(message: &str) -> String {
         .map(|(_, rest)| rest.trim())
         .unwrap_or(message);
     let line = stripped.lines().next().unwrap_or("email backend error");
-    line.chars().take(200).collect()
+    safe_model_line(line, 200)
 }
 fn structured_error(code: &str, message: &str) -> CborValue {
     structured_error_with_details(code, message, CborValue::Map(Vec::new()))
@@ -3318,7 +3524,10 @@ fn structured_error(code: &str, message: &str) -> CborValue {
 fn structured_error_with_details(code: &str, message: &str, details: CborValue) -> CborValue {
     cbor_map(vec![
         ("code", CborValue::Text(code.to_owned())),
-        ("message", CborValue::Text(message.to_owned())),
+        (
+            "message",
+            CborValue::Text(safe_model_line(message, MAX_BACKEND_ERROR_CHARS)),
+        ),
         ("details", details),
     ])
 }
@@ -3329,14 +3538,18 @@ fn attachment_cbor(index: usize, attachment: BackendAttachment) -> CborValue {
             "filename",
             attachment
                 .filename
-                .map(CborValue::Text)
+                .map(|filename| {
+                    CborValue::Text(safe_model_line(&filename, MAX_ATTACHMENT_NAME_CHARS))
+                })
                 .unwrap_or(CborValue::Null),
         ),
         (
             "content_type",
             attachment
                 .content_type
-                .map(CborValue::Text)
+                .map(|content_type| {
+                    CborValue::Text(safe_model_line(&content_type, MAX_HEADER_VALUE_CHARS))
+                })
                 .unwrap_or(CborValue::Null),
         ),
         (
@@ -3455,15 +3668,19 @@ fn invocation_display_args(arguments: &CborValue) -> Option<String> {
         "list_accounts" => Some("list_accounts".to_owned()),
         "list_folders" => args
             .and_then(|args| cbor_text_field(args, "account"))
-            .map(|account| format!("list_folders {account}"))
+            .map(|account| format!("list_folders {}", safe_display_line(account)))
             .or_else(|| Some("list_folders".to_owned())),
         "list" => {
             let account = args.and_then(|args| cbor_text_field(args, "account"));
             let folder = args.and_then(|args| cbor_text_field(args, "folder"));
             match (account, folder) {
-                (Some(account), Some(folder)) => Some(format!("list {account}/{folder}")),
-                (Some(account), None) => Some(format!("list {account}")),
-                (None, Some(folder)) => Some(format!("list {folder}")),
+                (Some(account), Some(folder)) => Some(format!(
+                    "list {}/{}",
+                    safe_display_line(account),
+                    safe_display_line(folder)
+                )),
+                (Some(account), None) => Some(format!("list {}", safe_display_line(account))),
+                (None, Some(folder)) => Some(format!("list {}", safe_display_line(folder))),
                 (None, None) => Some("list".to_owned()),
             }
         }
@@ -3476,13 +3693,17 @@ fn invocation_display_args(arguments: &CborValue) -> Option<String> {
                     .or_else(|| cbor_integer_field_string(args, "uid"))
             });
             let mut display = match (account, folder) {
-                (Some(account), Some(folder)) => format!("read {account}/{folder}"),
-                (Some(account), None) => format!("read {account}"),
-                (None, Some(folder)) => format!("read {folder}"),
+                (Some(account), Some(folder)) => format!(
+                    "read {}/{}",
+                    safe_display_line(account),
+                    safe_display_line(folder)
+                ),
+                (Some(account), None) => format!("read {}", safe_display_line(account)),
+                (None, Some(folder)) => format!("read {}", safe_display_line(folder)),
                 (None, None) => "read".to_owned(),
             };
             if let Some(uid) = uid {
-                display.push_str(&format!(" uid={uid}"));
+                display.push_str(&format!(" uid={}", safe_display_line(&uid)));
             }
             Some(display)
         }
@@ -3493,11 +3714,11 @@ fn invocation_display_args(arguments: &CborValue) -> Option<String> {
                 .map(|count| format!(" to={count}"))
                 .unwrap_or_default();
             Some(match account {
-                Some(account) => format!("send {account}{recipients}"),
+                Some(account) => format!("send {}{recipients}", safe_display_line(account)),
                 None => format!("send{recipients}"),
             })
         }
-        other => Some(other.to_owned()),
+        other => Some(safe_display_line(other)),
     }
 }
 
@@ -3506,13 +3727,17 @@ fn email_display_args(command: &str, data: Option<&CborValue>) -> Option<String>
         "list_accounts" => Some("list_accounts".to_owned()),
         "list_folders" => data
             .and_then(|data| cbor_text_field(data, "account"))
-            .map(|account| format!("list_folders {account}"))
+            .map(|account| format!("list_folders {}", safe_display_line(account)))
             .or_else(|| Some("list_folders".to_owned())),
         "list" => match (
             data.and_then(|data| cbor_text_field(data, "account")),
             data.and_then(|data| cbor_text_field(data, "folder")),
         ) {
-            (Some(account), Some(folder)) => Some(format!("list {account}/{folder}")),
+            (Some(account), Some(folder)) => Some(format!(
+                "list {}/{}",
+                safe_display_line(account),
+                safe_display_line(folder)
+            )),
             _ => data.map(|_| "list".to_owned()),
         },
         "read" => {
@@ -3524,15 +3749,15 @@ fn email_display_args(command: &str, data: Option<&CborValue>) -> Option<String>
                 _ => String::new(),
             };
             match data.and_then(|data| cbor_text_field(data, "uid")) {
-                Some(uid) => Some(format!("read{scope} uid={uid}")),
+                Some(uid) => Some(format!("read{scope} uid={}", safe_display_line(uid))),
                 None => data.map(|_| format!("read{scope}")),
             }
         }
         "send" => data
             .and_then(|data| cbor_text_field(data, "account"))
-            .map(|account| format!("send {account}"))
+            .map(|account| format!("send {}", safe_display_line(account)))
             .or_else(|| data.map(|_| "send".to_owned())),
-        other => Some(other.to_owned()),
+        other => Some(safe_display_line(other)),
     }
 }
 
