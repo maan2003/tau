@@ -130,6 +130,11 @@ fn representative_events() -> Vec<Event> {
         Event::UiNewAgent(UiNewAgent {
             session_id: "s1".into(),
         }),
+        Event::UiAgentStateRequest(UiAgentStateRequest {
+            session_id: "s1".into(),
+            agent_id: "engineer_abcd1234".to_owned(),
+            action: UiAgentStateAction::Suspend,
+        }),
         Event::AgentMessage(AgentMessage {
             session_id: "s1".into(),
             sender_id: "engineer_abcd1234".to_owned(),
@@ -139,6 +144,11 @@ fn representative_events() -> Vec<Event> {
         Event::SessionStarted(SessionStarted {
             session_id: "s1".into(),
             reason: SessionStartReason::Initial,
+        }),
+        Event::SessionAgentStateChanged(SessionAgentStateChanged {
+            session_id: "s1".into(),
+            agent_id: "engineer_abcd1234".to_owned(),
+            state: AgentState::ActiveDelegated,
         }),
         Event::SessionCompactionStarted(SessionCompactionStarted {
             session_id: "s1".into(),
@@ -790,6 +800,14 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             session_id: "s1".into(),
             text: "draft".to_owned(),
         }),
+        Event::UiNewAgent(UiNewAgent {
+            session_id: "s1".into(),
+        }),
+        Event::UiAgentStateRequest(UiAgentStateRequest {
+            session_id: "s1".into(),
+            agent_id: "worker".to_owned(),
+            action: UiAgentStateAction::Suspend,
+        }),
         Event::SessionCompactionStarted(SessionCompactionStarted {
             session_id: "s1".into(),
             target_agent_id: None,
@@ -843,6 +861,11 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             message_class: PromptMessageClass::User,
             originator: PromptOriginator::User,
             ctx_id: None,
+        }),
+        Event::SessionAgentStateChanged(SessionAgentStateChanged {
+            session_id: "s1".into(),
+            agent_id: "worker".to_owned(),
+            state: AgentState::Suspended,
         }),
     ];
     for event in &durable {

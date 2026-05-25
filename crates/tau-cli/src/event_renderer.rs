@@ -2322,9 +2322,6 @@ impl EventRenderer {
     }
 
     pub(crate) fn handle_recorded_at(&mut self, event: &Event, recorded_at: UnixMicros) {
-        if self.handle_ui_new_agent(event) {
-            return;
-        }
         self.learn_agent_metadata(event);
         let target_agent_id = self.agent_id_for_event(event);
         if self.current_agent_id.is_none() {
@@ -2399,16 +2396,6 @@ impl EventRenderer {
         self.update_agent_in_progress();
     }
 
-    fn handle_ui_new_agent(&mut self, event: &Event) -> bool {
-        let Event::UiNewAgent(req) = event else {
-            return false;
-        };
-        if self.current_session_id.as_ref() == Some(&req.session_id) {
-            self.clear_selected_agent();
-        }
-        true
-    }
-
     fn event_selects_agent_from_empty(&self, event: &Event) -> bool {
         match event {
             Event::SessionPromptCreated(prompt) => {
@@ -2443,18 +2430,22 @@ impl EventRenderer {
             Event::StartAgentRequest(request) => {
                 self.query_agents
                     .insert(request.query_id.clone(), request.agent_id.clone());
-                self.mark_agent_live(request.agent_id.clone());
+                self.remember_agent(request.agent_id.clone());
             }
             Event::StartAgentAccepted(accepted) => {
                 self.query_agents
                     .insert(accepted.query_id.clone(), accepted.agent_id.clone());
-                self.mark_agent_live_and_unsuspended(accepted.agent_id.clone());
+                self.remember_agent(accepted.agent_id.clone());
             }
-            Event::StartAgentResult(result) => {
-                if let Some(agent_id) = self.query_agents.get(&result.query_id).cloned() {
-                    self.mark_agent_suspended(&agent_id);
+            Event::SessionAgentStateChanged(changed) => match changed.state {
+                tau_proto::AgentState::Active | tau_proto::AgentState::ActiveDelegated => {
+                    self.mark_agent_live_and_unsuspended(changed.agent_id.clone());
                 }
-            }
+                tau_proto::AgentState::Suspended => {
+                    self.mark_agent_suspended(&changed.agent_id);
+                }
+            },
+            Event::StartAgentResult(_) => {}
             Event::UiPromptSubmitted(prompt) => {
                 if let Some(agent_id) = prompt.target_agent_id.as_deref() {
                     if prompt.originator.is_user() {
@@ -2848,6 +2839,7 @@ impl EventRenderer {
                 self.handle_existing_session_started(started);
                 true
             }
+            Event::SessionAgentStateChanged(_) => true,
             _ => false,
         }
     }

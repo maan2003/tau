@@ -54,6 +54,22 @@ fn send_new_agent_request(writer: &WriterHandle, session_id: &str) -> io::Result
     )
 }
 
+fn send_agent_state_request(
+    writer: &WriterHandle,
+    session_id: &str,
+    agent_id: &str,
+    action: tau_proto::UiAgentStateAction,
+) -> io::Result<()> {
+    send_event(
+        writer,
+        &Event::UiAgentStateRequest(tau_proto::UiAgentStateRequest {
+            session_id: session_id.into(),
+            agent_id: agent_id.to_owned(),
+            action,
+        }),
+    )
+}
+
 fn peel_log_with_timestamp(
     frame: Frame,
 ) -> (Option<tau_proto::LogEventId>, Option<UnixMicros>, Frame) {
@@ -1372,6 +1388,12 @@ impl<'a> TerminalInputSession<'a> {
                 .system_info(&format!("unknown agent: {agent_id}"));
             return;
         }
+        let _ = send_agent_state_request(
+            self.writer,
+            self.session_id.as_str(),
+            &agent_id,
+            tau_proto::UiAgentStateAction::Suspend,
+        );
         mark_agent_suspended(&self.ctx.suspended_agents, &agent_id);
         let _ = self
             .ctx
@@ -1397,6 +1419,12 @@ impl<'a> TerminalInputSession<'a> {
                 .system_info(&format!("unknown agent: {agent_id}"));
             return;
         }
+        let _ = send_agent_state_request(
+            self.writer,
+            self.session_id.as_str(),
+            &agent_id,
+            tau_proto::UiAgentStateAction::Resume,
+        );
         mark_agent_resumed(&self.ctx.live_agents, &self.ctx.suspended_agents, &agent_id);
         let _ = self
             .ctx
@@ -2162,6 +2190,35 @@ mod role_cycle_tests {
             frame,
             Frame::Event(Event::UiNewAgent(tau_proto::UiNewAgent { session_id }))
                 if session_id.as_str() == "s1"
+        ));
+    }
+
+    #[test]
+    fn agent_suspend_sends_harness_state_request() {
+        // Explicit suspend/resume is harness-owned state, so the CLI sends a
+        // protocol request in addition to its optimistic local renderer update.
+        let (server_end, client_end) = UnixStream::pair().expect("socket pair");
+        let writer = Arc::new(Mutex::new(FrameWriter::new(BufWriter::new(client_end))));
+        send_agent_state_request(
+            &writer,
+            "s1",
+            "worker",
+            tau_proto::UiAgentStateAction::Suspend,
+        )
+        .expect("send /agent suspend request");
+
+        let mut reader = FrameReader::new(BufReader::new(server_end));
+        let frame = reader
+            .read_frame()
+            .expect("read frame")
+            .expect("frame present");
+        assert!(matches!(
+            frame,
+            Frame::Event(Event::UiAgentStateRequest(tau_proto::UiAgentStateRequest {
+                session_id,
+                agent_id,
+                action: tau_proto::UiAgentStateAction::Suspend,
+            })) if session_id.as_str() == "s1" && agent_id == "worker"
         ));
     }
 

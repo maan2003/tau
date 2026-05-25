@@ -91,12 +91,9 @@ fn ui_new_agent_rotates_default_conversation_without_switching_sessions() {
     let session_before = h.current_session_id.clone();
     let before_new_agent_seq = event_log_last_seq(&h).expect("event log not empty");
 
-    h.handle_ui_new_agent(
-        "ui-test",
-        tau_proto::UiNewAgent {
-            session_id: session_before.clone(),
-        },
-    )
+    h.handle_ui_new_agent(tau_proto::UiNewAgent {
+        session_id: session_before.clone(),
+    })
     .expect("handle /agent new");
     assert_eq!(h.current_session_id, session_before);
     assert!(
@@ -141,7 +138,8 @@ fn ui_new_agent_rotates_default_conversation_without_switching_sessions() {
             event,
             Event::UiNewAgent(req) if req.session_id == session_before
         ))
-        .is_some()
+        .is_none(),
+        "/agent new is a request, not a replayed current-agent coordination fact"
     );
     assert!(
         event_log_position_after(&h, before_new_agent_seq, |event| matches!(
@@ -269,7 +267,7 @@ fn ui_new_agent_rewrites_runtime_conversation_references_to_archive() {
         }),
     });
 
-    h.handle_ui_new_agent("ui-test", tau_proto::UiNewAgent { session_id })
+    h.handle_ui_new_agent(tau_proto::UiNewAgent { session_id })
         .expect("handle /agent new");
 
     assert!(h.conversations.contains_key(&archived));
@@ -327,21 +325,18 @@ fn ui_new_agent_rewrites_runtime_conversation_references_to_archive() {
 }
 
 #[test]
-fn ui_new_agent_replays_to_late_ui_subscribers() {
-    // Regression: `/agent new` is a durable UI coordination event. A UI that
-    // attaches after another UI issued it must replay the event so both clients
-    // converge on the same empty foreground-agent state.
+fn ui_new_agent_does_not_replay_to_late_ui_subscribers() {
+    // Current-agent selection is UI-local. `/agent new` rotates the harness
+    // default conversation for future untargeted prompts, but late/other UIs
+    // must not replay it and clear their own selected agent.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let session_id = h.current_session_id.clone();
 
-    h.handle_ui_new_agent(
-        "ui-test",
-        tau_proto::UiNewAgent {
-            session_id: session_id.clone(),
-        },
-    )
+    h.handle_ui_new_agent(tau_proto::UiNewAgent {
+        session_id: session_id.clone(),
+    })
     .expect("handle /agent new");
 
     let (server_end, client_end) = UnixStream::pair().expect("pair");
@@ -373,10 +368,139 @@ fn ui_new_agent_replays_to_late_ui_subscribers() {
             replayed.push(event);
         }
     }
-    assert_eq!(replayed.len(), 1);
-    assert_eq!(replayed[0].session_id, session_id);
+    assert!(
+        replayed.is_empty(),
+        "UiNewAgent is a request, not a durable cross-UI selection event"
+    );
 
     h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn ui_agent_state_request_updates_harness_state_and_replays() {
+    // Agent active/suspended state is harness-owned session state, not a
+    // renderer-local set. Explicit UI suspend/resume requests publish replayable
+    // session facts for late subscribers and prompt-completion state.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    h.submit_user_prompt("s1".into(), "hello".to_owned())
+        .expect("submit prompt");
+    let agent_id = h
+        .conversations
+        .get(&h.default_conversation_id)
+        .and_then(|conversation| conversation.agent_id.clone())
+        .expect("prompt minted an agent");
+    assert_eq!(
+        h.agent_states.get(&agent_id),
+        Some(&tau_proto::AgentState::Active)
+    );
+
+    h.handle_ui_agent_state_request(tau_proto::UiAgentStateRequest {
+        session_id: h.current_session_id.clone(),
+        agent_id: agent_id.clone(),
+        action: tau_proto::UiAgentStateAction::Suspend,
+    })
+    .expect("suspend");
+    assert_eq!(
+        h.agent_states.get(&agent_id),
+        Some(&tau_proto::AgentState::Suspended)
+    );
+
+    h.handle_ui_agent_state_request(tau_proto::UiAgentStateRequest {
+        session_id: h.current_session_id.clone(),
+        agent_id: agent_id.clone(),
+        action: tau_proto::UiAgentStateAction::Resume,
+    })
+    .expect("resume");
+    assert_eq!(
+        h.agent_states.get(&agent_id),
+        Some(&tau_proto::AgentState::Active)
+    );
+
+    let (server_end, client_end) = UnixStream::pair().expect("pair");
+    client_end
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .expect("read timeout");
+    h.accept_client(server_end).expect("accept");
+    let ui_conn = h
+        .bus
+        .connections()
+        .into_iter()
+        .find(|c| c.name == "socket-ui")
+        .expect("ui connection")
+        .id
+        .to_string();
+    h.handle_client_event(
+        &ui_conn,
+        Frame::Message(Message::Subscribe(Subscribe {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SESSION_AGENT_STATE_CHANGED,
+            )],
+        })),
+    )
+    .expect("subscribe");
+
+    let mut reader = FrameReader::new(BufReader::new(client_end));
+    let mut replayed_states = Vec::new();
+    while let Ok(Some(frame)) = reader.read_frame() {
+        let (_log_id, inner) = frame.peel_log();
+        if let Frame::Event(Event::SessionAgentStateChanged(changed)) = inner
+            && changed.agent_id == agent_id
+        {
+            replayed_states.push(changed.state);
+        }
+    }
+    assert_eq!(
+        replayed_states,
+        vec![
+            tau_proto::AgentState::Active,
+            tau_proto::AgentState::Suspended,
+            tau_proto::AgentState::Active,
+        ]
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn resumed_session_rehydrates_agent_state_from_event_log() {
+    // Session agent state is part of the harness session, so a cold resume must
+    // rebuild the harness-owned active/suspended map from durable events.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let agent_id = {
+        let mut h = echo_harness(&sp).expect("start");
+        h.selected_model = Some("test/model".into());
+        h.submit_user_prompt("s1".into(), "hello".to_owned())
+            .expect("submit prompt");
+        let agent_id = h
+            .conversations
+            .get(&h.default_conversation_id)
+            .and_then(|conversation| conversation.agent_id.clone())
+            .expect("prompt minted an agent");
+        h.handle_ui_agent_state_request(tau_proto::UiAgentStateRequest {
+            session_id: h.current_session_id.clone(),
+            agent_id: agent_id.clone(),
+            action: tau_proto::UiAgentStateAction::Suspend,
+        })
+        .expect("suspend");
+        h.shutdown().expect("shutdown");
+        agent_id
+    };
+    wait_for_session_unlock(&sp, "s1");
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    assert_eq!(
+        resumed.agent_states.get(&agent_id),
+        Some(&tau_proto::AgentState::Suspended)
+    );
+
+    resumed.shutdown().expect("shutdown");
 }
 
 #[test]
@@ -4495,6 +4619,14 @@ fn switch_session_rebinds_default_conversation() {
 
     let cid = h.default_conversation_id.clone();
     assert_eq!(h.conversations[&cid].session_id.as_str(), "s1");
+    h.conversations
+        .get_mut(&cid)
+        .expect("default conversation")
+        .agent_id = Some("old-agent".to_owned());
+    h.agent_conversations
+        .insert("old-agent".to_owned(), cid.clone());
+    h.agent_states
+        .insert("old-agent".to_owned(), tau_proto::AgentState::Suspended);
 
     let shell_conn = h
         .extension_connection_id("shell")
@@ -4531,6 +4663,9 @@ fn switch_session_rebinds_default_conversation() {
         "s2",
         "default conversation must follow the bound session id",
     );
+    assert!(h.conversations[&cid].agent_id.is_none());
+    assert!(h.agent_conversations.is_empty());
+    assert!(h.agent_states.is_empty());
 
     // Drive the new session through init so submit_user_prompt
     // actually dispatches (rather than queuing).
@@ -6005,6 +6140,11 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     )
     .expect("query");
 
+    assert_eq!(
+        h.agent_states.get("test-agent-q1"),
+        Some(&tau_proto::AgentState::ActiveDelegated),
+        "tool-backed delegate is active while its initial turn is running"
+    );
     assert!(
         h.conversations
             .values()
@@ -6080,6 +6220,11 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         })
         .expect("query result routed");
     assert_eq!(result.text, "delegated answer");
+    assert_eq!(
+        h.agent_states.get("test-agent-q1"),
+        Some(&tau_proto::AgentState::Suspended),
+        "completed untouched delegates are automatically suspended"
+    );
 
     let side_cid = h
         .agent_conversations
@@ -6101,6 +6246,88 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     assert!(side_conv.parent_tool_call_id.is_none());
     assert!(side_conv.parent_conversation_id.is_none());
     assert_eq!(side_conv.agent_id.as_deref(), Some("test-agent-q1"));
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn delegated_agent_user_interaction_prevents_auto_suspend() {
+    // If a UI targets a running delegated agent before its delegated reply is
+    // returned, that interaction converts it into a normal active agent. The
+    // later delegate completion must not hide it from `/agent switch`.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
+
+    h.handle_start_agent_request(
+        "conn-delegate",
+        StartAgentRequest {
+            query_id: "q-user".to_owned(),
+            agent_id: "test-agent-q-user".to_owned(),
+            instruction: "side task".to_owned(),
+            role: None,
+            execution_mode: ToolExecutionMode::Shared,
+            input_stats: tau_proto::ToolDisplayStats::default(),
+            tool_call_id: Some("delegate-call".into()),
+            task_name: None,
+        },
+    )
+    .expect("query");
+    assert_eq!(
+        h.agent_states.get("test-agent-q-user"),
+        Some(&tau_proto::AgentState::ActiveDelegated)
+    );
+
+    h.submit_prompt_to_agent(
+        "s1".into(),
+        "test-agent-q-user",
+        "user follow-up".to_owned(),
+    )
+    .expect("user prompt to delegate");
+    assert_eq!(
+        h.agent_states.get("test-agent-q-user"),
+        Some(&tau_proto::AgentState::Active),
+        "user interaction converts active-delegated into ordinary active"
+    );
+
+    let side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("side prompt id");
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: side_spid,
+        target_agent_id: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "delegated answer".to_owned(),
+            }],
+            phase: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "conn-delegate".into(),
+            query_id: "q-user".to_owned(),
+        },
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("side finished");
+
+    assert_eq!(
+        h.agent_states.get("test-agent-q-user"),
+        Some(&tau_proto::AgentState::Active),
+        "delegate completion only auto-suspends untouched active-delegated agents"
+    );
+    assert!(
+        h.agent_conversations.contains_key("test-agent-q-user"),
+        "interacted delegate remains targetable"
+    );
+
     h.shutdown().expect("shutdown");
 }
 

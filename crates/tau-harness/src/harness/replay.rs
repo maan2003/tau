@@ -242,7 +242,6 @@ fn should_replay_session_event_to_late_subscriber(event: &Event) -> bool {
     matches!(
         event,
         Event::UiPromptSubmitted(_)
-            | Event::UiNewAgent(_)
             | Event::SessionPromptSteered(_)
             | Event::SessionUserMessageInjected(_)
             | Event::AgentMessage(_)
@@ -255,6 +254,7 @@ fn should_replay_session_event_to_late_subscriber(event: &Event) -> bool {
             | Event::ToolCancelled(_)
             | Event::ShellCommandFinished(_)
             | Event::SessionStarted(_)
+            | Event::SessionAgentStateChanged(_)
             | Event::SessionCompacted(_)
             | Event::SessionShutdown(_)
             | Event::ExtAgentsMdAvailable(_)

@@ -1,9 +1,10 @@
 # Event log reference
 
-The tau bus is fact-based: components broadcast what happened, never requests
-or replies. Every event has a dotted name `<category>.<call>` and a typed
-payload defined in `crates/tau-proto/src/events.rs`. This document groups the
-core events by the component (or class of component) that emits them.
+The tau bus mostly carries facts: components broadcast what happened, while the
+`ui.*` category carries user-intent requests from attached UIs to the harness.
+Every event has a dotted name `<category>.<call>` and a typed payload defined in
+`crates/tau-proto/src/events.rs`. This document groups the core events by the
+component (or class of component) that emits them.
 
 Events are distinct from **messages**: messages are point-to-point control-plane
 traffic (handshake, subscribe/intercept, the `LogEvent`/`Ack` envelope, etc.)
@@ -28,10 +29,6 @@ for control of the emit/intercept pipeline.
 - **`harness.context_usage_changed`** — Updated input/cached token counts
   and percent-of-context-window for the selected role's resolved model,
   after each agent response that reports usage.
-- **`harness.effort_changed`** — The current reasoning-effort level
-  (`off` / `minimal` / `low` / `medium` / `high` / `xhigh`).
-- **`harness.service_tier_changed`** — The current service tier (`fast`,
-  `flex`, or absent to use provider default).
 - **`harness.efforts_available`** — Which effort levels are valid for the
   selected role's resolved model. Empty when the selected role has no
   resolved model or the provider doesn't support reasoning.
@@ -47,7 +44,15 @@ tree and the prompt lifecycle.
   with `extension.context_ready`.
 - **`session.shutdown`** — The harness is leaving the current session,
   emitted before `session.started` for the next one. Extensions flush or
-  drop per-session state.
+  drop per-session state. `/session new` follows this by starting a fresh
+  session with no agents, as if the harness had just started.
+- **`session.agent_state_changed`** — Durable harness-owned state for one
+  session-scoped agent. `active` and `active_delegated` count as active
+  prompt targets; `suspended` keeps the agent resumable but hides it from
+  active switch/suspend completions. Tool-backed delegates start as
+  `active_delegated` and automatically become `suspended` when their
+  delegated reply is returned unless a user has targeted them in the
+  meantime.
 - **`session.prompt_queued`** — A user prompt arrived while the agent
   was busy and was queued instead of dispatched. Operational only;
   transient rather than durable transcript state.
@@ -214,8 +219,12 @@ intent.
 - **`ui.switch_session`** — User wants to switch to a different session
   in the same daemon, with `new`/`resume` reason.
 - **`ui.new_agent`** — User typed `/agent new`: keep the current session
-  but clear the foreground agent so the next untargeted prompt starts a
-  fresh agent.
+  but rotate the harness default conversation so the next untargeted prompt
+  starts a fresh agent. The invoking UI clears its own current-agent
+  selection locally; this request is not replayed to synchronize other UIs.
+- **`ui.agent_state_request`** — User typed `/agent suspend` or
+  `/agent resume`: ask the harness to change the replayable
+  `session.agent_state_changed` state for that agent.
 - **`ui.tree_request`** — User typed `/tree`: render the session
   branching tree to chat.
 - **`ui.navigate_tree`** — User typed `/tree <id>`: move the session

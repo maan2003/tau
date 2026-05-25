@@ -14,17 +14,17 @@ use tau_core::{
     ToolRouteError, ToolRouteTarget, validate_tool_arguments,
 };
 use tau_proto::{
-    ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished,
+    ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished, AgentState,
     BackgroundSupport, CborValue, ClientKind, ContentPart, ContextItem, ContextRole, Disconnect,
     Event, EventSelector, ExtensionName, Frame, HarnessContextUsageChanged, HarnessRoleSelected,
     Message, MessageItem, ModelId, PreviousResponseCandidate, PromptFragment, PromptOriginator,
     ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderResponseFinished, ProviderStopReason,
-    ProviderTokenUsage, SessionCompactionRequested, SessionId, SessionPromptCreated,
-    SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, SessionPromptRecalled,
-    SessionPromptTerminated, SessionPromptTerminationReason, TokenUsageStats, ToolBackgroundError,
-    ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled, ToolChoice, ToolDefinition,
-    ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult, ToolResultKind,
-    ToolType, UiCancelPrompt,
+    ProviderTokenUsage, SessionAgentStateChanged, SessionCompactionRequested, SessionId,
+    SessionPromptCreated, SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued,
+    SessionPromptRecalled, SessionPromptTerminated, SessionPromptTerminationReason,
+    TokenUsageStats, ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem,
+    ToolCancelled, ToolChoice, ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected,
+    ToolRequest, ToolResult, ToolResultKind, ToolType, UiAgentStateAction, UiCancelPrompt,
 };
 
 use crate::conversation::{
@@ -916,8 +916,12 @@ pub struct Harness {
     /// additional entries that live until their final response is
     /// routed back to the requesting extension.
     pub(crate) conversations: std::collections::HashMap<ConversationId, Conversation>,
-    /// Agent id to conversation routing for live agents.
+    /// Agent id to conversation routing for addressable agents in the current
+    /// session. Suspended agents remain here so `/agent resume` and follow-up
+    /// prompts can continue their conversation.
     pub(crate) agent_conversations: HashMap<String, ConversationId>,
+    /// Harness-owned lifecycle state for current-session agents.
+    pub(crate) agent_states: HashMap<String, AgentState>,
     /// Agent ids that were once known but can no longer receive messages.
     pub(crate) stopped_agent_ids: HashSet<String>,
     /// Id of the user's main interactive conversation. Always present
@@ -1460,6 +1464,7 @@ impl Harness {
             prompt_cache_diagnostics: std::collections::HashMap::new(),
             conversations,
             agent_conversations: HashMap::new(),
+            agent_states: HashMap::new(),
             stopped_agent_ids: HashSet::new(),
             default_conversation_id,
             turn_state: TurnState::Idle,
@@ -1516,6 +1521,7 @@ impl Harness {
             .record_session_meta(eager_session_id, std::env::current_dir().ok())?;
 
         harness.rehydrate_default_agent_from_session();
+        harness.rehydrate_agent_states_from_session();
 
         for command in extension_connects {
             harness.queue_extension_connect(command)?;
@@ -1706,6 +1712,7 @@ impl Harness {
             prompt_cache_diagnostics: std::collections::HashMap::new(),
             conversations,
             agent_conversations: HashMap::new(),
+            agent_states: HashMap::new(),
             stopped_agent_ids: HashSet::new(),
             default_conversation_id,
             turn_state: TurnState::Idle,
@@ -1761,6 +1768,7 @@ impl Harness {
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session metadata recorded");
 
         harness.rehydrate_default_agent_from_session();
+        harness.rehydrate_agent_states_from_session();
 
         for command in extension_connects {
             harness.queue_extension_connect(command)?;
@@ -2503,20 +2511,36 @@ impl Harness {
     }
 
     fn session_id_for_event(&self, event: &Event) -> Option<SessionId> {
+        self.ui_session_id_for_event(event)
+            .or_else(|| self.session_event_session_id(event))
+            .or_else(|| self.provider_event_session_id(event))
+            .or_else(|| self.tool_event_session_id(event))
+            .or_else(|| self.extension_event_session_id(event))
+    }
+
+    fn ui_session_id_for_event(&self, event: &Event) -> Option<SessionId> {
         match event {
             Event::UiPromptSubmitted(prompt) => Some(prompt.session_id.clone()),
             Event::UiShellCommand(command) => Some(command.session_id.clone()),
             Event::UiSwitchSession(req) => Some(req.new_session_id.clone()),
             Event::UiNewAgent(req) => Some(req.session_id.clone()),
+            Event::UiAgentStateRequest(req) => Some(req.session_id.clone()),
             Event::UiTreeRequest(req) => Some(req.session_id.clone()),
             Event::UiNavigateTree(req) => Some(req.session_id.clone()),
             Event::UiCompactRequest(req) => Some(req.session_id.clone()),
             Event::UiCancelPrompt(req) => Some(req.session_id.clone()),
+            _ => None,
+        }
+    }
+
+    fn session_event_session_id(&self, event: &Event) -> Option<SessionId> {
+        match event {
             Event::SessionPromptQueued(queued) => Some(queued.session_id.clone()),
             Event::SessionPromptRecalled(recalled) => Some(recalled.session_id.clone()),
             Event::SessionPromptSteered(steered) => Some(steered.session_id.clone()),
             Event::SessionStarted(started) => Some(started.session_id.clone()),
             Event::SessionShutdown(shutdown) => Some(shutdown.session_id.clone()),
+            Event::SessionAgentStateChanged(changed) => Some(changed.session_id.clone()),
             Event::SessionCompactionStarted(started) => Some(started.session_id.clone()),
             Event::SessionCompactionFinished(finished) => Some(finished.session_id.clone()),
             Event::SessionCompacted(compacted) => Some(compacted.session_id.clone()),
@@ -2528,6 +2552,13 @@ impl Harness {
             Event::SessionPromptPrewarmRequested(prewarm) => Some(prewarm.session_id.clone()),
             Event::SessionUserMessageInjected(injected) => Some(injected.session_id.clone()),
             Event::AgentMessage(message) => Some(message.session_id.clone()),
+            Event::ShellCommandFinished(finished) => Some(finished.session_id.clone()),
+            _ => None,
+        }
+    }
+
+    fn provider_event_session_id(&self, event: &Event) -> Option<SessionId> {
+        match event {
             Event::ProviderPromptSubmitted(submitted) => {
                 self.session_id_for_prompt(&submitted.session_prompt_id)
             }
@@ -2537,6 +2568,12 @@ impl Harness {
             Event::ProviderResponseFinished(finished) => {
                 self.session_id_for_prompt(&finished.session_prompt_id)
             }
+            _ => None,
+        }
+    }
+
+    fn tool_event_session_id(&self, event: &Event) -> Option<SessionId> {
+        match event {
             Event::ToolRequest(request) => self.session_id_for_tool_call(&request.call_id),
             Event::ToolStarted(started) => self.session_id_for_tool_call(&started.call_id),
             Event::ToolRejected(rejected) => self.session_id_for_tool_call(&rejected.call_id),
@@ -2553,7 +2590,12 @@ impl Harness {
             Event::ToolDelegateProgress(progress) => {
                 self.session_id_for_tool_call(&progress.call_id)
             }
-            Event::ShellCommandFinished(finished) => Some(finished.session_id.clone()),
+            _ => None,
+        }
+    }
+
+    fn extension_event_session_id(&self, event: &Event) -> Option<SessionId> {
+        match event {
             Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_) => {
                 Some(self.current_session_id.clone())
             }
@@ -3739,7 +3781,8 @@ impl Harness {
                 Ok(true)
             }
             Event::UiSwitchSession(req) => self.handle_ui_switch_session(client_id, req),
-            Event::UiNewAgent(req) => self.handle_ui_new_agent(client_id, req),
+            Event::UiNewAgent(req) => self.handle_ui_new_agent(req),
+            Event::UiAgentStateRequest(req) => self.handle_ui_agent_state_request(req),
             Event::UiTreeRequest(req) => self.handle_ui_tree_request(client_id, req),
             Event::UiNavigateTree(req) => self.handle_ui_navigate_tree(client_id, req),
             Event::UiCompactRequest(req) => self.handle_ui_compact_request(client_id, req),
@@ -3932,15 +3975,38 @@ impl Harness {
         Ok(true)
     }
 
-    fn handle_ui_new_agent(
-        &mut self,
-        client_id: &str,
-        req: tau_proto::UiNewAgent,
-    ) -> Result<bool, HarnessError> {
-        self.publish_event(Some(client_id), Event::UiNewAgent(req.clone()));
+    fn handle_ui_new_agent(&mut self, req: tau_proto::UiNewAgent) -> Result<bool, HarnessError> {
+        // `/agent new` is an invoking-UI-local selection reset plus this harness
+        // request to rotate the default conversation. Do not publish or persist
+        // the request: late/other UIs must not clear their local current-agent
+        // selection in response.
         if req.session_id == self.current_session_id {
             self.rotate_default_agent_conversation();
         }
+        Ok(true)
+    }
+
+    fn handle_ui_agent_state_request(
+        &mut self,
+        req: tau_proto::UiAgentStateRequest,
+    ) -> Result<bool, HarnessError> {
+        if req.session_id != self.current_session_id {
+            self.emit_info(&format!(
+                "harness is bound to session `{}`; agent state request for `{}` rejected",
+                self.current_session_id.as_str(),
+                req.session_id.as_str()
+            ));
+            return Ok(true);
+        }
+        if req.agent_id == "main" || !self.agent_conversations.contains_key(&req.agent_id) {
+            self.emit_info(&format!("unknown agent `{}`", req.agent_id));
+            return Ok(true);
+        }
+        let state = match req.action {
+            UiAgentStateAction::Suspend => AgentState::Suspended,
+            UiAgentStateAction::Resume => AgentState::Active,
+        };
+        self.set_agent_state(&req.agent_id, state);
         Ok(true)
     }
 
@@ -5550,6 +5616,9 @@ impl Harness {
         self.conversations.insert(cid.clone(), conv);
         self.active_start_agent_requests
             .insert(cid.clone(), ActiveStartAgentRequest { execution_mode });
+        if delegate_execution_mode.is_some() {
+            self.set_agent_state(&agent_id, AgentState::ActiveDelegated);
+        }
 
         // Emit the initial progress snapshot (`%0/0`, no ctx
         // info yet) so the parent's tool block flips from `…` to the
@@ -6175,6 +6244,7 @@ impl Harness {
                 reason: format!("unknown agent `{agent_id}`"),
             });
         };
+        self.set_agent_state(agent_id, AgentState::Active);
         if self.dispatch_blocked_for(&cid) || !self.session_initialized(&session_id) {
             if let Some(conv) = self.conversations.get_mut(&cid) {
                 conv.pending_prompts
@@ -6441,6 +6511,7 @@ impl Harness {
         };
         self.conversations.clear();
         self.agent_conversations.clear();
+        self.agent_states.clear();
         self.stopped_agent_ids.clear();
         self.conversations.insert(
             default_id.clone(),
@@ -6456,6 +6527,7 @@ impl Harness {
         self.current_session_id = new_session_id.clone();
         if matches!(reason, tau_proto::SessionStartReason::Resume) {
             self.rehydrate_default_agent_from_session();
+            self.rehydrate_agent_states_from_session();
         }
         self.publish_delegate_roles_context();
 
@@ -7050,11 +7122,30 @@ impl Harness {
         self.send_prompt_to_agent_for(&cid)
     }
 
+    fn set_agent_state(&mut self, agent_id: &str, state: AgentState) {
+        if agent_id == "main" {
+            return;
+        }
+        if self.agent_states.get(agent_id).copied() == Some(state) {
+            return;
+        }
+        self.agent_states.insert(agent_id.to_owned(), state);
+        self.publish_event(
+            None,
+            Event::SessionAgentStateChanged(SessionAgentStateChanged {
+                session_id: self.current_session_id.clone(),
+                agent_id: agent_id.to_owned(),
+                state,
+            }),
+        );
+    }
+
     fn remove_conversation(&mut self, cid: &ConversationId) -> Option<Conversation> {
         if let Some(conv) = self.conversations.get(cid)
             && let Some(agent_id) = &conv.agent_id
         {
             self.agent_conversations.remove(agent_id);
+            self.agent_states.remove(agent_id);
             self.stopped_agent_ids.insert(agent_id.clone());
         }
         self.conversations.remove(cid)
@@ -7208,6 +7299,51 @@ impl Harness {
             .insert(agent_id, self.default_conversation_id.clone());
     }
 
+    fn rehydrate_agent_states_from_session(&mut self) {
+        let Ok(events) = self.store.session_events(self.current_session_id.as_str()) else {
+            return;
+        };
+        let mut explicitly_tracked = HashSet::new();
+        for entry in events {
+            match entry.event {
+                Event::SessionAgentStateChanged(changed) => {
+                    explicitly_tracked.insert(changed.agent_id.clone());
+                    self.agent_states.insert(changed.agent_id, changed.state);
+                }
+                Event::UiPromptSubmitted(prompt) if prompt.originator.is_user() => {
+                    if let Some(agent_id) = prompt.target_agent_id
+                        && !explicitly_tracked.contains(agent_id.as_str())
+                    {
+                        self.agent_states
+                            .entry(agent_id)
+                            .or_insert(AgentState::Active);
+                    }
+                }
+                Event::SessionPromptCreated(prompt) if prompt.originator.is_user() => {
+                    if let Some(agent_id) = prompt.target_agent_id
+                        && !explicitly_tracked.contains(agent_id.as_str())
+                    {
+                        self.agent_states
+                            .entry(agent_id)
+                            .or_insert(AgentState::Active);
+                    }
+                }
+                Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
+                    if let Some(agent_id) = finished.target_agent_id
+                        && !explicitly_tracked.contains(agent_id.as_str())
+                    {
+                        self.agent_states
+                            .entry(agent_id)
+                            .or_insert(AgentState::Active);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.agent_states
+            .retain(|agent_id, _| self.agent_conversations.contains_key(agent_id));
+    }
+
     fn agent_id_is_taken(&self, agent_id: &str) -> bool {
         self.agent_conversations.contains_key(agent_id)
             || self.stopped_agent_ids.contains(agent_id)
@@ -7232,7 +7368,11 @@ impl Harness {
         let role = {
             let conv = self.conversations.get(cid)?;
             if let Some(agent_id) = &conv.agent_id {
-                return Some(agent_id.clone());
+                let agent_id = agent_id.clone();
+                if self.agent_states.get(&agent_id).copied() != Some(AgentState::ActiveDelegated) {
+                    self.set_agent_state(&agent_id, AgentState::Active);
+                }
+                return Some(agent_id);
             }
             self.role_name_for_conversation(conv)
         };
@@ -7243,6 +7383,7 @@ impl Harness {
         self.stopped_agent_ids.remove(&agent_id);
         self.agent_conversations
             .insert(agent_id.clone(), cid.clone());
+        self.set_agent_state(&agent_id, AgentState::Active);
         Some(agent_id)
     }
 
@@ -8284,15 +8425,28 @@ impl Harness {
             // local head so the user's next interactive prompt
             // continues on the main branch instead of the side branch.
             self.snap_to_default_conversation();
+            let completed_agent_id = self
+                .conversations
+                .get(&cid)
+                .and_then(|conv| conv.agent_id.clone());
             let keep_tool_backed_conversation = self
                 .conversations
                 .get(&cid)
                 .is_some_and(|conv| conv.parent_tool_call_id.is_some());
+            let should_auto_suspend_delegate = keep_tool_backed_conversation
+                && completed_agent_id.as_deref().is_some_and(|agent_id| {
+                    self.agent_states.get(agent_id).copied() == Some(AgentState::ActiveDelegated)
+                });
             // Release before removing or detaching the side conversation so
             // queued descendants can still resolve their parent conversation
             // while starting. Active descendants keep their own copied state.
             self.release_start_agent_request(&cid);
             if keep_tool_backed_conversation {
+                if should_auto_suspend_delegate
+                    && let Some(agent_id) = completed_agent_id.as_deref()
+                {
+                    self.set_agent_state(agent_id, AgentState::Suspended);
+                }
                 self.detach_completed_tool_backed_start_agent(&cid);
             } else {
                 self.transfer_background_completion_target_before_teardown(&cid);

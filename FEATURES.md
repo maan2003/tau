@@ -21,11 +21,12 @@ hidden `tau ext <name>` subcommands; you can replace any of them by editing
 
 ### Persisted event log
 
-Every protocol event in a session is appended to
-`<state_dir>/sessions/<session_id>/events.cbor` (length-prefixed CBOR stream). The
-in-memory [`SessionTree`] is rebuilt from the log on resume, so the on-disk
-record and the live view cannot drift. Because the log is a stream of typed
-events rather than a flat transcript, sessions branch into a tree: rewinding
+Durable session-scoped protocol events are appended to
+`<state_dir>/sessions/<session_id>/events.cbor` (length-prefixed CBOR stream);
+transient UI requests and progress updates are not. The in-memory
+[`SessionTree`] is rebuilt from the log on resume, so the on-disk record and the
+live view cannot drift. Because the log is a stream of typed events rather than
+a flat transcript, sessions branch into a tree: rewinding
 to an earlier turn keeps the abandoned branch on disk.
 
 ```
@@ -338,16 +339,24 @@ Type `/` for menu autocompletion. The built-in set:
 | ------------------- | ---------------------------------------------------- |
 | `/quit`             | Exit the session                                     |
 | `/detach`           | Leave the UI, keep the harness running for reattach  |
-| `/session new`      | Start a fresh session in this harness                |
-| `/agent new`        | Clear the selected agent and start the next prompt as a new agent |
-| `/agent switch <id>` | Switch to an existing live agent transcript (`none` clears selection) |
-| `/agent suspend [id]` | Hide a live agent from prompt targets until resumed |
-| `/agent resume <id>` | Re-enable a suspended agent for switching and prompts |
+| `/session new`      | Close the current session and start a fresh no-agent session |
+| `/agent new`        | Clear this UI's selected agent; next untargeted prompt mints a new agent |
+| `/agent switch <id>` | Switch this UI to an active agent transcript (`none` clears selection) |
+| `/agent suspend [id]` | Mark an agent suspended in harness state until resumed |
+| `/agent resume <id>` | Mark a suspended agent active for switching and prompts |
 | `/model <role>`     | Switch agent role                                    |
 | `/role <role> ...`  | Switch, create, edit, or delete an agent role        |
 | `/fast`             | Toggle Codex Fast mode (`service_tier: fast`)        |
 | `/tree [id]`        | Print session tree; with `id`, rewind head           |
 | `/set <name> <val>` | Set a UI setting (Tab cycles names + values)         |
+
+A session is the harness's session-scoped state, backed by the durable event
+log. Starting a new session resets harness/UI session state and begins with no
+agents. The "current agent" selection is local to each attached UI: `/agent new`
+and `/agent switch` do not synchronize selection to other UIs. Active vs.
+suspended agent lifecycle state is harness-owned and replayed through session
+events; completed delegated agents are kept resumable but auto-suspended unless
+a user interacted with them while they were running.
 
 Available `/set` names include `show-diff` (expanded vs. compact diffs),
 `show-thinking` (agent reasoning summaries), `show-cache-stats`

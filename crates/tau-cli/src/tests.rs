@@ -406,10 +406,10 @@ fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
 }
 
 #[test]
-fn ui_new_agent_clears_selected_agent_for_matching_session() {
-    // Regression: `/agent new` is broadcast and replayed, so renderers that did
-    // not initiate the command must also leave the selected-agent state for the
-    // matching session while ignoring events for other sessions.
+fn ui_new_agent_event_does_not_clear_selected_agent() {
+    // Current-agent selection is UI-local. Only the invoking input loop clears
+    // its renderer via `RendererCmd::ClearSelectedAgent`; a replayed/live
+    // UiNewAgent request must not make other renderers change selection.
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle,
@@ -441,11 +441,84 @@ fn ui_new_agent_clears_selected_agent_for_matching_session() {
         session_id: "s1".into(),
     }));
     assert_eq!(
-        *renderer
+        renderer
             .current_agent_state()
             .lock()
-            .expect("current agent"),
-        None
+            .expect("current agent")
+            .as_deref(),
+        Some("engineer_abc12345")
+    );
+}
+
+#[test]
+fn session_agent_state_changed_updates_active_and_suspended_sets() {
+    // Agent lifecycle state comes from harness session events. Active-delegated
+    // counts as active for `/agent switch`; suspended remains known but is
+    // removed from the active set by the suspended overlay.
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::SessionAgentStateChanged(
+        tau_proto::SessionAgentStateChanged {
+            session_id: "s1".into(),
+            agent_id: "worker".to_owned(),
+            state: tau_proto::AgentState::ActiveDelegated,
+        },
+    ));
+    assert!(
+        renderer
+            .known_agents()
+            .lock()
+            .expect("known agents")
+            .contains(&"worker".to_owned())
+    );
+    assert!(
+        renderer
+            .live_agents()
+            .lock()
+            .expect("live agents")
+            .contains("worker")
+    );
+    assert!(
+        !renderer
+            .suspended_agents()
+            .lock()
+            .expect("suspended agents")
+            .contains("worker")
+    );
+
+    renderer.handle(&Event::SessionAgentStateChanged(
+        tau_proto::SessionAgentStateChanged {
+            session_id: "s1".into(),
+            agent_id: "worker".to_owned(),
+            state: tau_proto::AgentState::Suspended,
+        },
+    ));
+    assert!(
+        renderer
+            .suspended_agents()
+            .lock()
+            .expect("suspended agents")
+            .contains("worker")
+    );
+
+    renderer.handle(&Event::SessionAgentStateChanged(
+        tau_proto::SessionAgentStateChanged {
+            session_id: "s1".into(),
+            agent_id: "worker".to_owned(),
+            state: tau_proto::AgentState::Active,
+        },
+    ));
+    assert!(
+        !renderer
+            .suspended_agents()
+            .lock()
+            .expect("suspended agents")
+            .contains("worker")
     );
 }
 
@@ -823,7 +896,7 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
 }
 
 #[test]
-fn start_agent_result_suspends_and_resume_reactivates_agent() {
+fn agent_state_event_suspends_and_resume_reactivates_agent() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -839,15 +912,25 @@ fn start_agent_result_suspends_and_resume_reactivates_agent() {
         query_id: "q-worker".to_owned(),
         agent_id: "worker-1".to_owned(),
     }));
+    renderer.handle(&Event::SessionAgentStateChanged(
+        tau_proto::SessionAgentStateChanged {
+            session_id: "s1".into(),
+            agent_id: "worker-1".to_owned(),
+            state: tau_proto::AgentState::ActiveDelegated,
+        },
+    ));
     assert!(renderer.live_agents().lock().unwrap().contains("worker-1"));
 
-    // Completed delegated agents become suspended UI choices: the transcript is
-    // still known, but `/agent switch` should not offer it until resumed.
-    renderer.handle(&Event::StartAgentResult(tau_proto::StartAgentResult {
-        query_id: "q-worker".to_owned(),
-        text: "done".to_owned(),
-        error: None,
-    }));
+    // Completed delegated agents become suspended choices when the harness
+    // publishes the durable state change: the transcript is still known, but
+    // `/agent switch` should not offer it until resumed.
+    renderer.handle(&Event::SessionAgentStateChanged(
+        tau_proto::SessionAgentStateChanged {
+            session_id: "s1".into(),
+            agent_id: "worker-1".to_owned(),
+            state: tau_proto::AgentState::Suspended,
+        },
+    ));
     assert!(renderer.live_agents().lock().unwrap().contains("worker-1"));
     assert!(
         renderer

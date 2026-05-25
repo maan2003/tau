@@ -1460,6 +1460,41 @@ pub struct AgentMessage {
     pub message: String,
 }
 
+/// Harness-tracked lifecycle state for a session-scoped agent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    /// The agent can receive user prompts and appears in active-agent UI lists.
+    Active,
+    /// A tool-backed delegated agent is currently running. UIs treat this as
+    /// active for switching, but the harness may automatically suspend it when
+    /// the delegated reply completes if no user has interacted with it.
+    ActiveDelegated,
+    /// The agent is still resumable/addressable but hidden from active-agent
+    /// completions until explicitly resumed or otherwise interacted with.
+    Suspended,
+}
+
+impl AgentState {
+    /// Whether this state counts as an active prompt target in UIs.
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Active | Self::ActiveDelegated)
+    }
+}
+
+/// Durable, replayable session fact recording the harness-owned state of one
+/// agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionAgentStateChanged {
+    /// Session that owns the agent.
+    pub session_id: SessionId,
+    /// Agent whose lifecycle state changed.
+    pub agent_id: String,
+    /// New harness-tracked lifecycle state.
+    pub state: AgentState,
+}
+
 /// Request to start a side-agent conversation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StartAgentRequest {
@@ -1767,14 +1802,37 @@ pub struct UiSwitchSession {
     pub reason: SessionStartReason,
 }
 
-/// The user typed `/agent new`: rotate the foreground conversation within the
-/// current session. The harness keeps the session id unchanged, clears the
-/// current foreground agent binding, and lets the next untargeted prompt mint a
-/// fresh agent id on a fresh conversation branch.
+/// The user typed `/agent new`: rotate the harness's default conversation
+/// within the current session so the next untargeted prompt mints a fresh agent
+/// id. Current-agent selection is UI-local; this request must not be replayed
+/// to make other UIs clear their selected agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiNewAgent {
     /// Session whose foreground conversation should be rotated.
     pub session_id: SessionId,
+}
+
+/// User-requested lifecycle transition for an agent in the current session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiAgentStateAction {
+    /// Hide the agent from active-agent switch completions without deleting its
+    /// conversation.
+    Suspend,
+    /// Mark the agent active/resumable for prompt targeting again.
+    Resume,
+}
+
+/// The user typed `/agent suspend` or `/agent resume`: ask the harness to
+/// update the session-scoped agent state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiAgentStateRequest {
+    /// Session whose agent state should change.
+    pub session_id: SessionId,
+    /// Agent to update.
+    pub agent_id: String,
+    /// Requested lifecycle transition.
+    pub action: UiAgentStateAction,
 }
 
 /// The user typed `/tree`: render the session's branching tree (one
@@ -2695,6 +2753,8 @@ pub enum Event {
     UiSwitchSession(UiSwitchSession),
     #[serde(rename = "ui.new_agent")]
     UiNewAgent(UiNewAgent),
+    #[serde(rename = "ui.agent_state_request")]
+    UiAgentStateRequest(UiAgentStateRequest),
     #[serde(rename = "ui.tree_request")]
     UiTreeRequest(UiTreeRequest),
     #[serde(rename = "ui.navigate_tree")]
@@ -2727,6 +2787,8 @@ pub enum Event {
     SessionStarted(SessionStarted),
     #[serde(rename = "session.shutdown")]
     SessionShutdown(SessionShutdown),
+    #[serde(rename = "session.agent_state_changed")]
+    SessionAgentStateChanged(SessionAgentStateChanged),
     #[serde(rename = "session.compaction_started")]
     SessionCompactionStarted(SessionCompactionStarted),
     #[serde(rename = "session.compaction_finished")]
@@ -2814,6 +2876,7 @@ impl Event {
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiNewAgent(_) => EventName::UI_NEW_AGENT,
+            Self::UiAgentStateRequest(_) => EventName::UI_AGENT_STATE_REQUEST,
             Self::UiTreeRequest(_) => EventName::UI_TREE_REQUEST,
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
             Self::UiCompactRequest(_) => EventName::UI_COMPACT_REQUEST,
@@ -2827,6 +2890,7 @@ impl Event {
             Self::SessionPromptSteered(_) => EventName::SESSION_PROMPT_STEERED,
             Self::SessionStarted(_) => EventName::SESSION_STARTED,
             Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
+            Self::SessionAgentStateChanged(_) => EventName::SESSION_AGENT_STATE_CHANGED,
             Self::SessionCompactionStarted(_) => EventName::SESSION_COMPACTION_STARTED,
             Self::SessionCompactionFinished(_) => EventName::SESSION_COMPACTION_FINISHED,
             Self::SessionCompacted(_) => EventName::SESSION_COMPACTED,
@@ -2867,7 +2931,9 @@ impl Event {
                 | Self::SessionPromptCreated(_)
                 | Self::SessionPromptTerminated(_)
                 | Self::SessionPromptPrewarmRequested(_)
+                | Self::UiAgentStateRequest(_)
                 | Self::UiCompactRequest(_)
+                | Self::UiNewAgent(_)
                 | Self::UiPromptDraft(_)
         )
     }
