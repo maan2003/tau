@@ -1,5 +1,7 @@
 use std::cell::RefCell;
 use std::io::{BufReader, BufWriter};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::thread;
 
@@ -2858,6 +2860,155 @@ fn source_truncated_read_and_open_report_body_truncated() {
     let opened = engine.action_in_open(&id).expect("open");
     assert!(opened.contains("body_truncated: true"));
     assert!(opened.contains("small approval prefix"));
+}
+
+#[cfg(unix)]
+fn file_mode(path: &std::path::Path) -> u32 {
+    std::fs::metadata(path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+#[cfg(unix)]
+#[test]
+fn state_paths_are_private_and_existing_files_are_hardened() {
+    // Email state contains message subjects, bodies, recipients, and approval
+    // decisions. On Unix the extension must create private state paths and
+    // defensively tighten older permissive paths when it initializes or touches
+    // them.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let state_dir = temp.path().join("state");
+    std::fs::create_dir_all(state_dir.join("policy")).expect("mkdir");
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod state");
+    let allow_path = state_dir.join("policy").join("incoming-allow.json");
+    std::fs::write(&allow_path, r#"{"schema":1,"patterns":[]}"#).expect("allow");
+    std::fs::set_permissions(&allow_path, std::fs::Permissions::from_mode(0o644))
+        .expect("chmod allow");
+
+    let state = StateStore::open(state_dir.clone()).expect("state");
+
+    assert_eq!(file_mode(&state_dir), 0o700);
+    for dir in [
+        "policy",
+        "approvals",
+        "approvals/incoming",
+        "approvals/incoming/pending",
+        "approvals/outgoing",
+        "approvals/outgoing/pending",
+        "logs",
+    ] {
+        assert_eq!(file_mode(&state_dir.join(dir)), 0o700, "{dir}");
+    }
+    assert_eq!(file_mode(&state_dir.join("state-v1.json")), 0o600);
+
+    state.load_incoming_allow().expect("load allow");
+    assert_eq!(file_mode(&allow_path), 0o600);
+
+    state
+        .save_outgoing_allow_records(&[StatePattern {
+            kind: "exact".to_owned(),
+            pattern: "friend@example.test".to_owned(),
+            created_at: "now".to_owned(),
+            created_by: "test".to_owned(),
+            note: None,
+        }])
+        .expect("save allow");
+    assert_eq!(
+        file_mode(&state_dir.join("policy/outgoing-allow.json")),
+        0o600
+    );
+
+    let approval = OutgoingApproval {
+        schema: 1,
+        id: String::new(),
+        kind: "outgoing".to_owned(),
+        status: "pending".to_owned(),
+        account: "work".to_owned(),
+        from: "me@example.test".to_owned(),
+        to: vec!["friend@example.test".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "secret".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+        blocked_recipients: vec!["friend@example.test".to_owned()],
+        reason: "test".to_owned(),
+        sent_message_id: None,
+    };
+    let id = state.pending_outgoing(&approval).expect("pending");
+    assert_eq!(
+        file_mode(
+            &state
+                .approval_path("outgoing", "pending", &id)
+                .expect("path")
+        ),
+        0o600
+    );
+
+    let log_path = state_dir.join("logs/email.jsonl");
+    std::fs::write(&log_path, b"").expect("log");
+    std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o644)).expect("chmod log");
+    state
+        .append_email_log(&EmailLogEntry {
+            schema: 1,
+            ts_unix_ms: 1,
+            kind: "tool".to_owned(),
+            command: "send".to_owned(),
+            status: "ok".to_owned(),
+            account: None,
+            folder: None,
+            uid: None,
+            access: None,
+            from: None,
+            to: Vec::new(),
+            title: None,
+            title_redacted: false,
+            approval_id: None,
+            message_count: None,
+            reason: None,
+        })
+        .expect("append log");
+    assert_eq!(file_mode(&log_path), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn recent_email_log_hardens_existing_log_file_on_read() {
+    // `/email log last` only reads the audit log, but the log still contains
+    // sensitive message metadata. Reading a pre-existing permissive file should
+    // defensively tighten it just like append paths do.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let state = StateStore::open(temp.path().join("state")).expect("state");
+    let log_path = temp.path().join("state/logs/email.jsonl");
+    std::fs::write(
+        &log_path,
+        br#"{"schema":1,"ts_unix_ms":1,"kind":"tool","command":"send","status":"ok","to":[],"title_redacted":false}
+"#,
+    )
+    .expect("log");
+    std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o644)).expect("chmod log");
+
+    let entries = state.recent_email_log(1).expect("recent log");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(file_mode(&log_path), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn temporary_json_files_are_private_until_committed() {
+    // Atomic state writes briefly place complete JSON content in a temp file,
+    // so the temp path needs the same owner-only mode as the final state file.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let path = temp.path().join("state.json");
+
+    let tmp = write_json_temp(&path, &serde_json::json!({"secret":"value"})).expect("write tmp");
+
+    assert_eq!(file_mode(&tmp), 0o600);
 }
 
 #[test]

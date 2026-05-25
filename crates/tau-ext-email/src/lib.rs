@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1018,20 +1020,23 @@ pub struct StateStore {
 impl StateStore {
     /// Create the state directory and marker file if needed.
     pub fn open(state_dir: PathBuf) -> Result<Self, String> {
-        fs::create_dir_all(&state_dir).map_err(|error| error.to_string())?;
+        create_private_dir_all(&state_dir)?;
         for dir in [
             "policy",
+            "approvals",
+            "approvals/incoming",
             "approvals/incoming/pending",
             "approvals/incoming/sending",
             "approvals/incoming/approved",
             "approvals/incoming/denied",
+            "approvals/outgoing",
             "approvals/outgoing/pending",
             "approvals/outgoing/sending",
             "approvals/outgoing/approved",
             "approvals/outgoing/denied",
             "logs",
         ] {
-            fs::create_dir_all(state_dir.join(dir)).map_err(|error| error.to_string())?;
+            create_private_dir_all(&state_dir.join(dir))?;
         }
         atomic_json_write(
             &state_dir.join("state-v1.json"),
@@ -1113,10 +1118,7 @@ impl StateStore {
         let path = self.email_log_path();
         let mut bytes = serde_json::to_vec(entry).map_err(|error| error.to_string())?;
         bytes.push(b'\n');
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
+        let mut file = open_private_append(&path)
             .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
         file.write_all(&bytes)
             .map_err(|error| format!("failed to append {}: {error}", path.display()))?;
@@ -1129,10 +1131,10 @@ impl StateStore {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let file = fs::File::open(&path)
+        let bytes = read_sensitive_file(&path)
             .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
         let mut entries = VecDeque::new();
-        for line in BufReader::new(file).lines() {
+        for line in BufReader::new(bytes.as_slice()).lines() {
             let line =
                 line.map_err(|error| format!("failed to read {}: {error}", path.display()))?;
             if line.trim().is_empty() {
@@ -1172,7 +1174,7 @@ impl StateStore {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let file: PolicyFile = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+        let file: PolicyFile = serde_json::from_slice(&read_sensitive_file(&path)?)
             .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
         if file.schema != 1 {
             return Err(format!(
@@ -1211,7 +1213,7 @@ impl StateStore {
             .into_iter()
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
             .map(|path| {
-                serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+                serde_json::from_slice(&read_sensitive_file(&path)?)
                     .map_err(|error| format!("failed to parse {}: {error}", path.display()))
             })
             .collect()
@@ -1227,7 +1229,7 @@ impl StateStore {
         if !path.exists() {
             return Err(format!("approval `{id}` not found"));
         }
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_sensitive_file(&path)?)
             .map_err(|error| format!("failed to parse {}: {error}", path.display()))
     }
 
@@ -1377,7 +1379,7 @@ impl StateStore {
         let to = self.approval_path(kind, new_status, id)?;
         if from.exists() {
             let mut record: serde_json::Value =
-                serde_json::from_slice(&fs::read(&from).map_err(|error| error.to_string())?)
+                serde_json::from_slice(&read_sensitive_file(&from)?)
                     .map_err(|error| format!("failed to parse {}: {error}", from.display()))?;
             validate_approval_record(&record, kind, "pending", id)?;
             record["status"] = serde_json::Value::String(new_status.to_owned());
@@ -1742,6 +1744,68 @@ fn current_unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
+fn create_private_dir_all(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|error| error.to_string())?;
+    chmod_private_dir(path)
+}
+
+fn read_sensitive_file(path: &Path) -> Result<Vec<u8>, String> {
+    chmod_private_file(path)?;
+    fs::read(path).map_err(|error| error.to_string())
+}
+
+fn open_private_append(path: &Path) -> Result<fs::File, std::io::Error> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path)?;
+    chmod_private_file_handle(&file)?;
+    Ok(file)
+}
+
+fn create_private_file(path: &Path) -> Result<fs::File, std::io::Error> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path)?;
+    chmod_private_file_handle(&file)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn chmod_private_dir(path: &Path) -> Result<(), String> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("failed to chmod {}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn chmod_private_dir(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn chmod_private_file(path: &Path) -> Result<(), String> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("failed to chmod {}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn chmod_private_file(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn chmod_private_file_handle(file: &fs::File) -> Result<(), std::io::Error> {
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn chmod_private_file_handle(_file: &fs::File) -> Result<(), std::io::Error> {
+    Ok(())
+}
+
 fn temp_json_path(parent: &Path, path: &Path) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1758,11 +1822,11 @@ fn write_json_temp<T: Serialize>(path: &Path, value: &T) -> Result<PathBuf, Stri
     let parent = path
         .parent()
         .ok_or_else(|| "state path has no parent".to_owned())?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    create_private_dir_all(parent)?;
     let tmp = temp_json_path(parent, path);
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
     {
-        let mut file = fs::File::create(&tmp).map_err(|error| error.to_string())?;
+        let mut file = create_private_file(&tmp).map_err(|error| error.to_string())?;
         file.write_all(&bytes).map_err(|error| error.to_string())?;
         file.sync_all().map_err(|error| error.to_string())?;
     }
