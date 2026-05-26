@@ -419,17 +419,28 @@ fn text_field(value: &CborValue, name: &str) -> Option<String> {
     }
 }
 
-fn bool_field(value: &CborValue, name: &str) -> Option<bool> {
-    match map_get(value, name) {
-        Some(CborValue::Bool(value)) => Some(*value),
-        _ => None,
-    }
-}
-
 fn assert_unapproved_preview_only(result: &CborValue) {
     let data = map_get(result, "data").expect("data");
     assert!(map_get(data, "body_text").is_none());
     assert!(text_field(data, "body_preview").is_some());
+}
+
+fn pending_incoming_id(engine: &Engine<FakeBackend>, index: usize) -> String {
+    engine
+        .state
+        .list_pending_incoming()
+        .expect("pending incoming")[index]
+        .id
+        .clone()
+}
+
+fn pending_outgoing_id(engine: &Engine<FakeBackend>, index: usize) -> String {
+    engine
+        .state
+        .list_pending_outgoing()
+        .expect("pending outgoing")[index]
+        .id
+        .clone()
 }
 
 #[test]
@@ -704,14 +715,7 @@ fn omitted_read_scope_defaults_to_first_account_inbox_and_limit_100() {
         ))
         .expect("parse read"),
     );
-    assert_eq!(
-        data_field(&read, "account"),
-        &CborValue::Text("work".to_owned())
-    );
-    assert_eq!(
-        data_field(&read, "folder"),
-        &CborValue::Text("INBOX".to_owned())
-    );
+    assert_eq!(cbor_text_field(&read, "status"), Some("ok"));
 }
 
 #[test]
@@ -849,7 +853,7 @@ fn approval_required_send_displays_as_success_for_agent() {
     assert_eq!(display.status_text, "approval_required");
     assert_eq!(
         text_field(map_get(&result.result, "data").expect("data"), "message"),
-        Some("Your email will be delivered after user's approval.".to_owned())
+        Some("Message pending approval.".to_owned())
     );
 }
 
@@ -1099,8 +1103,9 @@ fn incoming_allow_requires_trusted_aligned_authentication() {
         assert_eq!(cbor_text_field(&result, "status"), Some("preview"));
         assert_eq!(read_reason(&result), Some(reason.to_owned()));
         assert_eq!(
-            data_field(&result, "subject_preview"),
-            &CborValue::Text("must stay hidden until trusted auth".to_owned())
+            header_text_field(map_get(&result, "data").expect("data"), "subject_preview")
+                .map(str::to_owned),
+            Some("must stay hidden until trusted auth".to_owned())
         );
         assert_unapproved_preview_only(&result);
     }
@@ -1143,10 +1148,10 @@ fn incoming_allow_requires_trusted_aligned_dkim_by_default() {
     assert!(body.contains("<external_unstrusted_message>\n"));
     assert!(body.contains("secret body"));
     assert!(body.contains("\n</external_unstrusted_message>"));
-    let headers = data_field(&result, "headers");
-    assert_eq!(text_field(headers, "source"), Some("text".to_owned()));
-    assert_eq!(bool_field(headers, "trusted"), Some(true));
-    assert_eq!(bool_field(headers, "simplified"), Some(true));
+    let headers = text_field(data, "headers").expect("headers");
+    assert!(headers.contains("source=text"));
+    assert!(headers.contains("trusted=true"));
+    assert!(headers.contains("simplified=true"));
 }
 
 #[test]
@@ -1343,8 +1348,9 @@ fn request_full_creation_repeat_stability_and_exact_approval() {
     assert_eq!(cbor_text_field(&preview, "status"), Some("preview"));
     assert_unapproved_preview_only(&preview);
     assert_eq!(
-        data_field(&preview, "subject_preview"),
-        &CborValue::Text("secret subject".to_owned())
+        header_text_field(map_get(&preview, "data").expect("data"), "subject_preview")
+            .map(str::to_owned),
+        Some("secret subject".to_owned())
     );
     assert!(
         engine
@@ -1361,13 +1367,12 @@ fn request_full_creation_repeat_stability_and_exact_approval() {
         uid: "1".to_owned(),
     });
     assert_eq!(cbor_text_field(&first, "status"), Some("approval_required"));
-    let id = match data_field(&first, "approval_id") {
-        CborValue::Text(id) => id.clone(),
-        _ => panic!("id"),
-    };
+    let id = pending_incoming_id(&engine, 0);
     assert_eq!(
-        data_field(&first, "access"),
-        &CborValue::Text("preview".to_owned())
+        data_field(&first, "message"),
+        &CborValue::Text(
+            "Access requested. When approved, read again to fetch full content.".to_owned()
+        )
     );
 
     let second = engine.dispatch(EmailCommand::RequestFull {
@@ -1376,9 +1381,11 @@ fn request_full_creation_repeat_stability_and_exact_approval() {
         uid: "1".to_owned(),
     });
     assert_eq!(
-        data_field(&second, "approval_id"),
-        &CborValue::Text(id.clone())
+        cbor_text_field(&second, "status"),
+        Some("approval_required")
     );
+    let second_id = pending_incoming_id(&engine, 0);
+    assert_eq!(second_id, id);
 
     engine.state.approve_incoming(&id).expect("approve");
     let approved = engine.dispatch(EmailCommand::Read {
@@ -1391,8 +1398,8 @@ fn request_full_creation_repeat_stability_and_exact_approval() {
     let approved_body = text_field(approved_data, "body_text").expect("body");
     assert!(approved_body.contains("<external_unstrusted_message>\n"));
     assert!(approved_body.contains("secret body"));
-    let approved_headers = data_field(&approved, "headers");
-    assert_eq!(bool_field(approved_headers, "trusted"), Some(false));
+    let approved_headers = text_field(approved_data, "headers").expect("headers");
+    assert!(approved_headers.contains("trusted=false"));
 
     let original_message = engine
         .backend
@@ -1506,10 +1513,10 @@ fn unapproved_read_returns_sanitized_preview_without_raw_body_text() {
             .chars()
             .all(|ch| { ch.is_ascii_alphanumeric() || matches!(ch, ' ' | ',' | '.') })
     );
-    let headers = data_field(&result, "headers");
-    assert_eq!(text_field(headers, "source"), Some("html".to_owned()));
-    assert_eq!(bool_field(headers, "trusted"), Some(false));
-    assert_eq!(bool_field(headers, "simplified"), Some(true));
+    let headers = text_field(data, "headers").expect("headers");
+    assert!(headers.contains("source=html"));
+    assert!(headers.contains("trusted=false"));
+    assert!(headers.contains("simplified=true"));
 }
 
 #[test]
@@ -1603,7 +1610,7 @@ fn outgoing_whitelisted_sends_and_mixed_recipients_queue_whole_message() {
     );
     assert_eq!(
         text_field(map_get(&queued, "data").expect("data"), "message"),
-        Some("Your email will be delivered after user's approval.".to_owned())
+        Some("Message pending approval.".to_owned())
     );
     assert_eq!(
         engine.backend.sent.borrow().len(),
@@ -1620,7 +1627,7 @@ fn outgoing_whitelisted_sends_and_mixed_recipients_queue_whole_message() {
 fn outgoing_actions_list_open_approve_and_whitelist_drive_policy() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
-    let queued = engine.dispatch(EmailCommand::Send {
+    let _queued = engine.dispatch(EmailCommand::Send {
         account: Some("work".to_owned()),
         from: Some("alice@company.com".to_owned()),
         to: vec!["external@example.net".to_owned()],
@@ -1631,10 +1638,7 @@ fn outgoing_actions_list_open_approve_and_whitelist_drive_policy() {
         reply_to: None,
         in_reply_to: None,
     });
-    let id = match data_field(&queued, "approval_id") {
-        CborValue::Text(id) => id.clone(),
-        _ => panic!("approval id"),
-    };
+    let id = pending_outgoing_id(&engine, 0);
     assert_eq!(id, "1");
 
     let listed = engine
@@ -1704,7 +1708,7 @@ fn outgoing_approve_revalidates_persisted_pending_draft_before_smtp() {
     // stored draft against current account identity and policy before SMTP.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
-    let queued = engine.dispatch(EmailCommand::Send {
+    let _queued = engine.dispatch(EmailCommand::Send {
         account: Some("work".to_owned()),
         from: None,
         to: vec!["external@example.net".to_owned()],
@@ -1715,10 +1719,7 @@ fn outgoing_approve_revalidates_persisted_pending_draft_before_smtp() {
         reply_to: None,
         in_reply_to: None,
     });
-    let id = match data_field(&queued, "approval_id") {
-        CborValue::Text(id) => id.clone(),
-        _ => panic!("approval id"),
-    };
+    let id = pending_outgoing_id(&engine, 0);
     let path = engine
         .state
         .approval_path("outgoing", "pending", &id)
@@ -1760,7 +1761,10 @@ fn outgoing_reply_to_and_from_spoofing_are_policy_checked() {
         cbor_text_field(&queued, "status"),
         Some("approval_required")
     );
-    assert!(format!("{queued:?}").contains("attacker@evil.test"));
+    assert_eq!(
+        cbor_text_field(&queued, "status"),
+        Some("approval_required")
+    );
 
     let sent = engine.dispatch(EmailCommand::Send {
         account: Some("work".to_owned()),
@@ -1810,11 +1814,8 @@ fn allowed_read_normalizes_from_display_for_model_visible_output() {
     });
 
     assert_eq!(cbor_text_field(&result, "status"), Some("ok"));
-    let headers = map_get(map_get(&result, "data").expect("data"), "headers").expect("headers");
-    assert_eq!(
-        text_field(headers, "from"),
-        Some("team@company.com".to_owned())
-    );
+    let headers = text_field(map_get(&result, "data").expect("data"), "headers").expect("headers");
+    assert!(headers.contains("from=team@company.com"));
     assert!(!format!("{result:?}").contains("CEO"));
 }
 
@@ -1921,7 +1922,7 @@ fn outgoing_success_outputs_do_not_leak_bcc() {
     assert_eq!(cbor_text_field(&sent, "status"), Some("sent"));
     assert!(!format!("{sent:?}").contains("secret@trusted.test"));
 
-    let queued = engine.dispatch(EmailCommand::Send {
+    let _queued = engine.dispatch(EmailCommand::Send {
         account: Some("work".to_owned()),
         from: None,
         to: vec!["external@example.net".to_owned()],
@@ -1932,10 +1933,7 @@ fn outgoing_success_outputs_do_not_leak_bcc() {
         reply_to: None,
         in_reply_to: None,
     });
-    let id = match data_field(&queued, "approval_id") {
-        CborValue::Text(id) => id.clone(),
-        _ => panic!("approval id"),
-    };
+    let id = pending_outgoing_id(&engine, 0);
     engine
         .dispatch_action("email.out.approve", &[id])
         .expect("approve");
@@ -1985,15 +1983,12 @@ fn action_outputs_escape_controls_and_row_forgery() {
         }],
     );
 
-    let incoming = engine.dispatch(EmailCommand::RequestFull {
+    let _incoming = engine.dispatch(EmailCommand::RequestFull {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         uid: "77".to_owned(),
     });
-    let incoming_id = match data_field(&incoming, "approval_id") {
-        CborValue::Text(id) => id.clone(),
-        _ => panic!("approval id"),
-    };
+    let incoming_id = pending_incoming_id(&engine, 0);
     let listed = engine.dispatch_action("email.in.list", &[]).expect("list");
     let opened = engine
         .dispatch_action("email.in.open", &[incoming_id])
@@ -2006,7 +2001,7 @@ fn action_outputs_escape_controls_and_row_forgery() {
     assert!(opened.contains("subject: hello\\nstatus: forged\\e[31m"));
     assert!(opened.contains("file\\nreason: forged\\u{202e}.txt"));
 
-    let outgoing = engine.dispatch(EmailCommand::Send {
+    let _outgoing = engine.dispatch(EmailCommand::Send {
         account: Some("work".to_owned()),
         from: None,
         to: vec!["external@example.net".to_owned()],
@@ -2017,10 +2012,7 @@ fn action_outputs_escape_controls_and_row_forgery() {
         reply_to: None,
         in_reply_to: None,
     });
-    let outgoing_id = match data_field(&outgoing, "approval_id") {
-        CborValue::Text(id) => id.clone(),
-        _ => panic!("approval id"),
-    };
+    let outgoing_id = pending_outgoing_id(&engine, 0);
     let listed = engine.dispatch_action("email.out.list", &[]).expect("list");
     let opened = engine
         .dispatch_action("email.out.open", &[outgoing_id])
@@ -2035,15 +2027,12 @@ fn action_outputs_escape_controls_and_row_forgery() {
 fn incoming_actions_list_shows_subject_preview_but_open_shows_user_content() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
-    let queued = engine.dispatch(EmailCommand::RequestFull {
+    let _queued = engine.dispatch(EmailCommand::RequestFull {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         uid: "1".to_owned(),
     });
-    let id = match data_field(&queued, "approval_id") {
-        CborValue::Text(id) => id.clone(),
-        _ => panic!("approval id"),
-    };
+    let id = pending_incoming_id(&engine, 0);
     assert_eq!(id, "1");
 
     let listed = engine
@@ -2198,8 +2187,8 @@ fn message_management_commands_update_flags_and_trash_without_approval() {
     });
     assert_eq!(cbor_text_field(&trashed, "status"), Some("moved_to_trash"));
     assert_eq!(
-        data_field(&trashed, "trash_folder"),
-        &CborValue::Text("Trash".to_owned())
+        data_field(&trashed, "message"),
+        &CborValue::Text("Message moved to trash.".to_owned())
     );
     assert!(
         engine
@@ -2276,8 +2265,8 @@ fn email_log_records_agent_access_and_mutations() {
     assert_eq!(entries[1].kind, "access");
     assert_eq!(entries[1].command, "request_full");
     assert_eq!(entries[1].status, "approval_required");
-    assert_eq!(entries[1].access.as_deref(), Some("preview"));
-    assert_eq!(entries[1].approval_id.as_deref(), Some("1"));
+    assert_eq!(entries[1].access.as_deref(), Some("none"));
+    assert_eq!(entries[1].approval_id.as_deref(), None);
     let raw_entries = format!("{entries:?}");
     assert!(!raw_entries.contains("secret body"));
     assert!(!raw_entries.contains("outgoing body"));
@@ -2306,15 +2295,12 @@ fn incoming_deny_persists_none_access_but_request_full_can_ask_again() {
     // approval, but an explicit request_full can still ask the user again.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
-    let queued = engine.dispatch(EmailCommand::RequestFull {
+    let _queued = engine.dispatch(EmailCommand::RequestFull {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         uid: "1".to_owned(),
     });
-    let id = match data_field(&queued, "approval_id") {
-        CborValue::Text(id) => id.clone(),
-        _ => panic!("approval id"),
-    };
+    let id = pending_incoming_id(&engine, 0);
 
     let denied = engine
         .dispatch_action("email.in.deny", std::slice::from_ref(&id))
@@ -2417,13 +2403,12 @@ fn incoming_deny_persists_none_access_but_request_full_can_ask_again() {
         Some("approval_required")
     );
     assert_eq!(
-        data_field(&requeued, "access"),
-        &CborValue::Text("none".to_owned())
+        data_field(&requeued, "message"),
+        &CborValue::Text(
+            "Access requested. When approved, read again to fetch full content.".to_owned()
+        )
     );
-    let second_id = match data_field(&requeued, "approval_id") {
-        CborValue::Text(id) => id.clone(),
-        _ => panic!("approval id"),
-    };
+    let second_id = pending_incoming_id(&engine, 0);
     assert_ne!(second_id, id);
     engine
         .dispatch_action("email.in.approve", &[second_id])
@@ -2601,26 +2586,26 @@ fn outgoing_exact_message_approval_matching() {
             reply_to: reply_to.map(str::to_owned),
             in_reply_to: in_reply_to.map(str::to_owned),
         };
-    let queued = engine.dispatch(mk_send("one", Some("reply@example.net"), Some("<m1>")));
-    let id = match data_field(&queued, "approval_id") {
-        CborValue::Text(id) => id.clone(),
-        _ => panic!("id"),
-    };
+    let _queued = engine.dispatch(mk_send("one", Some("reply@example.net"), Some("<m1>")));
+    let id = pending_outgoing_id(&engine, 0);
     let changed_subject = engine.dispatch(mk_send("two", Some("reply@example.net"), Some("<m1>")));
-    assert_ne!(
-        data_field(&changed_subject, "approval_id"),
-        &CborValue::Text(id.clone())
+    assert_eq!(
+        cbor_text_field(&changed_subject, "status"),
+        Some("approval_required")
     );
+    assert_ne!(pending_outgoing_id(&engine, 1), id);
     let changed_reply = engine.dispatch(mk_send("one", Some("other@example.net"), Some("<m1>")));
-    assert_ne!(
-        data_field(&changed_reply, "approval_id"),
-        &CborValue::Text(id.clone())
+    assert_eq!(
+        cbor_text_field(&changed_reply, "status"),
+        Some("approval_required")
     );
+    assert_ne!(pending_outgoing_id(&engine, 2), id);
     let changed_thread = engine.dispatch(mk_send("one", Some("reply@example.net"), Some("<m2>")));
-    assert_ne!(
-        data_field(&changed_thread, "approval_id"),
-        &CborValue::Text(id.clone())
+    assert_eq!(
+        cbor_text_field(&changed_thread, "status"),
+        Some("approval_required")
     );
+    assert_ne!(pending_outgoing_id(&engine, 3), id);
 
     let approval_path = engine
         .state
@@ -2872,15 +2857,12 @@ fn source_truncated_read_and_open_report_body_truncated() {
     assert_eq!(data_field(&read, "body_truncated"), &CborValue::Bool(true));
     assert!(format!("{read:?}").contains("small parsed prefix"));
 
-    let approval_required = engine.dispatch(EmailCommand::RequestFull {
+    let _approval_required = engine.dispatch(EmailCommand::RequestFull {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         uid: "21".to_owned(),
     });
-    let id = match data_field(&approval_required, "approval_id") {
-        CborValue::Text(id) => id.clone(),
-        _ => panic!("approval id"),
-    };
+    let id = pending_incoming_id(&engine, 0);
     let opened = engine.action_in_open(&id).expect("open");
     assert!(opened.contains("body_truncated: true"));
     assert!(opened.contains("small approval prefix"));

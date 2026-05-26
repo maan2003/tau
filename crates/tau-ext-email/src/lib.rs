@@ -2685,10 +2685,6 @@ fn safe_model_vec(values: Vec<String>, max_items: usize, max_chars: usize) -> Ve
         .collect()
 }
 
-fn visible_recipients(message: &OutgoingMessage) -> impl Iterator<Item = &String> {
-    message.to.iter().chain(message.cc.iter())
-}
-
 fn safe_display_join<'a>(values: impl IntoIterator<Item = &'a String>, separator: &str) -> String {
     values
         .into_iter()
@@ -2765,6 +2761,52 @@ fn format_folder_line(folder: BackendFolder) -> CborValue {
         name
     };
     CborValue::Text(format!("{} {}", flags, name))
+}
+
+fn format_read_headers(
+    from: &str,
+    message: &BackendMessage,
+    subject_name: &str,
+    subject: &str,
+    trusted: bool,
+    source: &str,
+) -> String {
+    let recipients = |values: &[String]| {
+        let values = safe_model_vec(values.to_vec(), MAX_RECIPIENTS, MAX_ADDRESS_CHARS);
+        if values.is_empty() {
+            "-".to_owned()
+        } else {
+            values.join(";")
+        }
+    };
+    let message_id = message
+        .message_id
+        .as_deref()
+        .map(|value| safe_model_line(value, MAX_HEADER_VALUE_CHARS))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "-".to_owned());
+    let subject = safe_model_line(subject, MAX_HEADER_VALUE_CHARS);
+    let subject = if subject.is_empty() { "-" } else { &subject };
+    format!(
+        "from={}, to={}, cc={}, date={}, {subject_name}={}, message_id={}, trusted={}, source={}, simplified=true",
+        list_token(from, MAX_ADDRESS_CHARS),
+        recipients(&message.to),
+        recipients(&message.cc),
+        list_token(&message.date, MAX_HEADER_VALUE_CHARS),
+        subject,
+        message_id,
+        trusted,
+        source,
+    )
+}
+
+fn header_text_field<'a>(data: &'a CborValue, name: &str) -> Option<&'a str> {
+    let headers = cbor_text_field(data, "headers")?;
+    let prefix = format!("{name}=");
+    let value = headers
+        .split(", ")
+        .find_map(|part| part.strip_prefix(&prefix))?;
+    (value != "-").then_some(value)
 }
 
 fn format_list_message_line(message: BackendMessage, access: &str) -> String {
@@ -2975,17 +3017,27 @@ impl<B: EmailBackend> Engine<B> {
                 entry.account = log_account(data, Some(account.as_str()));
                 entry.folder = log_field(data, "folder", Some(folder.as_str()));
                 entry.uid = log_field(data, "uid", Some(uid.as_str()));
+                if entry.access.is_none() {
+                    entry.access = match email_log_status(result).as_str() {
+                        "ok" => Some(ACCESS_FULL.to_owned()),
+                        ACCESS_PREVIEW => Some(ACCESS_PREVIEW.to_owned()),
+                        "approval_required" => Some(ACCESS_NONE.to_owned()),
+                        _ => None,
+                    };
+                }
                 entry.from = data
                     .and_then(|data| cbor_text_field(data, "from"))
                     .map(str::to_owned)
                     .or_else(|| {
-                        data.and_then(|data| cbor_nested_text_field(data, "headers", "from"))
+                        data.and_then(|data| header_text_field(data, "from"))
                             .map(str::to_owned)
                     });
                 if let Some(data) = data {
-                    if let Some(subject) = cbor_nested_text_field(data, "headers", "subject") {
+                    if let Some(subject) = header_text_field(data, "subject") {
                         entry.title = Some(email_log_title(subject));
-                    } else if let Some(subject) = cbor_text_field(data, "subject_preview") {
+                    } else if let Some(subject) = cbor_text_field(data, "subject_preview")
+                        .or_else(|| header_text_field(data, "subject_preview"))
+                    {
                         entry.title = Some(email_log_title(subject));
                         entry.title_redacted = true;
                     }
@@ -3324,7 +3376,6 @@ impl<B: EmailBackend> Engine<B> {
                     ),
                     ("subject_redacted", CborValue::Bool(true)),
                     ("reason", CborValue::Text(decision.reason.clone())),
-                    ("policy", policy_cbor(&decision)),
                 ]),
             );
         }
@@ -3350,7 +3401,8 @@ impl<B: EmailBackend> Engine<B> {
             let truncate = truncate_body(&wrapped_body);
             let attachments = msg
                 .attachments
-                .into_iter()
+                .iter()
+                .cloned()
                 .enumerate()
                 .map(|(index, attachment)| attachment_cbor(index, attachment))
                 .collect();
@@ -3359,66 +3411,15 @@ impl<B: EmailBackend> Engine<B> {
                 "ok",
                 cbor_map(vec![
                     (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "folder",
-                        CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    ("uid", CborValue::Text(uid.to_owned())),
-                    ("access", CborValue::Text(ACCESS_FULL.to_owned())),
-                    (
                         "headers",
-                        cbor_map(vec![
-                            (
-                                "from",
-                                CborValue::Text(safe_model_line(&from, MAX_ADDRESS_CHARS)),
-                            ),
-                            (
-                                "to",
-                                CborValue::Array(
-                                    safe_model_vec(msg.to, MAX_RECIPIENTS, MAX_ADDRESS_CHARS)
-                                        .into_iter()
-                                        .map(CborValue::Text)
-                                        .collect(),
-                                ),
-                            ),
-                            (
-                                "cc",
-                                CborValue::Array(
-                                    safe_model_vec(msg.cc, MAX_RECIPIENTS, MAX_ADDRESS_CHARS)
-                                        .into_iter()
-                                        .map(CborValue::Text)
-                                        .collect(),
-                                ),
-                            ),
-                            (
-                                "date",
-                                CborValue::Text(safe_model_line(&msg.date, MAX_HEADER_VALUE_CHARS)),
-                            ),
-                            (
-                                "subject",
-                                CborValue::Text(safe_model_line(
-                                    &msg.subject,
-                                    MAX_HEADER_VALUE_CHARS,
-                                )),
-                            ),
-                            (
-                                "message_id",
-                                msg.message_id
-                                    .map(|message_id| {
-                                        CborValue::Text(safe_model_line(
-                                            &message_id,
-                                            MAX_HEADER_VALUE_CHARS,
-                                        ))
-                                    })
-                                    .unwrap_or(CborValue::Null),
-                            ),
-                            ("trusted", CborValue::Bool(trusted)),
-                            ("source", CborValue::Text(simplified.source.to_owned())),
-                            ("simplified", CborValue::Bool(true)),
-                        ]),
+                        CborValue::Text(format_read_headers(
+                            &from,
+                            &msg,
+                            "subject",
+                            &msg.subject,
+                            trusted,
+                            simplified.source,
+                        )),
                     ),
                     (
                         "body_text",
@@ -3445,7 +3446,6 @@ impl<B: EmailBackend> Engine<B> {
                         CborValue::Integer(truncate.shown_bytes.into()),
                     ),
                     ("attachments", CborValue::Array(attachments)),
-                    ("policy", policy_cbor(&decision)),
                 ]),
             );
         }
@@ -3474,94 +3474,18 @@ impl<B: EmailBackend> Engine<B> {
             "read",
             ACCESS_PREVIEW,
             cbor_map(vec![
-                ("access", CborValue::Text(ACCESS_PREVIEW.to_owned())),
-                ("kind", CborValue::Text("incoming_read".to_owned())),
-                ("account", CborValue::Text(account_id.to_owned())),
-                (
-                    "folder",
-                    CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
-                ),
-                (
-                    "uid",
-                    CborValue::Text(safe_model_line(uid, MAX_HEADER_VALUE_CHARS)),
-                ),
+                ("reason", CborValue::Text(decision.reason.clone())),
                 (
                     "headers",
-                    cbor_map(vec![
-                        (
-                            "from",
-                            CborValue::Text(safe_model_line(&preview_from, MAX_ADDRESS_CHARS)),
-                        ),
-                        (
-                            "to",
-                            CborValue::Array(
-                                safe_model_vec(
-                                    preview_message.to.clone(),
-                                    MAX_RECIPIENTS,
-                                    MAX_ADDRESS_CHARS,
-                                )
-                                .into_iter()
-                                .map(CborValue::Text)
-                                .collect(),
-                            ),
-                        ),
-                        (
-                            "cc",
-                            CborValue::Array(
-                                safe_model_vec(
-                                    preview_message.cc.clone(),
-                                    MAX_RECIPIENTS,
-                                    MAX_ADDRESS_CHARS,
-                                )
-                                .into_iter()
-                                .map(CborValue::Text)
-                                .collect(),
-                            ),
-                        ),
-                        (
-                            "date",
-                            CborValue::Text(safe_model_line(
-                                &preview_message.date,
-                                MAX_HEADER_VALUE_CHARS,
-                            )),
-                        ),
-                        ("subject", CborValue::Null),
-                        (
-                            "subject_preview",
-                            CborValue::Text(unapproved_subject_preview(&preview_message.subject)),
-                        ),
-                        (
-                            "message_id",
-                            preview_message
-                                .message_id
-                                .as_deref()
-                                .map(|message_id| {
-                                    CborValue::Text(safe_model_line(
-                                        message_id,
-                                        MAX_HEADER_VALUE_CHARS,
-                                    ))
-                                })
-                                .unwrap_or(CborValue::Null),
-                        ),
-                        ("trusted", CborValue::Bool(false)),
-                        ("source", CborValue::Text(preview.source.to_owned())),
-                        ("simplified", CborValue::Bool(true)),
-                    ]),
-                ),
-                ("from", CborValue::Text(safe_model_line(&preview_from, MAX_ADDRESS_CHARS))),
-                (
-                    "date",
-                    CborValue::Text(safe_model_line(
-                        &preview_message.date,
-                        MAX_HEADER_VALUE_CHARS,
+                    CborValue::Text(format_read_headers(
+                        &preview_from,
+                        &preview_message,
+                        "subject_preview",
+                        &unapproved_subject_preview(&preview_message.subject),
+                        false,
+                        preview.source,
                     )),
                 ),
-                ("subject", CborValue::Null),
-                (
-                    "subject_preview",
-                    CborValue::Text(unapproved_subject_preview(&preview_message.subject)),
-                ),
-                ("subject_redacted", CborValue::Bool(true)),
                 (
                     "body_preview",
                     CborValue::Text(safe_model_text(&wrapped_preview, READ_BODY_MAX_BYTES)),
@@ -3590,30 +3514,10 @@ impl<B: EmailBackend> Engine<B> {
             return ok_envelope(
                 "request_full",
                 "already_full",
-                cbor_map(vec![
-                    ("access", CborValue::Text(ACCESS_FULL.to_owned())),
-                    ("requested_access", CborValue::Text(ACCESS_FULL.to_owned())),
-                    ("kind", CborValue::Text("incoming_read".to_owned())),
-                    (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "folder",
-                        CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "uid",
-                        CborValue::Text(safe_model_line(uid, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "message",
-                        CborValue::Text(
-                            "Full access is already available; use email read.".to_owned(),
-                        ),
-                    ),
-                    ("policy", policy_cbor(&decision)),
-                ]),
+                cbor_map(vec![(
+                    "message",
+                    CborValue::Text("Access already available. Use email read.".to_owned()),
+                )]),
             );
         }
         let approval = IncomingApproval {
@@ -3633,41 +3537,16 @@ impl<B: EmailBackend> Engine<B> {
             reason: decision.reason.clone(),
         };
         match self.state.pending_incoming(&approval) {
-            Ok(id) => ok_envelope(
+            Ok(_id) => ok_envelope(
                 "request_full",
                 "approval_required",
-                cbor_map(vec![
-                    ("approval_id", CborValue::Text(id)),
-                    ("access", CborValue::Text(access.to_owned())),
-                    ("requested_access", CborValue::Text(ACCESS_FULL.to_owned())),
-                    ("kind", CborValue::Text("incoming_read".to_owned())),
-                    (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
+                cbor_map(vec![(
+                    "message",
+                    CborValue::Text(
+                        "Access requested. When approved, read again to fetch full content."
+                            .to_owned(),
                     ),
-                    (
-                        "folder",
-                        CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "uid",
-                        CborValue::Text(safe_model_line(uid, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    ("from", CborValue::Text(approval.from)),
-                    ("date", CborValue::Text(approval.date)),
-                    ("subject", CborValue::Null),
-                    ("subject_preview", CborValue::Text(approval.subject_preview)),
-                    ("subject_redacted", CborValue::Bool(true)),
-                    ("reason", CborValue::Text(approval.reason)),
-                    (
-                        "message",
-                        CborValue::Text(
-                            "User approval requested. If approved, repeat the matching email read to fetch full content."
-                                .to_owned(),
-                        ),
-                    ),
-                    ("policy", policy_cbor(&decision)),
-                ]),
+                )]),
             ),
             Err(message) => error_envelope(Some("request_full"), "internal_error", &message),
         }
@@ -3721,20 +3600,10 @@ impl<B: EmailBackend> Engine<B> {
             Ok(()) => ok_envelope(
                 command_name,
                 command.status_name(),
-                cbor_map(vec![
-                    (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "folder",
-                        CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "uid",
-                        CborValue::Text(safe_model_line(uid, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                ]),
+                cbor_map(vec![(
+                    "message",
+                    CborValue::Text(command.success_message().to_owned()),
+                )]),
             ),
             Err(message) if backend_error_code(&message, "imap_error") == "message_not_found" => {
                 error_envelope(Some(command_name), "message_not_found", "message not found")
@@ -3750,27 +3619,13 @@ impl<B: EmailBackend> Engine<B> {
             Err(error) => return error,
         };
         match self.backend.move_message_to_trash(&account_id, folder, uid) {
-            Ok(trash_folder) => ok_envelope(
+            Ok(_trash_folder) => ok_envelope(
                 command,
                 "moved_to_trash",
-                cbor_map(vec![
-                    (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "folder",
-                        CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "uid",
-                        CborValue::Text(safe_model_line(uid, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "trash_folder",
-                        CborValue::Text(safe_model_line(&trash_folder, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                ]),
+                cbor_map(vec![(
+                    "message",
+                    CborValue::Text("Message moved to trash.".to_owned()),
+                )]),
             ),
             Err(message) if backend_error_code(&message, "imap_error") == "message_not_found" => {
                 error_envelope(Some(command), "message_not_found", "message not found")
@@ -3885,26 +3740,13 @@ impl<B: EmailBackend> Engine<B> {
         let blocked = self.blocked_recipients(&message);
         if blocked.is_empty() {
             return match self.backend.send_message(&message) {
-                Ok(id) => ok_envelope(
+                Ok(_id) => ok_envelope(
                     "send",
                     "sent",
-                    cbor_map(vec![
-                        ("account", CborValue::Text(account_id)),
-                        (
-                            "message_id",
-                            CborValue::Text(safe_model_line(&id, MAX_HEADER_VALUE_CHARS)),
-                        ),
-                        (
-                            "accepted_recipients",
-                            CborValue::Array(
-                                visible_recipients(&message)
-                                    .map(|recipient| safe_model_line(recipient, MAX_ADDRESS_CHARS))
-                                    .map(CborValue::Text)
-                                    .collect(),
-                            ),
-                        ),
-                        ("rejected_recipients", CborValue::Array(Vec::new())),
-                    ]),
+                    cbor_map(vec![(
+                        "message",
+                        CborValue::Text("Message sent.".to_owned()),
+                    )]),
                 ),
                 Err(message) => backend_error_envelope(Some("send"), "smtp_error", &message),
             };
@@ -3913,19 +3755,10 @@ impl<B: EmailBackend> Engine<B> {
             return ok_envelope(
                 "send",
                 "already_sent",
-                cbor_map(vec![
-                    ("account", CborValue::Text(account_id)),
-                    (
-                        "accepted_recipients",
-                        CborValue::Array(
-                            visible_recipients(&message)
-                                .map(|recipient| safe_model_line(recipient, MAX_ADDRESS_CHARS))
-                                .map(CborValue::Text)
-                                .collect(),
-                        ),
-                    ),
-                    ("rejected_recipients", CborValue::Array(Vec::new())),
-                ]),
+                cbor_map(vec![(
+                    "message",
+                    CborValue::Text("Message already sent.".to_owned()),
+                )]),
             );
         }
         let approval = OutgoingApproval {
@@ -3947,71 +3780,14 @@ impl<B: EmailBackend> Engine<B> {
             sent_message_id: None,
         };
         match self.state.pending_outgoing(&approval) {
-            Ok(id) => {
-                let bcc = message.bcc.clone();
-                let allowed_recipients = self
-                    .allowed_recipients(&message)
-                    .into_iter()
-                    .filter(|recipient| !bcc.contains(recipient))
-                    .collect::<Vec<_>>();
-                let blocked_recipients = blocked
-                    .into_iter()
-                    .filter(|recipient| !bcc.contains(recipient))
-                    .collect::<Vec<_>>();
-                ok_envelope(
-                    "send",
-                    "approval_required",
-                    cbor_map(vec![
-                        ("approval_id", CborValue::Text(id)),
-                        ("kind", CborValue::Text("outgoing_send".to_owned())),
-                        (
-                            "account",
-                            CborValue::Text(safe_model_line(
-                                &message.account,
-                                MAX_HEADER_VALUE_CHARS,
-                            )),
-                        ),
-                        (
-                            "blocked_recipients",
-                            CborValue::Array(
-                                blocked_recipients
-                                    .into_iter()
-                                    .map(|recipient| {
-                                        CborValue::Text(safe_model_line(
-                                            &recipient,
-                                            MAX_ADDRESS_CHARS,
-                                        ))
-                                    })
-                                    .collect(),
-                            ),
-                        ),
-                        (
-                            "allowed_recipients",
-                            CborValue::Array(
-                                allowed_recipients
-                                    .into_iter()
-                                    .map(|recipient| {
-                                        CborValue::Text(safe_model_line(
-                                            &recipient,
-                                            MAX_ADDRESS_CHARS,
-                                        ))
-                                    })
-                                    .collect(),
-                            ),
-                        ),
-                        (
-                            "reason",
-                            CborValue::Text("recipient_not_whitelisted".to_owned()),
-                        ),
-                        (
-                            "message",
-                            CborValue::Text(
-                                "Your email will be delivered after user's approval.".to_owned(),
-                            ),
-                        ),
-                    ]),
-                )
-            }
+            Ok(_id) => ok_envelope(
+                "send",
+                "approval_required",
+                cbor_map(vec![(
+                    "message",
+                    CborValue::Text("Message pending approval.".to_owned()),
+                )]),
+            ),
             Err(message) => error_envelope(Some("send"), "internal_error", &message),
         }
     }
@@ -4381,18 +4157,6 @@ impl<B: EmailBackend> Engine<B> {
             .chain(message.bcc.iter())
             .chain(message.reply_to.iter())
             .filter(|r| !self.recipient_allowed(r))
-            .cloned()
-            .collect()
-    }
-
-    fn allowed_recipients(&self, message: &OutgoingMessage) -> Vec<String> {
-        message
-            .to
-            .iter()
-            .chain(message.cc.iter())
-            .chain(message.bcc.iter())
-            .chain(message.reply_to.iter())
-            .filter(|r| self.recipient_allowed(r))
             .cloned()
             .collect()
     }
@@ -4804,6 +4568,15 @@ impl MessageManagementCommand {
             Self::MarkUnread => "marked_unread",
             Self::Star => "starred",
             Self::Unstar => "unstarred",
+        }
+    }
+
+    fn success_message(self) -> &'static str {
+        match self {
+            Self::MarkRead => "Message marked read.",
+            Self::MarkUnread => "Message marked unread.",
+            Self::Star => "Message starred.",
+            Self::Unstar => "Message unstarred.",
         }
     }
 
