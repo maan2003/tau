@@ -51,6 +51,7 @@
         buildPaths = [
           "Cargo.toml"
           "Cargo.lock"
+          ".config/nextest.toml"
           "config"
           "crates"
         ];
