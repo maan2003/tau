@@ -167,7 +167,6 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::SessionStarted(SessionStarted {
             session_id: "s1".into(),
-            reason: SessionStartReason::Initial,
         }),
         Event::SessionAgentLoaded(SessionAgentLoaded {
             session_id: "s1".into(),
@@ -348,7 +347,6 @@ fn representative_events() -> Vec<Event> {
 fn sample_session_started() -> Event {
     Event::SessionStarted(SessionStarted {
         session_id: "s1".into(),
-        reason: SessionStartReason::Initial,
     })
 }
 
@@ -1307,7 +1305,6 @@ fn event_defaults_to_transient_marks_progress_kinds() {
     let durable = [
         Event::SessionStarted(SessionStarted {
             session_id: "s1".into(),
-            reason: SessionStartReason::Initial,
         }),
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
             agent_id: agent_id("worker"),

@@ -1346,7 +1346,6 @@ fn agents_context_ready_staged_until_ready_and_queue_waits() {
     h.initialized_sessions.remove("s1");
     h.turn_state = TurnState::InitializingSession {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
         waiting_on: [tau_proto::ConnectionId::from(conn_id)]
             .into_iter()
             .collect(),
@@ -2652,81 +2651,6 @@ fn agents_context_is_injected_when_agent_is_created() {
 }
 
 #[test]
-fn resumed_session_init_does_not_reinject_agents_context() {
-    // Regression: cold resume must wait for extensions to refresh their
-    // context, but the restored conversation already contains the startup
-    // AGENTS.md user message. Appending it again makes the model see a
-    // duplicate user instruction before the first resumed prompt.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let tools_connection_id = h
-        .extension_connection_id("shell")
-        .expect("shell")
-        .to_owned();
-    let marker = "resume AGENTS marker";
-    let count_marker_injections = |h: &Harness| -> usize {
-        loaded_agent_events(h, "s1")
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    Event::AgentUserMessageInjected(injected)
-                        if injected.text.contains(marker)
-                )
-            })
-            .count()
-    };
-
-    h.discovered_agents_files.clear();
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h
-        .ensure_agent_id_for_agent(&cid)
-        .expect("default conversation has an agent id");
-    h.publish_event_for_agent(
-        &cid,
-        None,
-        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
-            agent_id: crate::parse_agent_id(&agent_id),
-            text: format!("# AGENTS.md instructions\n{marker}"),
-            message_class: tau_proto::PromptMessageClass::User,
-        }),
-    );
-    assert_eq!(count_marker_injections(&h), 1);
-
-    h.discovered_agents_files.push(DiscoveredAgentsFile {
-        source_id: tools_connection_id.clone().into(),
-        file_path: PathBuf::from("/repo/AGENTS.md"),
-        content: format!("# Root\n- {marker}\n"),
-    });
-    h.pending_notices.restore_sessions.insert("s1".into(), None);
-    h.turn_state = TurnState::InitializingSession {
-        session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Resume,
-        waiting_on: [tools_connection_id.clone().into()].into_iter().collect(),
-    };
-    h.handle_extension_event(
-        &tools_connection_id,
-        TestProtocolItem::Event(Event::ExtensionContextReady(
-            tau_proto::ExtensionContextReady {
-                session_id: "s1".into(),
-                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            },
-        )),
-    )
-    .expect("ready");
-
-    assert!(matches!(h.turn_state, TurnState::Idle));
-    assert_eq!(count_marker_injections(&h), 1);
-    assert!(
-        h.pending_notices.restore_sessions.contains_key("s1"),
-        "restore notice queue should be independent from AGENTS.md injection"
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
 fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     // Valid Tau-visible tool names that cannot be routed are model
     // errors, not malformed transcript structure. Commit the assistant
@@ -3491,99 +3415,6 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
 }
 
 #[test]
-fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    {
-        let mut h = echo_harness(&sp).expect("start");
-        let cid = ensure_test_user_agent(&mut h);
-        seed_agent_thinking(&mut h, &cid, "sp-old");
-        h.prompt_agents.insert("sp-old".into(), cid.clone());
-        h.handle_provider_response_finished(ProviderResponseFinished {
-            agent_prompt_id: "sp-old".into(),
-            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-            output_items: vec![ContextItem::ToolCall(ToolCallItem {
-                call_id: "historical-call".into(),
-                name: ToolName::new("not_a_tool"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: CborValue::Map(Vec::new()),
-            })],
-            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-            error: None,
-            usage: None,
-            originator: tau_proto::PromptOriginator::User,
-            compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
-            backend: None,
-            provider_response_id: None,
-            ws_pool_delta: None,
-        })
-        .expect("seed historical call id");
-        h.shutdown().expect("shutdown");
-    }
-
-    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-        .expect("resume");
-    let cid = test_user_agent(&h);
-    seed_agent_thinking(&mut h, &cid, "sp-new");
-    h.prompt_agents.insert("sp-new".into(), cid.clone());
-
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        agent_prompt_id: "sp-new".into(),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "historical-call".into(),
-            name: ToolName::new("not_a_tool"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        error: None,
-        usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("historical reuse should be repaired");
-
-    let mut assistant_call_ids = Vec::new();
-    let mut reused_error_ids = Vec::new();
-    for node in default_agent_tree(&h).nodes() {
-        match &node.entry {
-            AgentEntry::AssistantResponse { output_items, .. } => {
-                assistant_call_ids.extend(output_items.iter().filter_map(|item| match item {
-                    ContextItem::ToolCall(call) => Some(call.call_id.to_string()),
-                    _ => None,
-                }));
-            }
-            AgentEntry::ToolResults { items } => {
-                reused_error_ids.extend(items.iter().filter_map(|item| match &item.status {
-                    ToolResultStatus::Error { message }
-                        if message.contains("reused prior tool call_id") =>
-                    {
-                        Some(item.call_id.to_string())
-                    }
-                    _ => None,
-                }));
-            }
-            _ => {}
-        }
-    }
-    assert!(assistant_call_ids.iter().any(|id| id == "historical-call"));
-    assert!(
-        assistant_call_ids
-            .iter()
-            .any(|id| id == "invalid_tool_call_sp-new_1")
-    );
-    assert_eq!(reused_error_ids, vec!["invalid_tool_call_sp-new_1"]);
-
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
 fn disconnect_unregisters_tools_before_advancing_queued_prompt() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -3647,7 +3478,6 @@ fn disconnect_session_init_completion_waits_until_tool_cleanup() {
     );
     h.turn_state = TurnState::InitializingSession {
         session_id: h.current_session_id.clone(),
-        reason: tau_proto::SessionStartReason::Initial,
         waiting_on: HashSet::from([tau_proto::ConnectionId::from("init-ext")]),
     };
     let cid = ensure_test_user_agent(&mut h);
@@ -3917,8 +3747,7 @@ fn switch_session_clears_session_scoped_extension_context() {
     h.pending_agent_context_ready
         .insert(agent_id.clone(), HashSet::from([contributor.clone()]));
 
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session("s2".into()).expect("switch session");
 
     assert!(h.extension_prompt_fragments.contains_key(&contributor));
     let (fragments, tool_fragments) = h.gather_sourced_prompt_fragment_groups(&h.selected_role);

@@ -158,7 +158,7 @@ impl Harness {
                 // Reachable only if the bound session somehow lost its
                 // `initialized_sessions` entry; treat as a re-init.
                 // Init is global, so stop draining until it completes.
-                self.start_session_init(session_id, tau_proto::SessionStartReason::Initial);
+                self.start_session_init(session_id);
                 return;
             }
 

@@ -11,9 +11,9 @@ use tau_proto::{
     ContentPart, ContextItem, ContextRole, Effort, Event, ExtAgentsMdAvailable, ExtensionReady,
     HarnessContextUsageChanged, HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable,
     MessageItem, OpaqueProviderItem, ProviderResponseFinished, ProviderResponseUpdated,
-    ProviderStopReason, ServiceTier, SessionStartReason, SessionStarted, ThinkingSummary,
-    ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted,
-    UiRoleUpdateAction, Verbosity,
+    ProviderStopReason, ServiceTier, SessionStarted, ThinkingSummary, ToolBackgroundResult,
+    ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted, UiRoleUpdateAction,
+    Verbosity,
 };
 
 use super::chat::{
@@ -837,7 +837,6 @@ fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s1".into(),
-        reason: SessionStartReason::Initial,
     }));
     assert_eq!(
         *renderer
@@ -864,7 +863,6 @@ fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
-        reason: SessionStartReason::New,
     }));
     assert_eq!(
         *renderer
@@ -889,7 +887,6 @@ fn initial_session_started_renders_session_status_without_role_placeholder() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "tau-agent-test".into(),
-        reason: SessionStartReason::Initial,
     }));
     sync(&handle);
 
@@ -910,7 +907,6 @@ fn extension_prompt_with_target_does_not_select_from_empty_state() {
     );
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s1".into(),
-        reason: SessionStartReason::Initial,
     }));
 
     let originator = tau_proto::PromptOriginator::Extension {
@@ -974,7 +970,6 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s1".into(),
-        reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
         agent_id: agent_id("engineer_abc12345"),
@@ -1194,7 +1189,6 @@ fn first_agent_event_does_not_force_full_redraw() {
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
         parent_agent: None,
@@ -1225,7 +1219,6 @@ fn new_agent_after_new_session_does_not_force_full_redraw() {
     );
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s1".into(),
-        reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
@@ -1237,7 +1230,6 @@ fn new_agent_after_new_session_does_not_force_full_redraw() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
-        reason: SessionStartReason::New,
     }));
     sync(&handle);
     let full_render_count = handle.full_render_count();
@@ -1433,7 +1425,6 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
         "main-sp", "s1",
@@ -1511,7 +1502,6 @@ fn suspended_agent_stays_blocked_after_lifecycle_updates_until_resume() {
 
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
@@ -1783,7 +1773,6 @@ fn new_session_resets_agent_transcripts() {
     renderer.switch_agent("worker-1".to_owned());
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s2".into(),
-        reason: tau_proto::SessionStartReason::New,
     }));
     sync(&handle);
 
@@ -1842,7 +1831,6 @@ fn switched_agent_shows_its_tool_usage() {
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
@@ -1901,7 +1889,6 @@ fn delegate_progress_routes_to_hidden_tool_owner() {
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
@@ -1975,7 +1962,6 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.switch_agent("worker-1".to_owned());
     renderer.handle(&Event::UiShellCommand(tau_proto::UiShellCommand {
@@ -2025,7 +2011,6 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.switch_agent("main".to_owned());
 
@@ -2065,7 +2050,6 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     );
     replay.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
     replay.handle(&Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
@@ -2097,7 +2081,6 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
 
     let originator = tau_proto::PromptOriginator::Extension {
@@ -2141,7 +2124,6 @@ fn agent_switch_preserves_separate_transcripts() {
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
@@ -2189,7 +2171,6 @@ fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() 
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
@@ -2233,7 +2214,6 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
@@ -2679,7 +2659,6 @@ fn new_session_clears_session_ui_state() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
-        reason: SessionStartReason::New,
     }));
     sync(&handle);
 
@@ -2710,7 +2689,6 @@ fn new_session_replays_startup_context_and_kept_extensions() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
-        reason: SessionStartReason::New,
     }));
     sync(&handle);
 
@@ -2788,7 +2766,6 @@ fn warning_notice_level_hides_routine_extension_status() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
-        reason: SessionStartReason::New,
     }));
     sync(&handle);
 
@@ -2815,7 +2792,6 @@ fn new_session_preserves_role_status() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
-        reason: SessionStartReason::New,
     }));
     sync(&handle);
 
@@ -2845,7 +2821,6 @@ fn model_status_uses_symbol_prefixed_chips() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "tau-agent-test".into(),
-        reason: SessionStartReason::New,
     }));
     renderer.handle(&Event::HarnessContextUsageChanged(
         HarnessContextUsageChanged {
@@ -2886,7 +2861,6 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s1".into(),
-        reason: SessionStartReason::New,
     }));
     sync(&handle);
 
@@ -2942,7 +2916,6 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s1".into(),
-        reason: SessionStartReason::New,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
         parent_agent: None,
@@ -3530,7 +3503,6 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
-        reason: SessionStartReason::New,
     }));
     sync(&handle);
 
@@ -3602,7 +3574,6 @@ fn role_state_overrides_are_compared_to_role_baseline() {
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s3".into(),
-        reason: SessionStartReason::New,
     }));
     sync(&handle);
 

@@ -16,13 +16,13 @@ use tau_core::{
     ConnectionSendError, ConnectionSink, RoutedFrame,
 };
 use tau_proto::{
-    AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled, AgentPromptSteered,
-    CborValue, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventDelivery,
-    EventSelector, HarnessInputMessage, HarnessInputWriter, HarnessOutputMessage,
-    HarnessOutputReader, Intercept, InterceptAction, InterceptReply, InterceptionPriority,
-    MessageItem, NodeId, ProviderResponseFinished, ProviderResponseUpdated, StartAgentRequest,
-    Subscribe, ToolCallId, ToolCallItem, ToolName, ToolResult, ToolResultItem, ToolResultStatus,
-    ToolSpec, UiPromptDraft, UiPromptSubmitted,
+    AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled, CborValue,
+    ContentPart, ContextItem, ContextRole, Disconnect, Event, EventDelivery, EventSelector,
+    HarnessInputMessage, HarnessInputWriter, HarnessOutputMessage, HarnessOutputReader, Intercept,
+    InterceptAction, InterceptReply, InterceptionPriority, MessageItem, NodeId,
+    ProviderResponseFinished, ProviderResponseUpdated, StartAgentRequest, Subscribe, ToolCallId,
+    ToolCallItem, ToolName, ToolResult, ToolResultItem, ToolResultStatus, ToolSpec, UiPromptDraft,
+    UiPromptSubmitted,
 };
 use tau_session_inspect::{
     default_session_id, format_session_entry, open_session_store, policy_lines, session_lines,
@@ -1078,33 +1078,6 @@ fn echo_harness_with_dirs(
     state_dir: impl Into<PathBuf>,
     dirs: tau_config::settings::TauDirs,
 ) -> Result<Harness, HarnessError> {
-    echo_harness_with_dirs_and_start_reason(
-        session_id,
-        state_dir,
-        dirs,
-        tau_proto::SessionStartReason::Initial,
-    )
-}
-
-fn echo_harness_with_start_reason(
-    session_id: &str,
-    state_dir: impl Into<PathBuf>,
-    start_reason: tau_proto::SessionStartReason,
-) -> Result<Harness, HarnessError> {
-    let state_dir = state_dir.into();
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(state_dir.join("config")),
-        state_dir: Some(state_dir.join("runtime")),
-    };
-    echo_harness_with_dirs_and_start_reason(session_id, state_dir, dirs, start_reason)
-}
-
-fn echo_harness_with_dirs_and_start_reason(
-    session_id: &str,
-    state_dir: impl Into<PathBuf>,
-    dirs: tau_config::settings::TauDirs,
-    start_reason: tau_proto::SessionStartReason,
-) -> Result<Harness, HarnessError> {
     fn shell_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         tau_ext_shell::run(r, w).map_err(|e| e.to_string())
     }
@@ -1117,7 +1090,6 @@ fn echo_harness_with_dirs_and_start_reason(
             runner: shell_runner,
         }],
         session_id,
-        start_reason,
     )?;
     h.agent_id_rng = super::deterministic_agent_id_rng();
     h.enable_echo_tool_for_tests();
@@ -1129,13 +1101,6 @@ fn echo_harness_with_dirs_and_start_reason(
 }
 
 fn quiet_provider_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
-    quiet_provider_harness_with_start_reason(state_dir, tau_proto::SessionStartReason::Initial)
-}
-
-fn quiet_provider_harness_with_start_reason(
-    state_dir: impl Into<PathBuf>,
-    start_reason: tau_proto::SessionStartReason,
-) -> Result<Harness, HarnessError> {
     fn quiet_provider_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         fn inner(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::Error>> {
             let mut reader = TestOutputReader::new(BufReader::new(r));
@@ -1187,14 +1152,8 @@ fn quiet_provider_harness_with_start_reason(
         config_dir: Some(state_dir.join("config")),
         state_dir: Some(state_dir.join("runtime")),
     };
-    let mut h = Harness::new_with_provider(
-        state_dir,
-        dirs,
-        quiet_provider_runner,
-        Vec::new(),
-        "s1",
-        start_reason,
-    )?;
+    let mut h =
+        Harness::new_with_provider(state_dir, dirs, quiet_provider_runner, Vec::new(), "s1")?;
     h.agent_id_rng = super::deterministic_agent_id_rng();
     Ok(h)
 }
@@ -1385,23 +1344,6 @@ fn drive_harness_until_tool_turn_empty(h: &mut Harness) {
             HarnessEvent::NewClient(_) => {}
             HarnessEvent::Command(command) => h.handle_harness_command(command).expect("handle"),
         }
-    }
-}
-
-fn wait_for_session_unlock(state_dir: &Path, session_id: &str) {
-    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
-    let started = Instant::now();
-    loop {
-        let locked =
-            tau_core::session_is_locked(&sessions_dir, session_id).expect("session lock probe");
-        if !locked {
-            return;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "timed out waiting for session `{session_id}` lock to clear"
-        );
-        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

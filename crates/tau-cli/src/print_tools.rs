@@ -1,6 +1,5 @@
 use std::io::Write;
 
-use tau_harness::SessionLaunchStatus;
 use tau_proto::{HarnessInputMessage, HarnessOutputMessage};
 
 use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
@@ -17,7 +16,6 @@ pub(crate) fn run_print_tools(
     let mut daemon = resolve_daemon(
         false,
         &session_id,
-        SessionLaunchStatus::New,
         Some(output),
         Some(role),
         DaemonCliOverrides {

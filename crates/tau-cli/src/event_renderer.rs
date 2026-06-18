@@ -14,7 +14,6 @@ use tau_proto::{
 
 use crate::action_commands::ActionCommandState;
 use crate::agent_activity::AgentActivity;
-use crate::build_banner;
 use crate::markdown_render::{
     MarkdownStreamCache, markdown_block, markdown_prompt_block, markdown_streaming_block,
 };
@@ -1924,88 +1923,6 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
-    /// Clears all session-scoped UI state and re-renders an empty
-    /// transcript. Persistent user preferences such as `show-diff`
-    /// and `show-thinking` are intentionally preserved.
-    fn clear_for_new_session(&mut self) {
-        self.agents_ui_state.clear();
-        self.no_agent_ui_state = AgentUiState::default();
-        self.query_agents.clear();
-        self.prompt_agents.clear();
-        self.tool_agents.clear();
-        self.shell_agents.clear();
-        if let Ok(mut agents) = self.known_agents.lock() {
-            agents.clear();
-        }
-        if let Ok(mut agents) = self.live_agents.lock() {
-            agents.clear();
-        }
-        if let Ok(mut agents) = self.suspended_agents.lock() {
-            agents.clear();
-        }
-        self.clear_selected_agent();
-        self.agents_ui_state.clear();
-        self.prompts.clear();
-        self.last_user_block = None;
-        self.queued_user_blocks.clear();
-        self.tool_calls.clear();
-        if let Some(timer) = &self.tool_timer {
-            timer.clear_active();
-        }
-        self.shell_blocks.clear();
-        self.extension_blocks.clear();
-        self.model_status_block = None;
-        self.diff_blocks.clear();
-        self.thinking_history.clear();
-        self.turn_stats_history.clear();
-        self.tool_history.clear();
-        self.message_history.clear();
-        self.tool_summaries.clear();
-        self.prompt_tool_summary = None;
-        self.prompt_tool_summary_active = false;
-        // Model selection and effort are harness-global, not
-        // session-scoped. `/session new` only causes a SessionStarted event;
-        // the harness does not re-emit HarnessRoleSelected for the
-        // unchanged model. Keep the cached selection so the status bar
-        // can be recreated after clearing the terminal output.
-        self.current_context_percent = None;
-        self.current_context_input_tokens = None;
-        self.main_tools_completed = 0;
-        self.main_tools_total = 0;
-        self.main_backgrounded_tools.clear();
-        self.main_agent_turn_active = false;
-        self.main_tools_visible = false;
-        self.cumulative_agent_latency = Duration::ZERO;
-        self.agent_activity.clear();
-        self.update_agent_in_progress();
-        self.handle.clear_output();
-        self.render_session_preamble();
-        if self.current_session_id.is_some()
-            || self.current_model.is_some()
-            || self.current_role.is_some()
-        {
-            self.render_model_status();
-        }
-    }
-
-    fn render_session_preamble(&mut self) {
-        if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
-            return;
-        }
-        self.handle.print_output(
-            "banner",
-            tau_cli_term::StyledBlock::new(build_banner(&self.theme)),
-        );
-        let mut extensions: Vec<_> = self.ready_extensions.iter().collect();
-        extensions.sort();
-        for extension_name in extensions {
-            self.handle.print_output(
-                "extension-kept",
-                extension_status_block(&self.theme, extension_name, "kept"),
-            );
-        }
-    }
-
     fn render_model_status(&mut self) {
         use tau_cli_term::StyledBlock;
         use tau_cli_term::resolve::{convert_color, themed_text};
@@ -3127,23 +3044,12 @@ impl EventRenderer {
 
     fn handle_session_events(&mut self, event: &Event) -> bool {
         match event {
-            Event::SessionStarted(started)
-                if matches!(started.reason, tau_proto::SessionStartReason::New) =>
-            {
-                self.handle_new_session_started(started);
-                true
-            }
             Event::SessionStarted(started) => {
                 self.handle_existing_session_started(started);
                 true
             }
             _ => false,
         }
-    }
-
-    fn handle_new_session_started(&mut self, started: &tau_proto::SessionStarted) {
-        self.current_session_id = Some(started.session_id.clone());
-        self.clear_for_new_session();
     }
 
     fn handle_existing_session_started(&mut self, started: &tau_proto::SessionStarted) {

@@ -163,7 +163,6 @@ impl HarnessNotice {
 pub enum SessionDirStatus {
     #[default]
     New,
-    Resumed,
 }
 
 impl SessionDirStatus {
@@ -171,7 +170,6 @@ impl SessionDirStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::New => "new",
-            Self::Resumed => "resumed",
         }
     }
 }
@@ -2314,14 +2312,11 @@ pub enum UiRoleUpdateAction {
 
 /// The user requests switching to a different session within the same
 /// daemon. Harness emits `SessionShutdown` for the current session,
-/// then `SessionStarted { reason: New | Resume }` for the new one,
-/// and waits for extensions to acknowledge re-init.
+/// then `SessionStarted` for the new one, and waits for extensions to
+/// acknowledge re-init.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiSwitchSession {
     pub new_session_id: SessionId,
-    /// `New` if the id was just minted, `Resume` if it points at an
-    /// existing session on disk.
-    pub reason: SessionStartReason,
 }
 
 /// The UI requests creation of a durable agent and may include the first prompt
@@ -2664,32 +2659,12 @@ pub struct AgentUserMessageInjected {
 // Session lifecycle/membership events
 // ---------------------------------------------------------------------------
 
-/// Why a `SessionStarted` was published. Lets extensions distinguish
-/// "first session of this harness's life" from "user switched to a new
-/// session" (e.g. so they can clear caches).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionStartReason {
-    /// The harness eagerly initialized this session at startup.
-    Initial,
-    /// The user requested a fresh session via `/session new`.
-    New,
-    /// The user resumed an existing session by id.
-    Resume,
-}
-
 /// The harness created or switched to a session. Extensions that
 /// subscribe react by performing per-session setup (e.g. discovering
 /// AGENTS.md) and signal completion with `ExtensionContextReady`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionStarted {
     pub session_id: SessionId,
-    #[serde(default = "default_session_start_reason")]
-    pub reason: SessionStartReason,
-}
-
-fn default_session_start_reason() -> SessionStartReason {
-    SessionStartReason::Initial
 }
 
 /// The harness is leaving the current session. Fired before

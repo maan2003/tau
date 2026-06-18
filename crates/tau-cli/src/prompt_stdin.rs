@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
-use tau_harness::SessionLaunchStatus;
 use tau_proto::{
     AgentPromptTerminated, ContentPart, ContextItem, ContextRole, Event, EventName, EventSelector,
     HarnessInputMessage, HarnessOutputMessage, ProviderResponseFinished, ProviderResponseUpdated,
@@ -18,7 +17,6 @@ use crate::ui_prompt::{DEFAULT_AGENT_ROLE, create_user_agent_prompt};
 pub(crate) fn run_prompt_stdin(
     session_id: &str,
     attach: bool,
-    session_status: SessionLaunchStatus,
     startup_role: Option<&str>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
@@ -39,7 +37,6 @@ pub(crate) fn run_prompt_stdin(
     let mut daemon = resolve_daemon(
         attach,
         session_id,
-        session_status,
         daemon_output,
         startup_role,
         DaemonCliOverrides {

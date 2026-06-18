@@ -108,17 +108,6 @@ const SELF_KNOWLEDGE_UI_CONFIG: &str = include_str!("../../tau-config/config/bui
 const SELF_KNOWLEDGE_PIM_CONFIG: &str =
     include_str!("../../tau-ext-pim/config/self-knowledge.harness.yaml");
 
-fn session_dir_status_from_reason(
-    reason: tau_proto::SessionStartReason,
-) -> tau_proto::SessionDirStatus {
-    match reason {
-        tau_proto::SessionStartReason::Initial | tau_proto::SessionStartReason::New => {
-            tau_proto::SessionDirStatus::New
-        }
-        tau_proto::SessionStartReason::Resume => tau_proto::SessionDirStatus::Resumed,
-    }
-}
-
 pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
     format!(
         "{} Tool call `{call_id}` is complete.",
@@ -1121,9 +1110,6 @@ pub struct Harness {
     /// harness down and respawns extensions; that's a future
     /// `switch_session` operation, not silent multi-session.
     pub(crate) current_session_id: SessionId,
-    /// Reason associated with the current session binding. Late UI subscribers
-    /// receive a replayed `SessionStarted` snapshot with this reason.
-    pub(crate) current_session_start_reason: tau_proto::SessionStartReason,
     /// Random stream for agent-id template helpers. Production harnesses seed
     /// it from OS entropy; tests can replace it with a deterministic stream
     /// to stabilize generated agent ids. Advanced on each agent creation so
@@ -1555,8 +1541,6 @@ struct HarnessBaseParts {
     agent_store: AgentStore,
     /// Session id the harness is initially bound to.
     current_session_id: SessionId,
-    /// Reason associated with the initial session binding.
-    current_session_start_reason: tau_proto::SessionStartReason,
     /// Roles available after applying harness settings.
     available_roles: HashMap<String, tau_config::settings::AgentRole>,
     /// Role groups available for navigation and UI display.
@@ -1610,7 +1594,6 @@ impl Harness {
             store: parts.store,
             agent_store: parts.agent_store,
             current_session_id: parts.current_session_id,
-            current_session_start_reason: parts.current_session_start_reason,
             agent_id_rng: StdRng::from_entropy(),
             tool_agents: HashMap::new(),
             pending_tools: HashMap::new(),
@@ -1681,7 +1664,6 @@ impl Harness {
         provider_runner: ProviderRunner,
         tools: Vec<InProcessTool>,
         eager_session_id: &str,
-        eager_session_start_reason: tau_proto::SessionStartReason,
     ) -> Result<Self, HarnessError> {
         let state_dir = state_dir.into();
         let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
@@ -1791,7 +1773,6 @@ impl Harness {
             store,
             agent_store,
             current_session_id: eager_session_id.into(),
-            current_session_start_reason: eager_session_start_reason,
             available_roles,
             available_role_groups,
             custom_prompts,
@@ -1814,12 +1795,6 @@ impl Harness {
         // `<sessions_dir>/<eager_session_id>/lock`.
         harness.store.record_session_meta(eager_session_id)?;
 
-        if matches!(
-            eager_session_start_reason,
-            tau_proto::SessionStartReason::Resume
-        ) {
-            harness.rehydrate_agents_from_session();
-        }
         harness.publish_current_session_dir();
 
         for command in extension_connects {
@@ -1856,7 +1831,7 @@ impl Harness {
         // Every past agent that touched this code has "noticed" that
         // the CLI uses `chat-<ts>` session ids and concluded the eager
         // init is wasted work. It isn't. Please resist the urge.
-        harness.start_session_init(eager_session_id.into(), eager_session_start_reason);
+        harness.start_session_init(eager_session_id.into());
         harness.wait_for_session_init()?;
         Ok(harness)
     }
@@ -1867,7 +1842,6 @@ impl Harness {
         state_dir: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
-        eager_session_start_reason: tau_proto::SessionStartReason,
     ) -> Result<Self, HarnessError> {
         let mut initial_client_error_stream = None;
         Self::from_config_with_initial_client(
@@ -1875,7 +1849,6 @@ impl Harness {
             state_dir,
             dirs,
             eager_session_id,
-            eager_session_start_reason,
             None,
             &mut initial_client_error_stream,
         )
@@ -1887,7 +1860,6 @@ impl Harness {
         state_dir: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
-        eager_session_start_reason: tau_proto::SessionStartReason,
         initial_client: Option<InitialClient>,
         initial_client_error_stream: &mut Option<InitialClientStartupErrorOutput>,
     ) -> Result<(Self, Option<ConnectionId>), HarnessError> {
@@ -1953,7 +1925,6 @@ impl Harness {
             store,
             agent_store,
             current_session_id: eager_session_id.into(),
-            current_session_start_reason: eager_session_start_reason,
             available_roles,
             available_role_groups,
             custom_prompts,
@@ -1975,12 +1946,6 @@ impl Harness {
         harness.store.record_session_meta(eager_session_id)?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session metadata recorded");
 
-        if matches!(
-            eager_session_start_reason,
-            tau_proto::SessionStartReason::Resume
-        ) {
-            harness.rehydrate_agents_from_session();
-        }
         let initial_client_id = if let Some(initial_client) = initial_client {
             let client_id = match initial_client {
                 InitialClient::Stdio => harness.accept_stdio_client()?,
@@ -2023,7 +1988,7 @@ impl Harness {
         harness.emit_missing_default_role(missing_default_role);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "config checks complete");
 
-        harness.start_session_init(eager_session_id.into(), eager_session_start_reason);
+        harness.start_session_init(eager_session_id.into());
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session init started");
         if let Err(error) = harness.wait_for_session_init() {
             harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
@@ -4950,7 +4915,7 @@ impl Harness {
         req: tau_proto::UiSwitchSession,
     ) -> Result<bool, HarnessError> {
         self.publish_event(Some(client_id), Event::UiSwitchSession(req.clone()));
-        self.switch_session(req.new_session_id, req.reason)?;
+        self.switch_session(req.new_session_id)?;
         Ok(true)
     }
 
@@ -7852,18 +7817,12 @@ impl Harness {
     ///
     /// Pi-style: emit `SessionShutdown` for the old, drop in-flight
     /// prompts, swap the bound id, then run a fresh `start_session_init`
-    /// for the new id with the given reason. Extension processes are
+    /// for the new id. Extension processes are
     /// kept across sessions (they're not respawned); extensions that
     /// hold per-session state subscribe to `session.shutdown` to
     /// flush/clean up.
-    fn switch_session(
-        &mut self,
-        new_session_id: SessionId,
-        reason: tau_proto::SessionStartReason,
-    ) -> Result<(), HarnessError> {
-        if new_session_id == self.current_session_id
-            && !matches!(reason, tau_proto::SessionStartReason::New)
-        {
+    fn switch_session(&mut self, new_session_id: SessionId) -> Result<(), HarnessError> {
+        if new_session_id == self.current_session_id {
             self.emit_info(&format!("already on session `{}`", new_session_id.as_str()));
             return Ok(());
         }
@@ -7922,10 +7881,6 @@ impl Harness {
         self.stopped_agent_ids.clear();
 
         self.current_session_id = new_session_id.clone();
-        self.current_session_start_reason = reason;
-        if matches!(reason, tau_proto::SessionStartReason::Resume) {
-            self.rehydrate_agents_from_session();
-        }
         self.publish_delegate_roles_context();
 
         // Record session metadata + acquire the new session dir flock before
@@ -7935,7 +7890,7 @@ impl Harness {
         // Send the new debug log to the new session's dir, so each
         // session is self-contained.
         let _ = self.enable_debug_log(&self.sessions_dir().join(new_session_id.as_str()));
-        self.start_session_init(new_session_id.clone(), reason);
+        self.start_session_init(new_session_id.clone());
         self.publish_current_session_dir();
         Ok(())
     }
@@ -7946,7 +7901,7 @@ impl Harness {
             Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
                 session_id: self.current_session_id.clone(),
                 path: self.sessions_dir().join(self.current_session_id.as_str()),
-                status: session_dir_status_from_reason(self.current_session_start_reason),
+                status: tau_proto::SessionDirStatus::New,
             }),
         );
     }
@@ -7991,71 +7946,6 @@ impl Harness {
 
     fn restore_notice_already_persisted(&self, session_id: &SessionId) -> bool {
         self.any_loaded_agent_event(session_id, event_is_internal_restore_notice)
-    }
-
-    fn last_recorded_session_event_at(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<tau_proto::UnixMicros> {
-        self.loaded_agent_ids_for_session(session_id)
-            .into_iter()
-            .filter_map(|agent_id| match self.agent_store.agent_events(agent_id.as_str()) {
-                Ok(events) => Some(events),
-                Err(error) => {
-                    tracing::warn!(target: "tau_harness", %agent_id, %error, "failed to load agent events while checking restored timestamps");
-                    None
-                }
-            })
-            .flatten()
-            .filter_map(|entry| (entry.recorded_at.get() != 0).then_some(entry.recorded_at))
-            .max_by_key(|recorded_at| recorded_at.get())
-    }
-
-    fn queue_restore_notice_for_resumed_session(&mut self, session_id: &SessionId) {
-        if session_id != &self.current_session_id {
-            return;
-        }
-        if self.restore_notice_already_persisted(session_id) {
-            self.pending_notices.restore_sessions.remove(session_id);
-            return;
-        }
-        let last_recorded_at = self.last_recorded_session_event_at(session_id);
-        self.pending_notices
-            .restore_sessions
-            .insert(session_id.clone(), last_recorded_at);
-    }
-
-    fn queue_restore_background_notices_for_resumed_session(&mut self, session_id: &SessionId) {
-        if session_id != &self.current_session_id {
-            return;
-        }
-        let mut seen = HashSet::new();
-        let mut notices = Vec::new();
-        for cid in self.restored_agent_ids(session_id) {
-            for state in self.restored_background_tool_states_for_agent(&cid) {
-                let Some(tau_core::BackgroundToolCompletion::Error(error)) = state.completion
-                else {
-                    continue;
-                };
-                let notice = restored_background_tool_call_error_message(&error.call_id);
-                if error.message != notice || !seen.insert(notice.clone()) {
-                    continue;
-                }
-                if self.internal_prompt_already_persisted(session_id, &notice) {
-                    continue;
-                }
-                notices.push(notice);
-            }
-        }
-        if notices.is_empty() {
-            self.pending_notices
-                .restore_background_notices
-                .remove(session_id);
-        } else {
-            self.pending_notices
-                .restore_background_notices
-                .insert(session_id.clone(), notices);
-        }
     }
 
     fn mark_tool_unavailable_for_notice(
@@ -8318,27 +8208,18 @@ impl Harness {
         self.repair_restored_foreground_tool_calls(session_id);
         self.repair_restored_background_tool_calls(session_id);
         self.seed_restored_wait_background_completions(session_id);
-        self.queue_restore_background_notices_for_resumed_session(session_id);
     }
 
-    pub(crate) fn start_session_init(
-        &mut self,
-        session_id: SessionId,
-        reason: tau_proto::SessionStartReason,
-    ) {
-        if matches!(reason, tau_proto::SessionStartReason::Resume) {
-            self.queue_restore_notice_for_resumed_session(&session_id);
-        }
+    pub(crate) fn start_session_init(&mut self, session_id: SessionId) {
         let waiting_on = self.session_init_provider_ids();
         self.publish_event(
             None,
             Event::SessionStarted(tau_proto::SessionStarted {
                 session_id: session_id.clone(),
-                reason,
             }),
         );
         if waiting_on.is_empty() {
-            if let Err(error) = self.complete_session_init(session_id, reason) {
+            if let Err(error) = self.complete_session_init(session_id) {
                 self.emit_harness_failure(&format!("failed to initialize session: {error}"));
                 self.turn_state = TurnState::Idle;
             }
@@ -8351,7 +8232,6 @@ impl Harness {
 
         self.turn_state = TurnState::InitializingSession {
             session_id,
-            reason,
             waiting_on,
         };
     }
@@ -8368,20 +8248,19 @@ impl Harness {
         let completed_session = match &mut self.turn_state {
             TurnState::InitializingSession {
                 session_id,
-                reason,
                 waiting_on,
             } => {
                 let removed = waiting_on.remove(&source_id);
                 if removed && waiting_on.is_empty() {
-                    Some((session_id.clone(), *reason))
+                    Some(session_id.clone())
                 } else {
                     None
                 }
             }
             _ => None,
         };
-        if let Some((session_id, reason)) = completed_session {
-            self.complete_session_init(session_id, reason)?;
+        if let Some(session_id) = completed_session {
+            self.complete_session_init(session_id)?;
         }
         if let Some(waiting_on) = self.pending_agent_context_ready.get_mut(&ready.agent_id) {
             waiting_on.remove(&source_id);
@@ -8398,12 +8277,11 @@ impl Harness {
         let completed_session = match &mut self.turn_state {
             TurnState::InitializingSession {
                 session_id,
-                reason,
                 waiting_on,
             } => {
                 let removed = waiting_on.remove(connection_id);
                 if removed && waiting_on.is_empty() {
-                    Some((session_id.clone(), *reason))
+                    Some(session_id.clone())
                 } else {
                     None
                 }
@@ -8411,19 +8289,15 @@ impl Harness {
             _ => None,
         };
 
-        if let Some((session_id, reason)) = completed_session
-            && let Err(error) = self.complete_session_init(session_id, reason)
+        if let Some(session_id) = completed_session
+            && let Err(error) = self.complete_session_init(session_id)
         {
             self.emit_harness_failure(&format!("failed to initialize session: {error}"));
             self.turn_state = TurnState::Idle;
         }
     }
 
-    fn complete_session_init(
-        &mut self,
-        session_id: SessionId,
-        reason: tau_proto::SessionStartReason,
-    ) -> Result<(), HarnessError> {
+    fn complete_session_init(&mut self, session_id: SessionId) -> Result<(), HarnessError> {
         // AGENTS.md and skill context is agent-scoped. Session init only waits
         // for discovery; the discovered context is injected when a durable agent
         // is explicitly created from the UI's current role/cwd state.
@@ -8433,9 +8307,6 @@ impl Harness {
         // would deliver each error twice (live, then replay-marked) to peers
         // subscribed before init.
         self.catch_up_subscribers_after_session_init();
-        if matches!(reason, tau_proto::SessionStartReason::Resume) {
-            self.repair_restored_session_tool_state(&session_id);
-        }
         self.request_prompt_prewarm(&session_id);
         self.turn_state = TurnState::Idle;
         self.try_advance_queue();
@@ -8583,25 +8454,6 @@ impl Harness {
                 }),
             );
             self.session_loaded_agents.remove(&agent_id_proto);
-        }
-    }
-
-    fn rehydrate_agents_from_session(&mut self) {
-        let loaded_agents: Vec<tau_proto::AgentId> =
-            match self.store.load_session(self.current_session_id.as_str()) {
-                Ok(Some(membership)) => membership.loaded_agents().into_iter().cloned().collect(),
-                Ok(None) => return,
-                Err(error) => {
-                    self.emit_harness_failure(&format!(
-                        "failed to load session during restore: {error}"
-                    ));
-                    return;
-                }
-            };
-        for agent_id in loaded_agents {
-            if let Err(error) = self.load_existing_agent(agent_id.clone()) {
-                self.emit_harness_failure(&error);
-            }
         }
     }
 
@@ -11060,7 +10912,6 @@ impl Harness {
             &state_dir,
             tau_config::settings::TauDirs::default(),
             "s1",
-            tau_proto::SessionStartReason::Initial,
         )?;
         harness.selected_model = Some("test/model".parse().expect("model id"));
 

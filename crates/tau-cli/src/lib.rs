@@ -29,7 +29,7 @@ mod ui_prompt;
 use std::sync::{Mutex, MutexGuard};
 use std::{fmt, io};
 
-use tau_harness::{SessionLaunchStatus, runtime_dir};
+use tau_harness::runtime_dir;
 
 use crate::chat::run_chat;
 use crate::daemon::resolve_run_session_id;
@@ -586,7 +586,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         .map_err(|error| CliError::Participant(error.to_string()))?;
         match command {
             cli::Command::Run(cli::RunArgs {
-                resume,
                 config,
                 prompt_stdin,
                 attach,
@@ -600,34 +599,23 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         &extension_cli_overrides,
                     )?;
                 }
-                let (session_id, session_status) = if attach {
+                let session_id = if attach {
                     reject_harness_config_overrides(&harness_config_overrides, "--attach")?;
                     let cwd = std::env::current_dir()?;
                     let harness_path =
                         runtime_dir::find_harness_for_dir(&cwd).ok_or(CliError::NoRunningDaemon)?;
-                    let daemon_session_id = runtime_dir::read_session_id(&harness_path)
-                        .ok_or_else(|| {
-                            CliError::Participant(
-                                "running daemon did not publish its session id".to_owned(),
-                            )
-                        })?;
-                    if let Some(requested) = resume.as_deref().filter(|s| !s.is_empty())
-                        && requested != daemon_session_id
-                    {
-                        return Err(CliError::Participant(format!(
-                            "--attach: daemon is bound to session `{daemon_session_id}`, \
-                             cannot resume `{requested}` (start a fresh daemon for that)"
-                        )));
-                    }
-                    (daemon_session_id, SessionLaunchStatus::Resumed)
+                    runtime_dir::read_session_id(&harness_path).ok_or_else(|| {
+                        CliError::Participant(
+                            "running daemon did not publish its session id".to_owned(),
+                        )
+                    })?
                 } else {
-                    resolve_run_session_id(resume.as_deref())?
+                    resolve_run_session_id()?
                 };
                 if prompt_stdin {
                     prompt_stdin::run_prompt_stdin(
                         &session_id,
                         attach,
-                        session_status,
                         harness.role.as_deref(),
                         &role_cli_overrides,
                         &extension_cli_overrides,
@@ -637,7 +625,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     run_chat(
                         &session_id,
                         attach,
-                        session_status,
                         harness.role.as_deref(),
                         &role_cli_overrides,
                         &extension_cli_overrides,

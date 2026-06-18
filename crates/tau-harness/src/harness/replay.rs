@@ -5,10 +5,8 @@
 //! [`Harness::complete_subscription`] path. There is a second catch-up
 //! moment: when a session finishes initializing,
 //! [`Harness::catch_up_subscribers_after_session_init`] replays the durable
-//! session history to every peer that subscribed *before* init — on resume,
-//! that history predates the process and is never published live, so without
-//! this pass a startup extension would know less than one that joined a
-//! second later. Catch-up is semantic state reconstruction, not a readback of
+//! session history to every peer that subscribed *before* init. Catch-up is
+//! semantic state reconstruction, not a readback of
 //! a retained event log:
 //!
 //! - [`Harness::replay_session_events`] announces the current loaded-agent
@@ -30,7 +28,7 @@ use tau_proto::{
     HarnessModelsAvailable, HarnessOutputMessage, HarnessRoleSelected, HarnessRolesAvailable,
 };
 
-use super::{agent_runtime_state_for_turn, session_dir_status_from_reason};
+use super::agent_runtime_state_for_turn;
 use crate::extension::ExtensionState;
 use crate::harness::{Harness, selector_matches_event};
 use crate::model::{
@@ -47,9 +45,8 @@ impl Harness {
     /// the current session is still initializing: a subscriber connecting
     /// during startup observes the session lifecycle live, so replaying it
     /// here would deliver duplicate `SessionStarted` announcements. Durable
-    /// history a resumed session carries is delivered to those early
-    /// subscribers by [`Self::catch_up_subscribers_after_session_init`] once
-    /// init completes.
+    /// durable history is delivered to those early subscribers by
+    /// [`Self::catch_up_subscribers_after_session_init`] once init completes.
     pub(crate) fn complete_subscription(
         &mut self,
         connection_id: &str,
@@ -67,7 +64,6 @@ impl Harness {
     pub(crate) fn replay_session_events(&mut self, client_id: &str, selectors: &[EventSelector]) {
         let session_started = Event::SessionStarted(tau_proto::SessionStarted {
             session_id: self.current_session_id.clone(),
-            reason: self.current_session_start_reason,
         });
         if selector_matches_event(selectors, &session_started) {
             let _ = self.bus.send_to(
@@ -238,7 +234,7 @@ impl Harness {
         let session_dir_event = Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
             session_id: self.current_session_id.clone(),
             path: self.sessions_dir().join(self.current_session_id.as_str()),
-            status: session_dir_status_from_reason(self.current_session_start_reason),
+            status: tau_proto::SessionDirStatus::New,
         });
         if selector_matches_event(selectors, &session_dir_event) {
             let _ = self.bus.send_to(

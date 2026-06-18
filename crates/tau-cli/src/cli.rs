@@ -82,15 +82,6 @@ pub struct ExtensionOverrideArgs {
 
 #[derive(Args)]
 pub struct RunArgs {
-    /// Resume an existing session.
-    ///
-    /// Bare `-r` resumes the most recent session whose metadata matches
-    /// the current working directory. `-r <id>` resumes that
-    /// specific session id. Without `-r`, a fresh session id is minted
-    /// (`<basename(cwd)>-<rand6>`).
-    #[arg(short = 'r', long = "resume", num_args = 0..=1, default_missing_value = "")]
-    pub resume: Option<String>,
-
     /// Deprecated legacy extension config path; use `--harness-config`
     /// overrides instead.
     #[arg(long, hide = true)]

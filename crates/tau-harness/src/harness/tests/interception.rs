@@ -981,7 +981,6 @@ fn interception_replacement_of_session_agent_unloaded_publishes_original() {
 fn session_started_event(session_id: &str) -> Event {
     Event::SessionStarted(tau_proto::SessionStarted {
         session_id: session_id.into(),
-        reason: tau_proto::SessionStartReason::New,
     })
 }
 

@@ -30,37 +30,6 @@ use crate::settings::{Config, resolve_config, resolve_config_in};
 /// the long-running daemon paths block indefinitely on their event loop.
 const SEND_DAEMON_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SessionLaunchStatus {
-    New,
-    Resumed,
-}
-
-impl SessionLaunchStatus {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::New => "new",
-            Self::Resumed => "resumed",
-        }
-    }
-}
-
-impl From<SessionLaunchStatus> for tau_proto::SessionDirStatus {
-    fn from(status: SessionLaunchStatus) -> Self {
-        match status {
-            SessionLaunchStatus::New => Self::New,
-            SessionLaunchStatus::Resumed => Self::Resumed,
-        }
-    }
-}
-
-fn session_start_reason(status: SessionLaunchStatus) -> tau_proto::SessionStartReason {
-    match status {
-        SessionLaunchStatus::New => tau_proto::SessionStartReason::Initial,
-        SessionLaunchStatus::Resumed => tau_proto::SessionStartReason::Resume,
-    }
-}
-
 /// Serve-loop options for daemon mode.
 #[derive(Clone, Debug, Eq, PartialEq, bon::Builder)]
 pub struct ServeOptions {
@@ -76,10 +45,6 @@ pub struct ServeOptions {
     /// otherwise.
     #[builder(default)]
     pub exit_on_disconnect: bool,
-    /// Session lifecycle status announced to UI clients for the eager
-    /// session.
-    #[builder(default = SessionLaunchStatus::New)]
-    pub session_status: SessionLaunchStatus,
     /// Directory layout (config + state) the harness reads. Defaults to
     /// [`tau_config::settings::TauDirs::default()`] on the call site.
     pub dirs: Option<tau_config::settings::TauDirs>,
@@ -90,7 +55,6 @@ impl Default for ServeOptions {
         Self {
             max_clients: None,
             exit_on_disconnect: false,
-            session_status: SessionLaunchStatus::New,
             dirs: None,
         }
     }
@@ -268,13 +232,7 @@ pub fn run_embedded_message_with_options(
             (config, dirs)
         }
     };
-    let mut harness = Harness::from_config(
-        &config,
-        &state_dir,
-        dirs,
-        session_id,
-        tau_proto::SessionStartReason::Initial,
-    )?;
+    let mut harness = Harness::from_config(&config, &state_dir, dirs, session_id)?;
     let mut outcome = match harness.send_user_message(session_id, message, None) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -303,14 +261,8 @@ pub fn run_embedded_message_with_echo(
         config_dir: Some(state_dir.join("config")),
         state_dir: Some(state_dir.join("runtime")),
     };
-    let mut harness = Harness::new_with_provider(
-        state_dir,
-        dirs,
-        echo_runner,
-        echo_tools(),
-        session_id,
-        tau_proto::SessionStartReason::Initial,
-    )?;
+    let mut harness =
+        Harness::new_with_provider(state_dir, dirs, echo_runner, echo_tools(), session_id)?;
     disable_echo_tool_context_gate_for_tests(&mut harness);
     harness.enable_echo_tool_for_tests();
     let mut outcome = match harness.send_user_message(session_id, message, None) {
@@ -378,13 +330,7 @@ pub fn run_daemon(
             (config, dirs)
         }
     };
-    let mut harness = Harness::from_config(
-        &config,
-        state_dir,
-        dirs,
-        eager_session_id,
-        session_start_reason(options.session_status),
-    )?;
+    let mut harness = Harness::from_config(&config, state_dir, dirs, eager_session_id)?;
 
     let tx = harness.tx.clone();
     let forwarder = listener_handle.spawn_forwarder(tx)?;
@@ -419,14 +365,8 @@ pub fn run_daemon_with_echo(
             config_dir: Some(state_dir.join("config")),
             state_dir: Some(state_dir.join("runtime")),
         });
-    let mut harness = Harness::new_with_provider(
-        state_dir,
-        dirs,
-        echo_runner,
-        echo_tools(),
-        eager_session_id,
-        session_start_reason(options.session_status),
-    )?;
+    let mut harness =
+        Harness::new_with_provider(state_dir, dirs, echo_runner, echo_tools(), eager_session_id)?;
     disable_echo_tool_context_gate_for_tests(&mut harness);
     harness.enable_echo_tool_for_tests();
 
@@ -452,13 +392,7 @@ pub fn run_daemon_with_config(
     let state_dir = state_dir.into();
     let listener_handle = open_listener(&socket_path)?;
     let dirs = options.dirs.clone().unwrap_or_default();
-    let mut harness = Harness::from_config(
-        config,
-        state_dir,
-        dirs,
-        eager_session_id,
-        session_start_reason(options.session_status),
-    )?;
+    let mut harness = Harness::from_config(config, state_dir, dirs, eager_session_id)?;
 
     let tx = harness.tx.clone();
     let forwarder = listener_handle.spawn_forwarder(tx)?;
@@ -834,7 +768,6 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
             &state_dir,
             dirs,
             eager_session_id,
-            session_start_reason(options.session_status),
             initial_client,
             &mut initial_client_error_stream,
         ),
@@ -920,16 +853,12 @@ fn run_component_with_internal_tools_and_initial_client(
         tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "resolved project root");
         let config = resolve_config(None)?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "resolved config");
-        // The CLI passes the minted/resumed session id via the harness's
-        // SESSION_ID env var when spawning a daemon. Fallback to
+        // The CLI passes the minted session id via the harness's SESSION_ID env var
+        // when spawning a daemon. Fallback to
         // `default_session_id()` covers a bare `tau component harness`
         // launched without a CLI in front of it.
         let eager_session_id = std::env::var("TAU_SESSION_ID")
             .unwrap_or_else(|_| tau_session_inspect::default_session_id().to_owned());
-        let session_status = match std::env::var("TAU_SESSION_STATUS").as_deref() {
-            Ok("resumed") => crate::daemon::SessionLaunchStatus::Resumed,
-            _ => crate::daemon::SessionLaunchStatus::New,
-        };
         run_harness_daemon_with_internal_tools_and_initial_client(
             &project_root,
             &config,
@@ -939,7 +868,6 @@ fn run_component_with_internal_tools_and_initial_client(
             // flips this to `false` at runtime.
             ServeOptions {
                 exit_on_disconnect: true,
-                session_status,
                 ..Default::default()
             },
             internal_tool_handlers,

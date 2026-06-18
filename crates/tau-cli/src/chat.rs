@@ -13,7 +13,6 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use tau_config::settings::CliBindingAction;
-use tau_harness::SessionLaunchStatus;
 use tau_proto::{
     CborValue, Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
     PeerOutputWriter, UiFocusChanged, UiPromptDraft, UiPromptSubmitted, UiSetAgentDisplayName,
@@ -732,7 +731,6 @@ fn encode_binding_action(action: &CliBindingAction) -> String {
 pub(crate) fn run_chat(
     session_id: &str,
     attach: bool,
-    session_status: SessionLaunchStatus,
     startup_role: Option<&str>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
@@ -761,7 +759,6 @@ pub(crate) fn run_chat(
     let mut daemon = resolve_daemon(
         attach,
         session_id,
-        session_status,
         daemon_output,
         startup_role,
         DaemonCliOverrides {
@@ -1767,7 +1764,6 @@ impl<'a> TerminalInputSession<'a> {
             self.writer,
             &Event::UiSwitchSession(tau_proto::UiSwitchSession {
                 new_session_id: new_id.as_str().into(),
-                reason: tau_proto::SessionStartReason::New,
             }),
         );
         *self.session_id = new_id;
