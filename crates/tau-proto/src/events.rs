@@ -2362,6 +2362,13 @@ pub struct UiCreateAgent {
     pub parent_agent: Option<AgentId>,
 }
 
+/// The UI requests loading an existing durable agent into this harness.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiLoadAgent {
+    /// Durable agent id to reconstruct from the agent store.
+    pub agent_id: AgentId,
+}
+
 /// Initial metadata value requested while creating a new UI-owned agent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentInitialMetadata {
@@ -3238,6 +3245,8 @@ pub enum Event {
     UiSwitchSession(UiSwitchSession),
     #[serde(rename = "ui.create_agent")]
     UiCreateAgent(UiCreateAgent),
+    #[serde(rename = "ui.load_agent")]
+    UiLoadAgent(UiLoadAgent),
     #[serde(rename = "ui.tree_request")]
     UiTreeRequest(UiTreeRequest),
     #[serde(rename = "ui.navigate_tree")]
@@ -3384,6 +3393,7 @@ impl Event {
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiCreateAgent(_) => EventName::UI_CREATE_AGENT,
+            Self::UiLoadAgent(_) => EventName::UI_LOAD_AGENT,
             Self::UiTreeRequest(_) => EventName::UI_TREE_REQUEST,
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
             Self::UiCompactRequest(_) => EventName::UI_COMPACT_REQUEST,
@@ -3444,6 +3454,7 @@ impl Event {
                 | Self::AgentState(_)
                 | Self::UiCompactRequest(_)
                 | Self::UiCreateAgent(_)
+                | Self::UiLoadAgent(_)
                 | Self::UiPromptDraft(_)
                 | Self::UiFocusChanged(_)
                 | Self::UiSetAgentDisplayName(_)

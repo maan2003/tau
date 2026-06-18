@@ -1969,7 +1969,7 @@ impl<'a> TerminalInputSession<'a> {
             let known_agents = self.ctx.routing.known_agents();
             let active_count = self.ctx.routing.active_count();
             self.output.system_info(&format!(
-                "/agent <new|switch|suspend|resume|name> [agent_id]; current: {current}; active: {active_count}; known: {}",
+                "/agent <new|load|switch|suspend|resume|name> [agent_id]; current: {current}; active: {active_count}; known: {}",
                 known_agents.join(", ")
             ));
             return;
@@ -1986,17 +1986,18 @@ impl<'a> TerminalInputSession<'a> {
         }
         if parts.next().is_some() {
             self.output.system_info(
-                "/agent: too many arguments (use /agent <new|switch|suspend|resume|name> [agent_id])",
+                "/agent: too many arguments (use /agent <new|load|switch|suspend|resume|name> [agent_id])",
             );
             return;
         }
         match subcommand {
             "new" => self.handle_agent_new(target),
+            "load" => self.handle_agent_load(target),
             "switch" => self.handle_agent_switch(target),
             "suspend" => self.handle_agent_suspend(target),
             "resume" => self.handle_agent_resume(target),
             _ => self.output.system_info(
-                "/agent <new|switch|suspend|resume|name> [agent_id]; use /agent switch <agent_id>",
+                "/agent <new|load|switch|suspend|resume|name> [agent_id]; use /agent switch <agent_id>",
             ),
         }
     }
@@ -2071,6 +2072,24 @@ impl<'a> TerminalInputSession<'a> {
             return;
         }
         self.clear_selected_agent();
+    }
+
+    fn handle_agent_load(&self, target: Option<&str>) {
+        let Some(agent_id) = target.map(str::trim).filter(|arg| !arg.is_empty()) else {
+            self.output.system_info("/agent load <agent_id>");
+            return;
+        };
+        let agent_id = match tau_proto::AgentId::parse(agent_id) {
+            Ok(agent_id) => agent_id,
+            Err(error) => {
+                self.output.system_info(&error.to_string());
+                return;
+            }
+        };
+        let event = Event::UiLoadAgent(tau_proto::UiLoadAgent { agent_id });
+        if send_event(self.writer, &event).is_ok() {
+            self.output.system_info("requested agent load");
+        }
     }
 
     fn clear_selected_agent(&mut self) {
@@ -2562,6 +2581,7 @@ const SESSION_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[("new", "Start a fresh
 
 const AGENT_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[
     ("new", "Clear the selected agent"),
+    ("load", "Load an existing durable agent by id"),
     ("switch", "Route prompts to an active agent"),
     ("suspend", "Hide an active agent transcript"),
     ("resume", "Show a suspended agent transcript"),

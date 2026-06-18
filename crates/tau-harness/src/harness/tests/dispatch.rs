@@ -220,6 +220,51 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     h.shutdown().expect("shutdown");
 }
 
+#[test]
+fn ui_load_agent_loads_standalone_durable_agent() {
+    // A future session-less restore flow needs to reattach a durable agent by id
+    // without relying on pre-existing session membership. This locks down that
+    // the UI request reconstructs the in-memory agent route and records current
+    // harness membership for replay.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let agent_id = crate::parse_agent_id("restored-agent");
+    h.agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                parent_agent: None,
+                agent_id: agent_id.clone(),
+                role: "engineer".to_owned(),
+                display_name: Some("Restored".to_owned()),
+                metadata: Vec::new(),
+            }),
+        )
+        .expect("seed durable agent");
+
+    h.handle_ui_load_agent(tau_proto::UiLoadAgent {
+        agent_id: agent_id.clone(),
+    })
+    .expect("load agent");
+
+    let cid = h
+        .agent_routes
+        .get(agent_id.as_str())
+        .expect("agent route")
+        .clone();
+    let conversation = h.agents.get(&cid).expect("loaded conversation");
+    assert_eq!(conversation.agent_id.as_deref(), Some(agent_id.as_str()));
+    assert_eq!(conversation.display_name.as_deref(), Some("Restored"));
+    assert!(h.session_loaded_agents.contains(&agent_id));
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::SessionAgentLoaded(loaded)
+            if loaded.session_id == h.current_session_id && loaded.agent_id == agent_id
+    )));
+}
+
 /// `UiCreateAgent.metadata` must be embedded in the durable creation fact so
 /// replay restores shell cwd before `session.agent_loaded`.
 #[test]

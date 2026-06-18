@@ -4598,6 +4598,7 @@ impl Harness {
             }
             Event::UiSwitchSession(req) => self.handle_ui_switch_session(client_id, req),
             Event::UiCreateAgent(req) => self.handle_ui_create_agent(req),
+            Event::UiLoadAgent(req) => self.handle_ui_load_agent(req),
             Event::UiSetAgentDisplayName(req) => self.handle_ui_set_agent_display_name(req),
             Event::AgentMetadataSet(set) => {
                 if self.validate_agent_metadata_set(&set).is_ok() {
@@ -5040,6 +5041,29 @@ impl Harness {
             } else {
                 self.dispatch_prompt_for_agent(&cid, prompt)?;
             }
+        }
+        Ok(true)
+    }
+
+    fn handle_ui_load_agent(&mut self, req: tau_proto::UiLoadAgent) -> Result<bool, HarnessError> {
+        let was_loaded = self.session_loaded_agents.contains(&req.agent_id);
+        match self.load_existing_agent(req.agent_id.clone()) {
+            Ok(cid) => {
+                if !was_loaded {
+                    self.repair_restored_session_tool_state(&self.current_session_id.clone());
+                    self.publish_event(
+                        None,
+                        Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                            session_id: self.current_session_id.clone(),
+                            agent_id: req.agent_id,
+                        }),
+                    );
+                    self.catch_up_subscribers_after_session_init();
+                }
+                self.try_advance_queue();
+                tracing::debug!(target: "tau_harness", cid = %cid, "loaded existing agent");
+            }
+            Err(error) => self.emit_info_important(&error),
         }
         Ok(true)
     }
@@ -8575,56 +8599,67 @@ impl Harness {
                 }
             };
         for agent_id in loaded_agents {
-            let agent_id_string = agent_id.to_string();
-            if let Err(error) = self.agent_store.load_agent(agent_id.as_str()) {
-                self.emit_harness_failure(&format!(
+            if let Err(error) = self.load_existing_agent(agent_id.clone()) {
+                self.emit_harness_failure(&error);
+            }
+        }
+    }
+
+    fn load_existing_agent(&mut self, agent_id: tau_proto::AgentId) -> Result<AgentId, String> {
+        let agent_id_string = agent_id.to_string();
+        match self.agent_store.load_agent(agent_id.as_str()) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(format!("agent `{agent_id}` does not exist")),
+            Err(error) => {
+                return Err(format!(
                     "failed to load restored agent `{agent_id}`: {error}"
                 ));
-                continue;
             }
-            let head = self
-                .agent_head_moved_from_log(agent_id.as_str())
-                .or_else(|| {
-                    self.agent_store
-                        .agent(agent_id.as_str())
-                        .and_then(|tree| tree.head())
-                });
-            let cid: AgentId = crate::parse_agent_id(&agent_id_string);
-            let meta = self
-                .agent_store
-                .agent_meta(agent_id.as_str())
-                .ok()
-                .flatten();
-            let display_name = self
-                .agent_store
-                .agent(agent_id.as_str())
-                .and_then(|tree| tree.display_name().map(str::to_owned))
-                .or_else(|| meta.and_then(|meta| meta.display_name));
-            let role = self.agent_role_from_log(agent_id.as_str());
-            let originator = self.agent_originator_from_log(agent_id.as_str());
-            if let Some(conv) = self.agents.get_mut(&cid) {
-                conv.agent_id = Some(agent_id_string.clone());
-                conv.head = head;
-                conv.role = role.clone();
-                conv.display_name = display_name.clone();
-            } else {
-                let mut conv = Agent::new(
-                    cid.clone(),
-                    self.current_session_id.clone(),
-                    originator,
-                    head,
-                    None,
-                );
-                conv.agent_id = Some(agent_id_string.clone());
-                conv.role = role.clone();
-                conv.display_name = display_name.clone();
-                self.agents.insert(cid.clone(), conv);
-            }
-            self.agent_routes.insert(agent_id_string.clone(), cid);
-            self.session_loaded_agents.insert(agent_id.clone());
-            self.agent_states
-                .insert(agent_id_string, AgentState::Active);
         }
+        let head = self
+            .agent_head_moved_from_log(agent_id.as_str())
+            .or_else(|| {
+                self.agent_store
+                    .agent(agent_id.as_str())
+                    .and_then(|tree| tree.head())
+            });
+        let cid: AgentId = crate::parse_agent_id(&agent_id_string);
+        let meta = self
+            .agent_store
+            .agent_meta(agent_id.as_str())
+            .ok()
+            .flatten();
+        let display_name = self
+            .agent_store
+            .agent(agent_id.as_str())
+            .and_then(|tree| tree.display_name().map(str::to_owned))
+            .or_else(|| meta.and_then(|meta| meta.display_name));
+        let role = self.agent_role_from_log(agent_id.as_str());
+        let originator = self.agent_originator_from_log(agent_id.as_str());
+        if let Some(conv) = self.agents.get_mut(&cid) {
+            conv.agent_id = Some(agent_id_string.clone());
+            conv.head = head;
+            conv.role = role;
+            conv.display_name = display_name;
+        } else {
+            let mut conv = Agent::new(
+                cid.clone(),
+                self.current_session_id.clone(),
+                originator,
+                head,
+                None,
+            );
+            conv.agent_id = Some(agent_id_string.clone());
+            conv.role = role;
+            conv.display_name = display_name;
+            self.agents.insert(cid.clone(), conv);
+        }
+        self.agent_routes
+            .insert(agent_id_string.clone(), cid.clone());
+        self.session_loaded_agents.insert(agent_id);
+        self.agent_states
+            .insert(agent_id_string, AgentState::Active);
+        Ok(cid)
     }
 
     fn agent_head_moved_from_log(&self, agent_id: &str) -> Option<NodeId> {
