@@ -2967,7 +2967,6 @@ fn runtime_action_invoke_returns_action_error_for_bad_id() {
     };
     let event = runtime.dispatch_action(ActionInvoke {
         invocation_id: tau_proto::ActionInvocationId::new("invoke-1"),
-        session_id: tau_proto::SessionId::new("session-1"),
         extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
         instance_id: tau_proto::ExtensionInstanceId::from(1),
         action_id: "email.in.list".to_owned(),
@@ -3096,7 +3095,7 @@ fn send_rejects_non_empty_attachments_deliberately() {
 #[test]
 fn approval_file_creation_refuses_to_overwrite_existing_ids() {
     // Approval IDs are shown to the user before approval. Creating a pending
-    // record must not overwrite an existing ID if another session raced us.
+    // record must not overwrite an existing ID if another writer raced us.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let state = StateStore::open(temp.path().join("state")).expect("state");
     let path = state
@@ -3544,6 +3543,7 @@ fn configure_requires_state_dir_and_rejected_config_is_reported() {
             instance_name: None,
             config: CborValue::Map(Vec::new()),
             state_dir: None,
+            debug_dir: None,
             secrets: configure_secrets(),
         }))
         .expect("configure");

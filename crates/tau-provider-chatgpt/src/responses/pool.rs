@@ -379,11 +379,12 @@ fn store_ws_vcr_recording(
 pub fn run_turn_through_pool(
     pool: &mut WsPool,
     config: &ResponsesConfig,
-    session_id: &str,
+    _agent_id: &str,
     agent_prompt_id: &str,
     request: &crate::common::PromptPayload<'_>,
     on_update: &mut impl FnMut(&crate::common::StreamState),
 ) -> Result<crate::common::StreamState, WsTurnError> {
+    let agent_id = request.agent_id.as_str();
     let vcr_config = super::load_vcr_config().map_err(WsTurnError::Other)?;
     let vcr_record_config = if let Some(vcr_config) = vcr_config.as_ref() {
         if let Some(state) =
@@ -438,7 +439,7 @@ pub fn run_turn_through_pool(
                 pool.stats.silent_reconnects += 1;
                 tracing::info!(
                     target: crate::LOG_TARGET,
-                    session_id,
+                    agent_id,
                     error = %err,
                     silent_reconnects = pool.stats.silent_reconnects,
                     "Codex WS connection lost mid-turn",
@@ -518,7 +519,7 @@ pub fn run_turn_through_shared_pool(
         None
     };
 
-    let session_id = request.session_id.as_str();
+    let agent_id = request.agent_id.as_str();
     let key = PoolKey::for_request(config, request);
 
     if let Some(mut conn) = pool.checkout_until(&key, &config.api_key, should_abort)? {
@@ -563,7 +564,7 @@ pub fn run_turn_through_shared_pool(
                 let silent_reconnects = pool.bump_silent_reconnects()?;
                 tracing::info!(
                     target: crate::LOG_TARGET,
-                    session_id,
+                    agent_id,
                     error = %err,
                     silent_reconnects,
                     "Codex WS connection lost mid-turn",
@@ -635,9 +636,10 @@ pub fn run_turn_through_shared_pool(
 pub fn run_prewarm_through_pool(
     pool: &mut WsPool,
     config: &ResponsesConfig,
-    session_id: &str,
+    _agent_id: &str,
     request: &crate::common::PromptPayload<'_>,
 ) -> Result<crate::common::StreamState, LlmError> {
+    let agent_id = request.agent_id.as_str();
     let key = PoolKey::for_request(config, request);
 
     if let Some(mut conn) = pool.checkout(&key, &config.api_key) {
@@ -650,7 +652,7 @@ pub fn run_prewarm_through_pool(
                 pool.stats.silent_reconnects += 1;
                 tracing::info!(
                     target: crate::LOG_TARGET,
-                    session_id,
+                    agent_id,
                     error = %err,
                     "Codex WS connection lost during prewarm; reopening",
                 );
@@ -684,9 +686,10 @@ pub fn run_prewarm_through_pool(
 pub fn run_prewarm_through_shared_pool(
     pool: &SharedWsPool,
     config: &ResponsesConfig,
-    session_id: &str,
+    _agent_id: &str,
     request: &crate::common::PromptPayload<'_>,
 ) -> Result<crate::common::StreamState, LlmError> {
+    let agent_id = request.agent_id.as_str();
     let key = PoolKey::for_request(config, request);
 
     if let TryCheckout::Reserved(cached) = pool
@@ -705,7 +708,7 @@ pub fn run_prewarm_through_shared_pool(
                         .map_err(WsTurnError::into_llm_error)?;
                     tracing::info!(
                         target: crate::LOG_TARGET,
-                        session_id,
+                        agent_id,
                         error = %err,
                         "Codex WS connection lost during prewarm; reopening",
                     );
@@ -721,7 +724,7 @@ pub fn run_prewarm_through_shared_pool(
     } else {
         tracing::debug!(
             target: crate::LOG_TARGET,
-            session_id,
+            agent_id,
             "skipping prompt prewarm: websocket pool key is busy",
         );
         return Ok(crate::common::StreamState::new());

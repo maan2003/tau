@@ -125,6 +125,7 @@ fn configure_frame(config: tau_proto::CborValue) -> HarnessOutputMessage {
         instance_name: None,
         config,
         state_dir: None,
+        debug_dir: None,
         secrets: std::collections::BTreeMap::new(),
     })
 }
@@ -237,18 +238,6 @@ fn user_prompt_submitted(
     user_prompt_submitted_for_agent("main", text, originator)
 }
 
-fn session_agent_loaded(session_id: &str, agent_id: &str) -> Event {
-    Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-        session_id: session_id.into(),
-        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
-    })
-}
-fn session_agent_unloaded(session_id: &str, agent_id: &str) -> Event {
-    Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-        session_id: session_id.into(),
-        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
-    })
-}
 fn agent_state(agent_id: &str, state: tau_proto::AgentRuntimeState) -> Event {
     Event::AgentState(tau_proto::AgentStateChanged {
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
@@ -873,11 +862,11 @@ fn agent_idle_snake_case_fires_for_individual_agent_idle() {
     assert_eq!(osc.name, TEXT_VAR_NAME);
 }
 
-/// The new `agent_idle_all` hook must fire only after every loaded agent in the
-/// session has returned to idle. This catches implementations that merely copy
+/// The new `agent_idle_all` hook must fire only after every tracked agent has
+/// returned to idle. This catches implementations that merely copy
 /// the per-agent idle behavior and fire as soon as one agent finishes.
 #[test]
-fn agent_idle_all_fires_when_every_loaded_session_agent_is_idle() {
+fn agent_idle_all_fires_when_every_tracked_agent_is_idle() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
@@ -891,10 +880,10 @@ fn agent_idle_all_fires_when_every_loaded_session_agent_is_idle() {
         )))
         .expect("write config");
     writer
-        .write_event(&session_agent_loaded("s1", "main"))
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
         .expect("load main");
     writer
-        .write_event(&session_agent_loaded("s1", "other"))
+        .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Idle))
         .expect("load other");
     writer
         .write_event(&user_prompt_submitted_for_agent(
@@ -956,10 +945,10 @@ fn agent_idle_all_fires_when_every_loaded_session_agent_is_idle() {
     assert!(reader.read_event().expect("read eof").is_none());
 }
 
-/// If any other agent in the same session is still busy, `agent_idle_all` must
+/// If any other tracked agent is still busy, `agent_idle_all` must
 /// remain silent even though the finishing agent itself is idle.
 #[test]
-fn agent_idle_all_does_not_fire_while_another_session_agent_is_busy() {
+fn agent_idle_all_does_not_fire_while_another_agent_is_busy() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
@@ -973,10 +962,10 @@ fn agent_idle_all_does_not_fire_while_another_session_agent_is_busy() {
         )))
         .expect("write config");
     writer
-        .write_event(&session_agent_loaded("s1", "main"))
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
         .expect("load main");
     writer
-        .write_event(&session_agent_loaded("s1", "other"))
+        .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Idle))
         .expect("load other");
     writer
         .write_event(&user_prompt_submitted_for_agent(
@@ -1024,24 +1013,24 @@ fn agent_idle_all_does_not_fire_while_another_session_agent_is_busy() {
     assert!(reader.read_event().expect("read").is_none());
 }
 
-/// Running work in one session must not clear an already armed all-idle timer
-/// for another session.
+/// New running work anywhere must clear an already armed all-idle timer, since
+/// `agent_idle_all` is global to the tracked agent set.
 #[test]
-fn agent_idle_all_timer_survives_running_agent_in_other_session() {
+fn agent_idle_all_timer_clears_when_any_agent_starts_running() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
         .write_frame(&configure_frame(tau_proto::json_to_cbor(
             &serde_json::json!({
                 "agent_idle_all": [{
-                    "delay_seconds": 0,
+                    "delay_seconds": 1,
                     "osc1337": { "key": TEXT_VAR_NAME, "value": "{{hook}}:{{agent.id}}" },
                 }],
             }),
         )))
         .expect("write config");
     writer
-        .write_event(&session_agent_loaded("s1", "main"))
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
         .expect("load main");
     writer
         .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
@@ -1060,7 +1049,7 @@ fn agent_idle_all_timer_survives_running_agent_in_other_session() {
         .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
         .expect("main idle");
     writer
-        .write_event(&session_agent_loaded("s2", "other"))
+        .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Idle))
         .expect("load other");
     writer
         .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Running))
@@ -1072,17 +1061,13 @@ fn agent_idle_all_timer_survives_running_agent_in_other_session() {
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
-    let all_idle = reader.read_event().expect("read").expect("all idle event");
-    let Event::Osc1337SetUserVar(osc) = all_idle else {
-        panic!("expected all-idle OSC, got {all_idle:?}");
-    };
-    assert_eq!(osc.value, "agent_idle_all:main");
+    assert!(reader.read_event().expect("read").is_none());
 }
 
-/// A provider prompt has no session id, so it must not clear an all-idle timer
-/// already armed for another session.
+/// Provider prompts are not busy-state snapshots, so they must not clear an
+/// all-idle timer already armed from the last agent becoming idle.
 #[test]
-fn agent_idle_all_timer_survives_provider_prompt_in_other_session() {
+fn agent_idle_all_timer_survives_provider_prompt_without_agent_state() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
@@ -1096,7 +1081,7 @@ fn agent_idle_all_timer_survives_provider_prompt_in_other_session() {
         )))
         .expect("write config");
     writer
-        .write_event(&session_agent_loaded("s1", "main"))
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
         .expect("load main");
     writer
         .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
@@ -1173,7 +1158,7 @@ fn agent_idle_all_summary_side_prompt_does_not_cancel_pending_notification() {
         )))
         .expect("write config");
     writer
-        .write_event(&session_agent_loaded("s1", "main"))
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
         .expect("load main");
     writer
         .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
@@ -1205,7 +1190,7 @@ fn agent_idle_all_summary_side_prompt_does_not_cancel_pending_notification() {
         }))
         .expect("accepted");
     writer
-        .write_event(&session_agent_loaded("s1", "summary"))
+        .write_event(&agent_state("summary", tau_proto::AgentRuntimeState::Idle))
         .expect("load summary");
     writer
         .write_event(&agent_state(
@@ -1247,10 +1232,10 @@ fn agent_idle_all_summary_side_prompt_does_not_cancel_pending_notification() {
     handle.join().expect("ext thread");
 }
 
-/// Unloading the last busy agent in a session should remove stale busy state
-/// and allow `agent_idle_all` to fire for the now-idle remaining session.
+/// The last busy agent returning idle should remove stale busy state and allow
+/// `agent_idle_all` to fire.
 #[test]
-fn agent_idle_all_fires_when_busy_agent_unloads() {
+fn agent_idle_all_fires_when_last_busy_agent_becomes_idle() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
@@ -1264,10 +1249,10 @@ fn agent_idle_all_fires_when_busy_agent_unloads() {
         )))
         .expect("write config");
     writer
-        .write_event(&session_agent_loaded("s1", "main"))
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
         .expect("load main");
     writer
-        .write_event(&session_agent_loaded("s1", "other"))
+        .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Idle))
         .expect("load other");
     writer
         .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
@@ -1276,7 +1261,7 @@ fn agent_idle_all_fires_when_busy_agent_unloads() {
         .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Running))
         .expect("other running");
     writer
-        .write_event(&session_agent_unloaded("s1", "other"))
+        .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Idle))
         .expect("unload other");
     writer.flush().expect("flush");
 
@@ -1517,7 +1502,6 @@ fn prompt_draft_extends_idle_deadline() {
     for i in 0..5 {
         writer
             .write_event(&Event::UiPromptDraft(UiPromptDraft {
-                session_id: "s1".into(),
                 text: format!("partial draft {i}"),
             }))
             .expect("write");
@@ -1607,7 +1591,6 @@ fn prompt_draft_during_waiting_summary_does_not_cancel() {
     // The summary must still be allowed to land.
     writer
         .write_event(&Event::UiPromptDraft(UiPromptDraft {
-            session_id: "s1".into(),
             text: "typing while summary is in flight".into(),
         }))
         .expect("write");
@@ -1832,7 +1815,6 @@ fn config_reload_clears_pending_idle_hooks() {
         .expect("write config");
     writer
         .write_event(&Event::UiPromptDraft(tau_proto::UiPromptDraft {
-            session_id: "session".into(),
             text: "still typing".to_owned(),
         }))
         .expect("write draft");

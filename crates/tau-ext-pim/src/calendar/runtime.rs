@@ -1117,7 +1117,7 @@ impl Engine {
             .cloned()
             .ok_or_else(|| {
                 format!(
-                    "calendar event `{}` has not been read in this session or changed since it was cached; re-read the event and retry",
+                    "calendar event `{}` has not been read in this run or changed since it was cached; re-read the event and retry",
                     safe_display_line(event_id)
                 )
             })

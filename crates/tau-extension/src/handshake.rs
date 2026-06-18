@@ -1,6 +1,6 @@
 //! Reusable extension bootstrap helper.
 //!
-//! Every extension process opens its session with the same prelude:
+//! Every extension process starts its connection with the same prelude:
 //! `Hello` → optional `Subscribe` → optional `Intercept` → zero or more startup
 //! `Emit` event requests → `Ready`, then flushes. The exact mix varies (some
 //! extensions register tools, some intercept, some subscribe to several events,

@@ -31,8 +31,8 @@ pub struct Skill {
     pub description: String,
     /// Path to the Markdown skill file.
     pub file_path: PathBuf,
-    /// When true, the skill is listed in the system prompt at session
-    /// start so the agent sees its name + description without having
+    /// When true, the skill is listed in the startup system prompt so
+    /// the agent sees its name + description without having
     /// to search. Use `skill { query: "…" }` to discover/load hidden
     /// skills.
     pub add_to_prompt: bool,

@@ -77,7 +77,7 @@ impl<'a> RolePromptTemplateContext<'a> {
 /// Builds the system prompt from Tau defaults plus role prompt and prompt
 /// fragments.
 ///
-/// Must be deterministic and stable across turns of the same session
+/// Must be deterministic and stable across turns of the same agent
 /// — see the linear-prefix invariant in `send_prompt_to_agent`.
 /// Tools and skills are sorted by name (HashMap iteration would
 /// otherwise drift). The current date is intentionally omitted:

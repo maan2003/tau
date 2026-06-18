@@ -138,15 +138,15 @@ fn error_details_distinguish_otherwise_identical_messages() {
 /// Regression guard: `note_head_advanced_to` must skip the
 /// advance when `built_for` is `None`. The harness calls this hook
 /// on *every* fold (including ones that don't pass through dedup
-/// intake — user messages from session re-init, message projections,
-/// `ToolRequest`). On a freshly resumed session the map starts
+/// intake — user messages from agent replay, message projections,
+/// `ToolRequest`). On a freshly restored agent the map starts
 /// empty with `built_for == None`; if such a fold advanced the
 /// cursor unconditionally, `needs_rebuild(new_head)` would return
 /// `false` on the next dedup intake and the lazy rebuild would
 /// never run, silently losing every historical entry on the
 /// branch. A naive "just always set built_for" simplification
 /// would re-introduce that bug, which is the exact regression the
-/// `dedup_map_rebuilds_on_session_restore` integration test
+/// restore-path integration test
 /// caught during development.
 #[test]
 fn note_head_advanced_skips_when_built_for_is_none() {

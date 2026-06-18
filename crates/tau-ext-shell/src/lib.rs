@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 use tau_proto::{
     ActionError, ActionInvoke, ActionOutput, ActionResult, AgentContextKey, AgentContextValue,
     CborValue, ConfigError, Event, ExtAgentContextPublish, ExtPromptFragmentPublish,
-    ExtensionContextReady, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
-    PeerOutputWriter, PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded,
-    SessionStarted, ToolCancelled, ToolResult, ToolResultKind, ToolSpec, ToolTag,
+    ExtensionContextProviderRegister, ExtensionContextReady, HarnessInputMessage,
+    HarnessOutputMessage, PeerInputReader, PeerOutputWriter, PromptContent, PromptFragment,
+    PromptPriority, ToolCancelled, ToolResult, ToolResultKind, ToolSpec, ToolTag,
 };
 use tracing::{debug, trace};
 
@@ -473,18 +473,17 @@ where
     ]);
 
     // No past events requested: the shell starts from fresh live state.
-    // Replaying old invokes/commands would repeat work; old session starts
+    // Replaying old invokes/commands would repeat work; old agent starts
     // would duplicate context publication.
     let mut handshake = tau_extension::Handshake::tool("tau-ext-shell").subscribe([
         tau_proto::EventName::TOOL_STARTED,
         tau_proto::EventName::TOOL_CANCEL_REQUEST,
         tau_proto::EventName::ACTION_INVOKE,
-        tau_proto::EventName::SESSION_STARTED,
-        tau_proto::EventName::SESSION_AGENT_LOADED,
-        tau_proto::EventName::SESSION_AGENT_UNLOADED,
+        tau_proto::EventName::AGENT_STARTED,
+        tau_proto::EventName::AGENT_LOADED,
+        tau_proto::EventName::AGENT_UNLOADED,
         tau_proto::EventName::AGENT_METADATA_SET,
         tau_proto::EventName::AGENT_METADATA_UNSET,
-        tau_proto::EventName::SESSION_SHUTDOWN,
         tau_proto::EventName::AGENT_START_ACCEPTED,
         tau_proto::EventName::AGENT_START_RESULT,
         tau_proto::EventName::UI_SHELL_COMMAND,
@@ -506,14 +505,18 @@ where
         handshake =
             handshake.register_tool_with_group_and_prompt_fragment(tool, Some(tool_group), None);
     }
-    handshake = handshake.announce_event(Event::ExtensionContextProviderRegister(
-        tau_proto::ExtensionContextProviderRegister {},
-    ));
-    handshake
+    handshake = handshake
+        .announce_event(Event::ExtensionContextProviderRegister(
+            ExtensionContextProviderRegister {},
+        ))
         .announce_event(Event::ExtPromptFragmentPublish(ExtPromptFragmentPublish {
             fragment: shell_cwd_prompt_fragment(),
         }))
-        .publish_actions(shell_action_schema())
+        .publish_actions(shell_action_schema());
+    for event in build_global_startup_events() {
+        handshake = handshake.announce_event(event);
+    }
+    handshake
         .ready_message("filesystem and shell tools ready")
         .run(&mut writer)?;
 
@@ -593,11 +596,23 @@ where
                 // Replay-marked frames re-send historical facts to late
                 // subscribers. Execution triggers are skipped on replay so
                 // history does not re-run side effects; metadata-bearing facts
-                // are folded so cwd state is restored before live readiness.
+                // are folded before the loaded-agent boundary publishes cwd
+                // context and readiness.
                 let is_replay = delivery.is_replay();
                 match delivery.into_event() {
+                    Event::AgentLoaded(loaded) => {
+                        apply_loaded_cwd_metadata(loaded, &tx, &cwd_state);
+                    }
+                    Event::AgentUnloaded(unloaded) => {
+                        lock_manager.release_agent(&unloaded.agent_id);
+                        scheduler.cancel_agent(&unloaded.agent_id);
+                        cwd_state.unset(&unloaded.agent_id);
+                        cwd_state.take_pending_notice(&unloaded.agent_id);
+                        cwd_state.take_pending_cd_result(&unloaded.agent_id);
+                        start_agent_owners.retain(|_, agent_id| agent_id != &unloaded.agent_id);
+                    }
                     Event::AgentStarted(started) => {
-                        apply_started_cwd_metadata(started, &tx, &cwd_state, is_replay);
+                        apply_started_cwd_metadata(started, &cwd_state);
                     }
                     Event::ToolStarted(invoke) => {
                         if is_replay {
@@ -618,30 +633,6 @@ where
                             let (invoke, failure) = *error;
                             send_tool_failure(invoke, failure, &tx);
                         }
-                    }
-                    Event::SessionStarted(started) => {
-                        if is_replay {
-                            continue;
-                        }
-                        dispatch_session_started(started, &tx);
-                    }
-                    Event::SessionAgentLoaded(loaded) => {
-                        if is_replay {
-                            continue;
-                        }
-                        dispatch_session_agent_loaded(loaded, &tx, &cwd_state);
-                    }
-                    Event::SessionAgentUnloaded(unloaded) => {
-                        if is_replay {
-                            continue;
-                        }
-                        lock_manager.release_agent(&unloaded.agent_id);
-                        scheduler.cancel_agent(&unloaded.agent_id);
-                        cwd_state.unset(&unloaded.agent_id);
-                        cwd_state.take_pending_ready(&unloaded.agent_id);
-                        cwd_state.take_pending_notice(&unloaded.agent_id);
-                        cwd_state.take_pending_cd_result(&unloaded.agent_id);
-                        start_agent_owners.retain(|_, agent_id| agent_id != &unloaded.agent_id);
                     }
                     Event::AgentMetadataSet(set) => {
                         if set.key == cwd_state.key()
@@ -704,14 +695,6 @@ where
                                     ));
                                 }
                             }
-                            if let Some(session_id) = cwd_state.take_pending_ready(&agent_id) {
-                                let _ = tx.send(HarnessInputMessage::emit(
-                                    Event::ExtensionContextReady(ExtensionContextReady {
-                                        session_id,
-                                        agent_id,
-                                    }),
-                                ));
-                            }
                         } else if set.key == cwd_state.key() {
                             if is_replay {
                                 continue;
@@ -740,14 +723,6 @@ where
                                         event,
                                         pending_cd.lock_wait_duration_seconds,
                                     )));
-                            }
-                            if let Some(session_id) = cwd_state.take_pending_ready(&agent_id) {
-                                let _ = tx.send(HarnessInputMessage::emit(
-                                    Event::ExtensionContextReady(ExtensionContextReady {
-                                        session_id,
-                                        agent_id,
-                                    }),
-                                ));
                             }
                         }
                     }
@@ -782,21 +757,7 @@ where
                                         pending_cd.lock_wait_duration_seconds,
                                     )));
                             }
-                            if let Some(session_id) = cwd_state.take_pending_ready(&unset.agent_id)
-                            {
-                                let _ = tx.send(HarnessInputMessage::emit(
-                                    Event::ExtensionContextReady(ExtensionContextReady {
-                                        session_id,
-                                        agent_id: unset.agent_id,
-                                    }),
-                                ));
-                            }
                         }
-                    }
-                    Event::SessionShutdown(_) => {
-                        lock_manager.release_all_manual();
-                        scheduler.cancel_all_queued();
-                        start_agent_owners.clear();
                     }
                     Event::StartAgentAccepted(accepted) => {
                         start_agent_owners.insert(accepted.query_id, accepted.agent_id);
@@ -1359,7 +1320,6 @@ fn send_ui_shell_saturated_failure(
     let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
             command_id: cmd.command_id,
-            session_id: cmd.session_id,
             command: cmd.command,
             include_in_context: cmd.include_in_context,
             target_agent_id: cmd.target_agent_id,
@@ -1692,62 +1652,37 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
     }
 }
 
-fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<HarnessInputMessage>) {
-    for event in build_session_started_events(started) {
-        let _ = tx.send(HarnessInputMessage::emit(event));
-    }
-}
-
-fn apply_started_cwd_metadata(
-    started: tau_proto::AgentStarted,
-    tx: &mpsc::Sender<HarnessInputMessage>,
-    cwd_state: &CwdState,
-    is_replay: bool,
-) {
+fn apply_started_cwd_metadata(started: tau_proto::AgentStarted, cwd_state: &CwdState) {
     for item in started.metadata {
         if item.key == cwd_state.key()
             && let CborValue::Text(path) = item.value
         {
             let cwd = PathBuf::from(path);
-            cwd_state.set(started.agent_id.clone(), cwd.clone());
-            if !is_replay {
-                let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
-                    started.agent_id.clone(),
-                    &cwd,
-                )));
-            }
+            cwd_state.set(started.agent_id.clone(), cwd);
         }
     }
 }
 
-fn dispatch_session_agent_loaded(
-    loaded: SessionAgentLoaded,
+fn apply_loaded_cwd_metadata(
+    loaded: tau_proto::AgentLoaded,
     tx: &mpsc::Sender<HarnessInputMessage>,
     cwd_state: &CwdState,
 ) {
-    if let Some(cwd) = cwd_state.get(&loaded.agent_id) {
-        let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
-            loaded.agent_id.clone(),
-            &cwd,
-        )));
-        let _ = tx.send(HarnessInputMessage::emit(Event::ExtensionContextReady(
-            ExtensionContextReady {
-                session_id: loaded.session_id,
-                agent_id: loaded.agent_id,
-            },
-        )));
-        return;
-    }
+    let cwd = cwd_state.get_or_default(&loaded.agent_id);
+    publish_cwd_context_and_ready(tx, loaded.agent_id, &cwd);
+}
 
-    let cwd = CwdState::process_default();
-    cwd_state.set_pending_ready(loaded.agent_id.clone(), loaded.session_id);
-    let _ = tx.send(HarnessInputMessage::emit(Event::AgentMetadataSet(
-        tau_proto::AgentMetadataSet {
-            agent_id: loaded.agent_id,
-            key: cwd_state.key(),
-            value: CborValue::Text(cwd.display().to_string()),
-            inheritable: true,
-        },
+fn publish_cwd_context_and_ready(
+    tx: &mpsc::Sender<HarnessInputMessage>,
+    agent_id: tau_proto::AgentId,
+    cwd: &Path,
+) {
+    let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
+        agent_id.clone(),
+        cwd,
+    )));
+    let _ = tx.send(HarnessInputMessage::emit(Event::ExtensionContextReady(
+        ExtensionContextReady { agent_id },
     )));
 }
 
@@ -1812,7 +1747,7 @@ fn is_echo_tool(_name: &str) -> bool {
     false
 }
 
-fn build_session_started_events(_started: SessionStarted) -> Vec<Event> {
+fn build_global_startup_events() -> Vec<Event> {
     let mut events = Vec::new();
 
     let skill_dirs = session_skill_dirs(std::env::current_dir().ok(), dirs::home_dir());

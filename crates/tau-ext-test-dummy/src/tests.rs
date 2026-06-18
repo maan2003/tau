@@ -25,6 +25,7 @@ fn restart_config(mode: &str) -> HarnessOutputMessage {
             CborValue::Text(mode.to_owned()),
         )]),
         state_dir: None,
+        debug_dir: None,
         secrets: std::collections::BTreeMap::new(),
     })
 }
@@ -186,7 +187,6 @@ fn intercepted_prompt(text: &str) -> HarnessOutputMessage {
                 ctx_id: None,
             },
         )),
-        transient: false,
     })
 }
 

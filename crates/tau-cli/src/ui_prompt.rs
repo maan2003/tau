@@ -5,20 +5,18 @@ use tau_proto::{
 };
 
 /// Default role used when the UI submits a prompt without an explicit selected
-/// role from session state.
+/// role from UI state.
 pub(crate) const DEFAULT_AGENT_ROLE: &str = "senior-engineer";
 
 /// Build the standard user-originated create-agent event used by interactive
 /// chat and one-shot/headless prompt submission paths.
 pub(crate) fn create_user_agent_prompt(
-    session_id: &str,
     role: impl Into<String>,
     prompt: impl Into<String>,
     model_override: Option<tau_proto::ModelId>,
 ) -> Event {
     Event::UiCreateAgent(UiCreateAgent {
         parent_agent: None,
-        session_id: session_id.into(),
         role: role.into(),
         model_override,
         metadata: shell_cwd_metadata(),
@@ -58,7 +56,7 @@ mod tests {
     fn create_user_agent_prompt_preserves_model_override() {
         let model: tau_proto::ModelId = "test/override".parse().expect("model id");
         let Event::UiCreateAgent(req) =
-            create_user_agent_prompt("s1", "engineer", "hello", Some(model.clone()))
+            create_user_agent_prompt("engineer", "hello", Some(model.clone()))
         else {
             panic!("expected create agent event");
         };

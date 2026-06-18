@@ -24,4 +24,4 @@ The current implementation has a socket reader thread, renderer path, redraw/tim
 
 ## Command paths
 
-Interactive chat, `tau dev send`, and `--prompt-stdin` should share socket/session setup and prompt construction wherever possible. Mode-specific command capabilities are fine, but avoid duplicating protocol handshakes or slash-command parsing in separate paths.
+Interactive chat, `tau dev send`, and `--prompt-stdin` should share socket setup and prompt construction wherever possible. Mode-specific command capabilities are fine, but avoid duplicating protocol handshakes or slash-command parsing in separate paths.

@@ -34,9 +34,9 @@ for control of the emit/intercept pipeline.
   `ui.command_error`. Expected skill-name collisions are trace-level notices.
   Extension-authored skill diagnostics are sanitized to `extension.notice`; add a
   first-party kind here only when the harness owns and preserves it.
-- **`harness.session_dir`** — Announces the current session directory for UIs
-  and extensions that need to present or inspect session-local paths.
 - **`harness.ui_dir`** — Announces the UI state directory for UI-facing helpers.
+- **`harness.started`** — Announces the typed run id for this harness
+  process. Participants can use the id to correlate per-run debug artifacts.
 - **`harness.models_available`** — The full provider-published model list
   as `provider/model_id` strings. Re-emitted when provider snapshots change.
 - **`harness.roles_available`** — Snapshot of roles currently available from
@@ -58,39 +58,22 @@ for control of the emit/intercept pipeline.
   valid for the selected role's resolved model. Empty means no resolved model;
   `[off]` means the provider does not support thinking summaries.
 
-## Session (harness session tracker)
-
-Emitted by the harness's session tracker. The durable session log is a
-membership journal, not a transcript.
-
-- **`session.started`** — Must-pass immutable runtime lifecycle fact: the
-  harness created or switched to a session. Carries `session_id` and a reason
-  (`initial` startup, `new` via `/session new`, `resume` of an existing session).
-  Extensions react with per-session setup and reply with
-  `extension.context_ready`. Interceptors cannot drop or rewrite it.
-- **`session.shutdown`** — Must-pass immutable runtime lifecycle fact: the
-  harness is leaving the current session, emitted before `session.started` for
-  the next one. Extensions flush or drop per-session state. Interceptors cannot
-  drop or rewrite it.
-- **`session.agent_loaded`** — Durable membership fact: a global agent is
-  loaded into this session. The session log folds these facts to determine the
-  current loaded-agent set on resume. Interceptors cannot drop or rewrite this
-  immutable membership fact.
-- **`session.agent_unloaded`** — Durable membership fact: a global agent is no
-  longer loaded into this session. Interceptors cannot drop or rewrite this
-  immutable membership fact.
-
-Historical load/unload facts are not transcript history. On reconnect/resume the
-harness announces the current loaded-agent snapshot, then replays each loaded
-agent log once.
-
 ## Agent transcript and prompt lifecycle
 
 Emitted mostly by the harness as it routes UI requests into concrete global
 agents. Durable transcript facts are written to the owning agent log, not the
-session log. `agent.started` is the durable, immutable creation fact at the start
-of an agent log.
+harness runtime state. `agent.started` is the durable, immutable creation fact
+at the start of an agent log.
 
+- **`agent.load`** — Request to load an existing durable agent into this harness.
+- **`agent.loading`** — Transient fact that an existing durable agent is being
+  replayed before it becomes fully loaded.
+- **`agent.loaded`** — Transient fact that a durable agent is available for
+  prompt routing in this harness after durable transcript catch-up. Metadata is
+  reconstructed from `agent.started` plus `agent.metadata_*` facts, not carried
+  on this boundary.
+- **`agent.unloaded`** — Transient fact that a durable agent is no longer
+  available for prompt routing in this harness.
 - **`agent.prompt_submitted`** — A `ui.prompt_submitted` request was accepted
   into a concrete agent transcript. Carries `agent_id`, text, originator, and
   user/internal message class.
@@ -103,7 +86,7 @@ of an agent log.
   harness (e.g. `!`-shell command output, AGENTS.md preamble). Folds into the
   agent tree like a real user prompt.
 - **`agent.prompt_created`** — The harness assembled a provider prompt and
-  assigned it an `agent_prompt_id`; payload carries `agent_id`, `session_id`,
+  assigned it an `agent_prompt_id`; payload carries `agent_id`,
   `system_prompt`, materialized `context`, tools or `tools_ref`, model, model
   params, tool choice, originator/provenance, legacy cache-sharing flag,
   optional UI correlation id, and optional compaction summary. First-party
@@ -131,8 +114,9 @@ of an agent log.
   flag copied to child agents at creation time. Extensions use these facts for
   extension-visible state such as `ext_core-shell_cwd`.
 - **`agent.started`** — Durable creation fact for an agent. It carries optional
-  `parent_agent`; inheritable metadata from that parent is copied into the new
-  agent after this fact commits and before the agent is announced loaded.
+  `parent_agent` and initial metadata; inheritable metadata from that parent is
+  copied into the new agent during the start sequence for consumers to fold
+  before the metadata-free `agent.loaded` boundary.
 - **`agent.head_moved`** — Durable fact that changes an agent's selected tree
   head after navigation, so future prompts branch from the requested node.
 
@@ -260,12 +244,11 @@ harness/agent.
   AGENTS.md file and is shipping its contents eagerly so the harness
   can inject them without a tool round-trip.
 - **`extension.context_provider_register`** — The extension registers a named
-  context provider that can publish agent/session context updates.
+  context provider that can publish agent context updates.
 - **`extension.context_ready`** — The extension finished publishing
-  refreshed prompt context for one session (the reply to
-  `session.started`).
+  refreshed prompt context for one agent.
 - **`extension.agent_context_publish`** — The extension publishes context for a
-  particular agent/session context provider slot.
+  particular agent/context provider slot.
 - **`extension.prompt_fragment_publish`** — The extension publishes a prompt
   fragment contribution that prompt assembly may include according to config.
 - **`extension.prompt_submit_request`** — An extension request to submit a
@@ -288,7 +271,7 @@ harness/agent.
 - **`agent.message_sent`** — Harness-owned immutable sender-side projection for
   a short message an agent sent to another agent or to the user. Carries stable
   `message_id`, `sender_id`, recipient (`agent_id` or `user`), and `message`; it
-  does not carry a `session_id`.
+  is independent of the recipient's local UI state.
 - **`agent.message_received`** — Harness-owned immutable recipient-side
   projection for an agent-to-agent message. Carries the same stable
   `message_id`, the `sender_id`, the receiving `recipient_id`, and `message`;
@@ -305,7 +288,7 @@ harness/agent.
   extension-owned dotted name and CBOR payload. The nested name must have
   non-empty category and call segments, and must not use reserved first-party
   categories (`tool`, `action`, `agent`, `extension`, `provider`, `harness`,
-  `ui`, `shell`, `session`, or `term`). The harness
+  `ui`, `shell`, or `term`). The harness
   routes it like any other event. It is runtime/debug-log state unless a typed
   semantic event is added for a durable use case.
 
@@ -315,7 +298,7 @@ Emitted by attached UI clients (tau-cli-term, etc.) to express user
 intent.
 
 - **`ui.prompt_submitted`** — The user submitted a prompt request for an
-  existing agent: session id, text, required `agent_id`, originator (defaults to
+  existing agent: text, required `agent_id`, originator (defaults to
   `user`; reused for extension-driven side prompts), and user/internal message
   class. The harness translates accepted requests into durable
   `agent.prompt_submitted` facts.
@@ -323,13 +306,13 @@ intent.
   current draft buffer. Transient — used for "user is alive" signals
   (e.g. notification idle reset), not persisted.
 - **`ui.focus_changed`** — Attached terminal UI reports focus gained/lost for a
-  session when terminal focus events are available. Transient; used for idle and
+  terminal when focus events are available. Transient; used for idle and
   notification behavior, not transcript truth.
 - **`ui.role_select`** — User requests a role switch. The harness resolves
   the role to a provider-published model at runtime.
 - **`ui.agent_model_select`** — User requests a model override for a loaded
   agent. `agent_id` may be omitted only when the harness can unambiguously infer
-  the target from session selection/default state.
+  the target from current/default agent state.
 - **`ui.role_update`** — User changes or deletes a role. Wire actions are
   `delete`, `set_model`, `set_effort`, `set_verbosity`,
   `set_thinking_summary`, `set_service_tier`, `set_compaction_threshold`,
@@ -342,10 +325,8 @@ intent.
 - **`ui.detach_request`** — UI is detaching but wants the daemon to keep
   running so a later `tau --attach` can reconnect.
 - **`ui.shell_command`** — User submitted a `!` (in-context) or `!!`
-  (UI-only) shell command. Carries command id, command, session id,
+  (UI-only) shell command. Carries command id, command, and
   `include_in_context` flag.
-- **`ui.switch_session`** — User wants to switch to a different session
-  in the same daemon, with `new`/`resume` reason.
 - **`ui.create_agent`** — UI requests creation of a durable user-owned agent,
   optionally with the first prompt to append after context loads. The request
   carries the role, initial metadata, optional parent agent, optional prompt
@@ -357,13 +338,13 @@ intent.
   agent head to that node so the next prompt branches off there.
 - **`ui.compact_request`** — User typed `/compact`: request provider-side
   compaction for the selected or targeted agent before the next prompt.
-- **`ui.cancel_prompt`** — User requests cancellation of a prompt by session,
-  optional target agent, and optional prompt id; applies to active or queued
+- **`ui.cancel_prompt`** — User requests cancellation by optional target agent
+  and optional prompt id; applies to active or queued
   prompt work when still present.
 - **`ui.recall_queued_prompt`** — User requests removing the most recently queued
   prompt from the selected or targeted agent so it can be edited/resubmitted.
 - **`ui.set_agent_display_name`** — User requests a durable display-name update
-  for a known agent in the session; accepted requests produce
+  for a known agent; accepted requests produce
   `agent.display_name_set`.
 
 ## Shell (shell extension, user-initiated commands)
@@ -374,12 +355,12 @@ commands) in response to a `ui.shell_command`.
 - **`shell.command_progress`** — A chunk of stdout/stderr from a running
   user-initiated shell command, correlated by `command_id`. Transient.
 - **`shell.command_finished`** — A user-initiated shell command exited
-  or was cancelled. Echoes session id, command, optional target agent id,
-  and `include_in_context` flag from the originating request, plus the
+  or was cancelled. Echoes command, optional target agent id, and
+  `include_in_context` flag from the originating request, plus the
   truncated combined output, exit code, and `cancelled` flag. When
   `include_in_context` is set, the harness injects the output only into the
-  validated target agent for that session. A wrong-session, unknown, or
-  non-live target is ignored; targetless output goes to the unambiguous current
+  validated target agent. An unknown or non-live target is ignored; targetless
+  output goes to the unambiguous current
   user agent, creating one if needed, and ambiguous targetless candidates are
   refused.
 

@@ -97,7 +97,6 @@ fn pool_routes_each_thread_to_its_own_socket_and_reuses_them() {
     // Two turns on cache bucket A, interleaved with one on cache bucket B.
     // Expected: 2 upgrades total (one per prompt-cache bucket), 3 turns.
     for agent in ["agent-a", "agent-b", "agent-a"] {
-        let session_id = tau_proto::SessionId::new("session-pool-routing");
         let agent_id = tau_proto::AgentId::parse(agent).expect("agent id");
         let request = PromptPayload {
             system_prompt: "sys",
@@ -107,7 +106,6 @@ fn pool_routes_each_thread_to_its_own_socket_and_reuses_them() {
             tool_choice: tau_proto::ToolChoice::default(),
             compaction: None,
             originator: &tau_proto::PromptOriginator::User,
-            session_id: &session_id,
             agent_id: &agent_id,
             share_user_cache_key: false,
         };
@@ -250,7 +248,6 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
         let config = config.clone();
         let pool = pool.clone();
         thread::spawn(move || {
-            let session_id = tau_proto::SessionId::new("same-session");
             let originator = tau_proto::PromptOriginator::User;
             let request = PromptPayload {
                 system_prompt: "sys",
@@ -260,7 +257,6 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
                 tool_choice: tau_proto::ToolChoice::default(),
                 compaction: None,
                 originator: &originator,
-                session_id: &session_id,
                 agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
                 share_user_cache_key: false,
             };
@@ -417,8 +413,6 @@ fn ws_turn_captures_response_id_for_chain_continuation() {
     let mut on_update = |state: &crate::common::StreamState| {
         last_text = state.text.clone();
     };
-
-    let session_id = tau_proto::SessionId::new("session-x");
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
@@ -427,7 +421,6 @@ fn ws_turn_captures_response_id_for_chain_continuation() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -460,8 +453,6 @@ fn ws_upgrade_thread_headers_match_prompt_cache_key() {
     config.supports_prompt_cache_key = true;
     let mut pool = WsPool::new();
     let mut on_update = |_: &crate::common::StreamState| {};
-
-    let session_id = tau_proto::SessionId::new("session-headers");
     let agent_id = tau_proto::AgentId::parse("header-agent").expect("agent id");
     let request = PromptPayload {
         system_prompt: "sys",
@@ -471,7 +462,6 @@ fn ws_upgrade_thread_headers_match_prompt_cache_key() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &session_id,
         agent_id: &agent_id,
         share_user_cache_key: false,
     };
@@ -508,7 +498,6 @@ fn prewarm_warms_cache_without_chaining_next_turn() {
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let mut pool = WsPool::new();
     let mut on_update = |_: &crate::common::StreamState| {};
-    let session_id = tau_proto::SessionId::new("session-prewarm");
     let prewarmed_messages = vec![user_msg("AGENTS.md context")];
     let real_messages = vec![user_msg("AGENTS.md context"), user_msg("actual request")];
 
@@ -520,7 +509,6 @@ fn prewarm_warms_cache_without_chaining_next_turn() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -573,8 +561,6 @@ fn fresh_open_with_previous_response_rebuilds_ws_warmth() {
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let mut pool = WsPool::new();
     let mut on_update = |_: &crate::common::StreamState| {};
-
-    let session_id = tau_proto::SessionId::new("session-fresh");
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
@@ -583,7 +569,6 @@ fn fresh_open_with_previous_response_rebuilds_ws_warmth() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -612,7 +597,6 @@ fn fresh_open_with_previous_response_preserves_compacted_items() {
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let mut pool = WsPool::new();
     let mut on_update = |_: &crate::common::StreamState| {};
-    let session_id = tau_proto::SessionId::new("session-compacted");
     let messages = vec![
         tau_proto::ContextItem::Compaction(tau_proto::OpaqueProviderItem(
             crate::common::json_to_cbor(&serde_json::json!({
@@ -631,7 +615,6 @@ fn fresh_open_with_previous_response_preserves_compacted_items() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -679,7 +662,6 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
 
     // Turn 1: opens conn-0, returns a `response_id` the harness
     // would chain off for turn 2.
-    let session_id = tau_proto::SessionId::new("session-die");
     let req1 = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
@@ -688,7 +670,6 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -714,7 +695,6 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -1007,7 +987,6 @@ fn pool_key_for(
     originator: tau_proto::PromptOriginator,
     share_user_cache_key: bool,
 ) -> PoolKey {
-    let session_id = tau_proto::SessionId::new("test-session");
     let agent_id = tau_proto::AgentId::parse(agent).expect("agent id");
     let request = PromptPayload {
         system_prompt: "sys",
@@ -1017,7 +996,6 @@ fn pool_key_for(
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &originator,
-        session_id: &session_id,
         agent_id: &agent_id,
         share_user_cache_key,
     };
@@ -1050,7 +1028,6 @@ fn run_turn_for_agent(
     agent: &str,
     on_update: &mut impl FnMut(&crate::common::StreamState),
 ) {
-    let session_id = tau_proto::SessionId::new(session);
     let agent_id = tau_proto::AgentId::parse(agent).expect("agent id");
     let request = PromptPayload {
         system_prompt: "sys",
@@ -1060,7 +1037,6 @@ fn run_turn_for_agent(
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &session_id,
         agent_id: &agent_id,
         share_user_cache_key: false,
     };
@@ -1079,11 +1055,10 @@ fn run_shared_turn(
 fn run_shared_turn_for_agent(
     pool: &SharedWsPool,
     config: &ResponsesConfig,
-    session: &str,
+    _label: &str,
     agent: &str,
     agent_prompt_id: &str,
 ) {
-    let session_id = tau_proto::SessionId::new(session);
     let agent_id = tau_proto::AgentId::parse(agent).expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
     let request = PromptPayload {
@@ -1094,7 +1069,6 @@ fn run_shared_turn_for_agent(
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &originator,
-        session_id: &session_id,
         agent_id: &agent_id,
         share_user_cache_key: false,
     };
@@ -1125,6 +1099,7 @@ fn make_config(base_url: &str, account_id: Option<&str>) -> ResponsesConfig {
         supports_websocket: true,
         supports_compaction: false,
         supports_prompt_cache_key: false,
+        debug_dir: None,
         supports_encrypted_reasoning: false,
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::harness::semantic_event_router;
 
 fn assistant_output(text: &str) -> Vec<tau_proto::ContextItem> {
     vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
@@ -28,16 +29,7 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.store
-        .append_session_event(
-            "s1",
-            Some(HARNESS_CONNECTION_ID.into()),
-            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                session_id: "s1".into(),
-                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            }),
-        )
-        .expect("seed session membership");
+    load_test_agent(&mut h, "agent-1");
     h.agent_store
         .append_agent_event(
             "agent-1",
@@ -99,15 +91,15 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
 }
 
 #[test]
-fn late_joining_ui_client_receives_replayed_session_events() {
+fn late_joining_ui_client_receives_replayed_agent_events() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.send_user_message("s1", "hello replay", None)
+    h.send_user_message("hello replay", None)
         .expect("send message");
 
-    let events = loaded_agent_events(&h, "s1");
+    let events = loaded_agent_events(&h);
     assert!(
         events
             .iter()
@@ -121,7 +113,7 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         "final agent response should be in a durable loaded-agent event log"
     );
     assert!(
-        events.iter().all(|event| !event.defaults_to_transient()),
+        events.iter().all(semantic_event_router::should_persist),
         "transient events must not be persisted"
     );
 
@@ -143,7 +135,6 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![
-                EventSelector::Prefix("session.".to_owned()),
                 EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
             ],
@@ -152,23 +143,21 @@ fn late_joining_ui_client_receives_replayed_session_events() {
     .expect("subscribe");
 
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
-    let mut got_session_started = false;
+    let mut got_agent_loaded = false;
     let mut got_agent_started = false;
     let mut got_prompt = false;
     let mut got_response = false;
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline
-        && !(got_session_started && got_agent_started && got_prompt && got_response)
+        && !(got_agent_loaded && got_agent_started && got_prompt && got_response)
     {
         let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
         let inner = frame.into_event_frame();
         match inner {
-            TestProtocolItem::Event(Event::SessionStarted(started))
-                if started.session_id.as_str() == "s1" =>
-            {
-                got_session_started = true;
+            TestProtocolItem::Event(Event::AgentLoaded(_)) => {
+                got_agent_loaded = true;
             }
             TestProtocolItem::Event(Event::AgentStarted(_)) => {
                 got_agent_started = true;
@@ -195,8 +184,8 @@ fn late_joining_ui_client_receives_replayed_session_events() {
     }
 
     assert!(
-        got_session_started,
-        "late UI should replay current session start"
+        got_agent_loaded,
+        "late UI should replay current loaded-agent boundary"
     );
     assert!(
         got_agent_started,
@@ -229,10 +218,10 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
     let mut h = echo_harness(&sp).expect("start");
 
     let past_text = "past extension replay guard";
-    h.send_user_message("s1", past_text, None)
+    h.send_user_message(past_text, None)
         .expect("send past message");
 
-    let durable_events = loaded_agent_events(&h, "s1");
+    let durable_events = loaded_agent_events(&h);
     assert!(
         durable_events.iter().any(|event| {
             matches!(event, Event::ProviderResponseFinished(finished)
@@ -270,7 +259,7 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
     }
 
     let live_text = "future live extension event";
-    h.send_user_message("s1", live_text, None)
+    h.send_user_message(live_text, None)
         .expect("send live message");
 
     {
@@ -293,28 +282,25 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
     h.shutdown().expect("shutdown");
 }
 
-/// A late extension subscribe announces the current session state — the same
-/// `SessionStarted`/`SessionAgentLoaded` snapshot a late UI gets. This is what
-/// lets a respawned extension rebuild per-agent state (e.g. agent context)
-/// after a mid-session crash instead of rejoining with amnesia.
+/// A late extension subscribe announces the same current loaded-agent boundary
+/// a late UI gets. This lets a respawned extension rebuild per-agent state
+/// (e.g. agent context) after a mid-run crash instead of rejoining with
+/// amnesia.
 #[test]
-fn extension_subscribe_announces_current_session_snapshot() {
+fn extension_subscribe_announces_current_loaded_agent_boundary() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    // Load an agent into the session before the extension subscribes.
-    h.send_user_message("s1", "hello snapshot", None)
+    // Load an agent before the extension subscribes.
+    h.send_user_message("hello snapshot", None)
         .expect("send message");
 
     let extension_events = connect_test_tool(&mut h, "respawned-extension");
     h.handle_extension_message(
         "respawned-extension",
         TestMessage::Subscribe(Subscribe {
-            selectors: vec![
-                EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
-                EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
-            ],
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_LOADED)],
         }),
     )
     .expect("extension subscribe");
@@ -322,19 +308,7 @@ fn extension_subscribe_announces_current_session_snapshot() {
     let events = extension_events.lock().expect("sink");
     assert!(
         events.iter().any(|routed| {
-            matches!(
-                peel_inner_event(&routed.frame),
-                Some(Event::SessionStarted(started)) if started.session_id.as_str() == "s1"
-            )
-        }),
-        "late extension should be told the current session",
-    );
-    assert!(
-        events.iter().any(|routed| {
-            matches!(
-                peel_inner_event(&routed.frame),
-                Some(Event::SessionAgentLoaded(loaded)) if loaded.session_id.as_str() == "s1"
-            )
+            matches!(peel_inner_event(&routed.frame), Some(Event::AgentLoaded(_)))
         }),
         "late extension should be told about already-loaded agents",
     );
@@ -372,10 +346,10 @@ fn queued_and_recalled_prompt_lifecycle_is_not_durable() {
         }),
     );
 
-    let events = h.store.session_events("s1").expect("session events");
+    let events = loaded_agent_events(&h);
     assert!(
-        events.iter().all(|entry| !matches!(
-            entry.event,
+        events.iter().all(|event| !matches!(
+            event,
             Event::AgentPromptQueued(_) | Event::AgentPromptRecalled(_)
         )),
         "cold replay must not resurrect transient queue lifecycle events: {events:?}"
@@ -385,7 +359,7 @@ fn queued_and_recalled_prompt_lifecycle_is_not_durable() {
 }
 
 #[test]
-fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
+fn late_joining_ui_client_replays_final_but_not_stale_queued_agent_events() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -395,7 +369,6 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     let agent_id = h
         .ensure_agent_id_for_agent(&cid)
         .expect("default conversation has an agent id");
-    let session_id = h.agents[&cid].session_id.clone();
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.publish_event(
         None,
@@ -410,7 +383,6 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
         Event::AgentPromptCreated(AgentPromptCreated {
             agent_id: crate::parse_agent_id(&agent_id),
             agent_prompt_id: spid.clone(),
-            session_id: session_id.clone(),
             system_prompt: String::new(),
             context: tau_proto::PromptContext { blocks: Vec::new() }, // Vec::new(),
             tools: Vec::new(),
@@ -675,7 +647,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
         }),
     );
 
-    let durable_events = loaded_agent_events(&h, "s1");
+    let durable_events = loaded_agent_events(&h);
     assert!(
         durable_events.iter().any(|event| {
             matches!(event, Event::ToolBackgroundResult(result)
@@ -769,9 +741,9 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
 #[test]
 fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
     // Extension discovery/context-ready events are runtime setup facts. The
-    // durable replay path now comes from session membership plus loaded-agent
-    // transcripts, so these extension events should neither land in the
-    // membership log nor be replayed from a transcript to late UI clients.
+    // durable replay path now comes from loaded-agent transcripts, so these
+    // extension events should neither land in durable agent logs nor be replayed
+    // from a transcript to late UI clients.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -792,7 +764,6 @@ fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
     h.publish_event(
         Some(&tools_conn),
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
-            session_id: default_session_id().into(),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
         }),
     );
@@ -824,16 +795,13 @@ fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
     )
     .expect("subscribe");
 
-    let session_events = h
-        .store
-        .session_events(h.current_session_id.as_str())
-        .expect("events");
+    let durable_events = loaded_agent_events(&h);
     assert!(
-        session_events.iter().all(|e| !matches!(
-            &e.event,
+        durable_events.iter().all(|event| !matches!(
+            event,
             Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_)
         )),
-        "runtime extension setup must not be persisted in the session membership log"
+        "runtime extension setup must not be persisted in durable agent history"
     );
 
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
@@ -883,9 +851,9 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    append_user_message_via_event(&mut h, "s1", "first");
+    append_user_message_via_event(&mut h, "first");
 
-    let spid1 = h.send_prompt_to_agent("s1");
+    let spid1 = send_prompt_to_test_agent(&mut h);
     h.handle_provider_response_finished(ProviderResponseFinished {
         agent_prompt_id: spid1,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -902,8 +870,8 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     })
     .expect("persist agent response");
 
-    append_user_message_via_event(&mut h, "s1", "second");
-    let spid2 = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "second");
+    let spid2 = send_prompt_to_test_agent(&mut h);
     let prompt2 = read_prompt_created(&h, &spid2);
     let serialized = serde_json::to_string(&prompt2.context.flatten()).expect("json");
     assert!(
@@ -915,23 +883,24 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
 }
 
 #[test]
-fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
+fn replay_emits_metadata_events_before_loaded_boundary() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     {
-        let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-        let mut sessions = tau_core::SessionStore::open(&sessions_dir).expect("session store");
-        sessions
-            .append_session_event(
-                "s1",
+        let mut agents = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+        agents
+            .append_agent_event(
+                "agent-replay-meta",
                 None,
-                Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                    session_id: "s1".into(),
+                Event::AgentStarted(tau_proto::AgentStarted {
                     agent_id: crate::parse_agent_id("agent-replay-meta"),
+                    parent_agent: None,
+                    role: "senior-engineer".to_owned(),
+                    display_name: None,
+                    metadata: Vec::new(),
                 }),
             )
-            .expect("seed session membership");
-        let mut agents = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+            .expect("seed agent start");
         agents
             .append_agent_event(
                 "agent-replay-meta",
@@ -958,14 +927,18 @@ fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
             .expect("seed latest metadata");
     }
 
-    let mut h = echo_harness_for("s1", &sp).expect("resume");
+    let mut h = echo_harness_for(&sp).expect("resume");
+    h.handle_agent_load(tau_proto::AgentLoad {
+        agent_id: crate::parse_agent_id("agent-replay-meta"),
+    })
+    .expect("load agent");
     let sink = connect_test_client(&mut h, "metadata-ui", tau_proto::ClientKind::Ui);
     h.handle_client_event(
         "metadata-ui",
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
-                EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_LOADED),
             ],
         })),
     )
@@ -994,16 +967,11 @@ fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
         .position(|event| {
             matches!(
                 event,
-                Event::SessionAgentLoaded(loaded)
-                    if loaded.agent_id.as_str() == "agent-replay-meta"
+                Event::AgentLoaded(loaded) if loaded.agent_id.as_str() == "agent-replay-meta"
             )
         })
-        .expect("session loaded replayed");
+        .expect("agent.loaded replayed");
     assert!(metadata_index < loaded_index);
-    assert!(replayed.iter().all(|event| !matches!(
-        event,
-        Event::AgentMetadataSet(set) if set.value == CborValue::Text("/first".to_owned())
-    )));
 
     h.shutdown().expect("shutdown");
 }

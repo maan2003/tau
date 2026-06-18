@@ -24,8 +24,8 @@ use crate::tool_render::{
     extension_status_block, extract_diff, format_token_count, pending_tool_call_display,
     render_compaction_block, render_delegate_display, render_diff_tool_block,
     render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
-    render_tool_use_state, render_turn_stats_block, session_status_block, streaming_block,
-    synthesize_fallback_display, system_loaded_block, tool_duration_suffix, ui_dir_block,
+    render_tool_use_state, render_turn_stats_block, streaming_block, synthesize_fallback_display,
+    system_loaded_block, tool_duration_suffix, ui_dir_block,
 };
 
 pub(crate) const UI_IO_MEDIUM_BYTES_PER_SEC: u64 = 10 * 1024;
@@ -119,13 +119,10 @@ pub(crate) struct EventRenderer {
     /// Live extension blocks keyed by instance_id. Shown in
     /// above_active while starting, moved to history when ready.
     extension_blocks: HashMap<tau_proto::ExtensionInstanceId, tau_cli_term::BlockId>,
-    /// Extensions that are already up in this daemon. `/session new` starts a
-    /// fresh session, but these processes are intentionally kept.
+    /// Extensions that are already up in this daemon.
     ready_extensions: HashSet<String>,
     /// Persistent status bar block showing the current model + effort.
     model_status_block: Option<tau_cli_term::BlockId>,
-    /// Current session id, rendered as the last status-bar element.
-    current_session_id: Option<tau_proto::SessionId>,
     /// Live history of completed diff-capable tool blocks plus the data
     /// needed to re-render them. `/set show-diff` flips
     /// `diffs_expanded` and walks this list calling `set_block` so
@@ -267,7 +264,7 @@ pub(crate) struct EventRenderer {
     /// Symbol shown before submitted prompts in the transcript.
     submitted_prompt_symbol: String,
     /// Shared flag telling the input loop whether Tau knows about
-    /// in-flight agent/session work. Updated before side-conversation
+    /// in-flight agent work. Updated before side-conversation
     /// filtering so sub-agent activity protects Ctrl-D too.
     agent_in_progress: Arc<AtomicBool>,
     /// Detailed lifecycle bookkeeping backing [`Self::agent_in_progress`].
@@ -992,28 +989,6 @@ fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<ToolCallIte
 }
 
 impl EventRenderer {
-    #[cfg(test)]
-    pub(crate) fn new(
-        handle: tau_cli_term::TermHandle,
-        completion_data: tau_cli_term::CompletionData,
-        theme: tau_themes::Theme,
-    ) -> Self {
-        // Tests pass a state_dir of None so toggles never touch the
-        // user's real `~/.local/state/tau/cli.json`.
-        Self::new_with_state(
-            handle,
-            completion_data,
-            theme,
-            tau_config::settings::CliState::default(),
-            tau_config::settings::TauDirs {
-                config_dir: None,
-                state_dir: None,
-            },
-            ">".to_string(),
-            ">".to_string(),
-        )
-    }
-
     pub(crate) fn new_with_state(
         handle: tau_cli_term::TermHandle,
         completion_data: tau_cli_term::CompletionData,
@@ -1053,7 +1028,6 @@ impl EventRenderer {
             extension_blocks: HashMap::new(),
             ready_extensions: HashSet::new(),
             model_status_block: None,
-            current_session_id: None,
             diff_blocks: Vec::new(),
             diffs_expanded: state.show_diff,
             show_thinking: state.show_thinking,
@@ -1139,16 +1113,6 @@ impl EventRenderer {
 
     pub(crate) fn current_agent_state(&self) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
         self.current_agent_state.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn tool_agent_for_test(&self, call_id: &str) -> Option<String> {
-        self.tool_agents.get(call_id).cloned()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn agent_id_for_event_for_test(&self, event: &Event) -> Option<String> {
-        self.agent_id_for_event(event)
     }
 
     pub(crate) fn switch_agent(&mut self, agent_id: String) {
@@ -1423,9 +1387,9 @@ impl EventRenderer {
         self.editor_context.clone()
     }
 
-    /// Returns a shared flag that is true while any agent/session work
+    /// Returns a shared flag that is true while any agent work
     /// is in flight. The input loop uses it to keep Ctrl-D from
-    /// terminating an active session accidentally.
+    /// terminating active work accidentally.
     pub(crate) fn agent_in_progress_state(&self) -> Arc<AtomicBool> {
         self.agent_in_progress.clone()
     }
@@ -1933,7 +1897,6 @@ impl EventRenderer {
         let status_style = themed.add_style(names::MODEL_STATUS);
         let model_style = themed.add_style(names::STATUS_MODEL);
         let role_style = themed.add_style(names::STATUS_ROLE);
-        let session_style = themed.add_style(names::STATUS_SESSION);
         let effort_style = themed.add_style(names::STATUS_EFFORT);
         let verbosity_style = themed.add_style(names::STATUS_VERBOSITY);
         let service_tier_style = themed.add_style(names::STATUS_SERVICE_TIER);
@@ -1947,14 +1910,6 @@ impl EventRenderer {
         let mut needs_space = false;
         let mut right_needs_space = false;
 
-        if let Some(session_id) = self.current_session_id.as_ref() {
-            push_status_chip(
-                &mut themed,
-                session_style,
-                &mut needs_space,
-                format!("&{session_id}"),
-            );
-        }
         match (
             self.current_agent_id.as_deref(),
             self.current_role.as_deref(),
@@ -1978,13 +1933,12 @@ impl EventRenderer {
                 &mut needs_space,
                 format!("={model}"),
             ),
-            (None, None, None) if self.current_session_id.is_none() => push_status_chip(
+            (None, None, None) => push_status_chip(
                 &mut themed,
                 status_style,
                 &mut needs_space,
                 "no role selected".to_owned(),
             ),
-            (None, None, None) => {}
         }
         let show_effort = self.baseline_params.map_or_else(
             || {
@@ -2288,7 +2242,6 @@ impl EventRenderer {
                     .finish_background_tool(&cancelled.call_id);
             }
             Event::UiCancelPrompt(_) => self.agent_activity.clear_optimistic_submissions(),
-            Event::SessionShutdown(_) => self.agent_activity.clear(),
             _ => {}
         }
     }
@@ -2448,11 +2401,6 @@ impl EventRenderer {
             "system-disconnect",
             themed_block(&self.theme, names::SYSTEM_DISCONNECT, reason),
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn handle(&mut self, event: &Event) {
-        self.handle_recorded_at(event, UnixMicros::now());
     }
 
     pub(crate) fn handle_recorded_at(&mut self, event: &Event, recorded_at: UnixMicros) {
@@ -2747,9 +2695,6 @@ impl EventRenderer {
                     self.mark_agent_suspended(&agent_id);
                 }
             }
-            Event::SessionAgentUnloaded(unloaded) => {
-                self.mark_agent_suspended(unloaded.agent_id.as_str());
-            }
             Event::HarnessAgentContextUsageChanged(changed) => {
                 self.remember_agent(changed.agent_id.to_string());
             }
@@ -2767,7 +2712,7 @@ impl EventRenderer {
         }
     }
 
-    fn agent_id_for_event(&self, event: &Event) -> Option<String> {
+    pub(crate) fn agent_id_for_event(&self, event: &Event) -> Option<String> {
         match event {
             Event::ToolRequest(request) => self.tool_agents.get(request.call_id.as_str()).cloned(),
             Event::ToolStarted(started) => self
@@ -2887,8 +2832,7 @@ impl EventRenderer {
         // point, so side-conversation events are rendered into their own hidden
         // or visible state instead of being dropped.
 
-        if self.handle_session_events(event)
-            || self.handle_prompt_events(event)
+        if self.handle_prompt_events(event)
             || self.handle_provider_response_events(event)
             || self.handle_tool_events(event, recorded_at)
             || self.handle_shell_events(event)
@@ -3040,21 +2984,6 @@ impl EventRenderer {
             (tau_config::settings::ShowMessages::AllSummary, false) => MessageRenderMode::Summary,
             (tau_config::settings::ShowMessages::AllFull, _) => MessageRenderMode::Full,
         }
-    }
-
-    fn handle_session_events(&mut self, event: &Event) -> bool {
-        match event {
-            Event::SessionStarted(started) => {
-                self.handle_existing_session_started(started);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn handle_existing_session_started(&mut self, started: &tau_proto::SessionStarted) {
-        self.current_session_id = Some(started.session_id.clone());
-        self.render_model_status();
     }
 
     fn handle_prompt_events(&mut self, event: &Event) -> bool {
@@ -4446,7 +4375,7 @@ impl EventRenderer {
                 self.handle.remove_block(state.block_id);
                 state.include_in_context
             } else {
-                // Session replay may contain only the durable terminal event. Render
+                // Agent transcript replay may contain only the durable terminal event. Render
                 // it from the self-contained payload instead of dropping it.
                 finished.include_in_context
             };
@@ -4641,12 +4570,6 @@ impl EventRenderer {
                 }
                 true
             }
-            Event::HarnessSessionDir(session_dir) => {
-                if self.notice_visible(tau_proto::NoticeLevel::Info, false) {
-                    self.handle_harness_session_dir(session_dir);
-                }
-                true
-            }
             Event::HarnessUiDir(ui_dir) => {
                 if self.notice_visible(tau_proto::NoticeLevel::Info, false) {
                     self.handle
@@ -4660,18 +4583,6 @@ impl EventRenderer {
             }
             _ => false,
         }
-    }
-
-    fn handle_harness_session_dir(&mut self, session_dir: &tau_proto::HarnessSessionDir) {
-        self.handle.print_output(
-            "session-dir",
-            session_status_block(
-                &self.theme,
-                &session_dir.path,
-                "/",
-                session_dir.status.as_str(),
-            ),
-        );
     }
 
     fn handle_harness_role_events(&mut self, event: &Event) -> bool {

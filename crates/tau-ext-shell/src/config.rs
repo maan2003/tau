@@ -1,4 +1,4 @@
-//! Per-session configuration for the shell/file extension.
+//! Configuration for the shell/file extension.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

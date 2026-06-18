@@ -2,9 +2,9 @@ use std::io::Write;
 
 use tau_proto::{HarnessInputMessage, HarnessOutputMessage};
 
-use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
+use crate::CliError;
+use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_run, resolve_daemon};
 use crate::render_request::RenderResponse;
-use crate::{CliError, mint_short_id};
 
 pub(crate) fn run_print_prompt(
     role: &str,
@@ -50,11 +50,10 @@ fn launch_render_daemon(
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<DaemonHandle, CliError> {
-    let session_id = mint_short_id(session_prefix);
-    let output = daemon_output_for_session(&session_id)?;
+    let _ = session_prefix;
+    let output = daemon_output_for_run()?;
     resolve_daemon(
         false,
-        &session_id,
         Some(output),
         Some(role),
         DaemonCliOverrides {

@@ -11,7 +11,7 @@ struct AgentContextContribution {
     value: tau_proto::AgentContextValue,
 }
 
-/// Store for session-scoped JSON context contributions keyed by agent.
+/// Store for per-agent JSON context contributions keyed by agent.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentContextStore {
     /// `agent_id -> context key -> contributor connection -> contribution`.
@@ -59,7 +59,8 @@ impl AgentContextStore {
         });
     }
 
-    /// Remove all session-scoped context contributions.
+    /// Remove all agent-scoped context contributions.
+    #[cfg(test)]
     pub(crate) fn clear(&mut self) {
         self.by_agent.clear();
     }

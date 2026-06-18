@@ -337,7 +337,7 @@ fn build_system_prompt_exposes_agent_context_to_handlebars() {
 }
 
 /// Prompt fragments are Handlebars templates rendered against the same
-/// prompt context as role templates, including extension-published session
+/// prompt context as role templates, including extension-published agent
 /// context.
 #[test]
 fn prompt_fragment_renders_agent_context_variable() {
@@ -670,7 +670,7 @@ pub(crate) fn assemble_conversation_from(
 /// diagnostic output.
 #[test]
 fn assemble_conversation_includes_tool_error_details() {
-    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("session-1"), &[]);
+    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("agent-1"), &[]);
     tree.apply_event(&user_prompt("build firefox"));
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
@@ -757,7 +757,7 @@ fn assemble_conversation_includes_tool_error_details() {
 /// through a separate side channel.
 #[test]
 fn assemble_conversation_preserves_agent_phase() {
-    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("session-1"), &[]);
+    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("agent-1"), &[]);
     tree.apply_event(&user_prompt("hi"));
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
@@ -894,7 +894,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
 /// future fold refactor can't silently drop them on the floor.
 #[test]
 fn assemble_conversation_replays_reasoning_items_before_text() {
-    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("session-1"), &[]);
+    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("agent-1"), &[]);
     tree.apply_event(&user_prompt("hi"));
     let blob = serde_json::json!({
         "type": "reasoning",
@@ -940,7 +940,7 @@ fn assemble_conversation_replays_reasoning_items_before_text() {
 /// before any function_call items that follow.
 #[test]
 fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
-    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("session-1"), &[]);
+    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("agent-1"), &[]);
     tree.apply_event(&user_prompt("go"));
     let blob = serde_json::json!({
         "type": "reasoning",

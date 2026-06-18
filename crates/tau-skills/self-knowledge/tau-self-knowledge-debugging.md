@@ -1,9 +1,9 @@
 ---
 name: tau-self-knowledge-debugging
 description: >
-  Use this skill when debugging Tau sessions, daemons, runtime behavior, socket
+  Use this skill when debugging Tau runs, daemons, runtime behavior, socket
   attachment, replay, logs, provider requests, token/cache usage, event ordering,
-  or persisted state under Tau config, state, session, and runtime directories.
+  or persisted state under Tau config, state, agent, debug, and runtime directories.
 advertise: false
 ---
 
@@ -13,34 +13,33 @@ Tau follows the XDG directories:
 
 - Config: `~/.config/tau/`
   - `cli.yaml`, `cli.d/*.yaml` — CLI display and key-binding config.
-  - `harness.yaml`, `harness.d/*.yaml` — harness, agent roles/defaults, extension, and session-retention config.
+  - `harness.yaml`, `harness.d/*.yaml` — harness, agent roles/defaults, extensions, tools, and agent/debug-retention config.
 - State: `~/.local/state/tau/` on Linux.
   - If no XDG state dir is available, inspection defaults may fall back to `.tau/state`.
   - `cli.json` — persisted CLI runtime toggles such as show-diff, show-thinking, show-tools, turn stats.
   - `policy.cbor` — persisted socket-client policy approvals.
   - `auth.d/<provider>.json` — per-provider credentials.
   - `auth.json` — legacy whole-file credentials, read for backwards compatibility.
-- Sessions: `~/.local/state/tau/sessions/<session_id>/`
-  - `events.cbor` — durable per-session membership journal (`session.agent_loaded` / `session.agent_unloaded`).
-  - `meta.json` — session metadata such as creation time and last-touched time.
-  - `lock` — flock used while the daemon has the session loaded for writing.
-  - `events.jsonl` — debug runtime event log for the session. It mirrors committed bus events and is not authoritative replay state.
-  - `debug/provider-requests/*-{request,response}.json` — exact upstream Responses request bodies plus parsed/provider-terminal response captures written by provider extensions, keyed by timestamp, `agent_prompt_id`, and transport. These include full prompt content, tool results, and model outputs, but not auth headers/API keys.
-  - `logs/tau-harness.log` — harness daemon stderr/tracing for the session.
-  - `logs/<extension>.log` — stderr for each spawned extension.
 - Agents: `~/.local/state/tau/agents/<agent_id>/`
   - `events.cbor` — durable agent transcript log and source of truth for replaying that agent tree.
   - `meta.json` — agent metadata such as cwd, creation time, and latest prompt preview.
   - `lock` — flock used while the daemon has the agent loaded for writing.
-- Runtime: `${XDG_RUNTIME_DIR}/tau/<pid>/` or `/tmp/tau-$USER/<pid>/`
-  - `tau.sock` — Unix socket for clients.
-  - `tau.dir` — project root marker used for daemon discovery.
-  - `tau.pid` — daemon process id.
-  - `tau.session_id` — session id bound to the daemon.
+- Debug runs: `~/.local/state/tau/debug/<run_id>/`
+  - `events.jsonl` — append-only harness runtime event log for the run. It mirrors committed bus events and is not authoritative replay state.
+  - `provider-requests/*-{request,response}.json` — exact upstream Responses request bodies plus parsed/provider-terminal response captures written by provider extensions, keyed by timestamp, `agent_prompt_id`, and transport. These include full prompt content, tool results, and model outputs, but not auth headers/API keys.
+  - `logs/<extension>.log` — stderr for each spawned extension.
+- Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`
+  - `<pid>.sock` — Unix socket for clients.
+  - `<pid>.json` — daemon discovery metadata, including project root and pid.
 
 ## Event logs are usually the first place to look
 
-For session misbehavior, inspect `~/.local/state/tau/sessions/<session_id>/events.jsonl` early. It is append-only JSONL meant for post-mortems and contains the harness-level event stream, including transient events that are not in durable session or agent replay. This makes it better than semantic `events.cbor` files when debugging missing UI updates, streaming updates, tool progress, connection churn, ordering issues, or short-lived states.
+For runtime, UI, or daemon misbehavior, inspect the current run's `events.jsonl`
+early. It is append-only JSONL meant for post-mortems and contains the
+harness-level event stream, including transient events that are not in durable
+agent replay. This makes it better than semantic `events.cbor` files when
+debugging missing UI updates, streaming updates, tool progress, connection
+churn, ordering issues, or short-lived states.
 
 Each debug log line includes fields such as:
 
@@ -50,63 +49,73 @@ Each debug log line includes fields such as:
 - `event_name` — protocol event name.
 - `event` — compacted event payload.
 
-Use session `events.cbor` when debugging membership replay, and agent `events.cbor` when debugging transcript/tree reconstruction. Use `events.jsonl` when debugging runtime behavior.
+Use agent `events.cbor` when debugging transcript/tree reconstruction. Use
+debug-run `events.jsonl` when debugging runtime behavior.
 
-## Drive a running session
+## Drive a running daemon
 
-Use `cargo r -- dev send <session_id> <line...>` to inject user-equivalent input into a running daemon-bound session. This is useful for agent-powered debugging because it goes through the socket protocol and normal UI event path instead of editing persisted logs by hand.
+Use `cargo r -- dev send <line...>` to inject user-equivalent input into a
+running daemon. This is useful for agent-powered debugging because it goes
+through the socket protocol and normal UI event path instead of editing
+persisted logs by hand.
 
 Examples:
 
 ```bash
-cargo r -- dev send <session_id> "normal user message"
-cargo r -- dev send <session_id> /cancel
-cargo r -- dev send <session_id> /model smart
-cargo r -- dev send <session_id> /compact
-cargo r -- dev send <session_id> '!pwd'
+cargo r -- dev send "normal user message"
+cargo r -- dev send /cancel
+cargo r -- dev send /model smart
+cargo r -- dev send /compact
+cargo r -- dev send '!pwd'
 ```
 
-The command requires the session id and finds the matching running daemon via its runtime `tau.session_id` marker. It supports normal prompts, core slash commands, and `!` / `!!` shell-command submissions.
+The command connects to a running harness socket. It supports normal prompts,
+core slash commands, and `!` / `!!` shell-command submissions.
 
 ## Quick inspection workflow
 
-1. Identify the session id. If unsure, list `~/.local/state/tau/sessions/` and sort by `meta.json` or directory mtime.
+1. Identify the current run id from the `harness.started` event, or list recent
+   `~/.local/state/tau/debug/` directories and sort by `events.jsonl` mtime.
 2. Read `events.jsonl` around the failing prompt first.
-3. Cross-check with `logs/tau-harness.log` and extension logs for errors or panics.
-4. Check session/agent `events.cbor` only when the bug involves replay or persisted semantic contents.
-5. Check runtime daemon files under `${XDG_RUNTIME_DIR}/tau/` when the bug involves attach/resume, wrong project daemon selection, or socket connection failures.
-6. For provider/cache-shape bugs, inspect `debug/provider-requests/` for the exact request body Tau sent upstream and the response capture it parsed afterward.
+3. Cross-check extension logs under `logs/` for errors or panics.
+4. Check agent `events.cbor` only when the bug involves replay or persisted semantic contents.
+5. Check runtime daemon files under `${XDG_RUNTIME_DIR}/tau/harnesses/` when the bug involves attach, wrong project daemon selection, or socket connection failures.
+6. For provider/cache-shape bugs, inspect `provider-requests/` for the exact request body Tau sent upstream and the response capture it parsed afterward.
 
 Helpful commands:
 
 ```bash
-# Pretty-print recent debug events for one session.
-tail -n 200 ~/.local/state/tau/sessions/<session_id>/events.jsonl | jq .
+# Pretty-print recent debug events for one run.
+tail -n 200 ~/.local/state/tau/debug/<run_id>/events.jsonl | jq .
 
-# Find recent session directories.
-find ~/.local/state/tau/sessions -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p\n' | sort -n
+# Find recent debug run directories by event-log mtime.
+find ~/.local/state/tau/debug -maxdepth 2 -name events.jsonl -printf '%T@ %h\n' | sort -n
 
-# Inspect logs for one session.
-ls -lah ~/.local/state/tau/sessions/<session_id>/logs
+# Inspect extension logs for one run.
+ls -lah ~/.local/state/tau/debug/<run_id>/logs
 
 # Inspect exact provider request/response captures, if present.
-ls -lah ~/.local/state/tau/sessions/<session_id>/debug/provider-requests
-jq '.previous_response, .body.previous_response_id, .body.input' ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*-sp-6-*-request.json
-jq '.response_id, .cached_tokens, .provider_terminal_event.response.usage, .agent_response_finished.tool_calls' ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*-sp-6-*-response.json
+ls -lah ~/.local/state/tau/debug/<run_id>/provider-requests
+jq '.previous_response, .body.previous_response_id, .body.input' ~/.local/state/tau/debug/<run_id>/provider-requests/*-sp-6-*-request.json
+jq '.response_id, .cached_tokens, .provider_terminal_event.response.usage, .agent_response_finished.tool_calls' ~/.local/state/tau/debug/<run_id>/provider-requests/*-sp-6-*-response.json
 ```
-
 
 ## Token/cache efficiency analysis
 
-When asked to analyze cache hit or token usage efficiency for a session, inspect `events.jsonl` and count `provider.response_finished` events. These events often appear twice: once with `type: "from_connection"` and once with `type: "published"`. Filter to one type, preferably `from_connection`, or dedupe by `(response_id, agent_prompt_id)` to avoid exactly doubling token totals.
+When asked to analyze cache hit or token usage efficiency for a Tau run,
+inspect `events.jsonl` and count `provider.response_finished` events. These
+events often appear twice: once with `type: "from_connection"` and once with
+`type: "published"`. Filter to one type, preferably `from_connection`, or
+dedupe by `(response_id, agent_prompt_id)` to avoid exactly doubling token
+totals.
 
 Useful one-shot summary:
 
 ```bash
 python3 - <<'PY'
 import json, pathlib
-sid = '<session_id>'
-p = pathlib.Path.home() / '.local/state/tau/sessions' / sid / 'events.jsonl'
+run_id = '<run_id>'
+p = pathlib.Path.home() / '.local/state/tau/debug' / run_id / 'events.jsonl'
 rows = []
 for ln, line in enumerate(p.open(), 1):
     j = json.loads(line)
@@ -135,20 +144,20 @@ for sp, ln, inp, cached, uncached, out, origin in sorted(rows, key=lambda r: r[4
 PY
 ```
 
-Red flags found in past sessions:
+Red flags found in past runs:
 
 - Internal extension prompts, especially `std-notifications` idle summaries, can create normal `ui.prompt_submitted` / `agent.prompt_created` / `provider.prompt_submitted` sequences with originator `{kind: "extension"}`. If they resend full history, cache continuity may collapse and waste many uncached tokens for tiny outputs. Check lines around `agent.start_request`, `ui.prompt_submitted`, and the following `provider.response_finished`.
 - `harness.context_usage_changed` currently follows all `provider.response_finished` events, including extension-originated prompts. Treat context/token stats carefully if side-channel prompts are present.
 - Large tool outputs in `agent.prompt_created` messages can dominate context: repeated large `read` slices, cargo/check output, clippy output, or colorized `jj diff`. Grep for `┄total <n>┄` markers in `events.jsonl` to find compacted large payloads.
-- For exact, uncompacted provider payloads, check `debug/provider-requests/*-{request,response}.json`. Request files are especially useful for cache misses involving `previous_response_id`, multi-tool-call suffixes, tool-use/tool-result ordering, or mismatches between `agent.prompt_created` and the serialized upstream `body.input`; response files show Tau's parsed `provider.response_finished` shape plus the raw terminal provider event (`response.completed` / `response.done`) when available.
+- For exact, uncompacted provider payloads, check `provider-requests/*-{request,response}.json`. Request files are especially useful for cache misses involving `previous_response_id`, multi-tool-call suffixes, tool-use/tool-result ordering, or mismatches between `agent.prompt_created` and the serialized upstream `body.input`; response files show Tau's parsed `provider.response_finished` shape plus the raw terminal provider event (`response.completed` / `response.done`) when available.
 - Repeated `provider.response_updated` streaming events are numerous and not useful for aggregate token accounting. Prefer `provider.response_finished`.
 
 Quick checks for side-channel waste:
 
 ```bash
 # Show extension-originated prompt/response activity.
-grep -n 'agent.start_request\|std-notifications\|"kind":"extension"' ~/.local/state/tau/sessions/<session_id>/events.jsonl
+grep -n 'agent.start_request\|std-notifications\|"kind":"extension"' ~/.local/state/tau/debug/<run_id>/events.jsonl
 
 # Search logs for runtime errors; no matches does not rule out token waste.
-grep -RniE 'error|warn|panic|cache|token' ~/.local/state/tau/sessions/<session_id>/logs
+grep -RniE 'error|warn|panic|cache|token' ~/.local/state/tau/debug/<run_id>/logs
 ```

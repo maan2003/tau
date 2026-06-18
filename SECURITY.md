@@ -109,7 +109,7 @@ the user's permissions. Scratch cleanup must remain guarded by a helper marker
 and path validation so `--remove-scratch` cannot recursively delete arbitrary
 user directories. Target commands such as capture, send, and stop must validate
 the recognized helper marker and scratch-root shape before connecting to a tmux
-socket, and cleanup must validate that ownership before killing a session or
+socket, and cleanup must validate that ownership before killing a tmux session or
 removing the scratch root.
 
 Provider credentials for `tau dev tmux start` are local-only by default. The
@@ -118,7 +118,7 @@ provider state from the user's real Tau directories unless the user explicitly
 opts in through `testing.yaml`. That allowlist names exact provider profile
 names only; the helper may copy only the corresponding
 `auth.d/<provider>.json` files into scratch state, must not copy lock files,
-general config, sessions, logs, unrelated provider profiles, whole directories,
+general config, agent state, debug logs, unrelated provider profiles, whole directories,
 or "all providers", and must refuse symlink/path-traversal attempts around those
 files. Reused scratch destinations must be reconciled to the current allowlist
 and must not write through pre-existing symlinks, non-regular files, or

@@ -73,12 +73,8 @@ fn interception_exact_selector_intercepts_before_log() {
 
     h.publish_event(None, draft_event("held"));
 
-    let (event, transient) = intercepted_payload(&interceptor);
+    let event = intercepted_payload(&interceptor);
     assert_eq!(event, draft_event("held"));
-    assert!(
-        transient,
-        "UiPromptDraft default transient flag is preserved"
-    );
     assert_eq!(h.event_log.next_seq(), after_registration_seq);
     assert!(after_registration_seq.get() < start_seq.get() + 2);
 }
@@ -631,18 +627,16 @@ fn interception_defers_subsequent_publishes_until_reply() {
 
 #[test]
 fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
-    // Regression for a real rostra session failure. A tool result can
+    // Regression for a real rostra failure. A tool result can
     // arrive while an unrelated event is parked in interception. The
     // result publish is deferred, but the intake path still completes
     // the call immediately and clears `tool_agents`. The
-    // eventual deferred commit must persist to the conversation's
-    // session from the publish snapshot, not from now-missing call
-    // tracking; otherwise the next LLM prompt contains a tool_use
-    // without its matching tool_result and the provider rejects it.
+    // eventual deferred commit must persist to the agent branch from the
+    // publish snapshot, not from now-missing call tracking; otherwise the next LLM
+    // prompt contains a tool_use without its matching tool_result and the
+    // provider rejects it.
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.current_session_id.clone();
-    h.initialized_sessions.insert(session_id.clone());
     let cid = ensure_test_user_agent(&mut h);
     let call_id: ToolCallId = "call-read".into();
     let tool_name = ToolName::new("read");
@@ -872,41 +866,36 @@ fn interception_replacement_of_agent_started_publishes_original() {
     assert_eq!(persisted_agent_started_events(&h), vec![started]);
 }
 
-fn session_agent_loaded_event(agent_id: &str) -> Event {
-    Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-        session_id: "session-intercept".into(),
+fn agent_loaded_event(agent_id: &str) -> Event {
+    Event::AgentLoaded(tau_proto::AgentLoaded {
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
     })
 }
 
-fn session_agent_unloaded_event(agent_id: &str) -> Event {
-    Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-        session_id: "session-intercept".into(),
+fn agent_unloaded_event(agent_id: &str) -> Event {
+    Event::AgentUnloaded(tau_proto::AgentUnloaded {
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
     })
 }
 
-/// Ensures interceptors cannot drop durable session membership load facts,
-/// because resume state depends on the committed membership log matching live
-/// delivery.
+/// Ensures interceptors cannot drop durable agent load facts, because replay
+/// depends on the committed load log matching live delivery.
 #[test]
-fn interception_drop_of_session_agent_loaded_is_overridden() {
+fn interception_drop_of_agent_loaded_is_overridden() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::SESSION_AGENT_LOADED,
-            )],
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_LOADED)],
             priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
     let baseline_seq = h.event_log.next_seq();
 
-    let loaded = session_agent_loaded_event("agent-loaded-original");
+    let loaded = agent_loaded_event("agent-loaded-original");
     h.publish_event(None, loaded.clone());
     h.handle_extension_event(
         "interceptor",
@@ -919,44 +908,38 @@ fn interception_drop_of_session_agent_loaded_is_overridden() {
     let entry = h
         .event_log
         .get_next_from(baseline_seq)
-        .expect("session.agent_loaded still committed despite Drop");
+        .expect("agent.loaded still committed despite Drop");
     assert_eq!(entry.event, loaded);
-    let membership = h
-        .store
-        .session("session-intercept")
-        .expect("session membership");
     assert!(
-        membership
-            .contains_agent(&tau_proto::AgentId::parse("agent-loaded-original").expect("agent id"))
+        event_log_events(&h).contains(&loaded),
+        "agent.loaded should remain in the event log"
     );
 }
 
-/// Ensures interceptors cannot rewrite durable session membership unload facts,
+/// Ensures interceptors cannot rewrite durable agent unload facts,
 /// preventing one agent's unload from being persisted as another agent's
 /// unload.
 #[test]
-fn interception_replacement_of_session_agent_unloaded_publishes_original() {
+fn interception_replacement_of_agent_unloaded_publishes_original() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::SESSION_AGENT_UNLOADED,
-            )],
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_UNLOADED)],
             priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
     let baseline_seq = h.event_log.next_seq();
 
-    let unloaded = session_agent_unloaded_event("agent-unloaded-original");
+    let unloaded = agent_unloaded_event("agent-unloaded-original");
     h.publish_event(None, unloaded.clone());
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(Some(Box::new(session_agent_unloaded_event(
+            action: InterceptAction::Pass(Some(Box::new(agent_unloaded_event(
                 "agent-unloaded-replacement",
             )))),
         })),
@@ -966,28 +949,9 @@ fn interception_replacement_of_session_agent_unloaded_publishes_original() {
     let entry = h
         .event_log
         .get_next_from(baseline_seq)
-        .expect("session.agent_unloaded committed");
+        .expect("agent.unloaded committed");
     assert_eq!(entry.event, unloaded);
-    let events = h
-        .store
-        .session_events("session-intercept")
-        .expect("session events")
-        .into_iter()
-        .map(|entry| entry.event)
-        .collect::<Vec<_>>();
-    assert_eq!(events, vec![unloaded]);
-}
-
-fn session_started_event(session_id: &str) -> Event {
-    Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: session_id.into(),
-    })
-}
-
-fn session_shutdown_event(session_id: &str) -> Event {
-    Event::SessionShutdown(tau_proto::SessionShutdown {
-        session_id: session_id.into(),
-    })
+    assert!(event_log_events(&h).contains(&unloaded));
 }
 
 fn agent_message_sent_event(message: &str) -> Event {
@@ -1012,78 +976,8 @@ fn agent_message_received_event(recipient_id: &str) -> Event {
     })
 }
 
-/// Ensures interceptors cannot drop session lifecycle facts required by
-/// extensions and context providers for per-session setup.
-#[test]
-fn interception_drop_of_session_started_is_overridden() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    let _interceptor = connect_test_tool(&mut h, "interceptor");
-    h.handle_extension_event(
-        "interceptor",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(tau_proto::EventName::SESSION_STARTED)],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
-
-    let started = session_started_event("session-lifecycle-original");
-    h.publish_event(None, started.clone());
-    h.handle_extension_event(
-        "interceptor",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Drop,
-        })),
-    )
-    .expect("drop reply");
-
-    let entry = h
-        .event_log
-        .get_next_from(baseline_seq)
-        .expect("session.started still committed despite Drop");
-    assert_eq!(entry.event, started);
-}
-
-/// Ensures interceptors cannot rewrite session shutdown facts used to flush or
-/// drop extension-owned per-session state.
-#[test]
-fn interception_replacement_of_session_shutdown_publishes_original() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    let _interceptor = connect_test_tool(&mut h, "interceptor");
-    h.handle_extension_event(
-        "interceptor",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN)],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
-
-    let shutdown = session_shutdown_event("session-lifecycle-original");
-    h.publish_event(None, shutdown.clone());
-    h.handle_extension_event(
-        "interceptor",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(Some(Box::new(session_shutdown_event(
-                "session-lifecycle-replacement",
-            )))),
-        })),
-    )
-    .expect("replacement reply");
-
-    let entry = h
-        .event_log
-        .get_next_from(baseline_seq)
-        .expect("session.shutdown committed");
-    assert_eq!(entry.event, shutdown);
-}
-
-/// Ensures interceptors cannot drop harness-validated sender-side message
-/// projections after recipient validation has already succeeded.
+/// Ensures interceptors cannot drop agent lifecycle facts required by
+/// extensions and context providers for per-agent setup.
 #[test]
 fn interception_drop_of_agent_message_sent_is_overridden() {
     let tmp = TempDir::new().expect("tempdir");
@@ -1319,9 +1213,6 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
     // head/tree before vs. after the intercept reply lands.
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.current_session_id.clone();
-    h.initialized_sessions.insert(session_id.clone());
-
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
@@ -1408,9 +1299,6 @@ fn interception_mutating_prompt_reaches_agent() {
     // end.
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.current_session_id.clone();
-    h.initialized_sessions.insert(session_id.clone());
-
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
@@ -1485,9 +1373,6 @@ fn publish_for_agent_does_not_emit_navigate_tree() {
     // stamps the conversation's `head` directly.
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.current_session_id.clone();
-    h.initialized_sessions.insert(session_id.clone());
-
     let baseline_seq = h.event_log.next_seq();
     let cid = ensure_test_user_agent(&mut h);
 
@@ -1568,9 +1453,8 @@ fn agent_metadata_set_and_unset_events_are_interceptable() {
         inheritable: true,
     });
     h.publish_event(None, set.clone());
-    let (event, transient) = intercepted_payload(&interceptor);
+    let event = intercepted_payload(&interceptor);
     assert_eq!(event, set);
-    assert!(!transient, "metadata set must be durable by default");
     h.handle_extension_event(
         "metadata-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -1582,9 +1466,8 @@ fn agent_metadata_set_and_unset_events_are_interceptable() {
     interceptor.lock().expect("events").clear();
     let unset = Event::AgentMetadataUnset(tau_proto::AgentMetadataUnset { agent_id, key });
     h.publish_event(None, unset.clone());
-    let (event, transient) = intercepted_payload(&interceptor);
+    let event = intercepted_payload(&interceptor);
     assert_eq!(event, unset);
-    assert!(!transient, "metadata unset must be durable by default");
 
     h.shutdown().expect("shutdown");
 }
@@ -1606,7 +1489,7 @@ fn invalid_metadata_interceptor_replacements_fall_back_to_original() {
     .expect("intercept registration");
 
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.session_loaded_agents.insert(agent_id.clone());
+    load_test_agent(&mut h, agent_id.as_str());
     let original = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
         agent_id: agent_id.clone(),
         key: tau_proto::AgentMetadataKey::new("valid"),

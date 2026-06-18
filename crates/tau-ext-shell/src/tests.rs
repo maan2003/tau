@@ -53,7 +53,7 @@ fn edit_file(
 
 /// Test-side wrapper around [`HarnessInputReader`] that exposes an
 /// `Event`-flavoured API so the existing tests can stay mechanical. Non-event
-/// messages are skipped by `read_event`.
+/// messages and ambient startup discovery events are skipped by `read_event`.
 struct EventReader<R> {
     inner: HarnessInputReader<R>,
 }
@@ -70,6 +70,9 @@ impl<R: std::io::Read> EventReader<R> {
             match self.inner.read_message()? {
                 None => return Ok(None),
                 Some(HarnessInputMessage::Emit(emit)) => match *emit.event {
+                    Event::ExtAgentsMdAvailable(_)
+                    | Event::ExtSkillAvailable(_)
+                    | Event::HarnessNotice(_) => continue,
                     Event::ToolProgress(progress)
                         if progress.message.is_none()
                             && progress.display.is_some()
@@ -266,6 +269,7 @@ fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable:
                 cbor_map(vec![("enable", CborValue::Bool(enable))]),
             )]),
             state_dir: None,
+            debug_dir: None,
             secrets: Default::default(),
         }))
         .expect("configure dir_lock");
@@ -285,7 +289,6 @@ fn tool_started(call_id: &str, tool_name: &str, arguments: CborValue, agent_id: 
 fn action_invoke(invocation_id: &str, action_id: &str, directory: &str) -> Event {
     Event::ActionInvoke(tau_proto::ActionInvoke {
         invocation_id: invocation_id.into(),
-        session_id: "session-1".into(),
         extension_name: "tau-ext-shell".into(),
         instance_id: 0.into(),
         action_id: action_id.to_owned(),
@@ -1230,10 +1233,10 @@ fn dir_lock_releases_delegate_locks_on_start_agent_result() {
         }
     }
 
-    // Delegates can finish without issuing an explicit unlock. Tau keeps their
-    // session agent loaded for history, so ext-shell must release manual locks
-    // on the start-result lifecycle event rather than waiting only for a later
-    // SessionAgentUnloaded event.
+    // Delegates can finish without issuing an explicit unlock. Tau may keep
+    // their durable agent loaded for history, so ext-shell must release manual
+    // locks on the start-result lifecycle event rather than waiting only for a
+    // later agent-unloaded event.
     writer
         .write_event(&Event::StartAgentResult(tau_proto::StartAgentResult {
             query_id: "delegate-locker".to_owned(),
@@ -1264,6 +1267,80 @@ fn dir_lock_releases_delegate_locks_on_start_agent_result() {
                 if progress.call_id.as_str() == "lock-after-delegate-result" =>
             {
                 panic!("lock waited after delegate lifecycle release: {progress:?}");
+            }
+            Some(_) => continue,
+            None => panic!("extension closed before second lock result"),
+        }
+    }
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+/// Ensures ext-shell tears down per-agent lock state on `agent.unloaded`.
+///
+/// The agent lifecycle replaced the old unload event with `agent.unloaded`.
+/// Manual directory locks are local extension state, so a removed agent must
+/// release ownership immediately instead of leaving later agents queued behind
+/// stale coverage.
+#[test]
+fn dir_lock_releases_locks_on_agent_unloaded() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let lock_dir = tempdir.path().to_path_buf();
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
+
+    writer
+        .write_event(&tool_started(
+            "lock-before-unload",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "update"),
+                ("directory", &lock_dir.display().to_string()),
+            ]),
+            "agent-a",
+        ))
+        .expect("dir_lock update");
+    writer.flush().expect("flush first lock");
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "lock-before-unload" => {
+                break;
+            }
+            Some(_) => continue,
+            None => panic!("extension closed before first lock result"),
+        }
+    }
+
+    writer
+        .write_event(&Event::AgentUnloaded(tau_proto::AgentUnloaded {
+            agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
+        }))
+        .expect("agent unloaded");
+    writer
+        .write_event(&tool_started(
+            "lock-after-unload",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "update"),
+                ("directory", &lock_dir.display().to_string()),
+            ]),
+            "agent-b",
+        ))
+        .expect("dir_lock update after unload");
+    writer.flush().expect("flush second lock");
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "lock-after-unload" => {
+                break;
+            }
+            Some(Event::ToolProgress(progress))
+                if progress.call_id.as_str() == "lock-after-unload" =>
+            {
+                panic!("lock waited after agent unload cleanup: {progress:?}");
             }
             Some(_) => continue,
             None => panic!("extension closed before second lock result"),
@@ -1814,7 +1891,6 @@ fn startup_registers_shell_cwd_prompt_fragment() {
     // tool, so it remains available even when shell tools are disabled.
     let (mut reader, mut writer) = spawn_extension();
 
-    let mut found_context_provider = false;
     let mut found_fragment = false;
     let mut saw_tool_fragment = false;
     for _ in 0..14 {
@@ -1825,9 +1901,6 @@ fn startup_registers_shell_cwd_prompt_fragment() {
         match event {
             Event::ToolRegister(register) => {
                 saw_tool_fragment |= register.prompt_fragment.is_some();
-            }
-            Event::ExtensionContextProviderRegister(_) => {
-                found_context_provider = true;
             }
             Event::ExtPromptFragmentPublish(publish) => {
                 assert_eq!(publish.fragment.name, "shell.cwd");
@@ -1847,10 +1920,6 @@ fn startup_registers_shell_cwd_prompt_fragment() {
             _ => {}
         }
     }
-    assert!(
-        found_context_provider,
-        "shell cwd context must gate first prompt dispatch"
-    );
     assert!(found_fragment, "expected shell cwd prompt fragment publish");
     assert!(!saw_tool_fragment, "cwd must not be attached to any tool");
 
@@ -1858,52 +1927,6 @@ fn startup_registers_shell_cwd_prompt_fragment() {
         .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
-}
-
-#[test]
-fn session_agent_loaded_publishes_current_directory_context_for_agent() {
-    // Agent context is the structured source used by the shell cwd prompt
-    // fragment; it must be keyed by durable agent, not by session.
-    let cwd = std::env::current_dir().expect("current dir");
-    let (tx, rx) = std::sync::mpsc::channel();
-    let cwd_state = CwdState::new();
-
-    dispatch_session_agent_loaded(
-        tau_proto::SessionAgentLoaded {
-            session_id: tau_proto::SessionId::new("session-1"),
-            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-        },
-        &tx,
-        &cwd_state,
-    );
-
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("cwd metadata publish") else {
-        panic!("expected cwd metadata publish");
-    };
-    let Event::AgentMetadataSet(metadata) = *emit.event else {
-        panic!("expected cwd metadata publish");
-    };
-    assert_eq!(metadata.key.as_str(), "ext_core-shell_cwd");
-    assert!(metadata.inheritable);
-    assert!(
-        rx.try_recv().is_err(),
-        "context waits for committed metadata"
-    );
-
-    cwd_state.set(
-        metadata.agent_id.clone(),
-        PathBuf::from(cwd.display().to_string()),
-    );
-    let context = cwd_context_event(metadata.agent_id, &cwd);
-    let Event::ExtAgentContextPublish(publish) = context else {
-        panic!("expected cwd agent context publish");
-    };
-    assert_eq!(publish.agent_id.as_ref(), "agent-1");
-    assert_eq!(publish.key.as_ref(), "cwd");
-    assert_eq!(
-        publish.value.0,
-        serde_json::Value::String(cwd.display().to_string())
-    );
 }
 
 #[test]
@@ -1959,7 +1982,7 @@ fn discover_agents_files_walks_ancestor_chain_in_order() {
 
 #[test]
 fn discover_agents_files_skips_symlinked_candidates() {
-    // AGENTS files are loaded implicitly on session start, so discovery must not
+    // AGENTS files are loaded implicitly on agent start, so discovery must not
     // follow repository-controlled symlinks into arbitrary readable files.
     let tempdir = TempDir::new().expect("tempdir");
     let root = tempdir.path().join("repo");
@@ -1978,7 +2001,7 @@ fn discover_agents_files_skips_symlinked_candidates() {
 
 #[test]
 fn discover_agents_files_skips_oversized_candidates() {
-    // Session-start AGENTS loading must have its own input cap; output caps on
+    // Agent-start AGENTS loading must have its own input cap; output caps on
     // later tool calls do not protect the implicit instruction payload.
     let tempdir = TempDir::new().expect("tempdir");
     let root = tempdir.path();
@@ -2316,52 +2339,6 @@ fn skill_diagnostics_map_expected_notice_levels() {
         .expect("skipped diagnostic");
     assert_eq!(skipped.level, tau_proto::NoticeLevel::Warning);
     assert!(skipped.always_show);
-}
-
-#[test]
-fn session_agent_loaded_emits_ready_after_agent_context_publish() {
-    let (mut reader, mut writer) = spawn_extension();
-    drain_startup(&mut reader);
-
-    writer
-        .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-            session_id: "s1".into(),
-            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-        }))
-        .expect("request");
-    writer.flush().expect("flush");
-    let metadata = loop {
-        let event = reader.read_event().expect("read").expect("metadata event");
-        if let Event::AgentMetadataSet(metadata) = event {
-            break metadata;
-        }
-    };
-    writer
-        .write_event(&Event::AgentMetadataSet(metadata))
-        .expect("commit metadata");
-    writer.flush().expect("flush metadata");
-
-    let mut saw_cwd_context = false;
-    loop {
-        let event = reader.read_event().expect("read").expect("context event");
-        match event {
-            Event::ExtAgentContextPublish(publish) if publish.key.as_ref() == "cwd" => {
-                saw_cwd_context = true;
-            }
-            Event::ExtensionContextReady(ready) => {
-                assert!(saw_cwd_context, "ready must follow cwd context publish");
-                assert_eq!(ready.session_id, "s1");
-                assert_eq!(ready.agent_id.as_str(), "agent-1");
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    writer
-        .write_frame(&disconnect_frame(None))
-        .expect("disconnect");
-    writer.flush().expect("flush");
 }
 
 #[test]
@@ -4620,6 +4597,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
                 ]),
             )]),
             state_dir: None,
+            debug_dir: None,
             secrets: std::collections::BTreeMap::new(),
         }))
         .expect("configure");
@@ -4736,6 +4714,7 @@ fn shell_extension_rejects_invalid_config() {
                 )]),
             )]),
             state_dir: None,
+            debug_dir: None,
             secrets: std::collections::BTreeMap::new(),
         }))
         .expect("configure");
@@ -4826,6 +4805,7 @@ fn shell_extension_reports_invalid_working_directory_config() {
                 missing_dir.to_str().expect("utf8 temp path"),
             )]),
             state_dir: None,
+            debug_dir: None,
             secrets: std::collections::BTreeMap::new(),
         }))
         .expect("configure");
@@ -5305,7 +5285,6 @@ fn user_shell_returns_after_foreground_exit_even_if_background_holds_pipe() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let cmd = tau_proto::UiShellCommand {
-        session_id: "s1".into(),
         command_id: "ui-sh-bg".into(),
         command: "setsid sh -c 'sleep 5; printf late' & printf early".to_owned(),
         include_in_context: true,
@@ -6820,6 +6799,104 @@ fn configure_instance_name_changes_cwd_metadata_key() {
     assert_eq!(cwd_state.key().as_str(), "ext_project-shell_cwd");
 }
 
+/// Ensures restored agents publish shell cwd context at the `agent.loaded`
+/// boundary.
+///
+/// The extension folds cwd metadata from earlier `agent.started` and
+/// `agent.metadata_set` events, then treats metadata-free `agent.loaded` as the
+/// catch-up-complete signal for initial context publication. The ready event is
+/// asserted because the harness gates first-prompt dispatch on per-agent
+/// context providers acknowledging that their local context has been published.
+#[test]
+fn agent_loaded_boundary_publishes_folded_cwd_context_and_marks_ready() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path().canonicalize().expect("canonical cwd");
+    let cwd_text = cwd.display().to_string();
+    let agent_id = tau_proto::AgentId::parse("agent-cwd-loaded").expect("agent id");
+    let cwd_state = CwdState::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    apply_started_cwd_metadata(
+        tau_proto::AgentStarted {
+            agent_id: agent_id.clone(),
+            parent_agent: None,
+            role: "engineer".to_owned(),
+            display_name: None,
+            metadata: vec![tau_proto::AgentInitialMetadata {
+                key: cwd_state.key(),
+                value: CborValue::Text(cwd_text.clone()),
+                inheritable: true,
+            }],
+        },
+        &cwd_state,
+    );
+    apply_loaded_cwd_metadata(
+        tau_proto::AgentLoaded {
+            agent_id: agent_id.clone(),
+        },
+        &tx,
+        &cwd_state,
+    );
+
+    assert_eq!(cwd_state.get(&agent_id), Some(cwd));
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("cwd context event") else {
+        panic!("expected context emit");
+    };
+    let Event::ExtAgentContextPublish(context) = *emit.event else {
+        panic!("expected cwd context event");
+    };
+    assert_eq!(context.agent_id, agent_id);
+    assert_eq!(context.key.as_str(), "cwd");
+    assert_eq!(context.value.0, serde_json::Value::String(cwd_text));
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("context ready event") else {
+        panic!("expected context ready emit");
+    };
+    let Event::ExtensionContextReady(ready) = *emit.event else {
+        panic!("expected context ready event");
+    };
+    assert_eq!(ready.agent_id, agent_id);
+}
+
+/// Ensures loaded agents without explicit cwd metadata still receive an
+/// agent-local cwd context and readiness acknowledgement.
+///
+/// This protects the first prompt for harness-created agents that do not carry
+/// CLI cwd metadata: the global prompt fragment can render an agent-local
+/// default cwd, and prompt dispatch does not wait forever on the shell context
+/// provider.
+#[test]
+fn agent_loaded_without_cwd_metadata_publishes_default_context_and_marks_ready() {
+    let agent_id = tau_proto::AgentId::parse("agent-cwd-default").expect("agent id");
+    let cwd_state = CwdState::new();
+    let expected_cwd = CwdState::process_default().display().to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    apply_loaded_cwd_metadata(
+        tau_proto::AgentLoaded {
+            agent_id: agent_id.clone(),
+        },
+        &tx,
+        &cwd_state,
+    );
+
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("cwd context event") else {
+        panic!("expected cwd context emit");
+    };
+    let Event::ExtAgentContextPublish(context) = *emit.event else {
+        panic!("expected cwd context event");
+    };
+    assert_eq!(context.agent_id, agent_id);
+    assert_eq!(context.key.as_str(), "cwd");
+    assert_eq!(context.value.0, serde_json::Value::String(expected_cwd));
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("context ready event") else {
+        panic!("expected context ready emit");
+    };
+    let Event::ExtensionContextReady(ready) = *emit.event else {
+        panic!("expected context ready event");
+    };
+    assert_eq!(ready.agent_id, agent_id);
+}
+
 #[test]
 fn explicit_shell_cwd_emits_metadata_without_precommitting_remembered_cwd() {
     let temp = TempDir::new().expect("tempdir");
@@ -7048,56 +7125,6 @@ fn overlapping_same_agent_cd_is_rejected_until_first_commit() {
     assert!(
         matches!(result, Event::ToolResult(result) if result.call_id.as_str() == "call-cd-one")
     );
-
-    writer
-        .write_frame(&disconnect_frame(None))
-        .expect("disconnect");
-    writer.flush().expect("flush");
-}
-
-#[test]
-fn malformed_cwd_metadata_does_not_wedge_context_ready() {
-    let (mut reader, mut writer) = spawn_extension();
-    drain_startup(&mut reader);
-    let agent_id = tau_proto::AgentId::parse("agent-bad-cwd").expect("agent id");
-
-    writer
-        .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-            session_id: "s1".into(),
-            agent_id: agent_id.clone(),
-        }))
-        .expect("load");
-    writer.flush().expect("flush load");
-    let _ = reader
-        .read_event()
-        .expect("read initial metadata")
-        .expect("metadata");
-
-    writer
-        .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
-            agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
-            value: CborValue::Bool(true),
-            inheritable: true,
-        }))
-        .expect("bad metadata");
-    writer.flush().expect("flush bad metadata");
-
-    let mut saw_context = false;
-    loop {
-        let event = reader.read_event().expect("read").expect("event");
-        match event {
-            Event::ExtAgentContextPublish(publish) if publish.key.as_ref() == "cwd" => {
-                saw_context = true;
-            }
-            Event::ExtensionContextReady(ready) => {
-                assert!(saw_context);
-                assert_eq!(ready.agent_id, agent_id);
-                break;
-            }
-            _ => {}
-        }
-    }
 
     writer
         .write_frame(&disconnect_frame(None))

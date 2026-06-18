@@ -87,7 +87,7 @@ impl ResultDedupMap {
 
     /// Replace contents from a freshly walked branch. Called after
     /// [`Self::needs_rebuild`] reports a mismatch, or eagerly on
-    /// session resume / session switch.
+    /// agent restore / agent switch.
     pub(crate) fn rebuild_from_branch<'a>(
         &mut self,
         branch: impl IntoIterator<Item = &'a AgentEntry>,
@@ -143,7 +143,7 @@ impl ResultDedupMap {
     /// Record a fresh `(hash, call_id)` pair. Caller must have
     /// confirmed `lookup(&hash).is_none()` first; an
     /// already-present hash is a programming error and triggers a
-    /// debug-assertion-only panic so production sessions just keep
+    /// debug-assertion-only panic so production agents just keep
     /// the original mapping.
     pub(crate) fn insert(&mut self, hash: ResultHash, call_id: ToolCallId) {
         debug_assert!(
@@ -160,9 +160,9 @@ impl ResultDedupMap {
     ///
     /// **Skips when `built_for` is `None`.** That state means the map
     /// has never been populated for this conversation (fresh harness
-    /// after session resume; map cleared after a navigation). A
+    /// after agent restore; map cleared after a navigation). A
     /// commit at this stage might be a non-dedup-eligible event (a
-    /// user message from session re-init, a message projection) whose
+    /// user message from agent replay, a message projection) whose
     /// fold doesn't pass through `dedup_tool_result`. Advancing
     /// unconditionally would mark the map as "in sync with this new
     /// head" while still empty, making the next dedup intake skip

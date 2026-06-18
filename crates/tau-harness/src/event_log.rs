@@ -3,7 +3,7 @@
 //! The harness assigns one globally monotonic [`EventLogSeq`] to every
 //! committed runtime event, but the sequencer does not retain event payloads
 //! and the sequence never leaves the process. Subscribe-time catch-up comes
-//! from semantic state instead: durable session/agent stores, current harness
+//! from semantic state instead: durable agent stores, current harness
 //! snapshots, and the append-only `events.jsonl` debug trace.
 
 #[cfg(test)]
@@ -18,7 +18,7 @@ use tau_proto::{ConnectionId, Event};
 ///
 /// This sequence is relative to the running harness as a whole and is
 /// harness-internal: it is not part of the wire protocol and is not
-/// comparable to persisted agent/session event sequences. Production code
+/// comparable to persisted agent event sequences. Production code
 /// uses it only to order test observations; nothing on the wire carries it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct EventLogSeq(u64);
@@ -86,7 +86,7 @@ impl EventLog {
     /// Durable-history replay uses this path: replayed transcript facts already
     /// live in agent logs, but their runtime deliveries still need fresh
     /// globally monotonic [`EventLogSeq`] values rather than reusing persisted
-    /// per-agent/per-session sequences.
+    /// per-agent sequences.
     pub(crate) fn reserve_seq(&self) -> EventLogSeq {
         let mut inner = self.inner.lock().expect("event log mutex poisoned");
         let seq = inner.next_seq;

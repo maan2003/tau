@@ -548,8 +548,6 @@ where
             tau_proto::EventName::TOOL_STARTED,
             tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
             tau_proto::EventName::AGENT_STARTED,
-            tau_proto::EventName::SESSION_AGENT_UNLOADED,
-            tau_proto::EventName::SESSION_SHUTDOWN,
         ])
         .register_tool_with_group_and_prompt_fragment(
             register_tool_spec(),
@@ -613,20 +611,7 @@ where
                             state.agent_labels.insert(started.agent_id, display_name);
                         }
                     }
-                    Event::SessionAgentUnloaded(unloaded) => {
-                        let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                        state.registered_agents.remove(&unloaded.agent_id);
-                        state.agent_labels.remove(&unloaded.agent_id);
-                        state
-                            .selected_agent_by_chat
-                            .retain(|_, agent_id| agent_id != &unloaded.agent_id);
-                    }
-                    Event::SessionShutdown(_) => {
-                        let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                        state.registered_agents.clear();
-                        state.agent_labels.clear();
-                        state.selected_agent_by_chat.clear();
-                    }
+
                     _ => {}
                 }
             }

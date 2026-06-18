@@ -53,9 +53,6 @@ pub const PROGRESS_INDICATOR: &str = "progress.indicator";
 pub const EXTENSION_LIFECYCLE: &str = "extension.lifecycle";
 pub const EXTENSION_STATUS: &str = "extension.status";
 
-// -- Sessions --
-pub const SESSION_STATUS: &str = "session.status";
-
 // -- System --
 pub const SYSTEM_INFO: &str = "system.info";
 pub const SYSTEM_INFO_IMPORTANT: &str = "system.info.important";
@@ -67,7 +64,6 @@ pub const SYSTEM_STATUS: &str = "system.status";
 pub const MODEL_STATUS: &str = "model.status";
 pub const STATUS_MODEL: &str = "status.model";
 pub const STATUS_ROLE: &str = "status.role";
-pub const STATUS_SESSION: &str = "status.session";
 pub const STATUS_CONTEXT: &str = "status.context";
 pub const STATUS_EFFORT: &str = "status.effort";
 pub const STATUS_VERBOSITY: &str = "status.verbosity";

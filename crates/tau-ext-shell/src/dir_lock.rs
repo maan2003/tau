@@ -501,19 +501,6 @@ impl DirLockManager {
         removed
     }
 
-    /// Drop all manual locks, used when the whole session is shutting down.
-    pub(crate) fn release_all_manual(&self) -> usize {
-        let mut state = self.inner.state.lock().expect("dir lock state poisoned");
-        let removed = state.manual.len();
-        let cancelled = state.waiters.len();
-        state.manual.clear();
-        state.waiters.clear();
-        if 0 < removed + cancelled {
-            self.inner.changed.notify_all();
-        }
-        removed
-    }
-
     /// Disable directory locking by releasing manual locks and cancelling
     /// queued waiters.
     pub(crate) fn disable(&self) -> (usize, usize) {

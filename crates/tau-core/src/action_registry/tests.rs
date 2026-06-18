@@ -1,5 +1,5 @@
 use tau_actions::{ACTION_SCHEMA_VERSION, ActionArg, ActionArgKind, ActionCommand, ActionSchema};
-use tau_proto::{ActionInvocationId, CborValue, SessionId};
+use tau_proto::{ActionInvocationId, CborValue};
 
 use super::*;
 
@@ -37,7 +37,6 @@ fn schema(action_id: &str) -> ActionSchema {
 fn invoke(action_id: &str, instance_id: u64) -> ActionInvoke {
     ActionInvoke {
         invocation_id: ActionInvocationId::from("act-1"),
-        session_id: SessionId::from("s1"),
         extension_name: ExtensionName::from("std-email"),
         instance_id: ExtensionInstanceId::from(instance_id),
         action_id: action_id.to_owned(),

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use tau_session_inspect::{default_session_id, default_sessions_dir, default_state_dir};
+use tau_agent_inspect::default_state_dir;
 
 #[derive(Parser)]
 #[command(
@@ -99,33 +99,15 @@ pub struct RunArgs {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Run an interactive agent session.
+    /// Run an interactive agent UI.
     ///
     /// By default, `tau` spawns a new harness daemon and attaches to it
-    /// for the duration of the session. Pass `--attach` (or `-a`) to
+    /// for the duration of the run. Pass `--attach` (or `-a`) to
     /// connect to an already-running daemon for the current project
     /// instead — useful for a second UI, or for reconnecting after
     /// `/detach`.
     #[command(hide = true)]
     Run(RunArgs),
-
-    /// List all sessions
-    SessionList {
-        /// Path to per-session storage root (`<state-dir>/sessions/`)
-        #[arg(long, default_value_os_t = default_sessions_dir())]
-        sessions_dir: PathBuf,
-    },
-
-    /// Show a single session's history
-    SessionShow {
-        /// Session identifier
-        #[arg(long, default_value_t = default_session_id().to_owned())]
-        session_id: String,
-
-        /// Path to per-session storage root (`<state-dir>/sessions/`)
-        #[arg(long, default_value_os_t = default_sessions_dir())]
-        sessions_dir: PathBuf,
-    },
 
     /// Show persisted policy approvals
     PolicyShow {
@@ -174,11 +156,8 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum DevCommand {
-    /// Send one line to a running session.
+    /// Send one line to a running daemon.
     Send {
-        /// Running session identifier.
-        session_id: String,
-
         /// Line to submit. Slash commands are interpreted like the TUI.
         #[arg(required = true, trailing_var_arg = true)]
         line: Vec<String>,

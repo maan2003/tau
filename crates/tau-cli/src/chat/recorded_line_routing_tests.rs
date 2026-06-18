@@ -102,7 +102,7 @@ fn model_selection_without_selected_agent_stages_one_shot_create_override() {
     let mut pending = PendingNewAgentModel::default();
     let model: tau_proto::ModelId = "test/staged".parse().expect("model id");
 
-    let event = pending.apply_selection("s1", None, model.clone());
+    let event = pending.apply_selection(None, model.clone());
 
     assert_eq!(event, None);
     assert_eq!(pending.take(), Some(model));
@@ -118,12 +118,11 @@ fn model_selection_with_selected_agent_emits_targeted_update() {
     let agent_id = tau_proto::AgentId::parse("agent-1234567890abcdef").expect("agent id");
 
     let event = pending
-        .apply_selection("s1", Some(agent_id.clone()), model.clone())
+        .apply_selection(Some(agent_id.clone()), model.clone())
         .expect("selected agent event");
 
     match event {
         Event::UiAgentModelSelect(select) => {
-            assert_eq!(select.session_id, "s1");
             assert_eq!(select.target_agent_id, Some(agent_id));
             assert_eq!(select.model, model);
         }

@@ -19,7 +19,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tau_proto::{AgentId, ConnectionId, Event, NodeId, UnixMicros};
 
-use crate::session::{
+use crate::agent_tree::{
     AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
     PersistedAgentEventSeq,
 };

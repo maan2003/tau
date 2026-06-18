@@ -1,34 +1,35 @@
 //! Semantic persistence classification for harness events.
 
-use tau_proto::{Event, SessionId};
+use tau_proto::Event;
 
 /// Return whether an event should enter durable semantic stores.
-///
-/// Transient events normally exist only for live observers. Terminal tool
-/// events are the exception: they must still be persisted so resumed agents can
-/// see tool completions that happened after a transient dispatch path.
-pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
-    !transient || is_transient_tool_terminal_event(event)
-}
-
-/// Return the session log target for session membership events.
-pub(crate) fn session_membership_id_for_event(event: &Event) -> Option<SessionId> {
-    match event {
-        Event::SessionAgentLoaded(loaded) => Some(loaded.session_id.clone()),
-        Event::SessionAgentUnloaded(unloaded) => Some(unloaded.session_id.clone()),
-        _ => None,
-    }
-}
-
-fn is_transient_tool_terminal_event(event: &Event) -> bool {
-    matches!(
+pub(crate) fn should_persist(event: &Event) -> bool {
+    !matches!(
         event,
-        Event::ToolResult(_)
-            | Event::ToolError(_)
-            | Event::ProviderToolResult(_)
-            | Event::ProviderToolError(_)
-            | Event::ToolCancelled(_)
-            | Event::ToolBackgroundResult(_)
-            | Event::ToolBackgroundError(_)
+        Event::ProviderResponseUpdated(_)
+            | Event::ProviderPromptSubmitted(_)
+            | Event::ToolProgress(_)
+            | Event::ToolDelegateProgress(_)
+            | Event::ActionSchemaPublished(_)
+            | Event::ActionInvoke(_)
+            | Event::ActionResult(_)
+            | Event::ActionError(_)
+            | Event::ShellCommandProgress(_)
+            | Event::UiPromptSubmitted(_)
+            | Event::AgentPromptQueued(_)
+            | Event::AgentPromptRecalled(_)
+            | Event::AgentPromptCreated(_)
+            | Event::AgentPromptTerminated(_)
+            | Event::AgentPromptPrewarmRequested(_)
+            | Event::AgentState(_)
+            | Event::AgentLoad(_)
+            | Event::AgentLoading(_)
+            | Event::AgentLoaded(_)
+            | Event::AgentUnloaded(_)
+            | Event::UiCompactRequest(_)
+            | Event::UiCreateAgent(_)
+            | Event::UiPromptDraft(_)
+            | Event::UiFocusChanged(_)
+            | Event::UiSetAgentDisplayName(_)
     )
 }

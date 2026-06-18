@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tau_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
-    EventBus, RoutedFrame, SessionStore, ToolRegistry, memory_connection,
+    EventBus, RoutedFrame, ToolRegistry, memory_connection,
 };
 use tau_proto::{
     AgentPromptCreated, ClientKind, ConnectionId, ContentPart, ContextItem, ContextRole, Event,
@@ -23,16 +23,16 @@ fn runtime_supports_embedded_and_daemon_scenarios() {
     let runtime = TestRuntime::new().expect("runtime should be created");
 
     let embedded = runtime
-        .run_embedded("session-1", "hello")
+        .run_embedded("hello")
         .expect("embedded run should succeed");
     assert!(!embedded.is_empty(), "response should not be empty");
 
-    let daemon = runtime.spawn_daemon("session-2", Some(1));
+    let daemon = runtime.spawn_daemon(Some(1));
     runtime
         .wait_until_ready(Duration::from_secs(2))
         .expect("daemon socket should appear");
     let attached = runtime
-        .send_daemon_message("session-2", "hello")
+        .send_daemon_message("hello")
         .expect("daemon message should succeed");
     assert!(!attached.is_empty(), "response should not be empty");
     daemon.join().expect("daemon should exit cleanly");
@@ -88,8 +88,7 @@ fn stream_connection(
 #[test]
 fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     let tempdir = TempDir::new().expect("tempdir should exist");
-    let store_path = tempdir.path().join("state");
-    let _store = SessionStore::open(&store_path).expect("store should open");
+    let _state_path = tempdir.path().join("state");
     let mut bus = EventBus::new();
     let mut registry = ToolRegistry::new();
 
@@ -191,6 +190,8 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
                 | Event::ExtensionReady(_)
                 | Event::ProviderModelsUpdated(_)
                 | Event::ExtensionContextProviderRegister(_)
+                | Event::ExtSkillAvailable(_)
+                | Event::ExtAgentsMdAvailable(_)
                 | Event::ExtPromptFragmentPublish(_) => {}
                 other => panic!("unexpected tool startup event: {other:?}"),
             },
@@ -207,7 +208,6 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     let prompt = AgentPromptCreated {
         agent_prompt_id: "sp-1".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        session_id: "session-1".into(),
         system_prompt: "You are helpful.".to_owned(),
         context: tau_proto::PromptContext {
             blocks: vec![tau_proto::ContextBlock::UserInput(

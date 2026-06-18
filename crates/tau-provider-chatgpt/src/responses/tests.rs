@@ -52,6 +52,7 @@ fn build_request_includes_prompt_cache_key_when_supported() {
         supports_websocket: false,
         supports_compaction: false,
         supports_prompt_cache_key: true,
+        debug_dir: None,
         supports_encrypted_reasoning: false,
     };
     let request = PromptPayload {
@@ -62,7 +63,6 @@ fn build_request_includes_prompt_cache_key_when_supported() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -89,6 +89,7 @@ fn build_request_includes_service_tier_when_configured() {
         supports_websocket: false,
         supports_compaction: false,
         supports_prompt_cache_key: false,
+        debug_dir: None,
         supports_encrypted_reasoning: false,
     };
     let request = PromptPayload {
@@ -103,7 +104,6 @@ fn build_request_includes_service_tier_when_configured() {
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
         share_user_cache_key: false,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
     };
 
@@ -129,7 +129,6 @@ fn build_request_maps_off_effort_to_openai_none() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -155,6 +154,7 @@ fn build_request_omits_prompt_cache_key_without_seed() {
         supports_websocket: false,
         supports_compaction: false,
         supports_prompt_cache_key: false,
+        debug_dir: None,
         supports_encrypted_reasoning: false,
     };
     let request = PromptPayload {
@@ -165,7 +165,6 @@ fn build_request_omits_prompt_cache_key_without_seed() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -193,7 +192,6 @@ fn build_request_first_turn_replays_full_history_without_chain() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -245,7 +243,6 @@ fn build_request_full_replay_serializes_restored_tool_error_before_next_user_mes
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -302,7 +299,6 @@ fn build_request_chain_turn_sends_delta_and_previous_response_id() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -339,7 +335,6 @@ fn build_request_cached_response_missing_from_context_falls_back_to_full_replay(
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -367,6 +362,7 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
     let config = ResponsesConfig {
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
+        debug_dir: None,
         ..chain_test_config()
     };
     let request = PromptPayload {
@@ -382,7 +378,6 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -402,6 +397,7 @@ fn build_request_prompt_cache_key_ignores_originator() {
     let config = ResponsesConfig {
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
+        debug_dir: None,
         ..chain_test_config()
     };
     let ext = tau_proto::PromptOriginator::Extension {
@@ -416,7 +412,6 @@ fn build_request_prompt_cache_key_ignores_originator() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -428,7 +423,6 @@ fn build_request_prompt_cache_key_ignores_originator() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &ext,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -451,6 +445,7 @@ fn build_request_share_user_cache_key_does_not_change_agent_bucket() {
     let config = ResponsesConfig {
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
+        debug_dir: None,
         ..chain_test_config()
     };
     let ext = tau_proto::PromptOriginator::Extension {
@@ -466,7 +461,6 @@ fn build_request_share_user_cache_key_does_not_change_agent_bucket() {
         compaction: None,
         originator: &ext,
         share_user_cache_key: true,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
     };
     let body =
@@ -486,6 +480,7 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
     let config = ResponsesConfig {
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
+        debug_dir: None,
         ..chain_test_config()
     };
     let ext = tau_proto::PromptOriginator::Extension {
@@ -521,7 +516,6 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
         share_user_cache_key: false,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
     };
     let ext_request = PromptPayload {
@@ -533,7 +527,6 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
         compaction: None,
         originator: &ext,
         share_user_cache_key: false,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
     };
 
@@ -574,7 +567,6 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
         tool_choice: tau_proto::ToolChoice::None,
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -607,7 +599,6 @@ fn build_request_sends_compaction_context_management_and_trigger_item() {
             compact_threshold: Some(1200),
         }),
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -646,7 +637,6 @@ fn build_request_trims_full_replay_before_latest_compaction_item() {
             compact_threshold: None,
         }),
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -675,6 +665,7 @@ fn chain_test_config() -> ResponsesConfig {
         supports_websocket: false,
         supports_compaction: false,
         supports_prompt_cache_key: false,
+        debug_dir: None,
         supports_encrypted_reasoning: false,
     }
 }
@@ -739,7 +730,7 @@ fn restored_internal_tool_error(call_id: &str, body: &str) -> ContextItem {
         tool_type: tau_proto::ToolType::Function,
         status: ToolResultStatus::Error {
             message: format!(
-                "{}: true\n\nTool call `{call_id}` was interrupted due to session restart. Side effects may have occurred.",
+                "{}: true\n\nTool call `{call_id}` was interrupted due to provider connection restart. Side effects may have occurred.",
                 tau_proto::TAU_INTERNAL_HEADER_NAME
             ),
         },
@@ -773,7 +764,6 @@ fn build_request_stamps_phase_on_assistant_messages_when_supported() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -812,7 +802,6 @@ fn build_request_omits_phase_when_unsupported() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -857,7 +846,6 @@ fn build_request_stamps_phase_on_pre_tool_call_text_flush() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -950,7 +938,6 @@ fn build_request_emits_include_when_encrypted_reasoning_supported() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -975,7 +962,6 @@ fn build_request_omits_include_when_encrypted_reasoning_unsupported() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -1017,7 +1003,6 @@ fn build_request_replays_reasoning_item_as_top_level_input() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -1080,7 +1065,6 @@ fn build_request_emits_custom_tool_definition_and_round_trips_custom_tool_output
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -1183,7 +1167,6 @@ fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -1325,7 +1308,6 @@ fn ws_envelope_adds_type_and_drops_stream() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };
@@ -1364,7 +1346,6 @@ fn ws_prewarm_envelope_sets_generate_false_and_drops_previous_response() {
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
     };

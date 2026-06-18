@@ -374,7 +374,6 @@ fn send_user_shell_finished(
     let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
             command_id: cmd.command_id,
-            session_id: cmd.session_id,
             command: cmd.command,
             include_in_context: cmd.include_in_context,
             target_agent_id: cmd.target_agent_id,
@@ -1852,7 +1851,7 @@ mod tests {
 
     /// Protects user shell clipping feedback for a single huge no-newline
     /// stdout stream. The final tail truncation must not drop the explicit
-    /// marker that tells session history the captured context is incomplete.
+    /// marker that tells agent history the captured context is incomplete.
     #[test]
     fn clipped_user_shell_output_marker_survives_tail_truncation() {
         let mut output = "x".repeat(MAX_OUTPUT_BYTES);

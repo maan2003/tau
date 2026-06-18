@@ -32,7 +32,6 @@ use std::{fmt, io};
 use tau_harness::runtime_dir;
 
 use crate::chat::run_chat;
-use crate::daemon::resolve_run_session_id;
 
 /// Single shared message for mutex-poison panics: every mutex in this
 /// crate is held only for short, infallible critical sections, so poison
@@ -93,11 +92,10 @@ pub enum CliError {
     Io(io::Error),
     Encode(tau_proto::EncodeError),
     Harness(tau_harness::HarnessError),
-    Inspect(tau_session_inspect::InspectError),
+    Inspect(tau_agent_inspect::InspectError),
     DaemonExited(String),
     NoRunningDaemon,
     Participant(String),
-    SessionNotFound(String),
 }
 
 impl fmt::Display for CliError {
@@ -113,7 +111,6 @@ impl fmt::Display for CliError {
                  drop `--attach` to spawn one",
             ),
             Self::Participant(msg) => write!(f, "participant error: {msg}"),
-            Self::SessionNotFound(id) => write!(f, "session not found: `{id}`"),
         }
     }
 }
@@ -132,8 +129,8 @@ impl From<tau_harness::HarnessError> for CliError {
     }
 }
 
-impl From<tau_session_inspect::InspectError> for CliError {
-    fn from(source: tau_session_inspect::InspectError) -> Self {
+impl From<tau_agent_inspect::InspectError> for CliError {
+    fn from(source: tau_agent_inspect::InspectError) -> Self {
         Self::Inspect(source)
     }
 }
@@ -220,11 +217,11 @@ pub(crate) fn build_banner(theme: &tau_themes::Theme) -> tau_cli_term::StyledTex
 }
 
 // ---------------------------------------------------------------------------
-// Short-id minting (used for both session ids and per-UI log dir ids)
+// Short-id minting (used for harness/agent ids and per-UI log dir ids)
 // ---------------------------------------------------------------------------
 
 /// Build an id of the form `<prefix>-<6 base36 chars>`. Used for both
-/// session and UI ids so the visual shape is consistent.
+/// harness, agent, and UI ids so the visual shape is consistent.
 pub(crate) fn mint_short_id(prefix: &str) -> String {
     use rand::distributions::Distribution;
 
@@ -528,12 +525,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     | cli::DevCommand::PrintSystemPrompt
                     | cli::DevCommand::PrintTools,
             } => {}
-            cli::Command::SessionList { .. } => {
-                reject_harness_config_overrides(&harness_config_overrides, "session-list")?;
-            }
-            cli::Command::SessionShow { .. } => {
-                reject_harness_config_overrides(&harness_config_overrides, "session-show")?;
-            }
             cli::Command::PolicyShow { .. } => {
                 reject_harness_config_overrides(&harness_config_overrides, "policy-show")?;
             }
@@ -599,22 +590,13 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         &extension_cli_overrides,
                     )?;
                 }
-                let session_id = if attach {
+                if attach {
                     reject_harness_config_overrides(&harness_config_overrides, "--attach")?;
                     let cwd = std::env::current_dir()?;
-                    let harness_path =
-                        runtime_dir::find_harness_for_dir(&cwd).ok_or(CliError::NoRunningDaemon)?;
-                    runtime_dir::read_session_id(&harness_path).ok_or_else(|| {
-                        CliError::Participant(
-                            "running daemon did not publish its session id".to_owned(),
-                        )
-                    })?
-                } else {
-                    resolve_run_session_id()?
-                };
+                    runtime_dir::find_harness_for_dir(&cwd).ok_or(CliError::NoRunningDaemon)?;
+                }
                 if prompt_stdin {
                     prompt_stdin::run_prompt_stdin(
-                        &session_id,
                         attach,
                         harness.role.as_deref(),
                         &role_cli_overrides,
@@ -623,7 +605,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     )
                 } else {
                     run_chat(
-                        &session_id,
                         attach,
                         harness.role.as_deref(),
                         &role_cli_overrides,
@@ -633,28 +614,9 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 }
             }
 
-            cli::Command::SessionList { sessions_dir } => {
-                reject_harness_config_overrides(&harness_config_overrides, "session-list")?;
-                for line in tau_session_inspect::session_list_lines(sessions_dir)? {
-                    println!("{line}");
-                }
-                Ok(())
-            }
-
-            cli::Command::SessionShow {
-                session_id,
-                sessions_dir,
-            } => {
-                reject_harness_config_overrides(&harness_config_overrides, "session-show")?;
-                for line in tau_session_inspect::session_lines(sessions_dir, &session_id)? {
-                    println!("{line}");
-                }
-                Ok(())
-            }
-
             cli::Command::PolicyShow { state_dir } => {
                 reject_harness_config_overrides(&harness_config_overrides, "policy-show")?;
-                for line in tau_session_inspect::policy_lines(state_dir.join("policy.cbor"))? {
+                for line in tau_agent_inspect::policy_lines(state_dir.join("policy.cbor"))? {
                     println!("{line}");
                 }
                 Ok(())
@@ -672,9 +634,9 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             }
 
             cli::Command::Dev { command } => match command {
-                cli::DevCommand::Send { session_id, line } => {
+                cli::DevCommand::Send { line } => {
                     reject_harness_config_overrides(&harness_config_overrides, "dev send")?;
-                    send::run_send(&session_id, &line.join(" "))
+                    send::run_send(&line.join(" "))
                 }
                 cli::DevCommand::DumpInitialPrompt { out, message } => {
                     reject_harness_config_overrides(

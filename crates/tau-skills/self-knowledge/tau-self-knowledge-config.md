@@ -2,7 +2,7 @@
 name: tau-self-knowledge-config
 description: >
   Use this skill when the user asks how to configure Tau, where Tau stores config,
-  state, sessions, runtime files, policies, credentials, or provider setup, or how
+  state, agents, runtime files, policies, credentials, or provider setup, or how
   to use tau init and tau provider commands.
 advertise: false
 ---
@@ -13,16 +13,16 @@ Tau follows the XDG directory layout on Linux:
 
 - Config: `~/.config/tau/`
   - `cli.yaml`, `cli.d/*.yaml` — CLI display preferences, key bindings, and prompt completions. See `tau-self-knowledge-cli-ui` for UI-specific behavior.
-  - `harness.yaml`, `harness.d/*.yaml` — harness roles/defaults, extensions, tools, custom prompts, and session retention.
+  - `harness.yaml`, `harness.d/*.yaml` — harness roles/defaults, extensions, tools, custom prompts, and agent/debug retention.
   - `testing.yaml` — explicit provider-profile allowlist for `tau dev tmux` E2E testing; see `tau-self-knowledge-e2e-testing`.
 - State: `~/.local/state/tau/` or the platform/user state directory.
-  - `sessions/<session_id>/` — durable session membership, metadata, logs, and debug captures.
   - `agents/<agent_id>/` — durable agent transcripts and metadata.
+  - `debug/<run_id>/` — per-run debug events, extension logs, and provider request captures.
   - `cli.json` — persisted CLI runtime toggles.
   - `policy.cbor` — persisted socket-client policy decisions.
   - `auth.d/<provider>.json` — provider credentials; `auth.json` may exist as legacy credentials.
-- Runtime: `${XDG_RUNTIME_DIR}/tau/<pid>/` or `/tmp/tau-$USER/<pid>/`.
-  - `tau.sock`, `tau.pid`, `tau.session_id`, `tau.dir` — daemon socket and discovery markers.
+- Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`.
+  - `harnesses/<pid>.sock`, `harnesses/<pid>.json` — daemon sockets and discovery metadata.
 
 Use `tau init` to create starter `cli.yaml` and `harness.yaml` files.
 

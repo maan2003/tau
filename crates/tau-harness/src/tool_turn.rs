@@ -87,24 +87,6 @@ impl ToolTurnMachine {
         Some((pending, action))
     }
 
-    /// Mark an invocation as in flight without queueing it first.
-    #[cfg(test)]
-    pub(crate) fn record_in_flight_for_test(
-        &mut self,
-        conversation_id: AgentId,
-        call_id: ToolCallId,
-    ) {
-        self.in_flight_tool_invocations.insert(
-            call_id,
-            InFlightToolInvocation {
-                conversation_id,
-                foreground_pending: true,
-                backgrounded: false,
-                foreground_deadline: None,
-            },
-        );
-    }
-
     /// Remove a call from the in-flight set after its real result arrives.
     pub(crate) fn mark_complete(&mut self, call_id: &ToolCallId) -> bool {
         self.in_flight_tool_invocations.remove(call_id).is_some()
@@ -200,18 +182,6 @@ impl ToolTurnMachine {
         queued
     }
 
-    /// Remove all queued and in-flight scheduler state.
-    pub(crate) fn clear(&mut self) {
-        self.pending_tool_invocations.clear();
-        self.in_flight_tool_invocations.clear();
-    }
-
-    /// True when no queued or in-flight tool calls remain.
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.pending_tool_invocations.is_empty() && self.in_flight_tool_invocations.is_empty()
-    }
-
     /// Number of queued invocations.
     #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
@@ -224,10 +194,34 @@ impl ToolTurnMachine {
         self.in_flight_tool_invocations.len()
     }
 
-    /// Whether a call is tracked as in-flight.
+    /// Whether no invocations are queued or in flight.
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pending_tool_invocations.is_empty() && self.in_flight_tool_invocations.is_empty()
+    }
+
+    /// Whether `call_id` is currently in flight.
     #[cfg(test)]
     pub(crate) fn is_in_flight(&self, call_id: &ToolCallId) -> bool {
         self.in_flight_tool_invocations.contains_key(call_id)
+    }
+
+    /// Test helper that marks `call_id` as running for `conversation_id`.
+    #[cfg(test)]
+    pub(crate) fn record_in_flight_for_test(
+        &mut self,
+        conversation_id: AgentId,
+        call_id: ToolCallId,
+    ) {
+        self.in_flight_tool_invocations.insert(
+            call_id,
+            InFlightToolInvocation {
+                conversation_id,
+                foreground_pending: true,
+                backgrounded: false,
+                foreground_deadline: None,
+            },
+        );
     }
 
     /// Whether `conversation_id` has queued work.

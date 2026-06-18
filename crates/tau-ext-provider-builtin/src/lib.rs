@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -524,6 +525,7 @@ where
     let mut deferred: VecDeque<HarnessOutputMessage> = VecDeque::new();
     let chatgpt_runtime = Arc::new(ChatGptRuntime::new());
     let cancellation = Arc::new(CancellationState::default());
+    let mut debug_dir: Option<PathBuf> = None;
     let mut prompt_queue: VecDeque<PromptJob> = VecDeque::new();
     let prompt_worker_context = PromptWorkerContext {
         worker_tx: &worker_tx,
@@ -572,6 +574,10 @@ where
         };
 
         let event = match frame {
+            HarnessOutputMessage::Configure(configure) => {
+                debug_dir = configure.debug_dir;
+                None
+            }
             HarnessOutputMessage::Deliver(delivery) => {
                 // Prompt execution is an effect; replay-marked frames
                 // re-send history and must never start a provider call.
@@ -590,7 +596,7 @@ where
         match event {
             Some(Event::AgentPromptPrewarmRequested(prewarm)) => {
                 let mut profiles = load_prompt_profiles();
-                handle_prewarm(&prewarm, &mut profiles, &chatgpt_runtime);
+                handle_prewarm(&prewarm, &mut profiles, &chatgpt_runtime, debug_dir.clone());
             }
             Some(Event::AgentPromptCreated(prompt)) => {
                 let agent_prompt_id = prompt.agent_prompt_id.clone();
@@ -605,7 +611,7 @@ where
                 trace_prompt_like("provider prompt", &prompt, &agent_prompt_id);
 
                 let mut profiles = load_prompt_profiles();
-                match resolve_prompt_backend(&prompt.model, &mut profiles) {
+                match resolve_prompt_backend(&prompt.model, &mut profiles, debug_dir.clone()) {
                     Some(backend) => {
                         let job = PromptJob {
                             agent_prompt_id,
@@ -1046,10 +1052,11 @@ impl RetrySleeper for SharedRetryContext {
 fn resolve_prompt_backend(
     model: &ModelId,
     profiles: &mut BuiltinProviderProfiles,
+    debug_dir: Option<PathBuf>,
 ) -> Option<PromptBackend> {
     match profiles.providers.get_mut(&model.provider)? {
         BuiltinProviderProfile::Chatgpt(profile) => {
-            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth)
+            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth, debug_dir)
                 .map(PromptBackend::Responses)
         }
         BuiltinProviderProfile::ChatCompletions(provider) => {
@@ -1081,10 +1088,11 @@ fn resolve_prompt_backend(
 fn resolve_responses_backend(
     model: &ModelId,
     profiles: &mut BuiltinProviderProfiles,
+    debug_dir: Option<PathBuf>,
 ) -> Option<responses::ResponsesConfig> {
     match profiles.providers.get_mut(&model.provider)? {
         BuiltinProviderProfile::Chatgpt(profile) => {
-            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth)
+            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth, debug_dir)
         }
         BuiltinProviderProfile::ChatCompletions(_) | BuiltinProviderProfile::OpenRouter(_) => None,
     }
@@ -1094,6 +1102,7 @@ fn resolve_chatgpt_backend(
     model: &ModelId,
     provider_name: &ProviderName,
     auth_store: &mut OpenAiAuth,
+    debug_dir: Option<PathBuf>,
 ) -> Option<responses::ResponsesConfig> {
     if oauth_token_should_refresh(&auth_store.access_token, auth_store.expires_at_ms)
         && !auth_store.refresh_token.trim().is_empty()
@@ -1112,11 +1121,13 @@ fn resolve_chatgpt_backend(
         return None;
     }
 
-    Some(tau_provider_chatgpt::config_for_model(
+    let mut config = tau_provider_chatgpt::config_for_model(
         &model.model,
         auth_store.access_token.clone(),
         auth_store.account_id.clone(),
-    ))
+    );
+    config.debug_dir = debug_dir;
+    Some(config)
 }
 
 fn refresh_chatgpt_credentials_locked(provider_name: &ProviderName) -> std::io::Result<OpenAiAuth> {
@@ -1298,6 +1309,7 @@ fn handle_prewarm(
     prewarm: &tau_proto::AgentPromptPrewarmRequested,
     profiles: &mut BuiltinProviderProfiles,
     chatgpt_runtime: &ChatGptRuntime,
+    debug_dir: Option<PathBuf>,
 ) {
     let Some(model) = prewarm.model.as_ref() else {
         tracing::debug!(
@@ -1307,7 +1319,7 @@ fn handle_prewarm(
         );
         return;
     };
-    let Some(config) = resolve_responses_backend(model, profiles) else {
+    let Some(config) = resolve_responses_backend(model, profiles, debug_dir) else {
         tracing::debug!(
             target: LOG_TARGET,
             agent_id = %prewarm.agent_id,
@@ -1316,7 +1328,7 @@ fn handle_prewarm(
         );
         return;
     };
-    let session_id_str = prewarm.session_id.as_str();
+    let agent_id_str = prewarm.agent_id.as_str();
     let request = common::PromptPayload {
         system_prompt: &prewarm.system_prompt,
         context: &prewarm.context,
@@ -1326,17 +1338,16 @@ fn handle_prewarm(
         compaction: None,
         originator: &prewarm.originator,
         share_user_cache_key: prewarm.share_user_cache_key,
-        session_id: &prewarm.session_id,
         agent_id: &prewarm.agent_id,
     };
-    tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "starting prompt prewarm");
-    match chatgpt_runtime.prewarm(&config, session_id_str, &request) {
+    tracing::debug!(target: LOG_TARGET, agent_id = agent_id_str, "starting prompt prewarm");
+    match chatgpt_runtime.prewarm(&config, agent_id_str, &request) {
         Ok(()) => {
-            tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "completed prompt prewarm")
+            tracing::debug!(target: LOG_TARGET, agent_id = agent_id_str, "completed prompt prewarm")
         }
         Err(error) => tracing::debug!(
             target: LOG_TARGET,
-            session_id = session_id_str,
+            agent_id = agent_id_str,
             "prompt prewarm failed: {error}",
         ),
     }
@@ -1396,7 +1407,6 @@ where
         compaction: prompt.compaction,
         originator: &prompt.originator,
         share_user_cache_key: prompt.share_user_cache_key,
-        session_id: &prompt.session_id,
         agent_id: &prompt.agent_id,
     };
 
@@ -1439,7 +1449,7 @@ where
             let backend =
                 backend_descriptor(config, transport_taken, dispatch.state.stale_chain_fallback);
             finish_stream(
-                prompt.session_id.as_str(),
+                config,
                 agent_prompt_id,
                 prompt,
                 &request,
@@ -1455,7 +1465,7 @@ where
         Err(error) => {
             let backend = backend_descriptor(config, transport_taken, false);
             finish_error(
-                prompt.session_id.as_str(),
+                config,
                 agent_prompt_id,
                 prompt,
                 &backend,
@@ -1482,7 +1492,8 @@ fn backend_descriptor(
 }
 
 fn maybe_debug_write_provider_response(
-    session_id: &str,
+    config: &responses::ResponsesConfig,
+    agent_id: &tau_proto::AgentId,
     response: &ProviderResponseFinished,
     provider_terminal_event: Option<&serde_json::Value>,
 ) {
@@ -1492,13 +1503,13 @@ fn maybe_debug_write_provider_response(
     if !matches!(backend.kind, ProviderBackendKind::Responses) {
         return;
     }
-    let Some(dir) = responses::debug_provider_request_dir(session_id) else {
+    let Some(dir) = responses::debug_provider_request_dir(config, agent_id) else {
         return;
     };
     if let Err(error) = std::fs::create_dir_all(&dir) {
         tracing::warn!(
             target: LOG_TARGET,
-            session_id,
+            agent_id = %agent_id,
             agent_prompt_id = %response.agent_prompt_id,
             "failed to create provider response debug dir: {error}",
         );
@@ -1517,7 +1528,7 @@ fn maybe_debug_write_provider_response(
         response.agent_prompt_id
     ));
     let metadata = serde_json::json!({
-        "session_id": session_id,
+        "agent_id": agent_id,
         "agent_prompt_id": response.agent_prompt_id,
         "transport": transport_label,
         "backend": backend,
@@ -1532,7 +1543,7 @@ fn maybe_debug_write_provider_response(
     {
         tracing::warn!(
             target: LOG_TARGET,
-            session_id,
+            agent_id = %agent_id,
             agent_prompt_id = %response.agent_prompt_id,
             "failed to write provider response debug log: {error}",
         );
@@ -1541,7 +1552,7 @@ fn maybe_debug_write_provider_response(
 
 #[allow(clippy::too_many_arguments)]
 fn finish_stream<W: Write>(
-    session_id: &str,
+    config: &responses::ResponsesConfig,
     agent_prompt_id: &str,
     prompt: &tau_proto::AgentPromptCreated,
     request: &common::PromptPayload<'_>,
@@ -1579,7 +1590,12 @@ fn finish_stream<W: Write>(
         provider_response_id,
         ws_pool_delta,
     };
-    maybe_debug_write_provider_response(session_id, &finished, provider_terminal_event.as_ref());
+    maybe_debug_write_provider_response(
+        config,
+        &prompt.agent_id,
+        &finished,
+        provider_terminal_event.as_ref(),
+    );
     let diagnostic = cache_miss_diagnostic(prompt, request, &finished);
     if let Some(diagnostic) = diagnostic {
         writer.write_message(&HarnessInputMessage::emit(
@@ -1632,7 +1648,7 @@ fn cache_miss_diagnostic(
 }
 
 fn finish_error<W: Write>(
-    session_id: &str,
+    config: &responses::ResponsesConfig,
     agent_prompt_id: &str,
     prompt: &tau_proto::AgentPromptCreated,
     backend: &ProviderBackend,
@@ -1654,7 +1670,7 @@ fn finish_error<W: Write>(
         provider_response_id: None,
         ws_pool_delta,
     };
-    maybe_debug_write_provider_response(session_id, &finished, None);
+    maybe_debug_write_provider_response(config, &prompt.agent_id, &finished, None);
     writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
         finished,
     )))?;

@@ -20,7 +20,7 @@ use tau_proto::{
 };
 
 use crate::action_commands::ActionCommandState;
-use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
+use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_run, resolve_daemon};
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, UiIoStats};
 use crate::prompt_history::PromptHistoryStore;
 use crate::tool_render::ui_dir_block;
@@ -587,11 +587,11 @@ fn cycle_role(
 /// to bump its idle deadline.
 const DRAFT_DEBOUNCE: Duration = Duration::from_secs(1);
 const EOF_DURING_AGENT_NOTICE: &str =
-    "An agent is still running; use /quit to terminate the session in progress.";
+    "An agent is still running; use /quit to terminate the work in progress.";
 pub(crate) const SUSPENDED_AGENT_PROMPT: &str =
     "This agent is suspended. Use `/resume` to resume it before sending messages.";
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/quit", "Exit the chat session"),
+    ("/quit", "Exit chat"),
     ("/cancel", "Cancel the current in-flight prompt"),
     (
         "/detach",
@@ -615,16 +615,12 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Invoke a user-invocable skill (e.g. /skill jujutsu optional args)",
     ),
     (
-        "/session",
-        "Manage chat sessions (e.g. /session new starts a fresh session)",
-    ),
-    (
         "/tree",
         "Print the selected agent tree (`/tree <id>` rewinds head to that node)",
     ),
     (
         "/compact",
-        "Force a provider-side compaction pass on the current session",
+        "Force a provider-side compaction pass on the current agent",
     ),
     ("/fast", "Toggle Fast mode"),
     (
@@ -729,7 +725,6 @@ fn encode_binding_action(action: &CliBindingAction) -> String {
 }
 
 pub(crate) fn run_chat(
-    session_id: &str,
     attach: bool,
     startup_role: Option<&str>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
@@ -738,14 +733,13 @@ pub(crate) fn run_chat(
 ) -> Result<(), CliError> {
     use tau_cli_term::{HighTerm, SlashCommand};
 
-    let state_dir = tau_session_inspect::default_state_dir();
+    let state_dir = tau_agent_inspect::default_state_dir();
     let ui_logging = ui_logging::init(&state_dir)?;
     tracing::info!(
         target: "tau_cli::ui",
         ui_id = ui_logging.ui_id(),
         ui_dir = %ui_logging.dir().display(),
         log_path = %ui_logging.log_path().display(),
-        session_id,
         attach,
         "terminal UI starting"
     );
@@ -754,11 +748,10 @@ pub(crate) fn run_chat(
     let daemon_output = if attach {
         None
     } else {
-        Some(daemon_output_for_session(session_id)?)
+        Some(daemon_output_for_run()?)
     };
     let mut daemon = resolve_daemon(
         attach,
-        session_id,
         daemon_output,
         startup_role,
         DaemonCliOverrides {
@@ -995,10 +988,6 @@ pub(crate) fn run_chat(
     completion_data
         .set_agent_mention_completer(build_agent_mention_completer(input_routing.clone()));
     completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new("/session"),
-        build_session_arg_completer(),
-    );
-    completion_data.set_arg_completer(
         tau_cli_term::CommandName::new("/theme"),
         build_theme_arg_completer(dirs.clone()),
     );
@@ -1053,11 +1042,9 @@ pub(crate) fn run_chat(
     // validation errors (e.g. `/role engineer effort foo`) through the same
     // TermHandle as remote events, so they don't garble the TUI like
     // `eprintln!` would.
-    let mut active_session_id = session_id.to_owned();
     let exit = terminal_input_loop(
         &mut term,
         &writer,
-        &mut active_session_id,
         TerminalInputLoopCtx {
             fast_service_tier_state,
             current_role_state,
@@ -1498,12 +1485,11 @@ trait RecordedLineHandlers {
 /// Mutable state for one terminal input loop invocation.
 ///
 /// Keeping the borrows and owned context together lets each command-family
-/// helper stay small while still sharing the same writer, session id, draft
-/// mailbox, and local output path as the old monolithic loop.
-struct TerminalInputSession<'a> {
+/// helper stay small while still sharing the same writer, input-loop
+/// context, draft mailbox, and local output path as the old monolithic loop.
+struct TerminalInputLoop<'a> {
     term: &'a mut tau_cli_term::HighTerm,
     writer: &'a WriterHandle,
-    session_id: &'a mut String,
     ctx: TerminalInputLoopCtx,
     output: LocalTerminalOutput,
     pending_new_agent_model: PendingNewAgentModel,
@@ -1518,13 +1504,11 @@ struct PendingNewAgentModel {
 impl PendingNewAgentModel {
     fn apply_selection(
         &mut self,
-        session_id: &str,
         selected_agent_id: Option<tau_proto::AgentId>,
         model: tau_proto::ModelId,
     ) -> Option<Event> {
         if let Some(target_agent_id) = selected_agent_id {
             Some(crate::ui_events::agent_model_select(
-                session_id,
                 Some(target_agent_id),
                 model,
             ))
@@ -1547,7 +1531,7 @@ impl PendingNewAgentModel {
     }
 }
 
-impl<'a> TerminalInputSession<'a> {
+impl<'a> TerminalInputLoop<'a> {
     fn run(&mut self) -> Result<InputLoopExit, CliError> {
         loop {
             let event = self.term.get_next_event()?;
@@ -1580,7 +1564,7 @@ impl<'a> TerminalInputSession<'a> {
     fn handle_non_exit_event(&mut self, event: tau_cli_term::Event) {
         use tau_cli_term::Event as TermEvent;
 
-        // These events update local UI/session state only; none of them can
+        // These events update local UI state only; none of them can
         // terminate the input loop, unlike submitted lines and EOF.
 
         match event {
@@ -1612,10 +1596,7 @@ impl<'a> TerminalInputSession<'a> {
     fn send_focus_changed(&self, focused: bool) {
         let _ = send_event(
             self.writer,
-            &Event::UiFocusChanged(UiFocusChanged {
-                session_id: self.session_id.as_str().into(),
-                focused,
-            }),
+            &Event::UiFocusChanged(UiFocusChanged { focused }),
         );
     }
 
@@ -1623,7 +1604,6 @@ impl<'a> TerminalInputSession<'a> {
         let _ = send_event(
             self.writer,
             &Event::UiRecallQueuedPrompt(tau_proto::UiRecallQueuedPrompt {
-                session_id: self.session_id.as_str().into(),
                 target_agent_id: self.selected_side_agent_id(),
             }),
         );
@@ -1650,20 +1630,18 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
-        // Keep session-lifecycle commands first: `/quit` and `/detach` exit
-        // immediately, while `/session new` mutates `session_id` for later
-        // commands and prompt submission.
-        let outcome = self.handle_session_command(text)?;
+        // Keep lifecycle commands first: `/quit` and `/detach` exit immediately.
+        let outcome = self.handle_lifecycle_command(text)?;
         if !matches!(outcome, CommandOutcome::NotHandled) {
             return Ok(outcome);
         }
-        if self.handle_non_session_command(text) {
+        if self.handle_other_command(text) {
             return Ok(CommandOutcome::Continue);
         }
         Ok(CommandOutcome::NotHandled)
     }
 
-    fn handle_non_session_command(&mut self, text: &str) -> bool {
+    fn handle_other_command(&mut self, text: &str) -> bool {
         // The grouping mirrors the old dispatch order while keeping each
         // command-family helper below the cargo-crap hotspot range.
         self.handle_custom_prompt_command(text)
@@ -1712,7 +1690,7 @@ impl<'a> TerminalInputSession<'a> {
         }
     }
 
-    fn handle_session_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
+    fn handle_lifecycle_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
         if text == "/quit" {
             return Ok(CommandOutcome::Exit(InputLoopExit::Quit));
         }
@@ -1731,50 +1709,13 @@ impl<'a> TerminalInputSession<'a> {
             );
             return Ok(CommandOutcome::Exit(InputLoopExit::Detach));
         }
-        if text == "/session" || text.starts_with("/session ") {
-            self.handle_session_namespace(text)?;
-            return Ok(CommandOutcome::Continue);
-        }
-
         Ok(CommandOutcome::NotHandled)
-    }
-
-    fn handle_session_namespace(&mut self, text: &str) -> Result<(), CliError> {
-        let rest = text.strip_prefix("/session").unwrap_or("").trim();
-        let mut parts = rest.split_whitespace();
-        let subcommand = parts.next();
-        let extra = parts.next();
-        match (subcommand, extra) {
-            (Some("new"), None) => self.start_new_session(),
-            (None, None) => {
-                self.output.system_info("/session new");
-                Ok(())
-            }
-            _ => {
-                self.output.system_info("/session new");
-                Ok(())
-            }
-        }
-    }
-
-    fn start_new_session(&mut self) -> Result<(), CliError> {
-        let cwd = std::env::current_dir()?;
-        let new_id = crate::daemon::mint_session_id(&cwd);
-        let _ = send_event(
-            self.writer,
-            &Event::UiSwitchSession(tau_proto::UiSwitchSession {
-                new_session_id: new_id.as_str().into(),
-            }),
-        );
-        *self.session_id = new_id;
-        self.clear_selected_agent();
-        Ok(())
     }
 
     fn send_cancel_prompt(&self) {
         let _ = send_event(
             self.writer,
-            &crate::ui_events::cancel_prompt(self.session_id, self.selected_side_agent_id()),
+            &crate::ui_events::cancel_prompt(self.selected_side_agent_id()),
         );
     }
 
@@ -1790,7 +1731,7 @@ impl<'a> TerminalInputSession<'a> {
         if text == "/tree" {
             let _ = send_event(
                 self.writer,
-                &crate::ui_events::tree_request(self.session_id, self.selected_side_agent_id()),
+                &crate::ui_events::tree_request(self.selected_side_agent_id()),
             );
             return true;
         }
@@ -1806,11 +1747,7 @@ impl<'a> TerminalInputSession<'a> {
             Ok(node_id) => {
                 let _ = send_event(
                     self.writer,
-                    &crate::ui_events::navigate_tree(
-                        self.session_id,
-                        self.selected_side_agent_id(),
-                        node_id,
-                    ),
+                    &crate::ui_events::navigate_tree(self.selected_side_agent_id(), node_id),
                 );
             }
             Err(_) => {
@@ -1824,7 +1761,7 @@ impl<'a> TerminalInputSession<'a> {
         if text == "/compact" {
             let _ = send_event(
                 self.writer,
-                &crate::ui_events::compact_request(self.session_id, self.selected_side_agent_id()),
+                &crate::ui_events::compact_request(self.selected_side_agent_id()),
             );
             return true;
         }
@@ -2023,7 +1960,6 @@ impl<'a> TerminalInputSession<'a> {
             return;
         }
         let event = Event::UiSetAgentDisplayName(UiSetAgentDisplayName {
-            session_id: self.session_id.as_str().into(),
             agent_id: tau_proto::AgentId::parse(agent_id).expect("known agent id is valid"),
             display_name: display_name.to_owned(),
         });
@@ -2082,7 +2018,7 @@ impl<'a> TerminalInputSession<'a> {
                 return;
             }
         };
-        let event = Event::UiLoadAgent(tau_proto::UiLoadAgent { agent_id });
+        let event = Event::AgentLoad(tau_proto::AgentLoad { agent_id });
         if send_event(self.writer, &event).is_ok() {
             self.output.system_info("requested agent load");
         }
@@ -2158,7 +2094,6 @@ impl<'a> TerminalInputSession<'a> {
                 match model.parse::<tau_proto::ModelId>() {
                     Ok(model) => {
                         if let Some(event) = self.pending_new_agent_model.apply_selection(
-                            self.session_id,
                             self.ctx.routing.selected_side_agent_id(),
                             model.clone(),
                         ) {
@@ -2196,7 +2131,6 @@ impl<'a> TerminalInputSession<'a> {
         self.invalidate_pending_draft();
         let event = Event::ActionInvoke(tau_proto::ActionInvoke {
             invocation_id: crate::mint_short_id("action").into(),
-            session_id: self.session_id.as_str().into(),
             extension_name: dispatch.extension_name,
             instance_id: dispatch.instance_id,
             action_id: parsed.action_id.clone(),
@@ -2237,13 +2171,7 @@ impl<'a> TerminalInputSession<'a> {
             return Ok(());
         }
         let target_agent_id = self.ctx.routing.selected_side_agent_id();
-        send_shell_command(
-            self.writer,
-            self.session_id,
-            command,
-            include_in_context,
-            target_agent_id,
-        )
+        send_shell_command(self.writer, command, include_in_context, target_agent_id)
     }
 
     fn submit_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
@@ -2263,7 +2191,6 @@ impl<'a> TerminalInputSession<'a> {
             tau_proto::AgentId::parse(&agent_id).expect("UI stores valid agent ids")
         }) {
             Event::UiPromptSubmitted(UiPromptSubmitted {
-                session_id: self.session_id.as_str().into(),
                 text: text.to_owned(),
                 agent_id: target_agent_id,
                 message_class: tau_proto::PromptMessageClass::User,
@@ -2279,7 +2206,7 @@ impl<'a> TerminalInputSession<'a> {
                 .and_then(|role| role.clone())
                 .unwrap_or_else(|| DEFAULT_AGENT_ROLE.to_owned());
             let model_override = self.pending_new_agent_model.take();
-            create_user_agent_prompt(self.session_id, role, text, model_override)
+            create_user_agent_prompt(role, text, model_override)
         };
         if send_event(self.writer, &event).is_err() {
             return Some(InputLoopExit::Quit);
@@ -2318,13 +2245,7 @@ impl<'a> TerminalInputSession<'a> {
         let text = self.term.handle().get_buffer();
         let (mtx, cv) = &*self.ctx.draft_handle;
         if let Ok(mut g) = mtx.lock() {
-            g.pending = Some((
-                g.epoch,
-                UiPromptDraft {
-                    session_id: self.session_id.as_str().into(),
-                    text,
-                },
-            ));
+            g.pending = Some((g.epoch, UiPromptDraft { text }));
             tracing::trace!(target: "tau_cli::ui", "prompt draft updated");
             cv.notify_one();
         }
@@ -2446,17 +2367,17 @@ impl<'a> TerminalInputSession<'a> {
     }
 }
 
-impl RecordedLineHandlers for TerminalInputSession<'_> {
+impl RecordedLineHandlers for TerminalInputLoop<'_> {
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
-        TerminalInputSession::handle_known_command(self, text)
+        TerminalInputLoop::handle_known_command(self, text)
     }
 
     fn handle_dynamic_action(&mut self, text: &str) -> CommandOutcome {
-        TerminalInputSession::handle_dynamic_action(self, text)
+        TerminalInputLoop::handle_dynamic_action(self, text)
     }
 
     fn submit_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
-        TerminalInputSession::submit_prompt(self, text)
+        TerminalInputLoop::submit_prompt(self, text)
     }
 
     fn system_info(&mut self, message: &str) {
@@ -2507,7 +2428,6 @@ pub(crate) fn next_active_agent(
 fn terminal_input_loop(
     term: &mut tau_cli_term::HighTerm,
     writer: &WriterHandle,
-    session_id: &mut String,
     ctx: TerminalInputLoopCtx,
 ) -> Result<InputLoopExit, CliError> {
     // Cloned `TermHandle` so we can `print_output` for client-side
@@ -2515,10 +2435,9 @@ fn terminal_input_loop(
     // thread without borrowing `term` while the loop also holds
     // `&mut term` for `get_next_event`.
     let output = LocalTerminalOutput::new(term.handle().clone(), ctx.theme.clone());
-    TerminalInputSession {
+    TerminalInputLoop {
         term,
         writer,
-        session_id,
         ctx,
         output,
         pending_new_agent_model: PendingNewAgentModel::default(),
@@ -2573,8 +2492,6 @@ fn active_side_agent_count_from_handles(
         .count()
 }
 
-const SESSION_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[("new", "Start a fresh chat session")];
-
 const AGENT_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[
     ("new", "Clear the selected agent"),
     ("load", "Load an existing durable agent by id"),
@@ -2583,22 +2500,6 @@ const AGENT_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[
     ("resume", "Show a suspended agent transcript"),
     ("name", "Set an agent display name"),
 ];
-
-fn build_session_arg_completer() -> tau_cli_term::ArgCompleter {
-    use tau_cli_term::CompletionItem;
-
-    Arc::new(move |args: &[&str]| match args.len() {
-        0 | 1 => {
-            let needle = args.first().copied().unwrap_or("").to_lowercase();
-            SESSION_SUBCOMMAND_COMPLETIONS
-                .iter()
-                .filter(|(subcommand, _)| completion_matches(subcommand, &needle))
-                .map(|(subcommand, description)| CompletionItem::new(*subcommand, *description))
-                .collect()
-        }
-        _ => Vec::new(),
-    })
-}
 
 fn build_agent_arg_completer(
     routing: InputRoutingState,
@@ -2885,7 +2786,6 @@ pub(crate) fn is_local_slash_command(text: &str) -> bool {
         "/quit"
             | "/cancel"
             | "/detach"
-            | "/session"
             | "/tree"
             | "/compact"
             | "/fast"
@@ -2981,14 +2881,13 @@ fn run_provider_auth(provider: &str, print_local: &impl Fn(&str)) {
 
 fn send_shell_command(
     writer: &WriterHandle,
-    session_id: &str,
     command: &str,
     include_in_context: bool,
     target_agent_id: Option<tau_proto::AgentId>,
 ) -> io::Result<()> {
     send_event(
         writer,
-        &crate::ui_events::shell_command(session_id, command, include_in_context, target_agent_id),
+        &crate::ui_events::shell_command(command, include_in_context, target_agent_id),
     )
 }
 

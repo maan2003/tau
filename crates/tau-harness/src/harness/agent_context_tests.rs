@@ -130,8 +130,8 @@ fn multiple_contributors_are_stable_wrappers_under_same_key() {
     );
 }
 
-/// Agent context never leaks between agents, which matters when one session can
-/// contain agents with different working directories.
+/// Agent context never leaks between agents, which matters when one harness can
+/// contain loaded agents with different working directories.
 #[test]
 fn different_agents_do_not_leak_context() {
     let mut store = AgentContextStore::default();

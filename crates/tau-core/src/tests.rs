@@ -2,13 +2,12 @@ use std::path::PathBuf;
 
 use tau_proto::{
     AgentDisplayNameSet, AgentHeadMoved, AgentId, AgentPromptSubmitted, Event, PromptMessageClass,
-    PromptOriginator, SessionAgentLoaded, SessionAgentUnloaded, SessionId,
+    PromptOriginator, UiPromptDraft,
 };
 
 use crate::{
     AgentEntry, AgentEventParent, AgentStore, AgentStoreError, NodeId, PersistedAgentEvent,
-    PersistedAgentEventSeq, PersistedSessionEvent, PersistedSessionEventSeq, SessionStore,
-    SessionStoreError,
+    PersistedAgentEventSeq,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -290,89 +289,16 @@ fn agent_store_restores_head_move_before_next_append() {
 }
 
 #[test]
-fn session_store_persists_only_membership_facts() {
-    let sessions_dir = temp_dir("sessions");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
-
-    let loaded = Event::SessionAgentLoaded(SessionAgentLoaded {
-        session_id: SessionId::from("session-1"),
-        agent_id: AgentId::parse("agent-1").expect("agent id"),
-    });
-    let outcome = store
-        .append_session_event("session-1", None, loaded.clone())
-        .expect("append loaded");
-
-    assert_eq!(outcome.seq.get(), 0);
-    assert_eq!(outcome.folded_node_id, None);
-    assert!(sessions_dir.join("session-1").join("events.cbor").exists());
-    assert!(
-        store
-            .session("session-1")
-            .expect("session membership")
-            .contains_agent(&AgentId::parse("agent-1").expect("agent id"))
-    );
-
-    store
-        .append_session_event(
-            "session-1",
-            None,
-            Event::SessionAgentUnloaded(SessionAgentUnloaded {
-                session_id: SessionId::from("session-1"),
-                agent_id: AgentId::parse("agent-1").expect("agent id"),
-            }),
-        )
-        .expect("append unloaded");
-
-    let reopened = SessionStore::open(&sessions_dir).expect("reopen session store");
-    let membership = reopened.session("session-1").expect("session membership");
-    assert_eq!(membership.session_id(), "session-1");
-    assert!(!membership.contains_agent(&AgentId::parse("agent-1").expect("agent id")));
-    let events = reopened.session_events("session-1").expect("events");
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].event, loaded);
-
-    let _ = std::fs::remove_dir_all(sessions_dir);
-}
-
-#[test]
-fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
-    let sessions_dir = temp_dir("sessions-bad-seq");
-    let events_path = sessions_dir.join("session-1").join("events.cbor");
-
-    // Persisted sequence is deliberately redundant with file order. Loading must
-    // reject a mismatch so a reordered or spliced membership stream is caught
-    // before it is folded into the session view.
-    append_raw_cbor(
-        &events_path,
-        &PersistedSessionEvent {
-            seq: PersistedSessionEventSeq::new(1),
-            source: None,
-            event: Event::SessionAgentLoaded(SessionAgentLoaded {
-                session_id: SessionId::from("session-1"),
-                agent_id: AgentId::parse("agent-1").expect("agent id"),
-            }),
-            recorded_at: tau_proto::UnixMicros::now(),
-        },
-    );
-
-    let error = SessionStore::open(&sessions_dir).expect_err("bad sequence must fail load");
-    assert!(matches!(error, SessionStoreError::InvalidSequence { .. }));
-
-    let _ = std::fs::remove_dir_all(sessions_dir);
-}
-
-#[test]
 fn agent_store_rejects_non_agent_transcript_events() {
     let agents_dir = temp_dir("agent-rejects-non-transcript");
     let mut store = AgentStore::open(&agents_dir).expect("open agent store");
 
-    let session_event = Event::SessionAgentLoaded(SessionAgentLoaded {
-        session_id: SessionId::from("session-1"),
-        agent_id: AgentId::parse("agent-1").expect("agent id"),
+    let non_agent_event = Event::UiPromptDraft(UiPromptDraft {
+        text: "not an agent event".to_owned(),
     });
     let error = store
-        .append_agent_event("agent-1", None, session_event)
-        .expect_err("agent store must reject session membership events");
+        .append_agent_event("agent-1", None, non_agent_event)
+        .expect_err("agent store must reject non-agent events");
     assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
 
     let mismatched = agent_prompt("agent-2", "not this agent");
@@ -383,19 +309,4 @@ fn agent_store_rejects_non_agent_transcript_events() {
     assert!(!agents_dir.join("agent-1").join("events.cbor").exists());
 
     let _ = std::fs::remove_dir_all(agents_dir);
-}
-
-#[test]
-fn session_store_rejects_transcript_events() {
-    let sessions_dir = temp_dir("session-rejects-transcript");
-    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
-
-    let error = store
-        .append_session_event("session-1", None, agent_prompt("agent-1", "not membership"))
-        .expect_err("session store must reject transcript events");
-
-    assert!(matches!(error, SessionStoreError::InvalidEvent { .. }));
-    assert!(!sessions_dir.join("session-1").join("events.cbor").exists());
-
-    let _ = std::fs::remove_dir_all(sessions_dir);
 }

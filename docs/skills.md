@@ -1,6 +1,6 @@
 # Skills
 
-Tau discovers Markdown skills at session start, advertises only the small set that should be immediately visible, and lets the agent discover or load the rest with the `skill` tool.
+Tau discovers Markdown skills at startup, advertises only the small set that should be immediately visible, and lets the agent discover or load the rest with the `skill` tool.
 
 
 ## Discovery

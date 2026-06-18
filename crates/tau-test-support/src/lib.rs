@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use tau_agent_inspect::{InspectError, open_policy_store};
 use tau_config::settings::TauDirs;
-use tau_core::{AgentStore, AgentStoreError, PolicyStore, SessionStore};
+use tau_core::{AgentStore, AgentStoreError, PolicyStore};
 use tau_harness::{
     HarnessError, ServeOptions, run_daemon_with_echo, run_embedded_message_with_echo,
     send_daemon_message,
 };
-use tau_session_inspect::{InspectError, open_policy_store, open_session_store};
 use tempfile::TempDir;
 
 /// Temporary runtime paths for end-to-end tests.
@@ -18,7 +18,7 @@ use tempfile::TempDir;
 pub struct TestRuntime {
     _tempdir: TempDir,
     pub socket_path: PathBuf,
-    /// Per-state directory containing session subdirs and `policy.cbor`.
+    /// Per-state directory containing agent state and `policy.cbor`.
     pub state_dir: PathBuf,
     /// Isolated `$XDG_CONFIG_HOME`/`$XDG_STATE_HOME` layout so tests don't
     /// leak into (or read from) the developer's real `~/.config/tau` and
@@ -50,22 +50,19 @@ impl TestRuntime {
     }
 
     /// Runs one embedded interaction and returns the agent response.
-    pub fn run_embedded(&self, session_id: &str, message: &str) -> Result<String, HarnessError> {
-        Ok(run_embedded_message_with_echo(&self.state_dir, session_id, message)?.response)
+    pub fn run_embedded(&self, message: &str) -> Result<String, HarnessError> {
+        Ok(run_embedded_message_with_echo(&self.state_dir, message)?.response)
     }
 
-    /// Starts a foreground daemon in a background thread, eager-initing
-    /// the given session id (typically what test code will then send a
-    /// message to).
-    pub fn spawn_daemon(&self, eager_session_id: &str, max_clients: Option<usize>) -> DaemonHandle {
+    /// Starts a foreground daemon in a background thread.
+    pub fn spawn_daemon(&self, max_clients: Option<usize>) -> DaemonHandle {
         let socket_path = self.socket_path.clone();
         let state_dir = self.state_dir.clone();
         let dirs = self.dirs.clone();
-        let eager_session_id = eager_session_id.to_owned();
         let join_handle = thread::spawn(move || {
             let mut options = ServeOptions::builder().dirs(dirs).build();
             options.max_clients = max_clients;
-            run_daemon_with_echo(socket_path, state_dir, &eager_session_id, options)
+            run_daemon_with_echo(socket_path, state_dir, options)
         });
         DaemonHandle { join_handle }
     }
@@ -76,17 +73,8 @@ impl TestRuntime {
     }
 
     /// Sends one message to a running daemon.
-    pub fn send_daemon_message(
-        &self,
-        session_id: &str,
-        message: &str,
-    ) -> Result<String, HarnessError> {
-        send_daemon_message(&self.socket_path, session_id, message)
-    }
-
-    /// Opens the session store for assertions.
-    pub fn open_session_store(&self) -> Result<SessionStore, InspectError> {
-        open_session_store(tau_config::settings::sessions_dir_of(&self.state_dir))
+    pub fn send_daemon_message(&self, message: &str) -> Result<String, HarnessError> {
+        send_daemon_message(&self.socket_path, message)
     }
 
     /// Opens the agent store for transcript assertions.

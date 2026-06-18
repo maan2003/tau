@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
     CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
-    ExtensionName, ModelId, ModelTag, PromptContext, PromptFragment, ProviderResponseItem,
-    ProviderTokenUsage, SessionId, SkillName, ToolCallId, ToolDefinition, ToolGroupName, ToolName,
-    ToolTag,
+    ExtensionName, HarnessRunId, ModelId, ModelTag, PromptContext, PromptFragment,
+    ProviderResponseItem, ProviderTokenUsage, SkillName, ToolCallId, ToolDefinition, ToolGroupName,
+    ToolName, ToolTag,
 };
 
 fn default_true() -> bool {
@@ -80,7 +80,7 @@ impl fmt::Display for NodeId {
 pub enum NoticeLevel {
     /// Harness/control-plane failure or other must-see failure notice.
     Critical,
-    /// Something is wrong, but the session is not necessarily terminating.
+    /// Something is wrong, but the harness is not necessarily terminating.
     Warning,
     /// Useful normal information.
     #[default]
@@ -158,32 +158,16 @@ impl HarnessNotice {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionDirStatus {
-    #[default]
-    New,
-}
-
-impl SessionDirStatus {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::New => "new",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct HarnessSessionDir {
-    pub session_id: SessionId,
-    pub path: std::path::PathBuf,
-    pub status: SessionDirStatus,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessUiDir {
     pub path: std::path::PathBuf,
+}
+
+/// Announces the typed id for one harness process run.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessStarted {
+    /// Short identifier shared by all participants for this harness run.
+    pub run_id: HarnessRunId,
 }
 
 /// The harness announces all available models as `provider/model` strings.
@@ -961,8 +945,6 @@ pub struct ActionSchemaPublished {
 pub struct ActionInvoke {
     /// Client-minted id used to route the matching result/error.
     pub invocation_id: ActionInvocationId,
-    /// Active Tau session from which the action was invoked.
-    pub session_id: SessionId,
     /// Extension name selected by the UI's schema snapshot.
     pub extension_name: ExtensionName,
     /// Extension instance id selected by the UI's schema snapshot.
@@ -1621,17 +1603,14 @@ pub struct ExtAgentsMdAvailable {
     pub content: String,
 }
 
-/// An extension declares that it will publish per-agent prompt context after
-/// each matching `session.agent_loaded` event and acknowledge completion with
-/// `extension.context_ready`.
+/// An extension declares that it will publish per-agent prompt context and
+/// acknowledge completion with `extension.context_ready`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionContextProviderRegister {}
 
 /// An extension finished broadcasting refreshed prompt context for one agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionContextReady {
-    /// Session containing the loaded agent.
-    pub session_id: SessionId,
     /// Durable agent whose context contributions are complete for now.
     pub agent_id: AgentId,
 }
@@ -1814,24 +1793,6 @@ pub struct AgentDisplayNameSet {
     pub display_name: String,
 }
 
-/// Durable session membership fact: an agent is now loaded in a session.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionAgentLoaded {
-    /// Session membership container.
-    pub session_id: SessionId,
-    /// Durable agent now available in the session.
-    pub agent_id: AgentId,
-}
-
-/// Durable session membership fact: an agent is no longer loaded in a session.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionAgentUnloaded {
-    /// Session membership container.
-    pub session_id: SessionId,
-    /// Durable agent removed from the session.
-    pub agent_id: AgentId,
-}
-
 /// Request to start a side-agent conversation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StartAgentRequest {
@@ -1913,6 +1874,28 @@ pub struct AgentStateChanged {
     /// New transient runtime state for the agent.
     pub state: AgentRuntimeState,
 }
+
+/// Transient fact that an existing durable agent is being loaded.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentLoading {
+    /// Durable agent whose transcript is being replayed before it becomes
+    /// loaded.
+    pub agent_id: AgentId,
+}
+
+/// Transient fact that a durable agent is loaded into this harness instance.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentLoaded {
+    /// Durable agent now available for prompt routing in this harness.
+    pub agent_id: AgentId,
+}
+
+/// Transient fact that a durable agent is no longer loaded in this harness.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentUnloaded {
+    /// Durable agent removed from prompt routing in this harness.
+    pub agent_id: AgentId,
+}
 /// Metadata for one model currently served by a provider extension.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderModelInfo {
@@ -1961,17 +1944,15 @@ pub struct ProviderModelsUpdated {
 /// Extension-defined event payload.
 ///
 /// `name` is the dotted event name used for routing and subscription
-/// matching. `payload` carries extension-owned CBOR data. `session_id`, when
-/// set, is runtime routing/context metadata; custom events are not folded into
-/// durable semantic logs unless a typed durable event is added for that use
-/// case. The name must use an extension-owned category, not one of Tau's
-/// reserved first-party categories such as `tool`, `harness`, `agent`, or
+/// matching. `payload` carries extension-owned CBOR data. Custom events are not
+/// folded into durable semantic logs unless a typed durable event is added for
+/// that use case. The name must use an extension-owned category, not one of
+/// Tau's reserved first-party categories such as `tool`, `harness`, `agent`, or
 /// `extension`; this prevents custom payloads from spoofing typed protocol
 /// events in routing code keyed by [`Event::name`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct CustomEvent {
     name: EventName,
-    session_id: Option<SessionId>,
     payload: CborValue,
 }
 
@@ -2014,31 +1995,17 @@ impl CustomEvent {
     ///
     /// Returns [`InvalidCustomEventName`] when `name` uses a reserved
     /// first-party event category.
-    pub fn try_new(
-        name: EventName,
-        session_id: Option<SessionId>,
-        payload: CborValue,
-    ) -> Result<Self, InvalidCustomEventName> {
+    pub fn try_new(name: EventName, payload: CborValue) -> Result<Self, InvalidCustomEventName> {
         if !Self::name_is_allowed(&name) {
             return Err(InvalidCustomEventName { name });
         }
-        Ok(Self {
-            name,
-            session_id,
-            payload,
-        })
+        Ok(Self { name, payload })
     }
 
     /// Event name used for routing and subscription matching.
     #[must_use]
     pub fn name(&self) -> &EventName {
         &self.name
-    }
-
-    /// Optional session metadata associated with this custom event.
-    #[must_use]
-    pub fn session_id(&self) -> Option<&SessionId> {
-        self.session_id.as_ref()
     }
 
     /// Extension-owned CBOR payload.
@@ -2072,14 +2039,11 @@ impl Serialize for CustomEvent {
         #[derive(Serialize)]
         struct WireCustomEvent<'a> {
             name: &'a EventName,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            session_id: Option<&'a SessionId>,
             payload: &'a CborValue,
         }
 
         WireCustomEvent {
             name: &self.name,
-            session_id: self.session_id.as_ref(),
             payload: &self.payload,
         }
         .serialize(serializer)
@@ -2094,13 +2058,11 @@ impl<'de> Deserialize<'de> for CustomEvent {
         #[derive(Deserialize)]
         struct WireCustomEvent {
             name: EventName,
-            #[serde(default)]
-            session_id: Option<SessionId>,
             payload: CborValue,
         }
 
         let wire = WireCustomEvent::deserialize(deserializer)?;
-        Self::try_new(wire.name, wire.session_id, wire.payload).map_err(serde::de::Error::custom)
+        Self::try_new(wire.name, wire.payload).map_err(serde::de::Error::custom)
     }
 }
 
@@ -2140,7 +2102,6 @@ impl PromptMessageClass {
 /// real user turns.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiPromptSubmitted {
-    pub session_id: SessionId,
     pub text: String,
     /// Agent that should receive this prompt. Agent creation is explicit via
     /// [`UiCreateAgent`]; prompt submissions only target existing agents.
@@ -2177,7 +2138,6 @@ pub struct UiPromptSubmitted {
 /// multiple attached UIs.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiPromptDraft {
-    pub session_id: SessionId,
     pub text: String,
 }
 
@@ -2186,16 +2146,12 @@ pub struct UiPromptDraft {
 /// Tau terminal window.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiFocusChanged {
-    /// Session whose attached UI observed the focus change.
-    pub session_id: SessionId,
     /// Whether the terminal reported focus gained (`true`) or lost (`false`).
     pub focused: bool,
 }
 
-/// The UI is detaching and wants the daemon to stay alive after it
-/// leaves, so a later `tau --attach` can pick up the same
-/// session. The harness flips its `exit_on_disconnect` flag to
-/// `false` on receipt.
+/// The UI is detaching and wants the daemon to stay alive after it leaves.
+/// The harness flips its `exit_on_disconnect` flag to `false` on receipt.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiDetachRequest {}
 
@@ -2209,9 +2165,7 @@ pub struct UiRoleSelect {
 /// The user requests switching the model used by one loaded agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiAgentModelSelect {
-    /// Session whose agent should be updated.
-    pub session_id: SessionId,
-    /// Agent to update. `None` asks the harness to use the session's only
+    /// Agent to update. `None` asks the harness to use the only
     /// unambiguous loaded user agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<AgentId>,
@@ -2310,23 +2264,12 @@ pub enum UiRoleUpdateAction {
     },
 }
 
-/// The user requests switching to a different session within the same
-/// daemon. Harness emits `SessionShutdown` for the current session,
-/// then `SessionStarted` for the new one, and waits for extensions to
-/// acknowledge re-init.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiSwitchSession {
-    pub new_session_id: SessionId,
-}
-
 /// The UI requests creation of a durable agent and may include the first prompt
 /// that should be submitted to it. This is the explicit boundary between
 /// pre-agent UI state (role/cwd can still change freely) and durable agent
 /// state.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiCreateAgent {
-    /// Session in which the agent should be loaded.
-    pub session_id: SessionId,
     /// Role to bind to the new durable agent.
     pub role: String,
     /// Model override to apply to the new agent before its first prompt is
@@ -2357,9 +2300,9 @@ pub struct UiCreateAgent {
     pub parent_agent: Option<AgentId>,
 }
 
-/// The UI requests loading an existing durable agent into this harness.
+/// Request to load an existing durable agent into this harness.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiLoadAgent {
+pub struct AgentLoad {
     /// Durable agent id to reconstruct from the agent store.
     pub agent_id: AgentId,
 }
@@ -2379,8 +2322,6 @@ pub struct AgentInitialMetadata {
 /// UI request to set a durable agent display name.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiSetAgentDisplayName {
-    /// Session in which the target agent must be loaded or known.
-    pub session_id: SessionId,
     /// Agent whose display name should be changed.
     pub agent_id: AgentId,
     /// New human-friendly display name.
@@ -2391,7 +2332,6 @@ pub struct UiSetAgentDisplayName {
 /// `harness.notice` line per node) to the chat output.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiTreeRequest {
-    pub session_id: SessionId,
     /// Target agent tree to render. `None` leaves selection to the harness's
     /// current/default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2402,7 +2342,6 @@ pub struct UiTreeRequest {
 /// so the next prompt branches off there.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiNavigateTree {
-    pub session_id: SessionId,
     /// Target agent tree to navigate. `None` leaves selection to the harness's
     /// current/default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2414,7 +2353,6 @@ pub struct UiNavigateTree {
 /// the target agent history before the next prompt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiCompactRequest {
-    pub session_id: SessionId,
     /// Target agent conversation to compact. `None` leaves selection to the
     /// harness's current/default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2439,8 +2377,6 @@ pub struct UiCompactRequest {
 ///   channel) is harmless — it just falls through with no in-flight match.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiCancelPrompt {
-    /// Session whose active or queued prompt should be cancelled.
-    pub session_id: SessionId,
     /// Target agent conversation to cancel. `None` leaves selection to the
     /// harness's current/default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2454,8 +2390,6 @@ pub struct UiCancelPrompt {
 /// prompt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiRecallQueuedPrompt {
-    /// Session whose conversation queue should be recalled from.
-    pub session_id: SessionId,
     /// Target agent conversation to recall from. `None` leaves selection to the
     /// harness's current/default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2479,7 +2413,6 @@ pub enum ShellStream {
 /// the result is UI-only and never reaches the model.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiShellCommand {
-    pub session_id: SessionId,
     pub command_id: crate::ShellCommandId,
     pub command: String,
     pub include_in_context: bool,
@@ -2504,14 +2437,13 @@ pub struct ShellCommandProgress {
 
 /// A user-initiated shell command completed (exited or was cancelled).
 ///
-/// The extension echoes `command`, `session_id`, and
-/// `include_in_context` back from the originating `UiShellCommand`
+/// The extension echoes `command` and `include_in_context` back from the
+/// originating `UiShellCommand`
 /// so the harness can act on the finished event without bookkeeping
 /// a per-command_id map.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ShellCommandFinished {
     pub command_id: crate::ShellCommandId,
-    pub session_id: SessionId,
     pub command: String,
     pub include_in_context: bool,
     /// Target agent for this user-authored shell command. `None` means no
@@ -2655,26 +2587,6 @@ pub struct AgentUserMessageInjected {
     pub message_class: PromptMessageClass,
 }
 
-// ---------------------------------------------------------------------------
-// Session lifecycle/membership events
-// ---------------------------------------------------------------------------
-
-/// The harness created or switched to a session. Extensions that
-/// subscribe react by performing per-session setup (e.g. discovering
-/// AGENTS.md) and signal completion with `ExtensionContextReady`.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionStarted {
-    pub session_id: SessionId,
-}
-
-/// The harness is leaving the current session. Fired before
-/// `SessionStarted` for the next one when the user switches sessions.
-/// Extensions that hold per-session state subscribe to flush or drop it.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionShutdown {
-    pub session_id: SessionId,
-}
-
 /// Who initiated the prompt — the human user via the UI, or a side query from
 /// an extension or harness-owned tool via [`StartAgentRequest`].
 ///
@@ -2727,8 +2639,6 @@ pub struct AgentPromptCreated {
     pub agent_prompt_id: AgentPromptId,
     /// Agent transcript this prompt belongs to.
     pub agent_id: AgentId,
-    /// Session where this request was first made.
-    pub session_id: SessionId,
     /// System prompt sent alongside the item timeline.
     pub system_prompt: String,
     /// Fully materialized prompt context for this turn.
@@ -2826,7 +2736,6 @@ pub struct AgentPromptTerminated {
 pub struct AgentPromptPrewarmRequested {
     /// Agent whose prompt prefix should be warmed.
     pub agent_id: AgentId,
-    pub session_id: SessionId,
     pub system_prompt: String,
     pub context: PromptContext,
     pub tools: Vec<ToolDefinition>,
@@ -3046,8 +2955,8 @@ pub struct ProviderBackend {
     /// Base URL or origin of the upstream provider endpoint.
     pub base_url: String,
     /// Wire transport the turn was sent over. Defaults to
-    /// `HttpSse` for backwards compatibility with sessions recorded
-    /// before this field existed.
+    /// `HttpSse` for backwards compatibility with records written before this
+    /// field existed.
     #[serde(default)]
     pub transport: ProviderBackendTransport,
     /// The backend retried a rejected `previous_response_id` as a full replay.
@@ -3176,10 +3085,10 @@ pub enum Event {
     // Harness notices
     #[serde(rename = "harness.notice")]
     HarnessNotice(HarnessNotice),
-    #[serde(rename = "harness.session_dir")]
-    HarnessSessionDir(HarnessSessionDir),
     #[serde(rename = "harness.ui_dir")]
     HarnessUiDir(HarnessUiDir),
+    #[serde(rename = "harness.started")]
+    HarnessStarted(HarnessStarted),
     #[serde(rename = "harness.models_available")]
     HarnessModelsAvailable(HarnessModelsAvailable),
     #[serde(rename = "harness.roles_available")]
@@ -3192,6 +3101,14 @@ pub enum Event {
     HarnessAgentContextUsageChanged(HarnessAgentContextUsageChanged),
     #[serde(rename = "agent.state")]
     AgentState(AgentStateChanged),
+    #[serde(rename = "agent.load")]
+    AgentLoad(AgentLoad),
+    #[serde(rename = "agent.loading")]
+    AgentLoading(AgentLoading),
+    #[serde(rename = "agent.loaded")]
+    AgentLoaded(AgentLoaded),
+    #[serde(rename = "agent.unloaded")]
+    AgentUnloaded(AgentUnloaded),
     #[serde(rename = "harness.efforts_available")]
     HarnessEffortsAvailable(HarnessEffortsAvailable),
     #[serde(rename = "harness.verbosities_available")]
@@ -3216,12 +3133,8 @@ pub enum Event {
     UiDetachRequest(UiDetachRequest),
     #[serde(rename = "ui.shell_command")]
     UiShellCommand(UiShellCommand),
-    #[serde(rename = "ui.switch_session")]
-    UiSwitchSession(UiSwitchSession),
     #[serde(rename = "ui.create_agent")]
     UiCreateAgent(UiCreateAgent),
-    #[serde(rename = "ui.load_agent")]
-    UiLoadAgent(UiLoadAgent),
     #[serde(rename = "ui.tree_request")]
     UiTreeRequest(UiTreeRequest),
     #[serde(rename = "ui.navigate_tree")]
@@ -3276,16 +3189,6 @@ pub enum Event {
     AgentMetadataSet(AgentMetadataSet),
     #[serde(rename = "agent.metadata_unset")]
     AgentMetadataUnset(AgentMetadataUnset),
-
-    // Session lifecycle/membership
-    #[serde(rename = "session.started")]
-    SessionStarted(SessionStarted),
-    #[serde(rename = "session.shutdown")]
-    SessionShutdown(SessionShutdown),
-    #[serde(rename = "session.agent_loaded")]
-    SessionAgentLoaded(SessionAgentLoaded),
-    #[serde(rename = "session.agent_unloaded")]
-    SessionAgentUnloaded(SessionAgentUnloaded),
 
     // Provider execution
     #[serde(rename = "provider.prompt_submitted")]
@@ -3343,8 +3246,8 @@ impl Event {
             Self::ProviderToolResult(_) => EventName::PROVIDER_TOOL_RESULT,
             Self::ProviderToolError(_) => EventName::PROVIDER_TOOL_ERROR,
             Self::HarnessNotice(_) => EventName::HARNESS_NOTICE,
-            Self::HarnessSessionDir(_) => EventName::HARNESS_SESSION_DIR,
             Self::HarnessUiDir(_) => EventName::HARNESS_UI_DIR,
+            Self::HarnessStarted(_) => EventName::HARNESS_STARTED,
             Self::HarnessModelsAvailable(_) => EventName::HARNESS_MODELS_AVAILABLE,
             Self::HarnessRolesAvailable(_) => EventName::HARNESS_ROLES_AVAILABLE,
             Self::HarnessRoleSelected(_) => EventName::HARNESS_ROLE_SELECTED,
@@ -3366,9 +3269,11 @@ impl Event {
             Self::UiRoleUpdate(_) => EventName::UI_ROLE_UPDATE,
             Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
-            Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiCreateAgent(_) => EventName::UI_CREATE_AGENT,
-            Self::UiLoadAgent(_) => EventName::UI_LOAD_AGENT,
+            Self::AgentLoad(_) => EventName::AGENT_LOAD,
+            Self::AgentLoading(_) => EventName::AGENT_LOADING,
+            Self::AgentLoaded(_) => EventName::AGENT_LOADED,
+            Self::AgentUnloaded(_) => EventName::AGENT_UNLOADED,
             Self::UiTreeRequest(_) => EventName::UI_TREE_REQUEST,
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
             Self::UiCompactRequest(_) => EventName::UI_COMPACT_REQUEST,
@@ -3388,10 +3293,6 @@ impl Event {
             Self::AgentDisplayNameSet(_) => EventName::AGENT_DISPLAY_NAME_SET,
             Self::AgentMetadataSet(_) => EventName::AGENT_METADATA_SET,
             Self::AgentMetadataUnset(_) => EventName::AGENT_METADATA_UNSET,
-            Self::SessionStarted(_) => EventName::SESSION_STARTED,
-            Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
-            Self::SessionAgentLoaded(_) => EventName::SESSION_AGENT_LOADED,
-            Self::SessionAgentUnloaded(_) => EventName::SESSION_AGENT_UNLOADED,
             Self::AgentPromptCreated(_) => EventName::AGENT_PROMPT_CREATED,
             Self::AgentPromptTerminated(_) => EventName::AGENT_PROMPT_TERMINATED,
             Self::AgentPromptPrewarmRequested(_) => EventName::AGENT_PROMPT_PREWARM_REQUESTED,
@@ -3402,37 +3303,5 @@ impl Event {
             Self::ProviderResponseFinished(_) => EventName::PROVIDER_RESPONSE_FINISHED,
             Self::ProviderCacheMissDiagnostic(_) => EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC,
         }
-    }
-
-    /// Returns true for protocol events that are runtime-only by default when
-    /// sent directly without an explicit [`crate::Emit`] durability override.
-    #[must_use]
-    pub const fn defaults_to_transient(&self) -> bool {
-        matches!(
-            self,
-            Self::ToolCancelled(_)
-                | Self::ProviderResponseUpdated(_)
-                | Self::ProviderPromptSubmitted(_)
-                | Self::ToolProgress(_)
-                | Self::ToolDelegateProgress(_)
-                | Self::ActionSchemaPublished(_)
-                | Self::ActionInvoke(_)
-                | Self::ActionResult(_)
-                | Self::ActionError(_)
-                | Self::ShellCommandProgress(_)
-                | Self::UiPromptSubmitted(_)
-                | Self::AgentPromptQueued(_)
-                | Self::AgentPromptRecalled(_)
-                | Self::AgentPromptCreated(_)
-                | Self::AgentPromptTerminated(_)
-                | Self::AgentPromptPrewarmRequested(_)
-                | Self::AgentState(_)
-                | Self::UiCompactRequest(_)
-                | Self::UiCreateAgent(_)
-                | Self::UiLoadAgent(_)
-                | Self::UiPromptDraft(_)
-                | Self::UiFocusChanged(_)
-                | Self::UiSetAgentDisplayName(_)
-        )
     }
 }

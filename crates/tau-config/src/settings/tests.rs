@@ -140,15 +140,26 @@ fn testing_settings_rejects_unknown_fields() {
     assert!(error.to_string().contains("unknown field"));
 }
 
-/// Ensures `session_retention_days: 0` disables cleanup by returning `None`.
+/// Ensures `agent_retention_days: 0` disables cleanup by returning `None`.
 #[test]
-fn zero_session_retention_disables_cleanup() {
+fn zero_agent_retention_disables_cleanup() {
     let settings = HarnessSettings {
-        session_retention_days: 0,
+        agent_retention_days: 0,
         ..HarnessSettings::built_in()
     };
 
-    assert_eq!(settings.session_retention(), None);
+    assert_eq!(settings.agent_retention(), None);
+}
+
+/// Ensures `debug_retention_days: 0` disables debug directory cleanup.
+#[test]
+fn zero_debug_retention_disables_cleanup() {
+    let settings = HarnessSettings {
+        debug_retention_days: 0,
+        ..HarnessSettings::built_in()
+    };
+
+    assert_eq!(settings.debug_retention(), None);
 }
 
 /// Ensures tag policy patterns support exact and terminal-prefix matching while
@@ -909,15 +920,15 @@ fn harness_settings_user_override_wins_over_built_in() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-                session_retention_days: 7,
+                agent_retention_days: 7,
             }"#,
     )
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert_eq!(s.session_retention_days, 7);
+    assert_eq!(s.agent_retention_days, 7);
     assert_eq!(
-        s.session_retention(),
+        s.agent_retention(),
         Some(std::time::Duration::from_secs(7 * 24 * 60 * 60))
     );
 }
@@ -1015,7 +1026,7 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            session_retention_days: 7,
+            agent_retention_days: 7,
             extensions: {
                 "core-shell": { config: { working_directory: "/from-file" } },
                 "std-websearch": { enable: true },
@@ -1025,7 +1036,7 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
     .expect("write");
 
     let overrides = [
-        HarnessConfigCliOverride::from_str("session_retention_days=3").expect("override"),
+        HarnessConfigCliOverride::from_str("agent_retention_days=3").expect("override"),
         HarnessConfigCliOverride::from_str(
             "extensions.core-shell.config.working_directory=/from-cli",
         )
@@ -1039,7 +1050,7 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
     let s = load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
         .expect("load");
 
-    assert_eq!(s.session_retention_days, 3);
+    assert_eq!(s.agent_retention_days, 3);
     let core_shell = &s.extensions["core-shell"];
     assert_eq!(
         core_shell.config.as_ref().and_then(|config| {
@@ -1752,7 +1763,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            session_retention_days: 7,
+            agent_retention_days: 7,
             extensions: {
                 mything: { command: ["mything"] },
             },
@@ -1773,7 +1784,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
     std::fs::write(
         dir.join("harness.d").join("01-extra.yaml"),
         r#"{
-            session_retention_days: 14,
+            agent_retention_days: 14,
             extensions: {
                 mything: { suffix: ["--flag"] },
             },
@@ -1792,7 +1803,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
     .expect("write drop-in");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert_eq!(s.session_retention_days, 14);
+    assert_eq!(s.agent_retention_days, 14);
     assert_eq!(
         s.extensions["mything"].command.as_ref().expect("command"),
         &vec!["mything".to_owned()]
@@ -2351,7 +2362,7 @@ fn harness_custom_prompts_parse_from_config() {
         dir.join("harness.yaml"),
         r#"custom_prompts:
   summarize: |
-    Summarize the current session.
+    Summarize the current agent.
   review: "Review this code carefully"
 "#,
     )
@@ -2368,7 +2379,7 @@ fn harness_custom_prompts_parse_from_config() {
             },
             CustomPrompt {
                 id: "summarize".to_owned(),
-                text: "Summarize the current session.\n".to_owned(),
+                text: "Summarize the current agent.\n".to_owned(),
             },
         ]
     );

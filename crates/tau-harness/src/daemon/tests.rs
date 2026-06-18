@@ -49,8 +49,8 @@ fn post_accept_startup_error_is_sent_through_normal_writer() {
         config_dir: Some(td.path().join("config")),
         state_dir: Some(td.path().join("runtime")),
     };
-    let mut harness = Harness::new_with_provider(&state_dir, dirs, echo_runner, echo_tools(), "s1")
-        .expect("harness");
+    let mut harness =
+        Harness::new_with_provider(&state_dir, dirs, echo_runner, echo_tools()).expect("harness");
     let (server_end, ui_end) = UnixStream::pair().expect("stream pair");
     let client_id = harness.accept_client(server_end).expect("accept client");
     let mut pre_accept_stream = None;

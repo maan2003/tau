@@ -46,9 +46,6 @@
     "extension.lifecycle":  { fg: "grey" },
     "extension.status":     { },
 
-    // -- Sessions --
-    "session.status":       { },
-
     // -- System --
     "system.info":          { fg: "grey" },
     "system.info.important": { fg: "dark_red", bold: true },
@@ -60,7 +57,6 @@
     "model.status":         { fg: "grey" },
     "status.model":         { fg: "grey" },
     "status.role":          { fg: "dark_yellow" },
-    "status.session":       { fg: "dark_cyan" },
     "status.context":       { fg: "dark_blue" },
     "status.effort":        { fg: "dark_yellow" },
     "status.verbosity":     { fg: "dark_magenta" },

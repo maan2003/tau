@@ -11,12 +11,14 @@ metadata key: `ext_<instance>_cwd`. The built-in core shell instance therefore
 uses `ext_core-shell_cwd`. If multiple shell instances are configured, each uses
 its own instance-derived key and keeps an independent cwd map.
 
-Committed `agent.metadata_set` / `agent.metadata_unset` events are the source of
-truth. The extension updates its in-memory `CwdState` only after seeing those
-events, publishes fresh `agent_context.cwd` after each committed change, and
-emits `extension.context_ready` only after publishing the initial cwd context for
-a loaded agent. Metadata values are inheritable so child agents start in the
-parent's remembered cwd.
+`agent.started` creation metadata and committed `agent.metadata_set` /
+`agent.metadata_unset` events are the source of truth for cwd. Metadata-free
+`agent.loaded` is the catch-up-complete boundary for initial per-agent context
+publication. The extension updates its in-memory `CwdState` only after seeing
+those committed facts, publishes fresh `agent_context.cwd` after each live
+change, and emits `extension.context_ready` only after publishing the initial
+cwd context for a loaded agent. Metadata values are inheritable so child agents
+start in the parent's remembered cwd.
 
 ## Cwd-aware tools and locks
 

@@ -1,12 +1,11 @@
 //! Harness daemon lifecycle: discovery, spawning, and initial UI wiring.
 
-use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use tau_harness::runtime_dir;
 
-use crate::{CliError, mint_short_id};
+use crate::CliError;
 
 /// How this CLI invocation is related to its harness daemon.
 ///
@@ -80,41 +79,14 @@ impl Drop for DaemonHandle {
     }
 }
 
-/// Resolves a fresh session id for one `tau` invocation.
-pub(crate) fn resolve_run_session_id() -> Result<String, CliError> {
-    let cwd = std::env::current_dir()?;
-    Ok(mint_session_id(&cwd))
-}
-
-pub(crate) fn mint_session_id(cwd: &Path) -> String {
-    let basename = cwd
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("session");
-    mint_short_id(basename)
-}
-
 pub(crate) struct DaemonOutput {
     pub(crate) stderr: Stdio,
 }
 
-pub(crate) fn daemon_output_for_session(session_id: &str) -> Result<DaemonOutput, CliError> {
-    // Route the daemon's stderr (where its tracing subscriber writes) into the
-    // per-session harness log so it sits next to per-extension logs under
-    // `<session>/logs/`. The CLI's own tracing still goes to `ui.log`; the two
-    // streams are intentionally separated so a session post-mortem doesn't need
-    // to pull from two places.
-    let sessions_dir = tau_session_inspect::default_sessions_dir();
-    let harness_log = tau_harness::harness_log_path(&sessions_dir, session_id);
-    if let Some(parent) = harness_log.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let stderr = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&harness_log)
-        .map(Stdio::from)?;
-    Ok(DaemonOutput { stderr })
+pub(crate) fn daemon_output_for_run() -> Result<DaemonOutput, CliError> {
+    Ok(DaemonOutput {
+        stderr: Stdio::null(),
+    })
 }
 
 pub(crate) struct DaemonCliOverrides<'a> {
@@ -125,12 +97,11 @@ pub(crate) struct DaemonCliOverrides<'a> {
 
 pub(crate) fn resolve_daemon(
     attach: bool,
-    session_id: &str,
     daemon_output: Option<DaemonOutput>,
     startup_role: Option<&str>,
     cli_overrides: DaemonCliOverrides<'_>,
 ) -> Result<DaemonHandle, CliError> {
-    tracing::debug!(target: "tau_cli::startup", attach, session_id, "resolving harness daemon");
+    tracing::debug!(target: "tau_cli::startup", attach, "resolving harness daemon");
     let project_root = std::env::current_dir()?;
     if attach {
         tracing::debug!(target: "tau_cli::startup", project_root = %project_root.display(), "looking for existing harness daemon");
@@ -140,7 +111,6 @@ pub(crate) fn resolve_daemon(
         return Ok(DaemonHandle::Attached { harness_path });
     }
     start_daemon(
-        session_id,
         daemon_output.expect("daemon output for spawned harness"),
         startup_role,
         cli_overrides,
@@ -153,17 +123,15 @@ pub(crate) fn resolve_daemon(
 /// immediately; the harness delays extension startup internally until that UI
 /// sends its subscribe message.
 fn start_daemon(
-    session_id: &str,
     output: DaemonOutput,
     startup_role: Option<&str>,
     cli_overrides: DaemonCliOverrides<'_>,
 ) -> Result<DaemonHandle, CliError> {
     let tau_binary = std::env::current_exe()?;
-    tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), session_id, "spawning harness daemon");
+    tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), "spawning harness daemon");
 
     let spawn_result = build_daemon_command(DaemonCommandSpec {
         tau_binary: &tau_binary,
-        session_id,
         stdout: Stdio::piped(),
         stderr: output.stderr,
         stdin: Stdio::piped(),
@@ -193,7 +161,6 @@ fn start_daemon(
 
 struct DaemonCommandSpec<'a> {
     tau_binary: &'a Path,
-    session_id: &'a str,
     stdout: Stdio,
     stderr: Stdio,
     stdin: Stdio,
@@ -207,14 +174,13 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
     let mut cmd = Command::new(spec.tau_binary);
     cmd.arg("component")
         .arg("harness")
-        .env("TAU_SESSION_ID", spec.session_id)
         // TAU_VERSION/TAU_BUILD/TAU_LAST_MODIFIED used to be forwarded
         // here; the harness child now reads its own `built` snapshot
         // (see `tau_harness::version::export_to_env`) and publishes
         // them to its own environment instead.
-        // Default-enable info logging in the child process so `tau`
-        // captures harness logs without requiring an env var. Users
-        // can still override/filter with `TAU_LOG`.
+        // Default-enable info logging in the child process so callers that
+        // choose to capture stderr get useful harness logs without requiring an
+        // env var. Users can still override/filter with `TAU_LOG`.
         .env(
             "TAU_LOG",
             std::env::var("TAU_LOG").unwrap_or_else(|_| {

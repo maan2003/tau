@@ -1,4 +1,4 @@
-//! Harness daemon: manages extensions, routing, session state, and
+//! Harness daemon: manages extensions, routing, agent state, and
 //! serves socket clients.
 //!
 //! Each connection has a reader thread and a writer thread.  All
@@ -29,7 +29,6 @@ pub mod internal_tools;
 mod model;
 mod prompt;
 mod secrets;
-mod session_cleanup;
 mod settings;
 mod tool_turn;
 mod turn;
@@ -42,7 +41,7 @@ pub fn dump_initial_prompt(
     harness::Harness::dump_initial_prompt(out_path, user_message)
 }
 
-pub use tau_core::{AgentEntry, AgentTree, SessionMeta, list_session_metas, session_is_locked};
+pub use tau_core::{AgentEntry, AgentTree};
 pub use tau_proto::AgentId;
 
 pub(crate) fn parse_agent_id(value: impl AsRef<str>) -> AgentId {
@@ -60,7 +59,7 @@ pub use crate::daemon::{
 #[cfg(any(test, feature = "echo-agent"))]
 pub use crate::daemon::{run_daemon_with_echo, run_embedded_message_with_echo};
 pub use crate::error::HarnessError;
-pub use crate::extension::{harness_log_path, session_logs_dir};
+pub use crate::extension::{debug_dir, debug_root, harness_logs_dir, new_harness_run_id};
 pub use crate::format::{format_extension_event, format_tool_progress};
 pub use crate::harness::{AgentToolCall, Harness};
 pub use crate::internal_tools::{InternalToolHandler, InternalToolHandlers, InternalToolHost};

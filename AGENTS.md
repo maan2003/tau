@@ -7,7 +7,7 @@
 - `crates/tau-cli-term` — higher-level terminal prompt: slash-command/path completion, menu rendering, `$EDITOR` integration
 - `crates/tau-cli-term-raw` — raw terminal rendering/input layer
 - `crates/tau-config` — user and project configuration loading
-- `crates/tau-core` — event bus, routing, state, sessions, policy, and tool registry
+- `crates/tau-core` — event bus, routing, state, agents, policy, and tool registry
 - `crates/tau-ext-std-notifications` — built-in notification extension
 - `crates/tau-ext-telegram` — disabled-by-default Telegram text bridge extension
 - `crates/tau-ext-shell` — shell- and filesystem-oriented extension
@@ -15,7 +15,7 @@
 - `crates/tau-ext-test-dummy` — test-only dummy extension
 - `crates/tau-ext-websearch` — built-in generic web search extension (Exa default plus opt-in Parallel.ai tools)
 - `crates/tau-extension` — extension-side protocol/runtime helpers
-- `crates/tau-harness` — harness daemon: extensions, bus, sessions, socket server, harness-owned delegate/wait tools
+- `crates/tau-harness` — harness daemon: extensions, bus, agents, socket server, harness-owned delegate/wait tools
 - `crates/tau-provider` — provider credential/config library (storage and OAuth helpers)
 - `crates/tau-provider-chat-completions` — OpenAI-compatible Chat Completions backend helpers
 - `crates/tau-provider-chatgpt` — ChatGPT/Codex Responses backend helpers, including HTTP/SSE, WebSocket, and pool logic
@@ -56,5 +56,5 @@
 
 - This project is still very immuture and backward compatibility is never needed.
 - ALWAYS consult `tau-commit` skill before making commits
-- When asked to debug existing tau sessions, read `tau-self-knowledge-debugging` skill
+- When asked to debug Tau runs, agents, daemon state, or event logs, read `tau-self-knowledge-debugging` skill
 - Extension configuration errors must never be silent. Extensions that fail to parse or apply their `Configure.config` MUST send `HarnessInputMessage::ConfigError`; the harness MUST surface those as mandatory `harness.notice` and replay them to late UI subscribers.

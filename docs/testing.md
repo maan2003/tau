@@ -29,7 +29,7 @@ Discover provider profile names in the real Tau environment with
 When providers are allowlisted, the helper copies only exact
 `~/.local/state/tau/auth.d/<provider>.json` files into scratch state and enables
 `provider-builtin` for the child Tau. It does not copy all providers, lock files,
-general config, sessions, logs, or unrelated state.
+general config, agent state, debug logs, or unrelated state.
 
 This workflow complements automated tests; it is not a replacement for focused
 regression coverage. Reusable steps live in

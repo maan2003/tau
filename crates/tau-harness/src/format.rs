@@ -1,6 +1,6 @@
 //! Pretty-printing helpers for harness lifecycle and tool-progress
-//! events. Session-entry rendering lives in `tau-session-inspect`; the
-//! harness pulls in [`tau_session_inspect::format_session_entry`] for
+//! events. Durable entry rendering lives in `tau-agent-inspect`; the
+//! harness pulls in [`tau_agent_inspect::format_agent_entry`] for
 //! its tree-preview helper.
 
 use tau_core::AgentEntry;
@@ -36,9 +36,9 @@ pub fn format_extension_event(event: &Event) -> String {
     }
 }
 
-/// One-line preview of a session entry for `/tree` output.
+/// One-line preview of a durable tree entry for `/tree` output.
 pub(crate) fn render_entry_preview(entry: &AgentEntry) -> String {
-    let raw = tau_session_inspect::format_session_entry(entry);
+    let raw = tau_agent_inspect::format_agent_entry(entry);
     let single_line: String = raw
         .chars()
         .map(|c| if c == '\n' { ' ' } else { c })

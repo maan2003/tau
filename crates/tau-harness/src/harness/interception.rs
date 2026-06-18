@@ -44,9 +44,6 @@ pub(crate) struct PendingIntercept {
     /// Event sent in the [`InterceptRequest`]. Returned to the chain
     /// if the reply is `Pass(None)`, replaced if `Pass(Some(_))`.
     pub(crate) event: Event,
-    /// Whether the original publisher requested transient delivery.
-    /// Carried so the eventual commit honours the call site's intent.
-    pub(crate) transient: bool,
     /// Original source connection id from the publish call (for log
     /// persistence + bus broadcast).
     pub(crate) source: Option<String>,
@@ -71,7 +68,6 @@ pub(crate) struct PendingIntercept {
 pub(crate) struct DeferredPublish {
     pub(crate) source: Option<String>,
     pub(crate) event: Event,
-    pub(crate) transient: bool,
     pub(crate) must_pass: bool,
     pub(crate) sync_head_for: Option<ConversationHeadSync>,
 }
@@ -106,18 +102,13 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::AGENT_USER_MESSAGE_INJECTED,
     EventName::AGENT_PROMPT_STEERED,
     EventName::AGENT_COMPACTION_TRIGGERED,
-    // Session lifecycle facts drive extension/context-provider setup and
-    // teardown. Dropping one can wedge startup or leave stale per-session state.
-    EventName::SESSION_STARTED,
-    EventName::SESSION_SHUTDOWN,
-    // Durable session membership facts anchor resume state. Dropping one leaves
-    // live session state inconsistent with persisted membership.
-    EventName::SESSION_AGENT_LOADED,
-    EventName::SESSION_AGENT_UNLOADED,
     // Agent creation and message projection facts are harness-validated durable
     // transcript facts. Dropping or rewriting them after validation breaks
     // sender/recipient correlation and resume state.
     EventName::AGENT_STARTED,
+    EventName::AGENT_LOADING,
+    EventName::AGENT_LOADED,
+    EventName::AGENT_UNLOADED,
     EventName::AGENT_MESSAGE_SENT,
     EventName::AGENT_MESSAGE_RECEIVED,
     // Agent request life-cycle: the agent extension consumes normal
@@ -166,12 +157,11 @@ fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) 
     matches!(
         original,
         Event::AgentStarted(_)
+            | Event::AgentLoading(_)
+            | Event::AgentLoaded(_)
+            | Event::AgentUnloaded(_)
             | Event::AgentMessageSent(_)
             | Event::AgentMessageReceived(_)
-            | Event::SessionStarted(_)
-            | Event::SessionShutdown(_)
-            | Event::SessionAgentLoaded(_)
-            | Event::SessionAgentUnloaded(_)
             | Event::AgentCompactionTriggered(_)
             | Event::AgentPromptCreated(_)
             | Event::ProviderResponseFinished(_)
@@ -434,7 +424,6 @@ impl Harness {
         &mut self,
         source: Option<&str>,
         event: Event,
-        transient: bool,
         must_pass: bool,
         sync_head_for: Option<ConversationHeadSync>,
     ) {
@@ -442,7 +431,6 @@ impl Harness {
             self.deferred_publishes.push_back(DeferredPublish {
                 source: source.map(str::to_owned),
                 event,
-                transient,
                 must_pass,
                 sync_head_for,
             });
@@ -451,7 +439,6 @@ impl Harness {
         self.dispatch_publish_step(
             source.map(str::to_owned),
             event,
-            transient,
             must_pass,
             sync_head_for,
             None,
@@ -473,7 +460,6 @@ impl Harness {
         &mut self,
         source: Option<String>,
         event: Event,
-        transient: bool,
         must_pass: bool,
         sync_head_for: Option<ConversationHeadSync>,
         mut cursor: Option<InterceptorCursor>,
@@ -481,7 +467,7 @@ impl Harness {
         loop {
             let Some(interceptor_match) = self.interceptors.next_for(&event, cursor.as_ref())
             else {
-                self.commit_event(source.as_deref(), event, transient, sync_head_for);
+                self.commit_event(source.as_deref(), event, sync_head_for);
                 return;
             };
             let interceptor = interceptor_match.registration;
@@ -499,7 +485,6 @@ impl Harness {
                 None,
                 HarnessOutputMessage::InterceptRequest(InterceptRequest {
                     event: Box::new(event.clone()),
-                    transient,
                 }),
             );
             let delivered = report
@@ -509,7 +494,6 @@ impl Harness {
                 self.pending_intercept = Some(PendingIntercept {
                     conn_id: conn_id.clone(),
                     event,
-                    transient,
                     source,
                     must_pass,
                     sync_head_for,
@@ -591,7 +575,6 @@ impl Harness {
         let PendingIntercept {
             conn_id: _,
             event: original_event,
-            transient,
             source,
             must_pass,
             sync_head_for,
@@ -680,14 +663,7 @@ impl Harness {
             return;
         };
 
-        self.dispatch_publish_step(
-            source,
-            event,
-            transient,
-            must_pass,
-            sync_head_for,
-            Some(cursor),
-        );
+        self.dispatch_publish_step(source, event, must_pass, sync_head_for, Some(cursor));
     }
 
     /// Drain `deferred_publishes` until either it's empty or one of
@@ -700,7 +676,6 @@ impl Harness {
             self.dispatch_publish_step(
                 deferred.source,
                 deferred.event,
-                deferred.transient,
                 deferred.must_pass,
                 deferred.sync_head_for,
                 None,

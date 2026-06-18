@@ -9,13 +9,12 @@ use tau_proto::{
 };
 
 use crate::CliError;
-use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
+use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_run, resolve_daemon};
 use crate::ui_prompt::{DEFAULT_AGENT_ROLE, create_user_agent_prompt};
 
 /// Read a single user prompt from stdin, submit it to a daemon, print the final
 /// reasoning snapshots and answer, then exit.
 pub(crate) fn run_prompt_stdin(
-    session_id: &str,
     attach: bool,
     startup_role: Option<&str>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
@@ -27,16 +26,15 @@ pub(crate) fn run_prompt_stdin(
     if prompt.is_empty() {
         return Ok(());
     }
-    print_prompt_stdin_headers(session_id, startup_role);
+    print_prompt_stdin_headers(startup_role);
 
     let daemon_output = if attach {
         None
     } else {
-        Some(daemon_output_for_session(session_id)?)
+        Some(daemon_output_for_run()?)
     };
     let mut daemon = resolve_daemon(
         attach,
-        session_id,
         daemon_output,
         startup_role,
         DaemonCliOverrides {
@@ -47,7 +45,7 @@ pub(crate) fn run_prompt_stdin(
     )?;
     let (mut reader, mut writer) = connect_prompt_stdin_client(&mut daemon)?;
     let role = prompt_stdin_role(startup_role);
-    submit_prompt(&mut writer, session_id, role, prompt)?;
+    submit_prompt(&mut writer, role, prompt)?;
 
     let mut output = OneShotOutput::default();
     let result = read_one_shot_result(&mut reader, &mut output);
@@ -66,8 +64,7 @@ pub(crate) fn run_prompt_stdin(
 type OneShotReader = crate::ui_client::UiInputReader;
 type OneShotWriter = crate::ui_client::UiOutputWriter;
 
-fn print_prompt_stdin_headers(session_id: &str, startup_role: Option<&str>) {
-    eprintln!("session_id: {session_id}");
+fn print_prompt_stdin_headers(startup_role: Option<&str>) {
     eprintln!("role: {}", prompt_stdin_role(startup_role));
 }
 
@@ -94,15 +91,10 @@ fn subscribe_to_prompt_stdin_events(writer: &mut OneShotWriter) -> io::Result<()
         ],
     )
 }
-fn submit_prompt(
-    writer: &mut OneShotWriter,
-    session_id: &str,
-    role: &str,
-    prompt: String,
-) -> io::Result<()> {
+fn submit_prompt(writer: &mut OneShotWriter, role: &str, prompt: String) -> io::Result<()> {
     crate::ui_client::send_message(
         writer,
-        &HarnessInputMessage::emit(create_user_agent_prompt(session_id, role, prompt, None)),
+        &HarnessInputMessage::emit(create_user_agent_prompt(role, prompt, None)),
     )
 }
 fn read_one_shot_result(

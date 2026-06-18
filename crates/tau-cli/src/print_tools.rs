@@ -2,20 +2,18 @@ use std::io::Write;
 
 use tau_proto::{HarnessInputMessage, HarnessOutputMessage};
 
-use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
+use crate::CliError;
+use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_run, resolve_daemon};
 use crate::render_request::RenderResponse;
-use crate::{CliError, mint_short_id};
 pub(crate) fn run_print_tools(
     role: &str,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<(), CliError> {
-    let session_id = mint_short_id("print-tools");
-    let output = daemon_output_for_session(&session_id)?;
+    let output = daemon_output_for_run()?;
     let mut daemon = resolve_daemon(
         false,
-        &session_id,
         Some(output),
         Some(role),
         DaemonCliOverrides {

@@ -648,7 +648,7 @@ fn escape_outside_completion_surfaces_event() {
     ));
 }
 
-/// Seeded history from previous sessions should appear before the current draft
+/// Seeded history from previous runs should appear before the current draft
 /// when navigating upward.
 #[test]
 fn seeded_input_history_is_recalled_before_current_draft() {

@@ -55,6 +55,29 @@ fn action_schema_fixture() -> ActionSchema {
     }
 }
 
+#[test]
+fn harness_run_id_validates_fixed_ascii_alphanumeric_wire_shape() {
+    let run_id = HarnessRunId::parse("aZ019B").expect("valid run id");
+    assert_eq!(run_id.as_str(), "aZ019B");
+    assert_eq!(
+        serde_json::to_value(&run_id).expect("serialize run id"),
+        serde_json::json!("aZ019B")
+    );
+    assert!(
+        serde_json::from_value::<HarnessRunId>(serde_json::json!("short"))
+            .expect_err("short run id")
+            .to_string()
+            .contains("harness run id must be 6 bytes")
+    );
+    assert_eq!(
+        HarnessRunId::parse("abc-12"),
+        Err(HarnessRunIdParseError::InvalidByte {
+            index: 3,
+            byte: b'-',
+        })
+    );
+}
+
 fn representative_events() -> Vec<Event> {
     vec![
         Event::ToolRegister(ToolRegister {
@@ -122,7 +145,6 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::ActionInvoke(ActionInvoke {
             invocation_id: "act-1".into(),
-            session_id: "s1".into(),
             extension_name: "std-email".into(),
             instance_id: 7.into(),
             action_id: "email.out.list".to_owned(),
@@ -144,7 +166,6 @@ fn representative_events() -> Vec<Event> {
             details: None,
         }),
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "hello".to_owned(),
             agent_id: agent_id("agent"),
             message_class: PromptMessageClass::User,
@@ -165,13 +186,6 @@ fn representative_events() -> Vec<Event> {
             kind: AgentMessageKind::Message,
             message: "hello back".to_owned(),
         }),
-        Event::SessionStarted(SessionStarted {
-            session_id: "s1".into(),
-        }),
-        Event::SessionAgentLoaded(SessionAgentLoaded {
-            session_id: "s1".into(),
-            agent_id: agent_id("engineer_abcd1234"),
-        }),
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
             agent_id: agent_id("engineer_abcd1234"),
             text: "hello".to_owned(),
@@ -187,7 +201,6 @@ fn representative_events() -> Vec<Event> {
         Event::AgentPromptCreated(AgentPromptCreated {
             agent_prompt_id: "sp-1".into(),
             agent_id: agent_id("engineer_abcd1234"),
-            session_id: "session_123".into(),
             system_prompt: "You are helpful.".to_owned(),
             context: PromptContext {
                 blocks: vec![ContextBlock::UserInput(UserInputBlock {
@@ -276,13 +289,11 @@ fn representative_events() -> Vec<Event> {
             content: "# Project instructions\n- Run tests".to_owned(),
         }),
         Event::ExtensionContextReady(ExtensionContextReady {
-            session_id: "s1".into(),
             agent_id: agent_id("agent-1"),
         }),
         Event::ExtensionEvent(
             CustomEvent::try_new(
                 "demo.progress".parse().expect("event name"),
-                Some("s1".into()),
                 CborValue::Text("working".to_owned()),
             )
             .expect("valid custom event"),
@@ -344,9 +355,13 @@ fn representative_events() -> Vec<Event> {
     ]
 }
 
-fn sample_session_started() -> Event {
-    Event::SessionStarted(SessionStarted {
-        session_id: "s1".into(),
+fn sample_event() -> Event {
+    Event::AgentStarted(AgentStarted {
+        parent_agent: None,
+        agent_id: agent_id("worker"),
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
     })
 }
 
@@ -380,19 +395,16 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             event: Box::new(Event::ExtensionEvent(
                 CustomEvent::try_new(
                     "demo.transient_progress".parse().expect("event name"),
-                    Some("s1".into()),
                     CborValue::Text("working".to_owned()),
                 )
                 .expect("valid custom event"),
             )),
-            transient: true,
         }),
         HarnessInputMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
         }),
         HarnessInputMessage::GetAgentPromptCreated(GetAgentPromptCreated {
             request_id: "prompt-1".to_owned(),
-            session_id: "s1".into(),
             agent_prompt_id: "sp-1".into(),
         }),
         HarnessInputMessage::GetRenderedSystemPrompt(GetRenderedSystemPrompt {
@@ -410,7 +422,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
         }),
         HarnessInputMessage::ExtensionDataRequest(ExtensionDataRequest {
             request_id: "ext-data-1".to_owned(),
-            scope: ExtensionDataScope::Session,
+            scope: ExtensionDataScope::User,
             op: ExtensionDataRequestOp::ReadFile {
                 path: ExtensionDataPath::new("notes/state.cbor"),
             },
@@ -424,6 +436,7 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
             instance_name: None,
             config: CborValue::Null,
             state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
+            debug_dir: None,
             secrets: std::collections::BTreeMap::new(),
         }),
         HarnessOutputMessage::Disconnect(Disconnect {
@@ -431,23 +444,21 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
         }),
         HarnessOutputMessage::Deliver(EventDelivery::live(
             UnixMicros::new(1_700_000_000_000_000),
-            sample_session_started(),
+            sample_event(),
         )),
         HarnessOutputMessage::Deliver(EventDelivery::replay(
             UnixMicros::new(1_700_000_000_000_000),
-            sample_session_started(),
+            sample_event(),
         )),
         HarnessOutputMessage::Deliver(EventDelivery::direct(Event::ExtensionEvent(
             CustomEvent::try_new(
                 "demo.snapshot".parse().expect("event name"),
-                Some("s1".into()),
                 CborValue::Text("snapshot".to_owned()),
             )
             .expect("valid custom event"),
         ))),
         HarnessOutputMessage::InterceptRequest(InterceptRequest {
-            event: Box::new(sample_session_started()),
-            transient: false,
+            event: Box::new(sample_event()),
         }),
         HarnessOutputMessage::AgentPromptCreatedResult(Box::new(AgentPromptCreatedResult {
             request_id: "prompt-1".to_owned(),
@@ -527,7 +538,6 @@ fn agent_message_events_have_names_and_persistence_defaults() {
     });
     assert_eq!(sent.name(), EventName::AGENT_MESSAGE_SENT);
     assert_eq!(sent.name().to_string(), "agent.message_sent");
-    assert!(!sent.defaults_to_transient());
 
     let received = Event::AgentMessageReceived(AgentMessageReceived {
         message_id: "msg-2".into(),
@@ -538,7 +548,6 @@ fn agent_message_events_have_names_and_persistence_defaults() {
     });
     assert_eq!(received.name(), EventName::AGENT_MESSAGE_RECEIVED);
     assert_eq!(received.name().to_string(), "agent.message_received");
-    assert!(!received.defaults_to_transient());
 }
 
 /// Ensures legacy agent-message payloads omit the default message kind but
@@ -700,7 +709,7 @@ fn custom_event_rejects_reserved_category_spelled_as_other() {
 
     assert!(!CustomEvent::name_is_allowed(&name));
 
-    let error = CustomEvent::try_new(name.clone(), None, CborValue::Null)
+    let error = CustomEvent::try_new(name.clone(), CborValue::Null)
         .expect_err("reserved custom event name should fail");
     assert_eq!(error.name(), &name);
     assert_eq!(error.into_name(), name);
@@ -738,7 +747,6 @@ fn custom_event_allows_extension_owned_event_names() {
     let event = Event::ExtensionEvent(
         CustomEvent::try_new(
             "demo.progress".parse().expect("custom event name"),
-            None,
             CborValue::Text("working".to_owned()),
         )
         .expect("valid custom event"),
@@ -755,19 +763,19 @@ fn custom_event_allows_extension_owned_event_names() {
 /// wire tags.
 #[test]
 fn input_emit_and_output_deliver_are_distinct_wire_messages() {
-    let event = sample_session_started();
-    let input = HarnessInputMessage::emit_with_transient(event.clone(), true);
+    let event = sample_event();
+    let input = HarnessInputMessage::emit(event.clone());
     let output =
         HarnessOutputMessage::deliver_live(UnixMicros::new(1_700_000_000_000_000), event.clone());
 
     let input_json = serde_json::to_value(&input).expect("serialize input");
     assert_eq!(input_json["message"], "emit");
-    assert_eq!(input_json["payload"]["event"]["event"], "session.started");
-    assert_eq!(input_json["payload"]["transient"], true);
+    assert_eq!(input_json["payload"]["event"]["event"], "agent.started");
+    assert!(input_json["payload"].get("transient").is_none());
 
     let output_json = serde_json::to_value(&output).expect("serialize output");
     assert_eq!(output_json["message"], "deliver");
-    assert_eq!(output_json["payload"]["event"]["event"], "session.started");
+    assert_eq!(output_json["payload"]["event"]["event"], "agent.started");
     assert_eq!(
         output_json["payload"]["recorded_at"],
         serde_json::json!(1_700_000_000_000_000_u64)
@@ -789,7 +797,7 @@ fn input_emit_and_output_deliver_are_distinct_wire_messages() {
 /// required.
 #[test]
 fn bare_event_is_not_a_protocol_item_in_either_direction() {
-    let bytes = encode_message_to_vec(&sample_session_started()).expect("encode bare event");
+    let bytes = encode_message_to_vec(&sample_event()).expect("encode bare event");
     assert!(decode_harness_input_from_slice(&bytes).is_err());
     assert!(decode_harness_output_from_slice(&bytes).is_err());
 }
@@ -814,6 +822,7 @@ fn configure_state_dir_is_optional_for_older_payloads() {
         instance_name: None,
         config: CborValue::Null,
         state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
+        debug_dir: None,
         secrets: std::collections::BTreeMap::new(),
     };
     let json = serde_json::to_value(&with_state).expect("serialize configure");
@@ -828,6 +837,7 @@ fn configure_state_dir_is_optional_for_older_payloads() {
         instance_name: None,
         config: CborValue::Null,
         state_dir: None,
+        debug_dir: None,
         secrets: std::collections::BTreeMap::new(),
     })
     .expect("serialize configure without state dir");
@@ -846,6 +856,7 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
         instance_name: None,
         config: CborValue::Null,
         state_dir: None,
+        debug_dir: None,
         secrets,
     };
 
@@ -1192,7 +1203,7 @@ fn tool_group_name_rejects_overlong_input() {
 fn event_delivery_helpers_expose_replay_marker_and_inner_event() {
     // The replay marker is the contract side-effecting consumers rely on to
     // skip historical frames; live and direct deliveries must not carry it.
-    let inner = sample_session_started();
+    let inner = sample_event();
     let message =
         HarnessOutputMessage::deliver_live(UnixMicros::new(1_700_000_000_000_000), inner.clone());
 
@@ -1203,148 +1214,16 @@ fn event_delivery_helpers_expose_replay_marker_and_inner_event() {
 
     let replayed = HarnessOutputMessage::deliver_replay(
         UnixMicros::new(1_700_000_000_000_000),
-        sample_session_started(),
+        sample_event(),
     );
     assert!(replayed.as_delivery().expect("delivery").is_replay());
 
-    let direct = HarnessOutputMessage::deliver(sample_session_started());
+    let direct = HarnessOutputMessage::deliver(sample_event());
     assert!(!direct.as_delivery().expect("delivery").is_replay());
 
     let non_delivery = HarnessOutputMessage::Disconnect(Disconnect { reason: None });
     assert_eq!(non_delivery.as_delivery(), None);
     assert_eq!(non_delivery.into_delivered_event(), None);
-}
-
-/// Ensures transient-default classification matches progress-style events.
-#[test]
-fn event_defaults_to_transient_marks_progress_kinds() {
-    // The set named by `defaults_to_transient` is the contract the
-    // harness relies on to decide which events skip durable semantic
-    // logs when a component publishes them without explicit transient
-    // metadata. Lock it down here so any future
-    // edit to the matcher is intentional.
-    let transient = [
-        Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            agent_prompt_id: "sp-1".into(),
-            items: Vec::new(),
-            compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
-            originator: PromptOriginator::User,
-        }),
-        Event::ToolProgress(ToolProgress {
-            call_id: "call-1".into(),
-            tool_name: ToolName::new("shell"),
-            message: Some("running".to_owned()),
-            progress: None,
-            display: None,
-        }),
-        Event::ActionSchemaPublished(ActionSchemaPublished {
-            extension_name: "std-email".into(),
-            instance_id: 7.into(),
-            schema: action_schema_fixture(),
-        }),
-        Event::ActionInvoke(ActionInvoke {
-            invocation_id: "act-1".into(),
-            session_id: "s1".into(),
-            extension_name: "std-email".into(),
-            instance_id: 7.into(),
-            action_id: "email.out.list".to_owned(),
-            raw_line: "/email out list".to_owned(),
-            argv: Vec::new(),
-            arguments: CborValue::Map(Vec::new()),
-        }),
-        Event::ActionResult(ActionResult {
-            invocation_id: "act-1".into(),
-            action_id: "email.out.list".to_owned(),
-            output: ActionOutput::Text {
-                text: "ok".to_owned(),
-            },
-        }),
-        Event::ActionError(ActionError {
-            invocation_id: "act-2".into(),
-            action_id: "email.out.list".to_owned(),
-            message: "nope".to_owned(),
-            details: None,
-        }),
-        Event::UiPromptDraft(UiPromptDraft {
-            session_id: "s1".into(),
-            text: "draft".to_owned(),
-        }),
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "hi".to_owned(),
-            agent_id: agent_id("agent"),
-            message_class: PromptMessageClass::User,
-            originator: PromptOriginator::User,
-            ctx_id: None,
-        }),
-        Event::AgentPromptQueued(AgentPromptQueued {
-            agent_id: agent_id("worker"),
-            text: "queued".to_owned(),
-            message_class: PromptMessageClass::User,
-        }),
-        Event::AgentPromptRecalled(AgentPromptRecalled {
-            agent_id: agent_id("worker"),
-            text: "queued".to_owned(),
-        }),
-        Event::AgentPromptTerminated(AgentPromptTerminated {
-            agent_id: agent_id("worker"),
-            agent_prompt_id: "sp-stale".into(),
-            reason: AgentPromptTerminationReason::Stale,
-            originator: PromptOriginator::User,
-        }),
-    ];
-    for event in &transient {
-        assert!(
-            event.defaults_to_transient(),
-            "{} should default to transient",
-            event.name()
-        );
-    }
-
-    let durable = [
-        Event::SessionStarted(SessionStarted {
-            session_id: "s1".into(),
-        }),
-        Event::AgentPromptSubmitted(AgentPromptSubmitted {
-            agent_id: agent_id("worker"),
-            text: "hi".to_owned(),
-            message_class: PromptMessageClass::User,
-            originator: PromptOriginator::User,
-            display_name: None,
-            ctx_id: None,
-        }),
-        Event::SessionAgentLoaded(SessionAgentLoaded {
-            session_id: "s1".into(),
-            agent_id: agent_id("worker"),
-        }),
-        Event::AgentMetadataSet(AgentMetadataSet {
-            agent_id: agent_id("worker"),
-            key: AgentMetadataKey::new("ext_core-shell_cwd"),
-            value: CborValue::Text("/tmp".to_owned()),
-            inheritable: true,
-        }),
-        Event::AgentMetadataUnset(AgentMetadataUnset {
-            agent_id: agent_id("worker"),
-            key: AgentMetadataKey::new("ext_core-shell_cwd"),
-        }),
-        Event::ToolError(ToolError {
-            call_id: "call-1".into(),
-            tool_name: ToolName::new("read"),
-            tool_type: ToolType::Function,
-            message: "failed".to_owned(),
-            details: None,
-            display: None,
-            originator: PromptOriginator::User,
-        }),
-    ];
-    for event in &durable {
-        assert!(
-            !event.defaults_to_transient(),
-            "{} should be durable",
-            event.name()
-        );
-    }
 }
 
 /// Ensures legacy tool-result events without an explicit kind deserialize as
@@ -1367,8 +1246,7 @@ fn tool_result_kind_defaults_to_final_for_legacy_events() {
 #[test]
 fn prompt_message_class_defaults_to_user_when_omitted() {
     let prompt: UiPromptSubmitted = serde_json::from_value(serde_json::json!({
-        "session_id": "s1",
-        "text": "legacy",
+                "text": "legacy",
         "agent_id": "agent",
         "originator": { "kind": "user" }
     }))

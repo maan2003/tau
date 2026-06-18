@@ -3,16 +3,13 @@ use tau_proto::{Event, PromptOriginator, UiRoleUpdateAction};
 use super::event_for_line;
 use crate::ui_prompt::DEFAULT_AGENT_ROLE;
 
-const SESSION_ID: &str = "test-session";
-
 fn event(text: &str) -> Option<Event> {
-    event_for_line(SESSION_ID, text)
+    event_for_line(text)
 }
 
 fn prompt_text(text: &str) -> String {
     match event(text).expect("prompt event") {
         Event::UiCreateAgent(req) => {
-            assert_eq!(req.session_id, SESSION_ID);
             assert_eq!(req.role, DEFAULT_AGENT_ROLE);
             assert_eq!(req.model_override, None);
             assert_eq!(req.originator, PromptOriginator::User);
@@ -37,7 +34,6 @@ fn quit_and_detach_are_no_ops() {
 fn cancel_requests_prompt_cancellation() {
     match event("/cancel").expect("cancel event") {
         Event::UiCancelPrompt(cancel) => {
-            assert_eq!(cancel.session_id, SESSION_ID);
             assert_eq!(cancel.agent_prompt_id, None);
         }
         other => panic!("expected UiCancelPrompt, got {other:?}"),
@@ -49,13 +45,12 @@ fn cancel_requests_prompt_cancellation() {
 #[test]
 fn tree_commands_request_or_navigate_tree() {
     match event("/tree").expect("tree event") {
-        Event::UiTreeRequest(req) => assert_eq!(req.session_id, SESSION_ID),
+        Event::UiTreeRequest(_) => {}
         other => panic!("expected UiTreeRequest, got {other:?}"),
     }
 
     match event("/tree 42").expect("navigate event") {
         Event::UiNavigateTree(req) => {
-            assert_eq!(req.session_id, SESSION_ID);
             assert_eq!(req.node_id, 42);
         }
         other => panic!("expected UiNavigateTree, got {other:?}"),
@@ -68,7 +63,7 @@ fn tree_commands_request_or_navigate_tree() {
 #[test]
 fn compact_requests_compaction() {
     match event("/compact").expect("compact event") {
-        Event::UiCompactRequest(req) => assert_eq!(req.session_id, SESSION_ID),
+        Event::UiCompactRequest(_) => {}
         other => panic!("expected UiCompactRequest, got {other:?}"),
     }
 }
@@ -95,7 +90,6 @@ fn role_and_model_selection_commands_are_distinct() {
 
     match event("/model test/model").expect("agent model select") {
         Event::UiAgentModelSelect(select) => {
-            assert_eq!(select.session_id, SESSION_ID);
             assert_eq!(select.target_agent_id, None);
             assert_eq!(select.model.to_string(), "test/model");
         }
@@ -125,7 +119,6 @@ fn role_delete_command_updates_roles() {
 fn shell_commands_record_context_mode() {
     match event("!! echo hi").expect("ui-only shell command") {
         Event::UiShellCommand(command) => {
-            assert_eq!(command.session_id, SESSION_ID);
             assert!(command.command_id.as_str().starts_with("ui-sh-"));
             assert_eq!(command.command, "echo hi");
             assert!(!command.include_in_context);
@@ -135,7 +128,6 @@ fn shell_commands_record_context_mode() {
 
     match event("! echo hi").expect("context shell command") {
         Event::UiShellCommand(command) => {
-            assert_eq!(command.session_id, SESSION_ID);
             assert!(command.command_id.as_str().starts_with("ui-sh-"));
             assert_eq!(command.command, "echo hi");
             assert!(command.include_in_context);

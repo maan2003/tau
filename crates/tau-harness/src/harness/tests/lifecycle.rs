@@ -4,7 +4,7 @@ use super::*;
 use crate::agent::PendingPrompt;
 use crate::extension::{ExtensionConnectCommand, ExtensionEntry, ExtensionState, spawn_in_process};
 use crate::harness::{
-    PendingTool, PromptFragmentSource, extension_disconnected_tool_call_error_message,
+    PendingTool, extension_disconnected_tool_call_error_message,
     tool_available_again_notice_prompt, tool_unavailable_notice_prompt,
     unavailable_tool_error_message, validate_protocol_version,
 };
@@ -36,7 +36,7 @@ fn context_text_count(prompt: &AgentPromptCreated, text: &str) -> usize {
 }
 
 fn agent_prompt_text_count(h: &Harness, text: &str) -> usize {
-    loaded_agent_events(h, "s1")
+    loaded_agent_events(h)
         .iter()
         .filter(|event| {
             matches!(
@@ -470,12 +470,11 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
         )]),
         extension_startup_diagnostics: Vec::new(),
     };
-    let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
+    let agents_dir = tau_config::settings::agents_dir_of(&sp);
 
     h.spawn_configured_extensions(
         &config,
-        &sessions_dir,
-        "s1",
+        &agents_dir,
         &BTreeMap::new(),
         &BTreeSet::new(),
         Instant::now(),
@@ -772,8 +771,8 @@ fn handshaking_tool_register_is_not_active_before_ready() {
     assert!(!system_prompt.contains("STAGED TOOL PROMPT"));
     assert!(!system_prompt.contains("STAGED EXTENSION PROMPT"));
 
-    append_user_message_via_event(&mut h, "s1", "before ready");
-    let spid = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "before ready");
+    let spid = send_prompt_to_test_agent(&mut h);
     let prompt = read_prompt_created(&h, &spid);
     assert!(!prompt_has_tool(&prompt, "staged_tool"));
     assert!(!prompt.system_prompt.contains("STAGED TOOL PROMPT"));
@@ -829,8 +828,8 @@ fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
     .expect("ready");
 
     assert_eq!(h.registry.providers_for("staged_tool").len(), 1);
-    append_user_message_via_event(&mut h, "s1", "after ready");
-    let spid = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "after ready");
+    let spid = send_prompt_to_test_agent(&mut h);
     let prompt = read_prompt_created(&h, &spid);
     assert!(prompt_has_tool(&prompt, "staged_tool"));
     assert!(
@@ -891,8 +890,8 @@ fn tool_prompt_fragment_heading_uses_model_visible_tool_name() {
     )
     .expect("ready");
 
-    append_user_message_via_event(&mut h, "s1", "after ready");
-    let spid = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "after ready");
+    let spid = send_prompt_to_test_agent(&mut h);
     let prompt = read_prompt_created(&h, &spid);
 
     assert!(
@@ -964,7 +963,6 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "run two tools".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -1146,17 +1144,9 @@ fn extension_that_never_sends_ready_never_exposes_staged_tool() {
     )
     .expect("stage tool");
 
-    let submission = h
-        .submit_user_prompt("s1".into(), "try never ready tool".to_owned())
+    h.dispatch_user_prompt("try never ready tool".to_owned())
         .expect("submit");
-    assert!(matches!(submission, PromptSubmission::Queued));
     assert!(h.registry.providers_for("never_ready_tool").is_empty());
-    assert!(
-        !event_log_events(&h)
-            .iter()
-            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
-    );
-
     h.shutdown().expect("shutdown");
 }
 
@@ -1185,17 +1175,10 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
     )
     .expect("stage provider models");
 
-    let submission = h
-        .submit_user_prompt("s1".into(), "wait for staged model".to_owned())
+    h.dispatch_user_prompt("wait for staged model".to_owned())
         .expect("submit");
-    assert!(matches!(submission, PromptSubmission::Queued));
     assert!(!h.available_models.contains(&model_id));
     assert!(!h.provider_model_routes.contains_key(&model_id));
-    assert!(
-        !event_log_events(&h)
-            .iter()
-            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
-    );
     assert!(!event_log_contains_source_event(&h, conn_id, |event| {
         matches!(event, Event::ProviderModelsUpdated(_))
     }));
@@ -1216,10 +1199,6 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
     assert!(event_log_contains_source_event(&h, conn_id, |event| {
         matches!(event, Event::ProviderModelsUpdated(update) if update.models.iter().any(|model| model.id == model_id))
     }));
-    let prompt = read_nth_prompt_created(&h, 0);
-    assert_eq!(prompt.model, model_id);
-    assert!(prompt_context_contains(&prompt, "wait for staged model"));
-
     h.shutdown().expect("shutdown");
 }
 
@@ -1314,111 +1293,6 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
 }
 
 #[test]
-fn startup_session_dir_is_reported_before_extension_ready() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("start");
-    let events = event_log_events(&h);
-    let session_dir = events
-        .iter()
-        .position(|event| matches!(event, Event::HarnessSessionDir(_)))
-        .expect("session dir event");
-    let extension_ready = events
-        .iter()
-        .position(|event| matches!(event, Event::ExtensionReady(_)))
-        .expect("extension ready event");
-
-    assert!(session_dir < extension_ready);
-
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
-fn agents_context_ready_staged_until_ready_and_queue_waits() {
-    // AGENTS.md discovery and the matching context-ready acknowledgement are
-    // startup context state. A queued user prompt must wait for Ready, then see
-    // the injected AGENTS.md context in the dispatched prompt.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("start");
-    let conn_id = "conn-staged-agents";
-    let _sink = connect_handshaking_tool(&mut h, conn_id);
-    h.initialized_sessions.remove("s1");
-    h.turn_state = TurnState::InitializingSession {
-        session_id: "s1".into(),
-        waiting_on: [tau_proto::ConnectionId::from(conn_id)]
-            .into_iter()
-            .collect(),
-    };
-
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtAgentsMdAvailable(
-            tau_proto::ExtAgentsMdAvailable {
-                file_path: "/repo/AGENTS.md".into(),
-                content: "# Rules\nSTAGED AGENTS CONTEXT".to_owned(),
-            },
-        )),
-    )
-    .expect("stage agents");
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtensionContextReady(
-            tau_proto::ExtensionContextReady {
-                session_id: "s1".into(),
-                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            },
-        )),
-    )
-    .expect("stage context ready");
-    let submission = h
-        .submit_user_prompt("s1".into(), "queued after staged context".to_owned())
-        .expect("submit");
-
-    assert!(matches!(submission, PromptSubmission::Queued));
-    assert!(h.discovered_agents_files.is_empty());
-    assert!(matches!(
-        h.turn_state,
-        TurnState::InitializingSession { .. }
-    ));
-    assert!(
-        !event_log_events(&h)
-            .iter()
-            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
-    );
-    assert!(!event_log_contains_source_event(&h, conn_id, |event| {
-        matches!(
-            event,
-            Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_)
-        )
-    }));
-
-    h.handle_extension_message(
-        conn_id,
-        TestMessage::Ready(tau_proto::Ready {
-            message: Some("ready".to_owned()),
-        }),
-    )
-    .expect("ready");
-
-    assert!(h.initialized_sessions.contains("s1"));
-    assert!(event_log_contains_source_event(&h, conn_id, |event| {
-        matches!(
-            event,
-            Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_)
-        )
-    }));
-    let prompt = read_nth_prompt_created(&h, 0);
-    assert!(prompt_context_contains(
-        &prompt,
-        "queued after staged context"
-    ));
-    assert!(prompt_context_contains(&prompt, "STAGED AGENTS CONTEXT"));
-
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
 fn interceptor_registration_is_staged_until_ready() {
     // Interception is an extension capability: before Ready, matching events
     // must pass through normally; after Ready, the same selector becomes active.
@@ -1479,12 +1353,10 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
             event: Box::new(Event::ExtensionEvent(
                 tau_proto::CustomEvent::try_new(
                     custom_name.clone(),
-                    Some("s1".into()),
                     CborValue::Text("STAGED CUSTOM EVENT".to_owned()),
                 )
                 .expect("valid custom event"),
             )),
-            transient: false,
         }),
     )
     .expect("stage emit");
@@ -1542,7 +1414,7 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
 #[test]
 fn prompt_created_waits_for_registered_agent_context_provider() {
     // Context readiness is an explicit extension capability, not a side effect
-    // of subscribing to `session.agent_loaded`. Once a provider registers, the
+    // of subscribing to `agent.loaded`. Once a provider registers, the
     // submitted user message may commit immediately, but `AgentPromptCreated`
     // must wait for that provider's per-agent context before freezing the model
     // snapshot.
@@ -1556,9 +1428,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
     h.handle_extension_message(
         conn_id,
         TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::SESSION_AGENT_LOADED,
-            )],
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_LOADED)],
         }),
     )
     .expect("subscribe");
@@ -1590,7 +1460,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
     )
     .expect("prompt fragment");
 
-    h.dispatch_user_prompt("s1".into(), "first prompt".to_owned())
+    h.dispatch_user_prompt("first prompt".to_owned())
         .expect("dispatch user prompt");
     assert!(
         !event_log_events(&h)
@@ -1624,7 +1494,6 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
         conn_id,
         TestProtocolItem::Event(Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
-                session_id: "s1".into(),
                 agent_id: crate::parse_agent_id(&agent_id),
             },
         )),
@@ -1745,12 +1614,10 @@ fn disconnect_before_ready_drops_all_staged_state() {
             event: Box::new(Event::ExtensionEvent(
                 tau_proto::CustomEvent::try_new(
                     "demo.dropped".parse().expect("event name"),
-                    Some("s1".into()),
                     CborValue::Text("DROPPED EVENT".to_owned()),
                 )
                 .expect("valid custom event"),
             )),
-            transient: false,
         }),
     )
     .expect("stage emit");
@@ -1796,15 +1663,15 @@ fn tool_unregister_removes_tool_from_future_prompt() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    append_user_message_via_event(&mut h, "s1", "before unregister");
-    let before_spid = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "before unregister");
+    let before_spid = send_prompt_to_test_agent(&mut h);
     let before_prompt = read_prompt_created(&h, &before_spid);
     assert!(prompt_has_tool(&before_prompt, "shell"));
 
     unregister_shell(&mut h);
 
-    append_user_message_via_event(&mut h, "s1", "after unregister");
-    let after_spid = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "after unregister");
+    let after_spid = send_prompt_to_test_agent(&mut h);
     let after_prompt = read_prompt_created(&h, &after_spid);
 
     assert!(prompt_has_tool(&before_prompt, "shell"));
@@ -1823,8 +1690,8 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    append_user_message_via_event(&mut h, "s1", "use shell");
-    let spid = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "use shell");
+    let spid = send_prompt_to_test_agent(&mut h);
     let old_prompt = read_prompt_created(&h, &spid);
     assert!(prompt_has_tool(&old_prompt, "shell"));
 
@@ -2032,7 +1899,6 @@ fn unavailable_tool_is_reported_without_crashing() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "shell printf hi".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -2136,7 +2002,7 @@ fn disconnected_tool_completes_pending_call() {
         },
     );
     h.pending_tool_providers
-        .insert(call_id.clone(), conn_id.clone().into());
+        .insert(call_id.clone(), conn_id.clone());
     h.tool_turn
         .record_in_flight_for_test(cid.clone(), call_id.clone());
     if let Some(conv) = h.agents.get_mut(&cid) {
@@ -2242,7 +2108,6 @@ fn disconnected_tool_is_removed_cleanly() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "shell printf hi".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -2421,7 +2286,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
         config_dir: Some(config_dir),
         state_dir: Some(state_dir.clone()),
     };
-    let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("start");
+    let mut h = echo_harness_with_dirs(state_dir, dirs).expect("start");
 
     h.selected_model = Some("test/model".into());
     h.selected_role = "engineer".to_owned();
@@ -2431,7 +2296,6 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "do it".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -2512,7 +2376,7 @@ fn provider_prompt_route_failure_clears_prompt_bookkeeping() {
     assert_eq!(conv.in_flight_prompt, None);
     assert_eq!(conv.last_prompt_id, None);
     assert!(matches!(conv.turn_state, AgentTurnState::Idle));
-    assert_eq!(h.current_session_state.token_usage.total.requests, 0);
+    assert_eq!(h.usage_state.token_usage.total.requests, 0);
 
     let events = event_log_events(&h);
     assert!(events.iter().any(|event| matches!(
@@ -2543,7 +2407,6 @@ fn targetless_shell_output_injects_into_default_agent() {
 
     h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
         command_id: "shell-1".into(),
-        session_id: "s1".into(),
         command: "printf hello".to_owned(),
         include_in_context: true,
         target_agent_id: None,
@@ -2552,7 +2415,7 @@ fn targetless_shell_output_injects_into_default_agent() {
         cancelled: false,
     });
 
-    let injected = loaded_agent_events(&h, "s1")
+    let injected = loaded_agent_events(&h)
         .into_iter()
         .find_map(|event| match event {
             Event::AgentUserMessageInjected(injected) if injected.text.contains("printf hello") => {
@@ -2566,10 +2429,10 @@ fn targetless_shell_output_injects_into_default_agent() {
     assert!(injected.text.contains("hello"));
 }
 
-/// Ensures stale or malformed shell finish events cannot inject output into the
-/// wrong session when an explicit target agent belongs to another session.
+/// Ensures shell finish events with an explicit target inject output into that
+/// loaded agent.
 #[test]
-fn shell_output_for_wrong_session_is_ignored() {
+fn shell_output_for_explicit_target_is_injected() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -2578,7 +2441,6 @@ fn shell_output_for_wrong_session_is_ignored() {
 
     h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
         command_id: "shell-2".into(),
-        session_id: "other-session".into(),
         command: "printf wrong".to_owned(),
         include_in_context: true,
         target_agent_id: Some(agent_id),
@@ -2587,8 +2449,8 @@ fn shell_output_for_wrong_session_is_ignored() {
         cancelled: false,
     });
 
-    assert!(loaded_agent_events(&h, "s1").into_iter().all(|event| {
-        !matches!(
+    assert!(loaded_agent_events(&h).into_iter().any(|event| {
+        matches!(
             event,
             Event::AgentUserMessageInjected(injected)
                 if injected.text.contains("printf wrong")
@@ -2611,18 +2473,18 @@ fn agents_context_is_injected_when_agent_is_created() {
     // only on the test-injected pair below.
     h.discovered_agents_files.clear();
     h.discovered_agents_files.push(DiscoveredAgentsFile {
-        source_id: tools_connection_id.clone().into(),
+        source_id: tools_connection_id.clone(),
         file_path: PathBuf::from("/repo/AGENTS.md"),
         content: "# Root\n- root rule\n".to_owned(),
     });
     h.discovered_agents_files.push(DiscoveredAgentsFile {
-        source_id: tools_connection_id.clone().into(),
+        source_id: tools_connection_id.clone(),
         file_path: PathBuf::from("/repo/pkg/AGENTS.md"),
         content: "# Package\n- package rule\n".to_owned(),
     });
     let _cid = ensure_test_user_agent(&mut h);
 
-    let events = loaded_agent_events(&h, "s1");
+    let events = loaded_agent_events(&h);
     let injected = events
         .iter()
         .rev()
@@ -2669,7 +2531,6 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "do it".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -2781,7 +2642,6 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "do it".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -3001,7 +2861,6 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
     h.handle_client_event(
         "ui",
         TestProtocolItem::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-            session_id: "s1".into(),
             target_agent_id: Some(target_agent_id.clone()),
             agent_prompt_id: None,
         })),
@@ -3107,7 +2966,6 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
     h.handle_client_event(
         "ui",
         TestProtocolItem::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-            session_id: "s1".into(),
             target_agent_id: Some(target_agent_id),
             agent_prompt_id: None,
         })),
@@ -3148,7 +3006,7 @@ fn provider_disconnect_terminates_event_loop() {
         .to_owned();
 
     h.tx.send(HarnessEvent::Disconnected {
-        connection_id: provider_id.into(),
+        connection_id: provider_id,
     })
     .expect("queue provider disconnect");
 
@@ -3457,7 +3315,7 @@ fn disconnect_unregisters_tools_before_advancing_queued_prompt() {
 }
 
 #[test]
-fn disconnect_session_init_completion_waits_until_tool_cleanup() {
+fn disconnect_tool_cleanup_happens_before_queued_prompt_dispatch() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -3476,10 +3334,6 @@ fn disconnect_session_init_completion_waits_until_tool_cleanup() {
             background_support: None,
         },
     );
-    h.turn_state = TurnState::InitializingSession {
-        session_id: h.current_session_id.clone(),
-        waiting_on: HashSet::from([tau_proto::ConnectionId::from("init-ext")]),
-    };
     let cid = ensure_test_user_agent(&mut h);
     h.agents
         .get_mut(&cid)
@@ -3715,55 +3569,4 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
     );
     assert!(!h.agent_context_providers.contains(&contributor));
     assert!(!h.pending_agent_context_ready.contains_key(&agent_id));
-}
-
-#[test]
-fn switch_session_clears_session_scoped_extension_context() {
-    let tmp = TempDir::new().expect("temp dir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    connect_test_tool(&mut h, "ctx-ext");
-    let contributor = tau_proto::ConnectionId::from("ctx-ext");
-    let agent_id = crate::parse_agent_id("agent-1");
-
-    h.publish_extension_prompt_fragment(
-        "ctx-ext",
-        tau_proto::ExtPromptFragmentPublish {
-            fragment: tau_proto::PromptFragment::new(
-                "ctx-fragment",
-                tau_proto::PromptPriority::new(100),
-                "old session fragment",
-            ),
-        },
-    );
-    h.publish_agent_context_publish(
-        "ctx-ext",
-        tau_proto::ExtAgentContextPublish {
-            agent_id: agent_id.clone(),
-            key: tau_proto::AgentContextKey::from("skills"),
-            value: tau_proto::AgentContextValue(serde_json::json!(["old session"])),
-        },
-    );
-    h.agent_context_providers.insert(contributor.clone());
-    h.pending_agent_context_ready
-        .insert(agent_id.clone(), HashSet::from([contributor.clone()]));
-
-    h.switch_session("s2".into()).expect("switch session");
-
-    assert!(h.extension_prompt_fragments.contains_key(&contributor));
-    let (fragments, tool_fragments) = h.gather_sourced_prompt_fragment_groups(&h.selected_role);
-    assert!(tool_fragments.is_empty());
-    assert!(fragments.iter().any(|sourced| {
-        sourced.fragment.name == "ctx-fragment"
-            && matches!(
-                sourced.source,
-                PromptFragmentSource::Extension { ref connection_id }
-                    if connection_id == &contributor
-            )
-    }));
-    assert_eq!(
-        h.agent_context.template_value(Some(&agent_id)),
-        serde_json::json!({})
-    );
-    assert!(h.pending_agent_context_ready.is_empty());
-    assert!(h.agent_context_providers.contains(&contributor));
 }

@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 use tau_harness::{EmbeddedOptions, run_embedded_message_with_options};
 use tempfile::TempDir;
 
-const DEFAULT_SESSION_ID: &str = "vcr-e2e-session";
-
 /// A real headless Tau run with isolated harness config and state.
 ///
 /// The caller owns VCR mode through normal environment variables such as
@@ -19,7 +17,6 @@ pub struct VcrFixture {
     state_dir: PathBuf,
     harness_state_dir: PathBuf,
     work_dir: PathBuf,
-    session_id: String,
 }
 
 impl VcrFixture {
@@ -56,8 +53,6 @@ impl VcrFixture {
             state_dir,
             harness_state_dir,
             work_dir,
-            session_id: std::env::var("TAU_E2E_SESSION_ID")
-                .unwrap_or_else(|_| DEFAULT_SESSION_ID.to_owned()),
         };
         let tau_bin = std::env::var("TAU_E2E_TAU_BIN").unwrap_or_else(|_| "tau".to_owned());
         fixture.write_harness_config(
@@ -72,7 +67,6 @@ impl VcrFixture {
     pub fn run_turn(&self, prompt: &str) -> Result<(), tau_harness::HarnessError> {
         run_embedded_message_with_options(
             &self.harness_state_dir,
-            &self.session_id,
             prompt,
             EmbeddedOptions::builder()
                 .dirs(tau_config::settings::TauDirs {

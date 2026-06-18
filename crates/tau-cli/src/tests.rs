@@ -11,9 +11,8 @@ use tau_proto::{
     ContentPart, ContextItem, ContextRole, Effort, Event, ExtAgentsMdAvailable, ExtensionReady,
     HarnessContextUsageChanged, HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable,
     MessageItem, OpaqueProviderItem, ProviderResponseFinished, ProviderResponseUpdated,
-    ProviderStopReason, ServiceTier, SessionStarted, ThinkingSummary, ToolBackgroundResult,
-    ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted, UiRoleUpdateAction,
-    Verbosity,
+    ProviderStopReason, ServiceTier, ThinkingSummary, ToolBackgroundResult, ToolCallItem,
+    ToolCancelled, ToolError, ToolResult, UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
 };
 
 use super::chat::{
@@ -51,15 +50,36 @@ fn cli_test_theme() -> tau_themes::Theme {
     .expect("CLI test theme parses")
 }
 
+fn format_turn_stats_line(
+    usage: &tau_proto::ProviderTokenUsage,
+    previous_usage: Option<&tau_proto::ProviderTokenUsage>,
+    turn_latency: Option<Duration>,
+    total_latency: Option<Duration>,
+) -> String {
+    let block = render_turn_stats_block(
+        &cli_test_theme(),
+        usage,
+        previous_usage,
+        turn_latency,
+        total_latency,
+    );
+    block
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect()
+}
+
 fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
 }
 use super::tool_render::{
     CompactionStatus, ToolStatus, build_delegate_completion_display, build_osc1337_set_user_var,
-    cache_hit_percent, format_turn_stats_line, render_action_error_block,
-    render_action_output_block, render_compaction_block, render_delegate_display,
-    render_diff_tool_block, render_multi_diff_tool_block, render_shell_block, render_tool_block,
-    render_tool_use_state, render_turn_stats_block, streaming_block, synthesize_fallback_display,
+    cache_hit_percent, render_action_error_block, render_action_output_block,
+    render_compaction_block, render_delegate_display, render_diff_tool_block,
+    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
+    render_turn_stats_block, streaming_block, synthesize_fallback_display,
 };
 
 #[test]
@@ -248,7 +268,7 @@ fn startup_role_flag_is_parsed_for_default_run() {
 #[test]
 fn renderer_learns_agent_from_tool_started_event() {
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -262,16 +282,11 @@ fn renderer_learns_agent_from_tool_started_event() {
     });
 
     assert_eq!(
-        renderer.agent_id_for_event_for_test(&event).as_deref(),
+        renderer.agent_id_for_event(&event).as_deref(),
         Some("agent-b")
     );
 
     renderer.handle(&event);
-
-    assert_eq!(
-        renderer.tool_agent_for_test("hidden-tool").as_deref(),
-        Some("agent-b")
-    );
     assert!(
         renderer
             .known_agents()
@@ -283,7 +298,7 @@ fn renderer_learns_agent_from_tool_started_event() {
 
 #[test]
 fn prompt_stdin_flag_is_parsed_for_default_run() {
-    // `--prompt-stdin` keeps the normal harness/session args but replaces the
+    // `--prompt-stdin` keeps the normal harness args but replaces the
     // terminal UI with the one-shot stdin client.
     let cli = super::cli::Cli::parse_from(["tau", "--role", "manager", "--prompt-stdin"]);
 
@@ -298,7 +313,7 @@ fn harness_config_flags_parse_repeated_and_global() {
         "--harness-config=extensions.core-shell.config.working_directory=/foo",
         "dev",
         "print-prompt",
-        "--harness-config=session_retention_days=3",
+        "--harness-config=agent_retention_days=3",
     ])
     .expect("parse overrides");
 
@@ -310,7 +325,7 @@ fn harness_config_flags_parse_repeated_and_global() {
                 raw_value: "/foo".to_owned(),
             },
             tau_config::settings::HarnessConfigCliOverride {
-                key: "session_retention_days".to_owned(),
+                key: "agent_retention_days".to_owned(),
                 raw_value: "3".to_owned(),
             },
         ]
@@ -319,7 +334,7 @@ fn harness_config_flags_parse_repeated_and_global() {
 #[test]
 fn harness_config_overrides_reject_attach_only_paths() {
     let overrides = [tau_config::settings::HarnessConfigCliOverride {
-        key: "session_retention_days".to_owned(),
+        key: "agent_retention_days".to_owned(),
         raw_value: "3".to_owned(),
     }];
 
@@ -339,7 +354,7 @@ fn legacy_config_path_is_rejected() {
     assert!(err.to_string().contains("--config is no longer supported"));
 
     let non_run_cli =
-        super::cli::Cli::parse_from(["tau", "--config", "legacy.json", "session-list"]);
+        super::cli::Cli::parse_from(["tau", "--config", "legacy.json", "provider", "list"]);
     let non_run_err = super::reject_legacy_config_path(non_run_cli.run.config.as_deref())
         .expect_err("legacy config path should fail before non-run dispatch");
     assert!(
@@ -585,7 +600,7 @@ fn custom_prompt_command_reports_unknown_id() {
 #[test]
 fn renderer_tracks_custom_prompts_from_harness_event() {
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -643,7 +658,6 @@ fn local_slash_commands_are_identified_for_history_rendering() {
     assert!(is_local_slash_command("/suspend"));
     assert!(is_local_slash_command("/resume"));
     assert!(is_local_slash_command("/new now"));
-    assert!(is_local_slash_command("/session new"));
     assert!(is_local_slash_command("/version"));
     assert!(is_local_slash_command("/version now"));
     assert!(is_local_slash_command("/skill jujutsu"));
@@ -712,6 +726,35 @@ impl std::io::Write for VtWriter {
     }
 }
 
+fn test_event_renderer(
+    handle: TermHandle,
+    completion_data: tau_cli_term::CompletionData,
+    theme: tau_themes::Theme,
+) -> EventRenderer {
+    EventRenderer::new_with_state(
+        handle,
+        completion_data,
+        theme,
+        tau_config::settings::CliState::default(),
+        tau_config::settings::TauDirs {
+            config_dir: None,
+            state_dir: None,
+        },
+        ">".to_string(),
+        ">".to_string(),
+    )
+}
+
+trait TestEventRendererExt {
+    fn handle(&mut self, event: &Event);
+}
+
+impl TestEventRendererExt for EventRenderer {
+    fn handle(&mut self, event: &Event) {
+        self.handle_recorded_at(event, tau_proto::UnixMicros::now());
+    }
+}
+
 fn setup(w: u16, h: u16) -> (Term, TermHandle, VtWriter) {
     let vt = VtWriter::new(vt100::Parser::new(h, w, 100));
     let (term, handle, _input) = Term::new_virtual(
@@ -770,11 +813,10 @@ fn assistant_message_item(text: impl Into<String>) -> ContextItem {
     })
 }
 
-fn agent_prompt_created(agent_prompt_id: &str, session_id: &str) -> AgentPromptCreated {
+fn agent_prompt_created(agent_prompt_id: &str, _session_id: &str) -> AgentPromptCreated {
     AgentPromptCreated {
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        session_id: session_id.into(),
         system_prompt: String::new(),
         context: tau_proto::PromptContext::default(),
         tools: Vec::new(),
@@ -794,7 +836,7 @@ fn renderer_starts_without_selected_or_default_agent() {
     // Regression: the UI opens in the start-new-agent state instead of
     // preselecting a synthetic `main` agent.
     let (_term, handle, _vt) = setup(80, 24);
-    let renderer = EventRenderer::new(
+    let renderer = test_event_renderer(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -824,20 +866,15 @@ fn renderer_starts_without_selected_or_default_agent() {
 }
 
 #[test]
-fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
+fn first_agent_prompt_created_selects_new_agent() {
     // Regression: the first prompt created for the default conversation carries
-    // the new agent id; seeing it from the empty state selects that agent. A
-    // later `/session new` returns to the empty start-new-agent state.
+    // the new agent id; seeing it from the empty state selects that agent.
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s1".into(),
-    }));
     assert_eq!(
         *renderer
             .current_agent_state()
@@ -859,39 +896,7 @@ fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
             .as_deref(),
         Some("engineer_abc12345")
     );
-    assert!(vt.screen_contains(80, "&s1 @engineer_abc12345"));
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s2".into(),
-    }));
-    assert_eq!(
-        *renderer
-            .current_agent_state()
-            .lock()
-            .expect("current agent"),
-        None
-    );
-}
-
-#[test]
-fn initial_session_started_renders_session_status_without_role_placeholder() {
-    // Regression: startup may announce SessionStarted before role selection.
-    // The status bar must still show the human-readable session id, without
-    // adding a misleading no-role placeholder next to it.
-    let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "tau-agent-test".into(),
-    }));
-    sync(&handle);
-
-    assert!(vt.screen_contains(80, "&tau-agent-test"));
-    assert!(!vt.screen_contains(80, "no role selected"));
+    assert!(vt.screen_contains(80, "@engineer_abc12345"));
 }
 
 #[test]
@@ -900,14 +905,11 @@ fn extension_prompt_with_target_does_not_select_from_empty_state() {
     // but `/agent none`/startup must stay on the no-agent screen until the user
     // explicitly selects a transcript.
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s1".into(),
-    }));
 
     let originator = tau_proto::PromptOriginator::Extension {
         name: "core-subagents".into(),
@@ -962,15 +964,11 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
     // select a live agent so the next Enter press sends a targeted follow-up
     // instead of being rejected as "not live".
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
         agent_id: agent_id("engineer_abc12345"),
         text: "hello".to_owned(),
@@ -1182,14 +1180,11 @@ fn first_agent_event_does_not_force_full_redraw() {
     // the input target. The already-visible empty transcript becomes the new
     // agent transcript in-place instead of replacing the whole output snapshot.
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
         parent_agent: None,
         agent_id: agent_id("engineer_abc12345"),
@@ -1206,36 +1201,30 @@ fn first_agent_event_does_not_force_full_redraw() {
 }
 
 #[test]
-fn new_agent_after_new_session_does_not_force_full_redraw() {
-    // `/session new` intentionally moves to the start-new-agent screen and clears
-    // the old transcript. Starting the next agent from that already-visible
+fn new_agent_after_agent_new_does_not_force_full_redraw() {
+    // `/agent new` intentionally moves to the start-new-agent screen without
+    // showing the old transcript. Starting the next agent from that already-visible
     // empty screen should only update target/status metadata, not redraw
     // scrollback.
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "first".into(),
         agent_id: tau_proto::AgentId::parse("engineer_one").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s2".into(),
-    }));
+    sync(&handle);
+    renderer.clear_selected_agent();
     sync(&handle);
     let full_render_count = handle.full_render_count();
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s2".into(),
         text: "second".into(),
         agent_id: tau_proto::AgentId::parse("engineer_two").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -1252,7 +1241,7 @@ fn selecting_same_agent_does_not_force_full_redraw() {
     // Regression: selecting the already-displayed target agent is a pure no-op
     // for transcript rendering.
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -1273,14 +1262,13 @@ fn switching_between_displayed_agents_restores_transcripts() {
     // between two agents still swaps the output snapshot and restores each
     // agent's durable scrollback.
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
     renderer.switch_agent("worker-1".to_owned());
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "worker one transcript".into(),
         agent_id: agent_id("worker-1"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -1289,7 +1277,6 @@ fn switching_between_displayed_agents_restores_transcripts() {
     }));
     renderer.switch_agent("worker-2".to_owned());
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "worker two transcript".into(),
         agent_id: agent_id("worker-2"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -1315,7 +1302,7 @@ fn switching_agents_preserves_turn_stats_cache_hit_baseline() {
     // second response must keep the previous same-agent response as its cache-hit
     // denominator instead of falling back to the no-baseline `Δ0% .../0` display.
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -1357,7 +1344,7 @@ fn switching_to_hidden_agent_preserves_turn_stats_cache_hit_baseline() {
     // state and later replayed by a full transcript re-render when selected, so
     // they must also retain their per-entry cache-hit baseline.
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -1395,7 +1382,7 @@ fn switching_to_hidden_agent_preserves_turn_stats_cache_hit_baseline() {
 #[test]
 fn extension_context_ready_routes_to_agent_ui_state() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -1403,7 +1390,6 @@ fn extension_context_ready_routes_to_agent_ui_state() {
     renderer.apply_setting("notice-level", "debug");
     renderer.handle(&Event::ExtensionContextReady(
         tau_proto::ExtensionContextReady {
-            session_id: "s1".into(),
             agent_id: agent_id("worker-1"),
         },
     ));
@@ -1418,14 +1404,11 @@ fn extension_context_ready_routes_to_agent_ui_state() {
 #[test]
 fn hidden_agent_events_do_not_force_visible_full_redraw() {
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
         "main-sp", "s1",
     )));
@@ -1453,7 +1436,7 @@ fn delegate_progress_does_not_overwrite_display_name_with_task_name() {
     // progress carries the raw task title for the parent tool block, but it must
     // not replace the display name chosen by the harness template.
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -1494,15 +1477,11 @@ fn suspended_agent_stays_blocked_after_lifecycle_updates_until_resume() {
     // make prompt submission active again until `/agent resume` clears the
     // suspension set.
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
@@ -1568,7 +1547,7 @@ fn selected_suspended_agent_placeholder_refreshes_until_resume() {
     // input placeholder immediately, so the empty prompt itself explains why a
     // normal message cannot be sent until `/resume` runs.
     let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -1601,7 +1580,7 @@ fn selected_suspended_agent_placeholder_refreshes_until_resume() {
 #[test]
 fn delegated_agent_is_active_until_start_agent_result() {
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -1648,7 +1627,7 @@ fn delegated_agent_is_active_until_start_agent_result() {
 #[test]
 fn extension_agent_prompt_lifecycle_is_active_until_response_finishes() {
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -1727,7 +1706,7 @@ fn extension_agent_prompt_lifecycle_is_active_until_response_finishes() {
 #[test]
 fn clearing_selected_agent_preserves_previous_transcript() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -1739,7 +1718,6 @@ fn clearing_selected_agent_preserves_previous_transcript() {
     }));
     renderer.switch_agent("worker-1".to_owned());
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "worker transcript survives".into(),
         agent_id: agent_id("worker-1"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -1759,9 +1737,9 @@ fn clearing_selected_agent_preserves_previous_transcript() {
 }
 
 #[test]
-fn new_session_resets_agent_transcripts() {
+fn agent_new_hides_agent_transcript_without_forgetting_it() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -1771,14 +1749,16 @@ fn new_session_resets_agent_transcripts() {
         agent_id: agent_id("worker-1"),
     }));
     renderer.switch_agent("worker-1".to_owned());
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s2".into(),
-    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "@worker-1"));
+
+    renderer.clear_selected_agent();
     sync(&handle);
 
     assert!(!vt.screen_contains(80, "@worker-1"));
     assert!(
-        !renderer
+        renderer
             .known_agents()
             .lock()
             .expect("known agents")
@@ -1790,7 +1770,7 @@ fn new_session_resets_agent_transcripts() {
 #[test]
 fn hidden_agent_activity_keeps_global_in_progress() {
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -1824,14 +1804,11 @@ fn hidden_agent_activity_keeps_global_in_progress() {
 #[test]
 fn switched_agent_shows_its_tool_usage() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
@@ -1882,14 +1859,11 @@ fn switched_agent_shows_its_tool_usage() {
 #[test]
 fn delegate_progress_routes_to_hidden_tool_owner() {
     let (_term, handle, vt) = setup(90, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
@@ -1955,17 +1929,13 @@ fn delegate_progress_routes_to_hidden_tool_owner() {
 #[test]
 fn shell_progress_routes_to_command_owner_after_agent_switch() {
     let (_term, handle, vt) = setup(90, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.switch_agent("worker-1".to_owned());
     renderer.handle(&Event::UiShellCommand(tau_proto::UiShellCommand {
-        session_id: "s1".into(),
         command_id: "ui-sh-1".into(),
         command: "printf worker-output".into(),
         include_in_context: false,
@@ -1984,7 +1954,6 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
     renderer.handle(&Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
             command_id: "ui-sh-1".into(),
-            session_id: "s1".into(),
             command: "printf worker-output".into(),
             include_in_context: false,
             target_agent_id: Some(agent_id("worker-1")),
@@ -2004,20 +1973,16 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
 #[test]
 fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     let (_term, handle, vt) = setup(90, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.switch_agent("main".to_owned());
 
     // Regression: the durable event's target must own the command even if the
     // selected transcript is main by the time the renderer processes the echo.
     renderer.handle(&Event::UiShellCommand(tau_proto::UiShellCommand {
-        session_id: "s1".into(),
         command_id: "ui-sh-race".into(),
         command: "printf race-output".into(),
         include_in_context: false,
@@ -2026,7 +1991,6 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     renderer.handle(&Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
             command_id: "ui-sh-race".into(),
-            session_id: "s1".into(),
             command: "printf race-output".into(),
             include_in_context: false,
             target_agent_id: Some(agent_id("worker-1")),
@@ -2043,18 +2007,14 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     assert!(vt.screen_contains(90, "race-output"));
 
     let (_term, handle, vt) = setup(90, 24);
-    let mut replay = EventRenderer::new(
+    let mut replay = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    replay.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
     replay.handle(&Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
             command_id: "ui-sh-replay".into(),
-            session_id: "s1".into(),
             command: "printf replay-output".into(),
             include_in_context: false,
             target_agent_id: Some(agent_id("worker-1")),
@@ -2074,14 +2034,11 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
 #[test]
 fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
 
     let originator = tau_proto::PromptOriginator::Extension {
         name: "core-subagents".into(),
@@ -2117,14 +2074,11 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
 #[test]
 fn agent_switch_preserves_separate_transcripts() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
@@ -2164,16 +2118,12 @@ fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() 
     // that agent's own fresh transcript rather than appending to the previously
     // selected agent's terminal output.
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "agent one prompt".to_owned(),
         agent_id: agent_id("agent-one"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -2188,7 +2138,6 @@ fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() 
     assert!(!vt.screen_contains(80, "agent one prompt"));
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "agent two prompt".to_owned(),
         agent_id: agent_id("agent-two"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -2207,16 +2156,12 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
     // the old agent while the user is typing the prompt meant to create a fresh
     // agent.
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "old agent prompt".to_owned(),
         agent_id: agent_id("old-agent"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -2233,7 +2178,6 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
         message_class: tau_proto::PromptMessageClass::User,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "stale old-agent prompt".to_owned(),
         agent_id: agent_id("old-agent"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -2276,7 +2220,7 @@ fn queued_prompt_selects_agent_from_empty_state() {
     // Enter from the empty screen would create a new agent instead of targeting
     // the active one.
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2306,7 +2250,7 @@ fn manual_compaction_selects_agent_from_empty_state() {
     // rendered as progress, it still identifies the agent the empty UI should
     // target for subsequent input.
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2333,13 +2277,7 @@ fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
     {
         let (mtx, _cv) = &handle;
         let mut slot = super::locked(mtx);
-        slot.pending = Some((
-            slot.epoch,
-            tau_proto::UiPromptDraft {
-                session_id: "s1".into(),
-                text: "old".into(),
-            },
-        ));
+        slot.pending = Some((slot.epoch, tau_proto::UiPromptDraft { text: "old".into() }));
     }
 
     let (epoch, _draft) = {
@@ -2430,7 +2368,6 @@ fn action_submission_invalidates_pending_draft_like_prompt_submission() {
         slot.pending = Some((
             slot.epoch,
             tau_proto::UiPromptDraft {
-                session_id: "s1".into(),
                 text: "/email list".into(),
             },
         ));
@@ -2468,7 +2405,7 @@ fn draft_snapshot_is_dropped_after_shutdown() {
 #[test]
 fn agent_messages_render_all_recipients_as_history() {
     let (_term, handle, vt) = setup(80, 8);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2485,7 +2422,6 @@ fn agent_messages_render_all_recipients_as_history() {
 
     for idx in 0..20 {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: format!("scroll filler {idx}"),
             agent_id: agent_id("engineer_22222222"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -2500,7 +2436,7 @@ fn agent_messages_render_all_recipients_as_history() {
 #[test]
 fn show_messages_none_leaves_no_visible_message_output() {
     let (_term, handle, vt) = setup(80, 8);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2524,7 +2460,7 @@ fn user_recipient_agent_messages_broadcast_to_visible_agent_even_when_hidden() {
     // even when another agent is selected and `show-messages` hides normal
     // agent-to-agent messages.
     let (_term, handle, vt) = setup(80, 10);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2550,7 +2486,7 @@ fn user_recipient_agent_messages_broadcast_to_visible_agent_even_when_hidden() {
 #[test]
 fn show_messages_summary_modes_do_not_show_body() {
     let (_term, handle, vt) = setup(80, 8);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2571,7 +2507,7 @@ fn show_messages_summary_modes_do_not_show_body() {
 #[test]
 fn show_messages_toggle_retroactively_hides_and_shows_history() {
     let (_term, handle, vt) = setup(80, 8);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2595,16 +2531,15 @@ fn show_messages_toggle_retroactively_hides_and_shows_history() {
 }
 
 #[test]
-fn new_session_clears_session_ui_state() {
+fn agent_new_hides_visible_agent_ui_state() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "old prompt".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -2656,23 +2591,27 @@ fn new_session_clears_session_ui_state() {
     assert!(vt.screen_contains(80, "old prompt"));
     assert!(vt.screen_contains(80, "old response"));
     assert!(vt.screen_contains(80, "read src/lib.rs"));
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s2".into(),
-    }));
+    sync(&handle);
+    renderer.clear_selected_agent();
     sync(&handle);
 
     assert!(!vt.screen_contains(80, "old prompt"));
     assert!(!vt.screen_contains(80, "old response"));
     assert!(!vt.screen_contains(80, "read src/lib.rs"));
-    assert!(vt.screen_contains(80, "&s2"));
-    assert!(!vt.screen_contains(80, "no role selected"));
+    assert!(
+        renderer
+            .known_agents()
+            .lock()
+            .expect("known agents")
+            .iter()
+            .any(|agent| agent == "main")
+    );
 }
 
 #[test]
-fn new_session_replays_startup_context_and_kept_extensions() {
+fn startup_context_and_extension_ready_are_visible() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2687,20 +2626,17 @@ fn new_session_replays_startup_context_and_kept_extensions() {
         extension_name: "core-shell".into(),
         pid: Some(123),
     }));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s2".into(),
-    }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "tau"));
-    assert!(vt.screen_contains(80, "extension core-shell kept"));
+    assert!(vt.screen_contains(80, "AGENTS.md"));
+    assert!(vt.screen_contains(80, "extension core-shell ready"));
 }
 /// `notice-level=warning` hides routine informational chatter while mandatory
 /// warnings such as configuration errors still reach the UI.
 #[test]
 fn warning_notice_level_hides_info_but_keeps_always_show_warning() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2729,7 +2665,7 @@ fn warning_notice_level_hides_info_but_keeps_always_show_warning() {
 #[test]
 fn critical_notice_level_keeps_always_show_harness_failure() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2746,13 +2682,12 @@ fn critical_notice_level_keeps_always_show_harness_failure() {
     assert!(vt.screen_contains(80, "failed to dispatch queued prompt: boom"));
 }
 
-/// Extension ready/kept messages are informational lifecycle notices, so a
-/// warning threshold should keep them out of live startup and `/session new`
-/// preambles.
+/// Extension ready messages are informational lifecycle notices, so a warning
+/// threshold should keep them out of live startup output.
 #[test]
 fn warning_notice_level_hides_routine_extension_status() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2764,17 +2699,14 @@ fn warning_notice_level_hides_routine_extension_status() {
         extension_name: "core-shell".into(),
         pid: Some(123),
     }));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s2".into(),
-    }));
     sync(&handle);
 
     assert!(!vt.screen_contains(80, "extension core-shell"));
 }
 #[test]
-fn new_session_preserves_role_status() {
+fn agent_new_preserves_role_status() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2789,21 +2721,19 @@ fn new_session_preserves_role_status() {
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "+engineer"));
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s2".into(),
-    }));
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+    renderer.clear_selected_agent();
     sync(&handle);
 
     assert!(vt.screen_contains(80, "+engineer"));
-    assert!(vt.screen_contains(80, "&s2"));
     assert!(!vt.screen_contains(80, "no role selected"));
 }
 
 #[test]
 fn model_status_uses_symbol_prefixed_chips() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2819,9 +2749,6 @@ fn model_status_uses_symbol_prefixed_chips() {
             ..Default::default()
         },
     }));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "tau-agent-test".into(),
-    }));
     renderer.handle(&Event::HarnessContextUsageChanged(
         HarnessContextUsageChanged {
             input_tokens: Some(12_000),
@@ -2836,7 +2763,7 @@ fn model_status_uses_symbol_prefixed_chips() {
         .into_iter()
         .find(|row| row.contains("+engineer"))
         .expect("status row");
-    assert!(status_row.starts_with("&tau-agent-test +engineer ~high"));
+    assert!(status_row.starts_with("+engineer ~high"));
     assert!(status_row.ends_with("#12k/200k"));
     assert!(!vt.screen_contains(80, "=test/model"));
     assert!(!vt.screen_contains(80, "v=high"));
@@ -2846,7 +2773,7 @@ fn model_status_uses_symbol_prefixed_chips() {
 #[test]
 fn status_identity_matches_no_agent_placeholder_semantics() {
     let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2859,23 +2786,19 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
         baseline_params: None,
         model_params: tau_proto::ModelParams::default(),
     }));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s1".into(),
-    }));
     sync(&handle);
 
     // In the no-agent/start-new-agent state, the status bar mirrors the prompt
-    // placeholder by showing the selected role immediately after the session.
+    // placeholder by showing the selected role.
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("&s1"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row before agent selection");
-    assert!(status_row.starts_with("&s1 +engineer"));
+    assert!(status_row.starts_with("+engineer"));
     assert!(!status_row.contains("@engineer_abc"));
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hello".into(),
         agent_id: tau_proto::AgentId::parse("engineer_abc").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -2888,9 +2811,9 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("&s1"))
+        .find(|row| row.contains("@engineer_abc"))
         .expect("status row after agent selection");
-    assert!(status_row.starts_with("&s1 @engineer_abc"));
+    assert!(status_row.starts_with("@engineer_abc"));
     assert!(!status_row.contains("+engineer"));
 
     renderer.clear_selected_agent();
@@ -2899,24 +2822,20 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("&s1"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row after clearing agent selection");
-    assert!(status_row.starts_with("&s1 +engineer"));
+    assert!(status_row.starts_with("+engineer"));
     assert!(!status_row.contains("@engineer_abc"));
 }
 
 #[test]
 fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
     let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s1".into(),
-    }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
         parent_agent: None,
         agent_id: agent_id("junior-engineer_b"),
@@ -2925,7 +2844,6 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
         metadata: Vec::new(),
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hello".into(),
         agent_id: tau_proto::AgentId::parse("junior-engineer_b").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -2937,16 +2855,16 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("&s1"))
+        .find(|row| row.contains("@junior-engineer_b"))
         .expect("status row after agent selection");
-    assert!(status_row.starts_with("&s1 @junior-engineer_b (sleep 6)"));
+    assert!(status_row.starts_with("@junior-engineer_b (sleep 6)"));
     assert!(!status_row.contains("@sleep 6 (junior-engineer_b)"));
 }
 
 #[test]
 fn model_status_shows_context_window_until_usage_is_known() {
     let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -2972,7 +2890,7 @@ fn model_status_shows_context_window_until_usage_is_known() {
 #[test]
 fn focused_agent_context_usage_event_replaces_unknown_context_window() {
     let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3011,7 +2929,7 @@ fn focused_agent_context_usage_event_replaces_unknown_context_window() {
 #[test]
 fn model_status_shows_main_tool_usage_before_context() {
     let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3202,10 +3120,9 @@ fn model_status_shows_main_tool_usage_before_context() {
     assert!(status_row.ends_with("@3 #12k/200k"));
     assert!(!status_row.contains('%'));
 
-    // Starting a new user task in the same session also keeps the chip hidden
+    // Starting a new user task with the same agent also keeps the chip hidden
     // until the main agent requests tools for that task.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "next task".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -3225,7 +3142,7 @@ fn model_status_shows_main_tool_usage_before_context() {
 #[test]
 fn agent_in_progress_ignores_completed_replayed_prompt_history() {
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3233,7 +3150,6 @@ fn agent_in_progress_ignores_completed_replayed_prompt_history() {
     let in_progress = renderer.agent_in_progress_state();
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "old prompt".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -3256,7 +3172,7 @@ fn agent_in_progress_ignores_completed_replayed_prompt_history() {
 #[test]
 fn prompt_termination_clears_live_response_and_activity() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3288,7 +3204,7 @@ fn prompt_termination_clears_live_response_and_activity() {
 #[test]
 fn agent_in_progress_clears_when_tool_is_cancelled() {
     let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3311,7 +3227,7 @@ fn agent_in_progress_clears_when_tool_is_cancelled() {
 
     // ToolCancelled is a terminal tool event just like ToolResult/ToolError.
     // The Ctrl-D guard must clear it, otherwise a cancelled tool leaves the
-    // session looking busy forever after the harness has stopped the tool.
+    // agent looking busy forever after the harness has stopped the tool.
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
@@ -3324,7 +3240,7 @@ fn agent_in_progress_clears_when_tool_is_cancelled() {
 #[test]
 fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3467,7 +3383,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
 #[test]
 fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3501,12 +3417,9 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
             service_tier: None,
         }),
     }));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s2".into(),
-    }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "&s2 +engineer"));
+    assert!(vt.screen_contains(80, "+engineer"));
     assert!(!vt.screen_contains(80, "^medium"));
     assert!(!vt.screen_contains(80, "~medium"));
 
@@ -3529,13 +3442,13 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "&s2 +engineer ~high"));
+    assert!(vt.screen_contains(80, "+engineer ~high"));
 }
 
 #[test]
 fn role_state_overrides_are_compared_to_role_baseline() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3572,18 +3485,15 @@ fn role_state_overrides_are_compared_to_role_baseline() {
             service_tier: Some(tau_proto::ServiceTier::Fast),
         }),
     }));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s3".into(),
-    }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "&s3 +engineer ^low ~high !off"));
+    assert!(vt.screen_contains(80, "+engineer ^low ~high !off"));
 }
 
 #[test]
 fn single_prompt_response_cycle() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3591,7 +3501,6 @@ fn single_prompt_response_cycle() {
 
     // User submits prompt.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hello".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -3634,14 +3543,13 @@ fn single_prompt_response_cycle() {
 #[test]
 fn thinking_renders_as_separate_block_above_response() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -3723,14 +3631,13 @@ fn thinking_renders_as_separate_block_above_response() {
 #[test]
 fn set_show_thinking_round_trip_restores_history() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -3804,7 +3711,7 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
     // doesn't suddenly resurrect them. Only blocks that were
     // visible at some point round-trip through `set_block`.
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3812,7 +3719,6 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
     renderer.apply_setting("show-thinking", "false");
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -3845,14 +3751,13 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
 #[test]
 fn no_thinking_block_when_summary_absent() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -3880,7 +3785,7 @@ fn no_thinking_block_when_summary_absent() {
 #[test]
 fn queued_prompt_renders_after_first_completes() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3888,7 +3793,6 @@ fn queued_prompt_renders_after_first_completes() {
 
     // First prompt.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "first".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -3983,7 +3887,7 @@ fn queued_prompt_renders_after_first_completes() {
 #[test]
 fn queued_prompt_then_late_ui_submit_advances_without_duplicate() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -3998,7 +3902,6 @@ fn queued_prompt_then_late_ui_submit_advances_without_duplicate() {
         message_class: tau_proto::PromptMessageClass::User,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "late echo".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -4022,7 +3925,7 @@ fn queued_prompt_then_late_ui_submit_advances_without_duplicate() {
 #[test]
 fn queued_prompt_steered_promotes_without_duplicate() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4074,7 +3977,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
 #[test]
 fn internal_prompt_events_are_hidden() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4084,7 +3987,6 @@ fn internal_prompt_events_are_hidden() {
     // prompt-like events, but they are internal control text and must not show
     // up in the user's transcript or queued prompt area.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "[tau-internal] Tool call `bg` is complete.".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::Internal,
@@ -4114,7 +4016,7 @@ fn internal_prompt_events_are_hidden() {
 #[test]
 fn queued_prompt_does_not_replace_dispatched_same_text() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4125,7 +4027,6 @@ fn queued_prompt_does_not_replace_dispatched_same_text() {
     // not remove the earlier transcript block while rendering the queued
     // marker.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "repeat".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -4157,7 +4058,7 @@ fn queued_prompt_does_not_replace_dispatched_same_text() {
 #[test]
 fn three_queued_prompts_render_sequentially() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4167,7 +4068,6 @@ fn three_queued_prompts_render_sequentially() {
     for i in 0..3 {
         if i == 0 {
             renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-                session_id: "s1".into(),
                 text: format!("msg-{i}"),
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 message_class: tau_proto::PromptMessageClass::User,
@@ -4229,7 +4129,7 @@ fn three_queued_prompts_render_sequentially() {
 #[test]
 fn streaming_indicator_appends_during_updates() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4278,7 +4178,7 @@ fn render_compaction_block_styles_completed_status() {
 #[test]
 fn render_empty_provider_response_placeholder_without_context_item() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4298,7 +4198,7 @@ fn render_empty_provider_response_placeholder_without_context_item() {
 #[test]
 fn render_provider_error_from_non_context_field() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4319,7 +4219,7 @@ fn render_provider_error_from_non_context_field() {
 #[test]
 fn manual_compaction_trigger_does_not_render_progress_status() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4338,7 +4238,7 @@ fn manual_compaction_trigger_does_not_render_progress_status() {
 #[test]
 fn render_provider_compaction_update_as_compact_progress() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4365,7 +4265,7 @@ fn render_provider_compaction_update_as_compact_progress() {
 #[test]
 fn render_provider_compaction_item_when_response_finishes() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4392,7 +4292,7 @@ fn render_provider_compaction_item_when_response_finishes() {
 #[test]
 fn delegate_progress_redraws_live_parent_block() {
     let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4467,7 +4367,7 @@ fn delegate_progress_redraws_live_parent_block() {
 #[test]
 fn provider_tool_error_before_tool_started_is_ignored() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4511,7 +4411,7 @@ fn provider_tool_error_before_tool_started_is_ignored() {
 #[test]
 fn logical_and_provider_tool_errors_render_one_terminal_line() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4559,7 +4459,7 @@ fn logical_and_provider_tool_errors_render_one_terminal_line() {
 #[test]
 fn provider_tool_error_without_logical_tool_error_does_not_finish_live_tool() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4604,7 +4504,7 @@ fn provider_tool_error_without_logical_tool_error_does_not_finish_live_tool() {
 #[test]
 fn running_tool_call_shows_ellipsis_until_result() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4681,7 +4581,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
 #[test]
 fn tool_progress_display_replaces_live_state_generically() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4720,7 +4620,7 @@ fn tool_progress_display_replaces_live_state_generically() {
 #[test]
 fn tool_started_renders_pending_until_provider_progress() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4764,7 +4664,7 @@ fn tool_started_renders_pending_until_provider_progress() {
 #[test]
 fn backgrounded_tool_stays_visibly_running_until_background_result() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4869,7 +4769,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
 #[test]
 fn running_shell_tool_shows_multiline_command_body_in_full_mode() {
     let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -4965,7 +4865,7 @@ fn running_shell_tool_shows_multiline_command_body_in_full_mode() {
 #[test]
 fn finished_tool_result_preserves_message_and_tool_item_order() {
     let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -5029,7 +4929,7 @@ fn live_tool_timer_updates_do_not_mutate_scrolled_history() {
     // hidden-prefix full redraw of old transcript rows that have moved to
     // scrollback.
     let (_term, handle, vt) = setup(80, 5);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -5077,7 +4977,7 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
     // area. Updating only the elapsed seconds would force visible churn without
     // changing useful content, so keep the live duration stable until completion.
     let (_term, handle, vt) = setup(80, 8);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -5162,7 +5062,7 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
 #[test]
 fn show_tools_summarize_turn_summarizes_tool_batch() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -5238,7 +5138,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
 #[test]
 fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -5324,7 +5224,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
 #[test]
 fn show_tools_compact_hides_payload_body() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -5390,7 +5290,7 @@ fn show_tools_compact_hides_payload_body() {
 #[test]
 fn show_tools_off_hides_tool_blocks() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -5427,7 +5327,7 @@ fn show_tools_off_hides_tool_blocks() {
 #[test]
 fn websearch_tool_result_shows_result_count_and_size() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -5461,14 +5361,13 @@ fn websearch_tool_result_shows_result_count_and_size() {
 #[test]
 fn streaming_block_does_not_duplicate_on_finish() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -5507,7 +5406,7 @@ fn streaming_block_does_not_duplicate_on_finish() {
 #[test]
 fn agents_md_loaded_event_shows_output_stats() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -6491,7 +6390,7 @@ fn streaming_block_handles_each_trailing_case() {
 #[test]
 fn three_prompts_during_streaming_all_render_correctly() {
     let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
@@ -6499,7 +6398,6 @@ fn three_prompts_during_streaming_all_render_correctly() {
 
     // User sends first prompt.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -6526,7 +6424,6 @@ fn three_prompts_during_streaming_all_render_correctly() {
 
     // User sends 2nd and 3rd prompts while streaming.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -6539,7 +6436,6 @@ fn three_prompts_during_streaming_all_render_correctly() {
         message_class: tau_proto::PromptMessageClass::User,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -6655,14 +6551,13 @@ fn three_prompts_during_streaming_all_render_correctly() {
 #[test]
 fn emoji_in_response_renders_correctly() {
     let (_term, handle, vt) = setup(40, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -6714,14 +6609,13 @@ fn emoji_in_response_renders_correctly() {
 #[test]
 fn multiple_emoji_no_column_drift() {
     let (_term, handle, vt) = setup(40, 24);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -6755,14 +6649,13 @@ fn multiple_emoji_no_column_drift() {
 #[test]
 fn overflowing_stream_replaced_cleanly_on_finish() {
     let (_term, handle, vt) = setup(40, 5);
-    let mut renderer = EventRenderer::new(
+    let mut renderer = test_event_renderer(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
         text: "overflow please".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,

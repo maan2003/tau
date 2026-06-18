@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ModelId;
 
-/// Token usage bucket for one provider/model or the session total.
+/// Token usage bucket for one provider/model or the harness total.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TokenUsageCounts {
@@ -28,7 +28,7 @@ impl TokenUsageCounts {
     }
 }
 
-/// Session-scoped token usage totals, plus per-provider/model buckets.
+/// Harness-scoped token usage totals, plus per-provider/model buckets.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TokenUsageStats {
@@ -85,7 +85,7 @@ pub struct ProviderTokenUsage {
     pub prompt_cached_tokens: u64,
     /// Output tokens received for this response.
     pub response_received_tokens: u64,
-    /// Session-total and per-model token counters after this response.
+    /// Harness-total and per-model token counters after this response.
     pub stats: TokenUsageStats,
 }
 
