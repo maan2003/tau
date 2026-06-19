@@ -1,5 +1,5 @@
 [package]
-name = "tau-session-inspect"
+name = "tau-agent-inspect"
 version.workspace = true
 edition.workspace = true
 description.workspace = true

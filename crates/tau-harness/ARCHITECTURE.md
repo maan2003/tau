@@ -1,8 +1,8 @@
 # tau-harness architecture
 
-`tau-harness` owns the daemon-side control plane for Tau sessions. It connects
+`tau-harness` owns the daemon-side control plane for Tau agents. It connects
 clients and extensions, sequences events, applies interception, persists durable
-session/agent facts, and delivers committed events to subscribers.
+agent facts, and delivers committed events to subscribers.
 
 ## Event sequencing, interception, and persistence
 
@@ -15,8 +15,8 @@ eligible semantic facts, and broadcasts delivery frames. Direct calls to
 Interceptors are local privileged extensions. They can inspect, modify, or drop
 most matching events before commit. The harness protects selected facts as
 must-pass and immutable because live state, durable resume state, and transcript
-routing must agree. Fully immutable facts include session lifecycle facts,
-session membership facts, `agent.started`, harness-owned agent message
+routing must agree. Fully immutable facts include harness-owned lifecycle
+facts, loaded-agent facts, `agent.started`, harness-owned agent message
 projections, terminal tool completion facts (`tool.result`, `tool.error`,
 `provider.tool_result`, `provider.tool_error`, `tool.cancelled`,
 `tool.background_result`, and `tool.background_error`), and selected response
@@ -28,20 +28,22 @@ and `always_show` warnings such as extension config errors) are replayable,
 published with a call-site `must_pass` override, and protected from interceptor
 rewrite/drop.
 
-## Session and agent stores
+## Loaded agents and agent stores
 
-The session store owns durable membership facts such as
-`session.agent_loaded` and `session.agent_unloaded`. `session.started` and
-`session.shutdown` are must-pass, immutable runtime/current-session snapshot
-facts, but they are not folded into the durable session membership store. Agent
-stores own durable transcript facts, including `agent.started`, prompt facts,
-provider/tool results, harness-owned inter-agent message projections, and
+Loaded-agent membership is runtime state owned by the harness process.
+`agent.loading`, `agent.loaded`, and `agent.unloaded` are transient, must-pass
+snapshots of that runtime state; they are not durable transcript facts. For
+explicit durable loads, `agent.loading` announces that replay catch-up is about
+to begin, replayed durable facts follow, and metadata-free `agent.loaded` marks
+the catch-up-complete boundary where the agent is fully loaded for subscribers.
+Agent stores own durable transcript facts, including `agent.started`, prompt
+facts, provider/tool results, harness-owned inter-agent message projections, and
 per-agent metadata set/unset facts. Metadata is committed through the same
-interceptable publish path as other ordinary events; the folded latest metadata
-snapshot is replayed to subscribers before `session.agent_loaded`, and
-inheritable entries are copied to child agents when an explicit or derived
-parent is known. Tests should assert durable stores, not only runtime delivery,
-when changing durable facts.
+interceptable publish path as other ordinary events. When an explicit or derived
+parent is known, inheritable parent entries are folded into the child
+`agent.started` creation metadata as defaults, and explicit child initial
+metadata wins on key collisions. Tests should assert durable stores, not only
+runtime delivery, when changing durable facts.
 
 ## Extension boundary
 
@@ -57,10 +59,13 @@ publish the original event so routing identities and durable folds stay aligned.
 Mutable prompt-text events may be rewritten only without changing their routing
 identity.
 
-The harness also tracks loaded session membership in runtime state before the
-corresponding must-pass `session.agent_loaded` publish commits. That keeps
-idempotency stable while an interceptor parks publication and prevents duplicate
-membership/start facts from being queued for the same live agent.
+The harness updates loaded-agent routing state before the corresponding
+must-pass lifecycle publish commits. That keeps idempotency stable while an
+interceptor parks publication and prevents duplicate load/start facts from being
+queued for the same live agent. For explicit `agent.load`, the harness records a
+post-commit continuation so durable transcript history is replayed only after
+the matching `agent.loading` boundary has committed, and final `agent.loaded` is
+published after that catch-up replay.
 
 Provider tool calls are evaluated against the tool snapshot owned by the prompt
 that produced them. Model-visible rejection diagnostics for those calls must use
@@ -148,10 +153,10 @@ pending loop-guard pivots.
 
 ## Lifecycle events
 
-Harness lifecycle events such as session start/shutdown and extension status are
-normal events unless specifically marked must-pass/immutable. Session lifecycle
+Harness lifecycle events such as agent loading/shutdown and extension status are
+normal events unless specifically marked must-pass/immutable. Agent lifecycle
 facts are protected because extensions and context providers use them to set up
-or tear down per-session state. Extension lifecycle/status events are runtime
+or tear down per-agent state. Extension lifecycle/status events are runtime
 observability facts and may be intercepted like other non-protected events unless
 call-site policy says otherwise.
 

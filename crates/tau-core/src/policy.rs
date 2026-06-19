@@ -10,7 +10,85 @@ use serde::{Deserialize, Serialize};
 use tau_proto::EventSelector;
 
 use crate::connection::{ConnectionMetadata, ConnectionOrigin};
-use crate::session_store::SessionStoreError;
+
+/// Error returned by the file-backed subscription policy store.
+#[derive(Debug)]
+pub enum PolicyStoreError {
+    CreateParentDirectory {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Decode {
+        path: PathBuf,
+        source: ciborium::de::Error<std::io::Error>,
+    },
+    Encode {
+        path: PathBuf,
+        source: ciborium::ser::Error<std::io::Error>,
+    },
+}
+
+impl fmt::Display for PolicyStoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CreateParentDirectory { path, source } => {
+                write!(
+                    f,
+                    "failed to create parent directory for policy store {}: {source}",
+                    path.display()
+                )
+            }
+            Self::Read { path, source } => {
+                write!(
+                    f,
+                    "failed to read policy store {}: {source}",
+                    path.display()
+                )
+            }
+            Self::Write { path, source } => {
+                write!(
+                    f,
+                    "failed to write policy store {}: {source}",
+                    path.display()
+                )
+            }
+            Self::Decode { path, source } => {
+                write!(
+                    f,
+                    "failed to decode policy store record from {}: {source}",
+                    path.display()
+                )
+            }
+            Self::Encode { path, source } => {
+                write!(
+                    f,
+                    "failed to encode policy store record for {}: {source}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl Error for PolicyStoreError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::CreateParentDirectory { source, .. }
+            | Self::Read { source, .. }
+            | Self::Write { source, .. } => Some(source),
+            Self::Decode { source, .. } => Some(source),
+            Self::Encode { source, .. } => Some(source),
+        }
+    }
+}
 
 /// Persisted approval for one subscription request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -29,11 +107,11 @@ pub struct PolicyStore {
 
 impl PolicyStore {
     /// Opens a policy store, loading any existing approvals.
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self, PolicyStoreError> {
         let path = path.into();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| {
-                SessionStoreError::CreateParentDirectory {
+                PolicyStoreError::CreateParentDirectory {
                     path: parent.to_path_buf(),
                     source,
                 }
@@ -41,7 +119,7 @@ impl PolicyStore {
         }
 
         let approvals = if path.exists() {
-            let bytes = fs::read(&path).map_err(|source| SessionStoreError::Read {
+            let bytes = fs::read(&path).map_err(|source| PolicyStoreError::Read {
                 path: path.clone(),
                 source,
             })?;
@@ -49,7 +127,7 @@ impl PolicyStore {
                 Vec::new()
             } else {
                 ciborium::from_reader(bytes.as_slice()).map_err(|source| {
-                    SessionStoreError::Decode {
+                    PolicyStoreError::Decode {
                         path: path.clone(),
                         source,
                     }
@@ -69,7 +147,7 @@ impl PolicyStore {
     }
 
     /// Records one approval and persists it if it is new.
-    pub fn record(&mut self, approval: SubscriptionApproval) -> Result<(), SessionStoreError> {
+    pub fn record(&mut self, approval: SubscriptionApproval) -> Result<(), PolicyStoreError> {
         if self.contains(&approval) {
             return Ok(());
         }
@@ -77,12 +155,12 @@ impl PolicyStore {
 
         let mut encoded = Vec::new();
         ciborium::into_writer(&self.approvals, &mut encoded).map_err(|source| {
-            SessionStoreError::Encode {
+            PolicyStoreError::Encode {
                 path: self.path.clone(),
                 source,
             }
         })?;
-        fs::write(&self.path, encoded).map_err(|source| SessionStoreError::Write {
+        fs::write(&self.path, encoded).map_err(|source| PolicyStoreError::Write {
             path: self.path.clone(),
             source,
         })
@@ -196,7 +274,6 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
                     | C::Agent
                     | C::Extension
                     | C::Provider
-                    | C::Session
                     | C::Ui
                     | C::Harness
                     | C::Shell

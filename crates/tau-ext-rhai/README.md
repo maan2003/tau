@@ -46,7 +46,7 @@ fn on_event(event, meta) {
     }
 }
 
-fn on_intercept(event, transient) {
+fn on_intercept(event) {
     event.payload.text = event.payload.text.replace("tao", "tau");
     return #{ kind: "pass", event: event };
 }
@@ -58,7 +58,7 @@ fn on_intercept(event, transient) {
 
 `on_event(event, meta)` is optional. `meta.replay` is `true` when the delivery is subscribe-time catch-up history rather than a live occurrence; `meta.recorded_at` carries the original commit timestamp when Tau supplies it. Scripts with user-visible side effects should skip replayed events.
 
-`on_intercept(event, transient)` is optional. Return values are:
+`on_intercept(event)` is optional. Return values are:
 
 - `()` or `"pass"` or `#{ kind: "pass" }` — pass the original event.
 - `#{ kind: "pass", event: event }` — pass a replacement event.
@@ -69,9 +69,8 @@ fn on_intercept(event, transient) {
 - `register_tool_group(name, spec)` — during `init` only, stage a tool group. Group names use Tau's validated tool-group identifier syntax.
 - `register_tool(name, spec, handler)` — during `init` only, stage an agent-invokable tool. `handler` is a Rhai function pointer such as `Fn("project_status")`; Tau calls it as `handler(args, call_info)` for live owned `tool.started` events. The `spec` map supports `description`, `parameters`, `model_visible_name`, `enabled_by_default`, and `group`.
 - `shell_spawn(command, opts)` — start a trusted host shell command asynchronously and return a `ShellJob`. `opts` supports `timeout`, `cwd`, `on_complete`, and `tag`. The completion callback is called as `on_complete(result, job)`.
-- `tau_emit(event)` — emit a durable Tau event map.
-- `tau_emit_transient(event)` — emit a transient Tau event map.
-- `tau_info(message)` / `tau_info(message, level)` — emit transient `harness.notice`; `level` is `"info"`, `"warning"`, `"debug"`, or `"trace"` (`"important"` is accepted as legacy `"warning"`).
+- `tau_emit(event)` — emit a Tau event map.
+- `tau_info(message)` / `tau_info(message, level)` — emit `harness.notice`; `level` is `"info"`, `"warning"`, `"debug"`, or `"trace"` (`"important"` is accepted as legacy `"warning"`).
 - `tau_log(level, message)` — write to extension logs only.
 
 `register_tool*` are available only during `init`. Other side-effecting host functions are available to `start`, raw event/intercept callbacks, tool handlers, and shell completion callbacks, but not during `init`. This keeps broken init scripts inert.

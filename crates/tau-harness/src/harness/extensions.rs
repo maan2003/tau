@@ -16,8 +16,6 @@ use crate::extension::ExtensionEntry;
 pub(super) struct StagedExtensionPublish {
     /// Event payload withheld until the source extension reaches `Ready`.
     pub(super) event: Event,
-    /// Whether the staged event should skip durable session history.
-    pub(super) transient: bool,
 }
 
 /// Extension-originated announcements accumulated until the extension reaches
@@ -46,7 +44,8 @@ pub(super) struct ExtensionActivationStage {
     /// Interceptor registration received before `Ready`. Registration is a
     /// replacement, so only the latest staged message matters.
     pub(super) intercept: Option<tau_proto::Intercept>,
-    /// Session-init acknowledgements received before `Ready`, in wire order.
+    /// Agent-context readiness acknowledgements received before `Ready`, in
+    /// wire order.
     pub(super) context_ready_events: Vec<tau_proto::ExtensionContextReady>,
     /// Extension-started agent queries received before `Ready`, in wire order.
     pub(super) agent_queries: Vec<tau_proto::StartAgentRequest>,

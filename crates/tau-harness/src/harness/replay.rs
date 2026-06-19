@@ -2,18 +2,12 @@
 //!
 //! Every peer — UI client or extension — that subscribes after the harness
 //! has already emitted events is caught up through the same
-//! [`Harness::complete_subscription`] path. There is a second catch-up
-//! moment: when a session finishes initializing,
-//! [`Harness::catch_up_subscribers_after_session_init`] replays the durable
-//! session history to every peer that subscribed *before* init — on resume,
-//! that history predates the process and is never published live, so without
-//! this pass a startup extension would know less than one that joined a
-//! second later. Catch-up is semantic state reconstruction, not a readback of
-//! a retained event log:
+//! [`Harness::complete_subscription`] path. Catch-up is semantic state
+//! reconstruction, not a readback of a retained event log:
 //!
-//! - [`Harness::replay_session_events`] announces the current loaded-agent
-//!   snapshot, then replays each loaded agent's durable transcript facts from
-//!   the global agent store.
+//! - [`Harness::replay_current_state`] replays each loaded agent's durable
+//!   transcript facts from the global agent store, then announces the
+//!   metadata-free loaded-agent boundary for that caught-up transcript.
 //! - [`Harness::replay_harness_notice`] reconstructs current harness status
 //!   from live state snapshots, so a subscriber that just joined sees the same
 //!   indicators as one that was here from the start without retaining old
@@ -30,7 +24,7 @@ use tau_proto::{
     HarnessModelsAvailable, HarnessOutputMessage, HarnessRoleSelected, HarnessRolesAvailable,
 };
 
-use super::{agent_runtime_state_for_turn, session_dir_status_from_reason};
+use super::agent_runtime_state_for_turn;
 use crate::extension::ExtensionState;
 use crate::harness::{Harness, selector_matches_event};
 use crate::model::{
@@ -43,13 +37,9 @@ impl Harness {
     /// catches the subscriber up to current state.
     ///
     /// UI clients and extensions share this path on purpose — subscribe
-    /// semantics must not drift between peer kinds. Catch-up is skipped while
-    /// the current session is still initializing: a subscriber connecting
-    /// during startup observes the session lifecycle live, so replaying it
-    /// here would deliver duplicate `SessionStarted` announcements. Durable
-    /// history a resumed session carries is delivered to those early
-    /// subscribers by [`Self::catch_up_subscribers_after_session_init`] once
-    /// init completes.
+    /// semantics must not drift between peer kinds. Catch-up is targeted to
+    /// this connection only, which is especially important for reconnecting
+    /// extensions.
     pub(crate) fn complete_subscription(
         &mut self,
         connection_id: &str,
@@ -57,113 +47,40 @@ impl Harness {
     ) -> Result<(), RouteError> {
         self.bus
             .set_subscriptions(connection_id, selectors.clone())?;
-        if self.session_initialized(&self.current_session_id) {
-            self.replay_session_events(connection_id, &selectors);
-            self.replay_harness_notice(connection_id, &selectors);
-        }
+        self.replay_current_state(connection_id, &selectors);
+        self.replay_harness_notice(connection_id, &selectors);
         Ok(())
     }
 
-    pub(crate) fn replay_session_events(&mut self, client_id: &str, selectors: &[EventSelector]) {
-        let session_started = Event::SessionStarted(tau_proto::SessionStarted {
-            session_id: self.current_session_id.clone(),
-            reason: self.current_session_start_reason,
-        });
-        if selector_matches_event(selectors, &session_started) {
-            let _ = self.bus.send_to(
-                client_id,
-                None,
-                HarnessOutputMessage::deliver(session_started),
-            );
-        }
-        self.replay_session_history(client_id, selectors);
+    pub(crate) fn replay_current_state(&mut self, client_id: &str, selectors: &[EventSelector]) {
+        self.replay_current_history(client_id, selectors);
     }
 
-    /// Catches one subscriber up on the bound session's content: the
+    /// Catches one subscriber up on the current harness content: the
     /// loaded-agent roster, each agent's durable transcript facts as
     /// replay-marked frames, and currently queued prompts.
     ///
     /// Called from two places: subscribe-time catch-up (after the
-    /// `SessionStarted` snapshot above) and session-init completion, where
-    /// peers that subscribed before init already saw `SessionStarted` live
+    /// startup snapshot above) and startup completion, where
+    /// peers that subscribed before init already saw startup state live
     /// and only need the history.
-    fn replay_session_history(&mut self, client_id: &str, selectors: &[EventSelector]) {
-        let loaded_agents: Vec<tau_proto::AgentId> = {
-            match self.store.load_session(self.current_session_id.as_str()) {
-                Ok(Some(membership)) => membership.loaded_agents().into_iter().cloned().collect(),
-                Ok(None) => Vec::new(),
-                Err(error) => {
-                    self.send_replay_error(
-                        client_id,
-                        &format!("failed to load session events for replay: {error}"),
-                    );
-                    Vec::new()
-                }
-            }
-        };
+    fn replay_current_history(&mut self, client_id: &str, selectors: &[EventSelector]) {
+        let mut loaded_agents: Vec<tau_proto::AgentId> = self
+            .agents
+            .values()
+            .filter_map(|conversation| conversation.agent_id.as_deref())
+            .map(crate::parse_agent_id)
+            .collect();
+        loaded_agents.sort();
 
         for agent_id in &loaded_agents {
-            if let Ok(Some(tree)) = self.agent_store.load_agent(agent_id.as_str()) {
-                for (key, entry) in tree.metadata() {
-                    let event = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
-                        agent_id: agent_id.clone(),
-                        key: key.clone(),
-                        value: entry.value.clone(),
-                        inheritable: entry.inheritable,
-                    });
-                    if selector_matches_event(selectors, &event) {
-                        let _ =
-                            self.bus
-                                .send_to(client_id, None, HarnessOutputMessage::deliver(event));
-                    }
-                }
-            }
-            let event = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                session_id: self.current_session_id.clone(),
-                agent_id: agent_id.clone(),
-            });
-            if selector_matches_event(selectors, &event) {
-                let _ = self
-                    .bus
-                    .send_to(client_id, None, HarnessOutputMessage::deliver(event));
-            }
-        }
-
-        for agent_id in loaded_agents {
-            let events = match self.agent_store.agent_events(agent_id.as_str()) {
-                Ok(events) => events,
-                Err(error) => {
-                    self.send_replay_error(
-                        client_id,
-                        &format!("failed to load agent `{agent_id}` events for replay: {error}"),
-                    );
-                    continue;
-                }
-            };
-            for entry in events {
-                if selector_matches_event(selectors, &entry.event)
-                    && should_replay_agent_event_to_late_subscriber(&entry.event)
-                {
-                    let frame =
-                        HarnessOutputMessage::deliver_replay(entry.recorded_at, entry.event);
-                    let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
-                }
-            }
+            self.replay_agent_history(client_id, selectors, agent_id);
+            self.replay_loaded_agent_boundary(client_id, selectors, agent_id);
         }
         self.replay_active_queued_prompts(client_id, selectors);
     }
 
-    /// Catches up every already-subscribed peer when session init completes.
-    ///
-    /// Peers that subscribed before init were skipped by
-    /// [`Self::complete_subscription`] — correct for a fresh session, where
-    /// everything arrives live. A resumed session's durable history predates
-    /// the process and is never published live, so it is replayed here;
-    /// otherwise a peer's view would depend on whether it subscribed before
-    /// or after init. The `SessionStarted` snapshot is not resent: these
-    /// peers just saw it live from `start_session_init`. For fresh sessions
-    /// this pass is a no-op (no agents loaded yet).
-    pub(crate) fn catch_up_subscribers_after_session_init(&mut self) {
+    pub(crate) fn replay_agent_history_to_subscribers(&mut self, agent_id: &tau_proto::AgentId) {
         let subscribers: Vec<(String, Vec<EventSelector>)> = self
             .bus
             .connections()
@@ -177,7 +94,47 @@ impl Harness {
             })
             .collect();
         for (client_id, selectors) in subscribers {
-            self.replay_session_history(&client_id, &selectors);
+            self.replay_agent_history(&client_id, &selectors, agent_id);
+        }
+    }
+
+    fn replay_loaded_agent_boundary(
+        &mut self,
+        client_id: &str,
+        selectors: &[EventSelector],
+        agent_id: &tau_proto::AgentId,
+    ) {
+        let loaded = self.agent_loaded_event(agent_id);
+        if selector_matches_event(selectors, &loaded) {
+            let _ = self
+                .bus
+                .send_to(client_id, None, HarnessOutputMessage::deliver(loaded));
+        }
+    }
+
+    fn replay_agent_history(
+        &mut self,
+        client_id: &str,
+        selectors: &[EventSelector],
+        agent_id: &tau_proto::AgentId,
+    ) {
+        let events = match self.agent_store.agent_events(agent_id.as_str()) {
+            Ok(events) => events,
+            Err(error) => {
+                self.send_replay_error(
+                    client_id,
+                    &format!("failed to load agent `{agent_id}` events for replay: {error}"),
+                );
+                return;
+            }
+        };
+        for entry in events {
+            if selector_matches_event(selectors, &entry.event)
+                && should_replay_agent_event_to_late_subscriber(&entry.event)
+            {
+                let frame = HarnessOutputMessage::deliver_replay(entry.recorded_at, entry.event);
+                let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
+            }
         }
     }
 
@@ -201,9 +158,6 @@ impl Harness {
         }
 
         for (conversation_id, conversation) in &self.agents {
-            if conversation.session_id != self.current_session_id {
-                continue;
-            }
             let target_agent_id = agent_by_conversation.get(conversation_id).cloned();
             for prompt in &conversation.pending_prompts {
                 let Some(agent_id) = target_agent_id.clone() else {
@@ -235,23 +189,20 @@ impl Harness {
     /// transcript catch-up path above comes from durable agent logs, while this
     /// method reconstructs current harness status snapshots.
     pub(crate) fn replay_harness_notice(&mut self, client_id: &str, selectors: &[EventSelector]) {
-        let session_dir_event = Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
-            session_id: self.current_session_id.clone(),
-            path: self.sessions_dir().join(self.current_session_id.as_str()),
-            status: session_dir_status_from_reason(self.current_session_start_reason),
+        let run_event = Event::HarnessStarted(tau_proto::HarnessStarted {
+            run_id: self.run_id.clone(),
         });
-        if selector_matches_event(selectors, &session_dir_event) {
+        if selector_matches_event(selectors, &run_event) {
             let _ = self.bus.send_to(
                 client_id,
-                None,
-                HarnessOutputMessage::deliver(session_dir_event),
+                Some("harness"),
+                HarnessOutputMessage::deliver(run_event),
             );
         }
 
         let mut agent_state_events = self
             .agents
             .values()
-            .filter(|agent| agent.session_id == self.current_session_id)
             .filter_map(|agent| {
                 let agent_id = agent.agent_id.as_ref()?;
                 Some(Event::AgentState(tau_proto::AgentStateChanged {
@@ -408,9 +359,9 @@ impl Harness {
             );
         }
         let context_event = Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
-            input_tokens: self.current_session_state.context_input_tokens,
-            cached_tokens: self.current_session_state.context_cached_tokens,
-            percent_used: self.current_session_state.context_percent_used,
+            input_tokens: self.usage_state.context_input_tokens,
+            cached_tokens: self.usage_state.context_cached_tokens,
+            percent_used: self.usage_state.context_percent_used,
         });
         if selector_matches_event(selectors, &context_event) {
             let _ = self.bus.send_to(
@@ -479,6 +430,8 @@ fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
         event,
         Event::AgentStarted(_)
             | Event::AgentDisplayNameSet(_)
+            | Event::AgentMetadataSet(_)
+            | Event::AgentMetadataUnset(_)
             | Event::AgentPromptSubmitted(_)
             | Event::AgentPromptSteered(_)
             | Event::AgentUserMessageInjected(_)

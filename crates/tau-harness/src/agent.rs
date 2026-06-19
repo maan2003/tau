@@ -1,7 +1,7 @@
 //! Per-agent runtime state tracked by the harness.
 //!
 //! An [`Agent`] is one live prompt/tool execution context loaded into the
-//! current harness session. The durable transcript lives in `tau-core`'s
+//! current harness. The durable transcript lives in `tau-core`'s
 //! `AgentTree`; this module stores the harness-owned runtime state layered on
 //! top of that transcript: the selected branch head, queued prompts, turn
 //! lifecycle, tool progress, and side-agent ancestry used for routing.
@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 pub(crate) use loop_guard::{LoopCycleState, LoopGuardState, LoopGuardTrigger, LoopTurnSignature};
 use tau_core::NodeId;
 use tau_proto::{
-    AgentId, AgentPromptId, ConnectionId, ModelId, PromptMessageClass, PromptOriginator, SessionId,
+    AgentId, AgentPromptId, ConnectionId, ModelId, PromptMessageClass, PromptOriginator,
     ToolCallId, ToolUseStats,
 };
 
@@ -58,7 +58,6 @@ pub(crate) struct Agent {
     /// the id through every call site.
     #[allow(dead_code)]
     pub(crate) id: AgentId,
-    pub(crate) session_id: SessionId,
     pub(crate) originator: PromptOriginator,
     /// Local cursor — where the *next* transcript event for this agent
     /// should be parented in the owning agent tree. The tree's own `head`
@@ -273,14 +272,12 @@ impl PendingPrompt {
 impl Agent {
     pub(crate) fn new(
         id: AgentId,
-        session_id: SessionId,
         originator: PromptOriginator,
         head: Option<NodeId>,
         source_connection: Option<ConnectionId>,
     ) -> Self {
         Self {
             id,
-            session_id,
             originator,
             head,
             source_connection,

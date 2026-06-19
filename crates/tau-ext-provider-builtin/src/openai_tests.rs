@@ -92,7 +92,6 @@ fn prompt() -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
         agent_prompt_id: "sp-1".into(),
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-        session_id: "session-1".into(),
         system_prompt: String::new(),
         context: tau_proto::PromptContext {
             blocks: vec![tau_proto::ContextBlock::UserInput(
@@ -152,9 +151,12 @@ fn resolves_chatgpt_to_codex_responses_backend() {
     // features owned by this provider slice.
     let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
 
-    let config =
-        resolve_responses_backend(&model_id(CHATGPT_PROVIDER_NAME, "gpt-5.4"), &mut profiles)
-            .expect("chatgpt backend");
+    let config = resolve_responses_backend(
+        &model_id(CHATGPT_PROVIDER_NAME, "gpt-5.4"),
+        &mut profiles,
+        None,
+    )
+    .expect("chatgpt backend");
 
     assert_eq!(config.surface, responses::ResponsesSurface::ChatGpt);
     assert_eq!(config.base_url, tau_provider_chatgpt::DEFAULT_BASE_URL);
@@ -175,11 +177,13 @@ fn chatgpt_phase_metadata_is_model_specific() {
     let old = resolve_responses_backend(
         &model_id(CHATGPT_PROVIDER_NAME, "gpt-5.2-codex"),
         &mut profiles,
+        None,
     )
     .expect("old codex backend");
     let new = resolve_responses_backend(
         &model_id(CHATGPT_PROVIDER_NAME, "gpt-5.3-codex"),
         &mut profiles,
+        None,
     )
     .expect("new codex backend");
 

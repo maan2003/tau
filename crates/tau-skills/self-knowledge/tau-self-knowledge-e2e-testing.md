@@ -62,7 +62,7 @@ For provider-management details, read
 `tau-self-knowledge-ext-provider-builtin`.
 
 Only those exact `auth.d/<provider>.json` files are copied into the scratch Tau
-state. Lock files, unrelated provider profiles, sessions, logs, general
+state. Lock files, unrelated provider profiles, agent state, debug logs, general
 `harness.yaml`, `cli.yaml`, and other user config/state are deliberately not
 copied. When the allowlist is non-empty, `tau dev tmux start` also enables the
 `provider-builtin` extension inside the tmux Tau so copied profiles can publish

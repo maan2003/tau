@@ -224,7 +224,7 @@ impl WorkScheduler {
         state.remove_agent(agent_id)
     }
 
-    /// Remove all queued work for session shutdown/disconnect cleanup.
+    /// Remove all queued work for extension shutdown/disconnect cleanup.
     pub(crate) fn cancel_all_queued(&self) -> usize {
         let mut state = self.inner.state.lock().expect("scheduler state poisoned");
         let removed = state.total_len();

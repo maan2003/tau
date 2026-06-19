@@ -20,7 +20,6 @@ pub(crate) struct CompletedPendingCd {
 pub(crate) struct CwdState {
     instance_name: Arc<Mutex<String>>,
     cwd_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, PathBuf>>>,
-    pending_ready_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, tau_proto::SessionId>>>,
     pending_notice_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, PathBuf>>>,
     pending_cd_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, PendingCdResult>>>,
 }
@@ -30,7 +29,6 @@ impl CwdState {
         Self {
             instance_name: Arc::new(Mutex::new("core-shell".to_owned())),
             cwd_by_agent: Arc::new(Mutex::new(HashMap::new())),
-            pending_ready_by_agent: Arc::new(Mutex::new(HashMap::new())),
             pending_notice_by_agent: Arc::new(Mutex::new(HashMap::new())),
             pending_cd_by_agent: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -80,27 +78,6 @@ impl CwdState {
             .lock()
             .expect("cwd map lock poisoned")
             .remove(agent_id);
-    }
-
-    pub(crate) fn set_pending_ready(
-        &self,
-        agent_id: tau_proto::AgentId,
-        session_id: tau_proto::SessionId,
-    ) {
-        self.pending_ready_by_agent
-            .lock()
-            .expect("cwd ready map lock poisoned")
-            .insert(agent_id, session_id);
-    }
-
-    pub(crate) fn take_pending_ready(
-        &self,
-        agent_id: &tau_proto::AgentId,
-    ) -> Option<tau_proto::SessionId> {
-        self.pending_ready_by_agent
-            .lock()
-            .expect("cwd ready map lock poisoned")
-            .remove(agent_id)
     }
 
     pub(crate) fn set_pending_notice(&self, agent_id: tau_proto::AgentId, cwd: PathBuf) {

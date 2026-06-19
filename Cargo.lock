@@ -3141,6 +3141,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tau-agent-inspect"
+version = "0.1.0"
+dependencies = [
+ "tau-config",
+ "tau-core",
+ "tau-proto",
+]
+
+[[package]]
 name = "tau-blocking-notify-channel"
 version = "0.1.0"
 dependencies = [
@@ -3162,6 +3171,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tau-actions",
+ "tau-agent-inspect",
  "tau-cli-picker",
  "tau-cli-term",
  "tau-cli-term-raw",
@@ -3170,7 +3180,6 @@ dependencies = [
  "tau-harness",
  "tau-harness-tools",
  "tau-proto",
- "tau-session-inspect",
  "tau-themes",
  "tempfile",
  "time",
@@ -3438,11 +3447,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tau-actions",
+ "tau-agent-inspect",
  "tau-config",
  "tau-core",
  "tau-ext-shell",
  "tau-proto",
- "tau-session-inspect",
  "tau-skills",
  "tau-socket",
  "tempfile",
@@ -3528,15 +3537,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tau-session-inspect"
-version = "0.1.0"
-dependencies = [
- "tau-config",
- "tau-core",
- "tau-proto",
-]
-
-[[package]]
 name = "tau-skills"
 version = "0.1.0"
 dependencies = [
@@ -3575,13 +3575,13 @@ dependencies = [
 name = "tau-test-support"
 version = "0.1.0"
 dependencies = [
+ "tau-agent-inspect",
  "tau-config",
  "tau-core",
  "tau-ext-provider-builtin",
  "tau-ext-shell",
  "tau-harness",
  "tau-proto",
- "tau-session-inspect",
  "tempfile",
 ]
 

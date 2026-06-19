@@ -4,9 +4,9 @@ use crate::agent::{Agent, AgentTurnState, PendingPrompt};
 use crate::harness::{
     AgentState, PendingTool, background_completion_prompt,
     extension_disconnected_background_tool_call_error_message,
-    extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
-    restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
+    extension_disconnected_tool_call_error_message, unavailable_tool_error_message,
 };
+use crate::turn::PromptSubmission;
 
 fn responses_backend() -> tau_proto::ProviderBackend {
     tau_proto::ProviderBackend {
@@ -30,10 +30,7 @@ fn publish_pending_agent_context_ready(h: &mut Harness, agent_id: &str) {
     h.handle_extension_event(
         source_id.as_str(),
         TestProtocolItem::Event(Event::ExtensionContextReady(
-            tau_proto::ExtensionContextReady {
-                session_id: h.current_session_id.clone(),
-                agent_id,
-            },
+            tau_proto::ExtensionContextReady { agent_id },
         )),
     )
     .expect("context ready");
@@ -57,7 +54,7 @@ fn user_prompt_mints_first_agent_for_empty_startup() {
         .find(|conversation| conversation.originator.is_user())
         .and_then(|conversation| conversation.agent_id.clone());
 
-    h.submit_user_prompt("s1".into(), "hello".to_owned())
+    h.dispatch_user_prompt("hello".to_owned())
         .expect("submit first user prompt");
 
     let agent_id = h
@@ -110,7 +107,7 @@ fn prompt_override_template_can_place_agent_id_without_default_duplication() {
         .or_default()
         .prompt_override = Some("custom-template".to_owned());
 
-    h.submit_user_prompt("s1".into(), "hello".to_owned())
+    h.dispatch_user_prompt("hello".to_owned())
         .expect("submit first user prompt");
 
     let agent_id = h
@@ -135,7 +132,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     // the agent id must already exist and be carried on the transient queued
     // event and in-memory replay so a live or late UI can select the same
     // conversation before dispatch. Queue lifecycle events are intentionally not
-    // durable session-store facts.
+    // durable agent-store facts.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -146,7 +143,6 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         parent_agent: None,
-        session_id: "s1".into(),
         role: h.selected_role.clone(),
         model_override: None,
         metadata: Vec::new(),
@@ -178,7 +174,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
         "hello while cold"
     );
     assert!(
-        loaded_agent_events(&h, "s1")
+        loaded_agent_events(&h)
             .iter()
             .all(|event| !matches!(event, Event::AgentPromptQueued(_))),
         "queued prompts are transient and must not be persisted"
@@ -220,8 +216,103 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     h.shutdown().expect("shutdown");
 }
 
+#[test]
+fn agent_load_loads_standalone_durable_agent() {
+    // A future standalone restore flow needs to reattach a durable agent by id
+    // without relying on pre-existing runtime membership. This locks down that
+    // the request reconstructs the in-memory agent route and emits a transient
+    // runtime load fact for current subscribers.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let agent_id = crate::parse_agent_id("restored-agent");
+    h.agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                parent_agent: None,
+                agent_id: agent_id.clone(),
+                role: "engineer".to_owned(),
+                display_name: Some("Restored".to_owned()),
+                metadata: Vec::new(),
+            }),
+        )
+        .expect("seed durable agent");
+    h.agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                agent_id: agent_id.clone(),
+                text: "persisted prompt".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                display_name: Some("Restored".to_owned()),
+                ctx_id: None,
+            }),
+        )
+        .expect("seed durable prompt");
+    let events = connect_test_tool(&mut h, "agent-load-observer");
+    h.handle_extension_message(
+        "agent-load-observer",
+        TestMessage::Subscribe(Subscribe {
+            selectors: vec![EventSelector::Prefix("agent.".to_owned())],
+        }),
+    )
+    .expect("subscribe");
+
+    h.handle_agent_load(tau_proto::AgentLoad {
+        agent_id: agent_id.clone(),
+    })
+    .expect("load agent");
+
+    let cid = h
+        .agent_routes
+        .get(agent_id.as_str())
+        .expect("agent route")
+        .clone();
+    let conversation = h.agents.get(&cid).expect("loaded conversation");
+    assert_eq!(conversation.agent_id.as_deref(), Some(agent_id.as_str()));
+    assert_eq!(conversation.display_name.as_deref(), Some("Restored"));
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentLoaded(loaded) if loaded.agent_id == agent_id
+    )));
+    let events = events.lock().expect("events");
+    let saw_live_loaded = events.iter().any(|routed| {
+        matches!(
+            &routed.frame,
+            HarnessOutputMessage::Deliver(delivery)
+                if !delivery.replay
+                    && matches!(
+                        delivery.event.as_ref(),
+                        Event::AgentLoaded(loaded) if loaded.agent_id == agent_id
+                    )
+        )
+    });
+    assert!(saw_live_loaded, "load should announce the agent as live");
+    let saw_replayed_prompt = events.iter().any(|routed| {
+        matches!(
+            &routed.frame,
+            HarnessOutputMessage::Deliver(delivery)
+                if delivery.replay
+                    && matches!(
+                        delivery.event.as_ref(),
+                        Event::AgentPromptSubmitted(prompt)
+                            if prompt.agent_id == agent_id && prompt.text == "persisted prompt"
+                    )
+        )
+    });
+    assert!(
+        saw_replayed_prompt,
+        "load should replay the loaded agent's stored transcript"
+    );
+}
+
 /// `UiCreateAgent.metadata` must be embedded in the durable creation fact so
-/// replay restores shell cwd before `session.agent_loaded`.
+/// replay reconstructs shell cwd before the metadata-free `agent.loaded`
+/// boundary.
 #[test]
 fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
     let td = TempDir::new().expect("tempdir");
@@ -231,7 +322,6 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         parent_agent: None,
-        session_id: "s1".into(),
         role: h.selected_role.clone(),
         model_override: None,
         metadata: vec![tau_proto::AgentInitialMetadata {
@@ -257,154 +347,6 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
         })
     }));
 
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
-fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
-    // Regression: queued/steered events do not carry an originator, so a later
-    // side-conversation durable event must not steal the default conversation's
-    // agent binding during cold resume.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    {
-        let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-        let mut sessions = tau_core::SessionStore::open(&sessions_dir).expect("session store");
-        for agent_id in ["engineer_default", "worker_steered"] {
-            sessions
-                .append_session_event(
-                    "s1",
-                    None,
-                    Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                        session_id: "s1".into(),
-                        agent_id: crate::parse_agent_id(agent_id),
-                    }),
-                )
-                .expect("seed session membership");
-        }
-        drop(sessions);
-
-        let mut agents = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
-        agents
-            .append_agent_event(
-                "engineer_default",
-                None,
-                Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-                    agent_id: tau_proto::AgentId::parse("engineer_default").expect("agent id"),
-                    text: "default prompt".to_owned(),
-                    message_class: tau_proto::PromptMessageClass::User,
-                    originator: tau_proto::PromptOriginator::User,
-                    display_name: None,
-                    ctx_id: None,
-                }),
-            )
-            .expect("seed default prompt");
-        agents
-            .append_agent_event(
-                "worker_steered",
-                None,
-                Event::AgentPromptSteered(AgentPromptSteered {
-                    agent_id: tau_proto::AgentId::parse("worker_steered").expect("agent id"),
-                    text: "side steered".to_owned(),
-                    message_class: tau_proto::PromptMessageClass::User,
-                }),
-            )
-            .expect("seed side steered prompt");
-    }
-
-    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-        .expect("resume");
-    assert_eq!(
-        h.agents
-            .get(&test_user_agent(&h))
-            .and_then(|conversation| conversation.agent_id.as_deref()),
-        Some("engineer_default")
-    );
-    assert_eq!(
-        h.agent_routes.get("engineer_default"),
-        Some(&test_user_agent(&h))
-    );
-    assert_ne!(
-        h.agent_routes.get("worker_steered"),
-        Some(&test_user_agent(&h))
-    );
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
-fn resume_rehydrates_delegated_agent_role_from_agent_log() {
-    // Regression: resumed delegated agents must keep the role selected when the
-    // delegate was created. Otherwise a targeted follow-up after cold resume
-    // falls back to the harness's currently selected interactive role.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let agent_id = {
-        let mut h = echo_harness(&sp).expect("start");
-        h.selected_model = Some("test/model".into());
-        h.handle_start_agent_request(
-            "conn-delegate",
-            StartAgentRequest {
-                parent_agent: None,
-                query_id: "q-role".to_owned(),
-                instruction: "side task".to_owned(),
-                role: Some("staff-engineer".to_owned()),
-                input_stats: tau_proto::ToolUseStats::default(),
-                tool_call_id: Some("delegate-call".into()),
-                task_name: None,
-            },
-        )
-        .expect("start delegate");
-        let cid = ext_query_cid(&h, "q-role").expect("delegated conversation");
-        let agent_id = h
-            .agents
-            .get(&cid)
-            .and_then(|conversation| conversation.agent_id.clone())
-            .expect("delegated agent id");
-        h.shutdown().expect("shutdown");
-        agent_id
-    };
-
-    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-        .expect("resume");
-    h.selected_role = "junior-engineer".to_owned();
-    let cid = h
-        .agent_routes
-        .get(&agent_id)
-        .cloned()
-        .expect("resumed delegated conversation");
-    assert_eq!(
-        h.agents
-            .get(&cid)
-            .and_then(|conversation| conversation.role.as_deref()),
-        Some("staff-engineer")
-    );
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
-fn resume_rehydrates_default_agent_conversation_from_durable_routing() {
-    // Regression: after a cold resume the UI may know the selected agent id from
-    // replay and send targeted prompts. The harness must rebuild the live
-    // agent_id -> default conversation map from durable session events.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let agent_id = {
-        let mut h = echo_harness(&sp).expect("start");
-        h.selected_model = Some("test/model".into());
-        h.submit_user_prompt("s1".into(), "hello".to_owned())
-            .expect("submit first prompt");
-        let agent_id = h
-            .agents
-            .get(&test_user_agent(&h))
-            .and_then(|conversation| conversation.agent_id.clone())
-            .expect("first prompt minted agent id");
-        h.shutdown().expect("shutdown");
-        agent_id
-    };
-
-    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-        .expect("resume");
-    assert_eq!(h.agent_routes.get(&agent_id), Some(&test_user_agent(&h)));
     h.shutdown().expect("shutdown");
 }
 
@@ -535,202 +477,6 @@ fn provider_text_response(
         provider_response_id: None,
         ws_pool_delta: None,
     }
-}
-
-fn seed_prior_user_message(state_dir: &Path, text: &str) {
-    seed_prior_user_message_at(state_dir, text, tau_proto::UnixMicros::now());
-}
-
-fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_proto::UnixMicros) {
-    seed_main_agent_loaded(state_dir);
-    let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
-    agent_store
-        .append_agent_event_at(
-            "main",
-            None,
-            tau_core::AgentEventParent::InheritHead,
-            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-                text: text.to_owned(),
-                message_class: tau_proto::PromptMessageClass::User,
-                originator: tau_proto::PromptOriginator::User,
-                display_name: None,
-                ctx_id: None,
-            }),
-            recorded_at,
-        )
-        .expect("seed prior user message");
-}
-
-fn seed_main_agent_loaded(state_dir: &Path) {
-    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
-    store
-        .append_session_event(
-            "s1",
-            None,
-            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                session_id: "s1".into(),
-                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-            }),
-        )
-        .expect("seed session membership");
-}
-
-fn context_text_count(prompt: &AgentPromptCreated, text: &str) -> usize {
-    prompt
-        .context
-        .flatten()
-        .iter()
-        .filter(|item| text_part(item) == Some(text))
-        .count()
-}
-
-fn restore_notice_context_text(prompt: &AgentPromptCreated) -> Option<String> {
-    prompt
-        .context
-        .flatten()
-        .iter()
-        .filter_map(text_part)
-        .find(|text| is_restore_notice_prompt_text(text))
-        .map(str::to_owned)
-}
-
-fn restore_notice_context_count(prompt: &AgentPromptCreated) -> usize {
-    prompt
-        .context
-        .flatten()
-        .iter()
-        .filter_map(text_part)
-        .filter(|text| is_restore_notice_prompt_text(text))
-        .count()
-}
-
-fn restore_notice_event_count(h: &Harness) -> usize {
-    loaded_agent_events(h, "s1")
-        .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                Event::AgentPromptSubmitted(prompt)
-                    if prompt.message_class.is_internal()
-                        && is_restore_notice_prompt_text(&prompt.text)
-            )
-        })
-        .count()
-}
-
-fn restored_background_notice(call_id: &str) -> String {
-    format!(
-        "{}: true\n\nBackground tool call `{call_id}` was interrupted due to session restart. Side effects may have occurred.",
-        tau_proto::TAU_INTERNAL_HEADER_NAME
-    )
-}
-
-fn seed_background_placeholder(state_dir: &Path, call_id: &str, tool_name: &str) {
-    seed_main_agent_loaded(state_dir);
-    let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
-    agent_store
-        .append_agent_event(
-            "main",
-            None,
-            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-                text: format!("run {tool_name}"),
-                message_class: tau_proto::PromptMessageClass::User,
-                originator: tau_proto::PromptOriginator::User,
-                display_name: None,
-                ctx_id: None,
-            }),
-        )
-        .expect("seed prior user message");
-    agent_store
-        .append_agent_event(
-            "main",
-            None,
-            Event::ProviderResponseFinished(ProviderResponseFinished {
-                agent_prompt_id: format!("sp-{call_id}").into(),
-                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-                output_items: vec![ContextItem::ToolCall(ToolCallItem {
-                    call_id: call_id.into(),
-                    name: ToolName::new(tool_name),
-                    tool_type: tau_proto::ToolType::Function,
-                    arguments: CborValue::Map(Vec::new()),
-                })],
-                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-                error: None,
-                usage: None,
-                originator: tau_proto::PromptOriginator::User,
-                compaction_original_input_tokens: None,
-                compaction_compacted_input_tokens: None,
-                backend: None,
-                provider_response_id: None,
-                ws_pool_delta: None,
-            }),
-        )
-        .expect("seed background tool call");
-    agent_store
-        .append_agent_event(
-            "main",
-            None,
-            Event::ProviderToolResult(ToolResult {
-                call_id: call_id.into(),
-                tool_name: ToolName::new(tool_name),
-                tool_type: tau_proto::ToolType::Function,
-                result: CborValue::Text(format!(
-                    "{}: true\n\nTool call `{call_id}` is running in the background.",
-                    tau_proto::TAU_INTERNAL_HEADER_NAME
-                )),
-                kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
-                originator: tau_proto::PromptOriginator::User,
-
-                display: None,
-            }),
-        )
-        .expect("seed background placeholder");
-}
-
-fn seed_background_result(state_dir: &Path, call_id: &str, tool_name: &str, output: &str) {
-    let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
-    agent_store
-        .append_agent_event(
-            "main",
-            None,
-            Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
-                call_id: call_id.into(),
-                tool_name: ToolName::new(tool_name),
-                tool_type: tau_proto::ToolType::Function,
-                result: CborValue::Text(output.to_owned()),
-                originator: tau_proto::PromptOriginator::User,
-
-                display: None,
-            }),
-        )
-        .expect("seed background result");
-}
-
-fn seed_background_error(state_dir: &Path, call_id: &str, tool_name: &str, message: &str) {
-    let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
-    agent_store
-        .append_agent_event(
-            "main",
-            None,
-            Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
-                call_id: call_id.into(),
-                tool_name: ToolName::new(tool_name),
-                tool_type: tau_proto::ToolType::Function,
-                message: message.to_owned(),
-                details: None,
-                originator: tau_proto::PromptOriginator::User,
-
-                display: None,
-            }),
-        )
-        .expect("seed background error");
 }
 
 fn agent_event_count(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> usize {
@@ -1288,7 +1034,7 @@ fn invalid_tool_example_registration_is_rejected_with_notice() {
 }
 
 #[test]
-fn shown_tool_failure_examples_are_session_and_agent_scoped() {
+fn shown_tool_failure_examples_are_agent_scoped() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -1303,14 +1049,14 @@ fn shown_tool_failure_examples_are_session_and_agent_scoped() {
 
     assert!(h.shown_tool_failure_examples.is_empty());
 
-    let cid = ensure_test_user_agent(&mut h);
-    h.shown_tool_failure_examples
-        .insert((cid, ToolName::new("example_tool"), "hint".to_owned()));
-    h.switch_session(
-        tau_proto::SessionId::new("session-after-example-hint"),
-        tau_proto::SessionStartReason::New,
-    )
-    .expect("switch session");
+    let other_cid = ensure_test_user_agent(&mut h);
+    h.shown_tool_failure_examples.insert((
+        other_cid.clone(),
+        ToolName::new("example_tool"),
+        "hint".to_owned(),
+    ));
+
+    h.remove_agent(&other_cid);
 
     assert!(h.shown_tool_failure_examples.is_empty());
 }
@@ -1741,7 +1487,6 @@ fn loop_guard_resets_when_user_prompt_is_queued() {
 
     let submission = h
         .submit_prompt_to_agent(
-            h.current_session_id.clone(),
             &agent_id,
             PendingPrompt::user("queued user input".to_owned()),
         )
@@ -1773,7 +1518,6 @@ fn loop_guard_queued_user_prompt_removes_pending_breaker() {
 
     let submission = h
         .submit_prompt_to_agent(
-            h.current_session_id.clone(),
             &agent_id,
             PendingPrompt::user("queued user input".to_owned()),
         )
@@ -2266,7 +2010,6 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "run two slow tools".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -3332,7 +3075,6 @@ fn provider_owner_validation_rejects_tool_event_message_emit() {
                 tool_name: ToolName::new("owned_tool"),
                 tool_type: tau_proto::ToolType::Function,
             })),
-            transient: false,
         })),
     )
     .expect("emitted cancellation ignored");
@@ -3369,7 +3111,6 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
                 provider_response_id: None,
                 ws_pool_delta: None,
             })),
-            transient: false,
         })),
     )
     .expect("emitted provider event ignored");
@@ -3459,7 +3200,6 @@ fn cancel_publishes_tool_cancel_request() {
     .expect("tool call routed");
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
         target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
         agent_prompt_id: None,
     });
@@ -3518,7 +3258,6 @@ fn cancel_clears_active_wait_state() {
     );
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
         target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
         agent_prompt_id: None,
     });
@@ -3562,7 +3301,6 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
         target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
         agent_prompt_id: None,
     });
@@ -3610,40 +3348,6 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         .count();
     assert_eq!(response_count_after, response_count_before);
     assert!(!h.canceled_prompts.contains(&spid));
-
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
-fn cross_session_submission_is_rejected() {
-    // The harness owns one session at a time. A UserMessage with
-    // a different session id must not silently spin up a second
-    // session — it gets rejected with a clear reason.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start"); // bound to "s1"
-
-    h.selected_model = Some("test/model".into());
-    let submission = h
-        .submit_user_prompt("chat-1".into(), "hello".to_owned())
-        .expect("submit");
-    match submission {
-        PromptSubmission::Rejected { reason } => {
-            assert!(reason.contains("s1"), "reason should name bound session");
-            assert!(reason.contains("chat-1"), "reason should name rejected id");
-        }
-        other => panic!("expected Rejected, got {other:?}"),
-    }
-    assert!(
-        h.agents
-            .values()
-            .all(|agent| agent.pending_prompts.is_empty()),
-        "rejected prompt must not queue"
-    );
-    assert!(
-        h.store.session("chat-1").is_none(),
-        "rejected session must not be created"
-    );
 
     h.shutdown().expect("shutdown");
 }
@@ -3719,8 +3423,8 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
         .model = Some(model_id.clone());
     h.selected_model = Some(model_id);
 
-    append_user_message_via_event(&mut h, "s1", "hello");
-    let spid = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "hello");
+    let spid = send_prompt_to_test_agent(&mut h);
 
     let frame_is_prompt = |routed: &RoutedFrame, spid: &AgentPromptId| {
         matches!(
@@ -3821,8 +3525,8 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         .model = Some(model_id.clone());
     h.selected_model = Some(model_id);
 
-    append_user_message_via_event(&mut h, "s1", "hello");
-    let spid = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "hello");
+    let spid = send_prompt_to_test_agent(&mut h);
     assert_eq!(
         h.pending_provider_prompts.get(&spid).map(|id| id.as_str()),
         Some("provider-owner"),
@@ -4049,7 +3753,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    append_user_message_via_event(&mut h, "s1", "go");
+    append_user_message_via_event(&mut h, "go");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let spid: AgentPromptId = format!("ap-{agent_id}-0").into();
@@ -4179,84 +3883,6 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
 }
 
 #[test]
-fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
-    // Branch selection is UI-owned across process restarts. The harness should
-    // honor the durable agent id when the UI replays its selected node after a
-    // resume, so the next user message branches from that per-agent head.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let first_user_head;
-    let agent_id: tau_proto::AgentId;
-
-    {
-        let mut h = echo_harness(&sp).expect("start");
-
-        append_user_message_via_event(&mut h, "s1", "first branch point");
-        let cid = ensure_test_user_agent(&mut h);
-        first_user_head = h.agents[&cid].head.expect("first user head");
-        append_user_message_via_event(&mut h, "s1", "second branch point");
-        agent_id = crate::parse_agent_id(
-            h.agents[&cid]
-                .agent_id
-                .clone()
-                .expect("default conversation agent id"),
-        );
-
-        h.handle_ui_navigate_tree(
-            "ui",
-            tau_proto::UiNavigateTree {
-                session_id: "s1".into(),
-                target_agent_id: Some(agent_id.clone()),
-                node_id: first_user_head.get(),
-            },
-        )
-        .expect("navigate tree");
-
-        assert_eq!(h.agents[&cid].head, Some(first_user_head));
-        assert!(loaded_agent_events(&h, "s1").into_iter().any(|event| {
-            matches!(
-                event,
-                Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
-                    agent_id: ref moved_agent_id,
-                    node_id,
-                }) if moved_agent_id == &agent_id && node_id == first_user_head
-            )
-        }));
-
-        h.shutdown().expect("shutdown");
-    }
-    wait_for_session_unlock(&sp, "s1");
-
-    {
-        let mut h =
-            echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-                .expect("resume");
-        let cid = ensure_test_user_agent(&mut h);
-
-        h.handle_ui_navigate_tree(
-            "ui",
-            tau_proto::UiNavigateTree {
-                session_id: "s1".into(),
-                target_agent_id: Some(agent_id.clone()),
-                node_id: first_user_head.get(),
-            },
-        )
-        .expect("reselect tree head after resume");
-
-        assert_eq!(h.agents[&cid].head, Some(first_user_head));
-
-        append_user_message_via_event(&mut h, "s1", "branched after resume");
-        let branched = default_agent_tree(&h)
-            .nodes()
-            .last()
-            .expect("branched node after resume");
-        assert_eq!(branched.parent_id, Some(first_user_head));
-
-        h.shutdown().expect("shutdown");
-    }
-}
-
-#[test]
 fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     // While the agent is mid-turn (a tool is in flight), a fresh user
     // prompt must queue rather than dispatch. When the tool result
@@ -4339,18 +3965,8 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         AgentTurnState::ToolsRunning { .. }
     ));
 
-    let submission = h
-        .submit_user_prompt("s1".into(), "redirect".to_owned())
+    h.dispatch_user_prompt("redirect".to_owned())
         .expect("submit");
-    assert!(
-        matches!(submission, PromptSubmission::Queued),
-        "in-flight turn should force queueing, got {submission:?}"
-    );
-    assert_eq!(
-        h.agents.get(&cid).expect("default").pending_prompts.len(),
-        1,
-        "the steering message should sit in pending_prompts until the next-round seam",
-    );
 
     drive_harness_until_call_completes(&mut h, "c1");
 
@@ -4454,8 +4070,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "hello".to_owned())
-        .expect("submit");
+    h.dispatch_user_prompt("hello".to_owned()).expect("submit");
     h.handle_provider_response_finished(ProviderResponseFinished {
         agent_prompt_id: read_nth_prompt_created(&h, 0).agent_prompt_id,
         agent_id: read_nth_prompt_created(&h, 0).agent_id,
@@ -4485,7 +4100,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
     ));
     assert_eq!(h.tool_turn.pending_len(), 0);
 
-    h.submit_user_prompt("s1".into(), "again".to_owned())
+    h.dispatch_user_prompt("again".to_owned())
         .expect("submit again");
     assert!(matches!(
         h.agents.get(&cid).expect("default").turn_state,
@@ -4502,8 +4117,8 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    append_user_message_via_event(&mut h, "s1", "hello");
-    let spid1 = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "hello");
+    let spid1 = send_prompt_to_test_agent(&mut h);
     let prompt1 = read_prompt_created(&h, &spid1);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -4540,8 +4155,8 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
     })
     .expect("finish first");
 
-    append_user_message_via_event(&mut h, "s1", "again");
-    let spid2 = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "again");
+    let spid2 = send_prompt_to_test_agent(&mut h);
     let raw2 = read_raw_prompt_created(&h, &spid2);
     let prompt2 = read_prompt_created(&h, &spid2);
     assert!(raw2.tools_ref.is_none());
@@ -4560,9 +4175,9 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    append_user_message_via_event(&mut h, "s1", "hello");
+    append_user_message_via_event(&mut h, "hello");
 
-    let spid1 = h.send_prompt_to_agent("s1");
+    let spid1 = send_prompt_to_test_agent(&mut h);
     let prompt1 = read_prompt_created(&h, &spid1);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -4600,9 +4215,9 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
     })
     .expect("persist first agent response");
 
-    append_user_message_via_event(&mut h, "s1", "again");
+    append_user_message_via_event(&mut h, "again");
 
-    let spid2 = h.send_prompt_to_agent("s1");
+    let spid2 = send_prompt_to_test_agent(&mut h);
     let prompt2 = read_prompt_created(&h, &spid2);
 
     assert_eq!(prompt2.system_prompt, prompt1.system_prompt);
@@ -4638,7 +4253,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.dispatch_user_prompt("first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -4677,7 +4292,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
     })
     .expect("finish first");
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.dispatch_user_prompt("second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -4696,7 +4311,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.dispatch_user_prompt("first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -4734,7 +4349,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     })
     .expect("finish first");
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.dispatch_user_prompt("second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
     let spid2 = prompt2.agent_prompt_id.clone();
@@ -4796,7 +4411,7 @@ fn model_switch_invalidates_chain_anchor() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model-a".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.dispatch_user_prompt("first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -4837,7 +4452,7 @@ fn model_switch_invalidates_chain_anchor() {
     // The selected role resolves to a different model.
     h.selected_model = Some("test/model-b".into());
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.dispatch_user_prompt("second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -4867,7 +4482,7 @@ fn params_drift_invalidates_chain_anchor() {
         .expect("selected role")
         .effort = Some(tau_proto::Effort::Low);
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.dispatch_user_prompt("first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -4911,7 +4526,7 @@ fn params_drift_invalidates_chain_anchor() {
         .expect("selected role")
         .effort = Some(tau_proto::Effort::High);
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.dispatch_user_prompt("second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -4936,7 +4551,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.dispatch_user_prompt("first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -4994,7 +4609,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
         },
     );
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.dispatch_user_prompt("second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -5017,7 +4632,7 @@ fn tools_drift_invalidates_chain_anchor() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.dispatch_user_prompt("first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -5075,7 +4690,7 @@ fn tools_drift_invalidates_chain_anchor() {
         },
     );
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.dispatch_user_prompt("second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -5089,7 +4704,7 @@ fn tools_drift_invalidates_chain_anchor() {
 /// change between turns, the chain anchor must remain valid. Locks
 /// in the "compute fingerprint over (system_prompt, tools, params)"
 /// surface — if a future change quietly mixes in some other input
-/// that drifts across turns (e.g. cwd, current date, session id),
+/// that drifts across turns (e.g. cwd, current date, runtime id),
 /// this test starts failing.
 #[test]
 fn stable_params_preserve_chain_anchor() {
@@ -5098,7 +4713,7 @@ fn stable_params_preserve_chain_anchor() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.dispatch_user_prompt("first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -5136,7 +4751,7 @@ fn stable_params_preserve_chain_anchor() {
     })
     .expect("finish first");
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.dispatch_user_prompt("second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -5157,7 +4772,7 @@ fn missing_response_id_leaves_chain_unset() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.dispatch_user_prompt("first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -5196,7 +4811,7 @@ fn missing_response_id_leaves_chain_unset() {
     })
     .expect("finish first");
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.dispatch_user_prompt("second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -5215,10 +4830,8 @@ fn queued_prompt_extends_completed_first_prompt() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let first = h
-        .submit_user_prompt("s1".into(), "first".to_owned())
+    h.dispatch_user_prompt("first".to_owned())
         .expect("submit first");
-    assert_eq!(first, PromptSubmission::Dispatched);
     let first_agent_id = h
         .agents
         .get(&test_user_agent(&h))
@@ -5228,10 +4841,8 @@ fn queued_prompt_extends_completed_first_prompt() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
 
-    let second = h
-        .submit_user_prompt("s1".into(), "second".to_owned())
+    h.dispatch_user_prompt("second".to_owned())
         .expect("submit second");
-    assert_eq!(second, PromptSubmission::Queued);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         agent_prompt_id: spid1,
@@ -5292,475 +4903,6 @@ fn queued_prompt_extends_completed_first_prompt() {
 }
 
 #[test]
-fn restore_notice_elapsed_format_uses_minutes_hours_and_days() {
-    // The restore notice is model-visible hidden context, so keep the elapsed
-    // wording compact and deterministic while still warning about outside
-    // changes since the durable transcript stopped.
-    assert!(
-        restore_notice_prompt_for_elapsed(Some(Duration::from_secs(59)))
-            .contains("Less than 1 minute has passed since the last recorded session event")
-    );
-    assert!(
-        restore_notice_prompt_for_elapsed(Some(Duration::from_secs(60)))
-            .contains("1 minute has passed since the last recorded session event")
-    );
-    assert!(
-        restore_notice_prompt_for_elapsed(Some(Duration::from_secs(42 * 60)))
-            .contains("42 minutes have passed since the last recorded session event")
-    );
-    assert!(
-        restore_notice_prompt_for_elapsed(Some(Duration::from_secs(2 * 60 * 60)))
-            .contains("2 hours have passed since the last recorded session event")
-    );
-    assert!(
-        restore_notice_prompt_for_elapsed(Some(Duration::from_secs(3 * 24 * 60 * 60)))
-            .contains("3 days have passed since the last recorded session event")
-    );
-}
-
-/// Regression: a cold-resumed session needs one hidden restore notice in the
-/// first provider prompt, but startup itself must not send that notice as a
-/// standalone turn or as prewarm-only context.
-#[test]
-fn resumed_startup_folds_restore_notice_before_first_user_prompt() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let two_hours_ago = tau_proto::UnixMicros::new(
-        tau_proto::UnixMicros::now()
-            .get()
-            .saturating_sub(2 * 60 * 60 * 1_000_000),
-    );
-    seed_prior_user_message_at(&sp, "before restore", two_hours_ago);
-
-    let mut h =
-        quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
-            .expect("resume");
-
-    assert!(h.prompt_agents.is_empty());
-    assert!(!event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::AgentPromptCreated(_)
-    )));
-    assert!(!event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::AgentPromptPrewarmRequested(prewarm)
-            if prewarm
-                .context.flatten()
-                .iter()
-                .any(|item| text_part(item).is_some_and(is_restore_notice_prompt_text))
-    )));
-    assert_eq!(restore_notice_event_count(&h), 0);
-
-    h.submit_user_prompt("s1".into(), "after restore".to_owned())
-        .expect("submit first resumed prompt");
-    let prompt = read_nth_prompt_created(&h, 0);
-    let notice_pos = prompt
-        .context
-        .flatten()
-        .iter()
-        .position(|item| text_part(item).is_some_and(is_restore_notice_prompt_text))
-        .expect("restore notice in first prompt");
-    let user_pos = prompt
-        .context
-        .flatten()
-        .iter()
-        .position(|item| text_part(item) == Some("after restore"))
-        .expect("user prompt in first prompt");
-    let notice = restore_notice_context_text(&prompt).expect("restore notice text");
-
-    assert!(notice_pos < user_pos);
-    assert!(notice.contains("Previous session was interrupted and restored."));
-    assert!(notice.contains("2 hours have passed since the last recorded session event"));
-    assert!(notice.contains("state of the world might have changed"));
-    assert_eq!(restore_notice_context_count(&prompt), 1);
-    assert_eq!(restore_notice_event_count(&h), 1);
-
-    h.shutdown().expect("shutdown");
-}
-
-/// The restore notice is a one-shot durable fact. Follow-up prompts and later
-/// cold resumes may replay the original notice in history, but must not append
-/// another copy.
-#[test]
-fn restore_notice_is_not_duplicated_by_followups_or_later_resumes() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_prior_user_message(&sp, "before restore");
-
-    let notice = {
-        let mut h =
-            quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
-                .expect("first resume");
-
-        h.submit_user_prompt("s1".into(), "first after restore".to_owned())
-            .expect("submit first resumed prompt");
-        let first_prompt = read_nth_prompt_created(&h, 0);
-        let first_spid = first_prompt.agent_prompt_id.clone();
-        let notice = restore_notice_context_text(&first_prompt)
-            .expect("restore notice")
-            .to_owned();
-        assert_eq!(restore_notice_context_count(&first_prompt), 1);
-
-        h.handle_provider_response_finished(provider_text_response(
-            &first_spid,
-            first_prompt.agent_id.clone(),
-            "first answer",
-        ))
-        .expect("finish first prompt");
-        h.submit_user_prompt("s1".into(), "second after restore".to_owned())
-            .expect("submit second prompt");
-        let second_prompt = read_nth_prompt_created(&h, 1);
-        assert_eq!(context_text_count(&second_prompt, notice.as_str()), 1);
-        assert_eq!(restore_notice_context_count(&second_prompt), 1);
-        assert_eq!(restore_notice_event_count(&h), 1);
-
-        h.shutdown().expect("shutdown");
-        notice
-    };
-    wait_for_session_unlock(&sp, "s1");
-
-    {
-        let mut h =
-            quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
-                .expect("second resume");
-
-        h.submit_user_prompt("s1".into(), "third after restore".to_owned())
-            .expect("submit after second resume");
-        let prompt = read_nth_prompt_created(&h, 0);
-        assert_eq!(context_text_count(&prompt, notice.as_str()), 1);
-        assert_eq!(restore_notice_context_count(&prompt), 1);
-        assert_eq!(restore_notice_event_count(&h), 1);
-
-        h.shutdown().expect("shutdown");
-    }
-}
-
-/// Regression: a background placeholder without a later background result/error
-/// means the real tool was lost across cold restore. Resume must publish a
-/// durable background error, fold an internal interruption note before the next
-/// user prompt, and let `wait` consume the restored error instead of hanging.
-#[test]
-fn resumed_lost_background_tool_gets_error_and_wait_returns() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_background_placeholder(&sp, "lost-bg", "slow_bg");
-
-    let mut h =
-        quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
-            .expect("resume");
-    let notice = restored_background_notice("lost-bg");
-
-    assert_eq!(background_error_count(&h, "lost-bg"), 1);
-    assert!(event_log_contains(
-        &h,
-        HARNESS_CONNECTION_ID,
-        |event| matches!(
-            event,
-            Event::ToolBackgroundError(error)
-                if error.call_id.as_str() == "lost-bg" && error.message == notice
-        )
-    ));
-    assert!(!event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::AgentPromptCreated(_)
-    )));
-
-    h.submit_user_prompt("s1".into(), "after restore".to_owned())
-        .expect("submit first resumed prompt");
-    let first_prompt = read_nth_prompt_created(&h, 0);
-    let first_spid = first_prompt.agent_prompt_id.clone();
-    let notice_pos = first_prompt
-        .context
-        .flatten()
-        .iter()
-        .position(|item| text_part(item) == Some(notice.as_str()))
-        .expect("background interruption notice in first prompt");
-    let user_pos = first_prompt
-        .context
-        .flatten()
-        .iter()
-        .position(|item| text_part(item) == Some("after restore"))
-        .expect("user prompt in first prompt");
-    assert!(notice_pos < user_pos);
-
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        agent_prompt_id: first_spid,
-        agent_id: first_prompt.agent_id.clone(),
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "wait-lost-bg".into(),
-            name: ToolName::new("wait"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("tool_call_id".to_owned()),
-                CborValue::Text("lost-bg".to_owned()),
-            )]),
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        error: None,
-        usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("wait for restored background call");
-
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolError(error)
-            if error.call_id.as_str() == "wait-lost-bg" && error.message == notice
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Resume should treat existing background results/errors as terminal. They are
-/// replayed into the wait tracker, but no restored interruption error is
-/// appended over the real outcome.
-#[test]
-fn resume_keeps_existing_background_completions() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_background_placeholder(&sp, "finished-bg", "slow_bg");
-    seed_background_placeholder(&sp, "failed-bg", "slow_bg");
-    seed_background_result(&sp, "finished-bg", "slow_bg", "finished");
-    seed_background_error(&sp, "failed-bg", "slow_bg", "real failure");
-
-    let mut h =
-        quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
-            .expect("resume");
-
-    assert_eq!(background_result_count(&h, "finished-bg"), 1);
-    assert_eq!(background_error_count(&h, "finished-bg"), 0);
-    assert_eq!(background_error_count(&h, "failed-bg"), 1);
-    assert!(!event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolBackgroundError(error)
-            if error.message == restored_background_notice(error.call_id.as_str())
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Completed background results restored from the agent log should be
-/// available to `wait({})`, not only to exact-id waits.
-#[test]
-fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_background_placeholder(&sp, "restored-any", "slow_bg");
-    seed_background_result(&sp, "restored-any", "slow_bg", "restored output");
-
-    let mut h =
-        quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
-            .expect("resume");
-    h.submit_user_prompt("s1".into(), "collect restored background".to_owned())
-        .expect("submit first resumed prompt");
-    let prompt = read_nth_prompt_created(&h, 0);
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        agent_prompt_id: prompt.agent_prompt_id,
-        agent_id: prompt.agent_id,
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "wait-restored-any".into(),
-            name: ToolName::new("wait"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        error: None,
-        usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("wait on restored completion");
-
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolResult(result)
-            if result.call_id.as_str() == "wait-restored-any"
-                && cbor_map_text(&result.result, "original_tool_call_id") == Some("restored-any")
-                && cbor_map_text(&result.result, "output") == Some("restored output")
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Restored no-arg waits must replay completions by durable completion order,
-/// not by the earlier provider-placeholder order.
-#[test]
-fn resumed_no_arg_wait_uses_restored_completion_event_order() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_background_placeholder(&sp, "restored-a", "slow_bg");
-    seed_background_placeholder(&sp, "restored-b", "slow_bg");
-    for (call_id, text) in [
-        ("restored-b", "first restored output"),
-        ("restored-a", "second restored output"),
-    ] {
-        seed_background_result(&sp, call_id, "slow_bg", text);
-    }
-
-    let mut h =
-        quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
-            .expect("resume");
-    let cid = ensure_test_user_agent(&mut h);
-    h.handle_wait_tool_call(
-        &cid,
-        &wait_no_args_call("wait-restored-first"),
-        ToolName::new("wait"),
-    )
-    .expect("consume first restored completion");
-    h.handle_wait_tool_call(
-        &cid,
-        &wait_no_args_call("wait-restored-second"),
-        ToolName::new("wait"),
-    )
-    .expect("consume second restored completion");
-
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolResult(result)
-            if result.call_id.as_str() == "wait-restored-first"
-                && cbor_map_text(&result.result, "original_tool_call_id") == Some("restored-b")
-                && cbor_map_text(&result.result, "output") == Some("first restored output")
-    )));
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolResult(result)
-            if result.call_id.as_str() == "wait-restored-second"
-                && cbor_map_text(&result.result, "original_tool_call_id") == Some("restored-a")
-                && cbor_map_text(&result.result, "output") == Some("second restored output")
-    )));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// The restored background error is durable. A later cold resume must observe
-/// the existing error and avoid appending a duplicate.
-#[test]
-fn repeated_resume_does_not_duplicate_background_errors() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_background_placeholder(&sp, "lost-once", "slow_bg");
-
-    {
-        let mut h =
-            quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
-                .expect("first resume");
-        assert_eq!(background_error_count(&h, "lost-once"), 1);
-        h.shutdown().expect("shutdown");
-    }
-    wait_for_session_unlock(&sp, "s1");
-
-    {
-        let mut h =
-            quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
-                .expect("second resume");
-        assert_eq!(background_error_count(&h, "lost-once"), 1);
-        h.shutdown().expect("shutdown");
-    }
-}
-
-#[test]
-fn switch_session_clears_loaded_agents_until_next_prompt() {
-    // `/session new` changes the session container. Agents are durable members
-    // of one session, so switching clears live agent routing; the next prompt
-    // creates a fresh durable agent in the new session.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start"); // bound to "s1"
-    h.selected_model = Some("test/model".into());
-    let model: tau_proto::ModelId = "test/model".into();
-    h.current_session_state.context_input_tokens = Some(92_000);
-    h.current_session_state.context_cached_tokens = Some(90_000);
-    h.current_session_state.context_percent_used = Some(92);
-    h.current_session_state.token_usage.start_request(&model);
-    h.current_session_state
-        .token_usage
-        .add_sent(&model, 819_300, 750_000);
-    h.current_session_state
-        .token_usage
-        .add_received(&model, 34_000);
-
-    let cid = ensure_test_user_agent(&mut h);
-    assert_eq!(h.agents[&cid].session_id.as_str(), "s1");
-    h.agents
-        .get_mut(&cid)
-        .expect("default conversation")
-        .agent_id = Some("old-agent".to_owned());
-    h.agent_routes.insert("old-agent".to_owned(), cid.clone());
-    h.agent_states
-        .insert("old-agent".to_owned(), AgentState::Suspended);
-
-    let shell_conn = h
-        .extension_connection_id("shell")
-        .expect("shell")
-        .to_owned();
-
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
-        .expect("switch");
-
-    let mut saw_session_dir = false;
-    let mut cursor = crate::event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(cursor) {
-        cursor = entry.seq.next();
-        if let Event::HarnessSessionDir(session_dir) = &entry.event
-            && session_dir.session_id == "s2"
-            && session_dir.path.ends_with("s2")
-            && session_dir.status == tau_proto::SessionDirStatus::New
-        {
-            saw_session_dir = true;
-        }
-    }
-    assert!(saw_session_dir, "switch must announce the new session dir");
-
-    assert_eq!(h.current_session_id.as_str(), "s2");
-    assert_eq!(h.current_session_state.context_input_tokens, None);
-    assert_eq!(h.current_session_state.context_cached_tokens, None);
-    assert_eq!(h.current_session_state.context_percent_used, None);
-    assert_eq!(
-        h.current_session_state.token_usage,
-        tau_proto::TokenUsageStats::default()
-    );
-    assert!(h.agents.is_empty());
-    assert!(h.agent_routes.is_empty());
-    assert!(h.agent_states.is_empty());
-
-    // Drive the new session through init so submit_user_prompt
-    // actually dispatches (rather than queuing).
-    h.handle_extension_event(
-        &shell_conn,
-        TestProtocolItem::Event(Event::ExtensionContextReady(
-            tau_proto::ExtensionContextReady {
-                session_id: "s2".into(),
-                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            },
-        )),
-    )
-    .expect("ready");
-
-    let submission = h
-        .submit_user_prompt("s2".into(), "hello".to_owned())
-        .expect("submit");
-    assert_eq!(submission, PromptSubmission::Dispatched);
-    let new_cid = test_user_agent(&h);
-    let new_agent_id = h.agents[&new_cid]
-        .agent_id
-        .clone()
-        .expect("new session agent id");
-    publish_pending_agent_context_ready(&mut h, new_agent_id.as_str());
-    assert!(read_nth_prompt_created(&h, 0).agent_id.as_str() == new_agent_id);
-
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
 fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -5775,7 +4917,7 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
         .expect("selected role")
         .compaction = Some(tau_config::settings::RoleCompaction::Threshold(1200));
 
-    h.handle_compact_request("s1".into(), Some(&target_agent_id));
+    h.handle_compact_request(Some(&target_agent_id));
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -6177,8 +5319,7 @@ fn agent_message_interrupts_exact_wait_by_wait_owner() {
     );
 
     let target_cid = ensure_test_user_agent(&mut h);
-    let waiter_cid =
-        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let waiter_cid = h.create_durable_user_agent(&h.selected_role.clone());
     let target_agent_id = h.agents[&target_cid]
         .agent_id
         .clone()
@@ -6295,7 +5436,6 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -6502,7 +5642,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         Some(&AgentState::ActiveDelegated)
     );
 
-    h.submit_prompt_to_agent("s1".into(), &side_agent_id, "user follow-up".to_owned())
+    h.submit_prompt_to_agent(&side_agent_id, "user follow-up".to_owned())
         .expect("user prompt to delegate");
     assert_eq!(
         h.agent_states.get(&side_agent_id),
@@ -6796,7 +5936,6 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -6927,7 +6066,6 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "find the bug in foo.rs".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -7081,7 +6219,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
     // Drive one full main-conv turn through the normal dispatch path
     // so `prompt_fingerprints`/`prompt_models` are populated and
     // `handle_provider_response_finished` actually mints the anchor.
-    h.submit_user_prompt("s1".into(), "find the bug in foo.rs".to_owned())
+    h.dispatch_user_prompt("find the bug in foo.rs".to_owned())
         .expect("submit main");
     let main_prompt = read_nth_prompt_created(&h, 0);
     let main_spid = main_prompt.agent_prompt_id.clone();
@@ -7194,7 +6332,6 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "go".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -7316,24 +6453,15 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
     // User submits a real prompt — the harness must preempt the
     // side conv (cancel it, free the agent slot) before queueing or
     // dispatching the user's turn.
-    h.submit_user_prompt("s1".into(), "interrupting prompt".to_owned())
+    h.dispatch_user_prompt("interrupting prompt".to_owned())
         .expect("submit user");
 
-    let side_conv = h.agents.get(&side_cid).expect("side conv still tracked");
     assert!(
-        side_conv.in_flight_prompt.is_none(),
-        "user prompt must clear the side conv's in-flight spid so the agent's \
-         prompt slot is free; still set to {:?}",
-        side_conv.in_flight_prompt,
-    );
-    assert!(
-        h.canceled_prompts.contains(&side_spid),
-        "side conv's spid must be marked canceled so a late response is dropped",
-    );
-    assert!(
-        !h.prompt_agents.contains_key(&side_spid),
-        "side conv's spid must be unrouted so the agent's eventual abort \
-         doesn't try to publish a finished event into a stale slot",
+        h.agents
+            .values()
+            .filter(|conv| conv.originator.is_user())
+            .any(|conv| matches!(conv.turn_state, AgentTurnState::AgentThinking { .. })),
+        "user prompt should dispatch independently of the side conversation",
     );
     assert!(
         event_log_contains_any_source(&h, |event| matches!(
@@ -7402,7 +6530,6 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -7577,7 +6704,6 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     h.publish_for_agent(
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "delegate slow work".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -7841,7 +6967,6 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     h.publish_for_agent(
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "delegate slow work".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -7971,7 +7096,6 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "run fail".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -8195,7 +7319,6 @@ fn backgrounded_tool_progress_is_not_published() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "run slow".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -8440,7 +7563,7 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
     h.selected_model = Some("test/model".into());
 
     let cid = ensure_test_user_agent(&mut h);
-    append_user_message_via_event(&mut h, "s1", "wait on missing call");
+    append_user_message_via_event(&mut h, "wait on missing call");
     seed_agent_thinking(&mut h, &cid, "sp-wait");
     let spid: AgentPromptId = "sp-wait".into();
     h.prompt_agents.insert(spid.clone(), cid.clone());
@@ -8638,7 +7761,6 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     h.publish_for_agent(
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "fan out".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -8862,7 +7984,6 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -9010,7 +8131,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     // Regression coverage for the live delegate line: renderers preserve
     // progress_counters order, so tools must precede context in the UI.
     assert_delegate_counter_order(&latest, &["tools", "ctx"]);
-    assert_eq!(h.current_session_state.context_input_tokens, None);
+    assert_eq!(h.usage_state.context_input_tokens, None);
 
     // Complete the sub-agent's tool — counters should drop and a
     // fresh progress event should show 0 in flight, 1 total.
@@ -9090,7 +8211,6 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
     h.publish_for_agent(
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -9632,7 +8752,6 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -9893,7 +9012,6 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     h.publish_for_agent(
         &default_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -10060,7 +9178,6 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -10226,7 +9343,6 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     h.publish_for_agent(
         &default_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
             text: "ROOT: ask top delegate to delegate again".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -10477,7 +9593,7 @@ fn message_tool_call(id: &str, recipient_id: &str, message: &str) -> AgentToolCa
     }
 }
 
-fn session_agent_message_sent_events(h: &Harness) -> Vec<tau_proto::AgentMessageSent> {
+fn event_log_agent_message_sent_events(h: &Harness) -> Vec<tau_proto::AgentMessageSent> {
     event_log_events(h)
         .into_iter()
         .filter_map(|event| match event {
@@ -10487,7 +9603,7 @@ fn session_agent_message_sent_events(h: &Harness) -> Vec<tau_proto::AgentMessage
         .collect()
 }
 
-fn session_agent_message_received_events(h: &Harness) -> Vec<tau_proto::AgentMessageReceived> {
+fn event_log_agent_message_received_events(h: &Harness) -> Vec<tau_proto::AgentMessageReceived> {
     event_log_events(h)
         .into_iter()
         .filter_map(|event| match event {
@@ -10498,7 +9614,7 @@ fn session_agent_message_received_events(h: &Harness) -> Vec<tau_proto::AgentMes
 }
 
 fn durable_agent_message_sent_events(h: &Harness) -> Vec<tau_proto::AgentMessageSent> {
-    loaded_agent_events(h, "s1")
+    loaded_agent_events(h)
         .into_iter()
         .filter_map(|event| match event {
             Event::AgentMessageSent(message) => Some(message),
@@ -10508,7 +9624,7 @@ fn durable_agent_message_sent_events(h: &Harness) -> Vec<tau_proto::AgentMessage
 }
 
 fn durable_agent_message_received_events(h: &Harness) -> Vec<tau_proto::AgentMessageReceived> {
-    loaded_agent_events(h, "s1")
+    loaded_agent_events(h)
         .into_iter()
         .filter_map(|event| match event {
             Event::AgentMessageReceived(message) => Some(message),
@@ -10531,8 +9647,8 @@ fn message_tool_to_user_emits_only_sender_projection() {
     )
     .expect("message tool");
 
-    let sent = session_agent_message_sent_events(&h);
-    let received = session_agent_message_received_events(&h);
+    let sent = event_log_agent_message_sent_events(&h);
+    let received = event_log_agent_message_received_events(&h);
     assert_eq!(sent.len(), 1);
     let sender_agent_id = h
         .agents
@@ -10571,8 +9687,8 @@ fn message_tool_unknown_recipient_errors_without_agent_message() {
     )
     .expect("message tool");
 
-    assert!(session_agent_message_sent_events(&h).is_empty());
-    assert!(session_agent_message_received_events(&h).is_empty());
+    assert!(event_log_agent_message_sent_events(&h).is_empty());
+    assert!(event_log_agent_message_received_events(&h).is_empty());
     assert!(durable_agent_message_sent_events(&h).is_empty());
     assert!(durable_agent_message_received_events(&h).is_empty());
     let errors: Vec<_> = event_log_events(&h)
@@ -10603,7 +9719,6 @@ fn message_tool_stopped_recipient_errors_without_agent_message() {
         stopped_cid.clone(),
         Agent::new(
             stopped_cid.clone(),
-            "s1".into(),
             tau_proto::PromptOriginator::User,
             None,
             None,
@@ -10619,8 +9734,8 @@ fn message_tool_stopped_recipient_errors_without_agent_message() {
     )
     .expect("message tool");
 
-    assert!(session_agent_message_sent_events(&h).is_empty());
-    assert!(session_agent_message_received_events(&h).is_empty());
+    assert!(event_log_agent_message_sent_events(&h).is_empty());
+    assert!(event_log_agent_message_received_events(&h).is_empty());
     assert!(durable_agent_message_sent_events(&h).is_empty());
     assert!(durable_agent_message_received_events(&h).is_empty());
     let errors: Vec<_> = event_log_events(&h)
@@ -10662,8 +9777,8 @@ fn message_tool_to_agent_queues_internal_prompt_markup() {
     )
     .expect("message tool");
 
-    let sent = session_agent_message_sent_events(&h);
-    let received = session_agent_message_received_events(&h);
+    let sent = event_log_agent_message_sent_events(&h);
+    let received = event_log_agent_message_received_events(&h);
     assert_eq!(sent.len(), 1);
     assert_eq!(received.len(), 1);
     assert_eq!(sent[0].message_id, received[0].message_id);
@@ -10717,8 +9832,8 @@ fn agent_watch_response_queues_distinct_internal_prompt_markup() {
     )
     .expect("watch response");
 
-    assert!(session_agent_message_sent_events(&h).is_empty());
-    let received = session_agent_message_received_events(&h);
+    assert!(event_log_agent_message_sent_events(&h).is_empty());
+    let received = event_log_agent_message_received_events(&h);
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].kind, tau_proto::AgentMessageKind::WatchResponse);
 
@@ -10784,13 +9899,12 @@ fn inbound_agent_message_events_are_ignored() {
         "extension",
         TestMessage::Emit(tau_proto::Emit {
             event: Box::new(forged),
-            transient: false,
         }),
     )
     .expect("extension emit");
 
-    assert!(session_agent_message_sent_events(&h).is_empty());
-    assert!(session_agent_message_received_events(&h).is_empty());
+    assert!(event_log_agent_message_sent_events(&h).is_empty());
+    assert!(event_log_agent_message_received_events(&h).is_empty());
     assert!(durable_agent_message_sent_events(&h).is_empty());
     assert!(durable_agent_message_received_events(&h).is_empty());
 
@@ -10806,19 +9920,13 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
     let mut h = echo_harness(&sp).expect("start");
 
     for forged in [
-        Event::SessionStarted(tau_proto::SessionStarted {
-            session_id: "forged-session".into(),
-            reason: tau_proto::SessionStartReason::New,
-        }),
-        Event::SessionShutdown(tau_proto::SessionShutdown {
-            session_id: "forged-session".into(),
-        }),
-        Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-            session_id: "forged-session".into(),
+        Event::AgentLoaded(tau_proto::AgentLoaded {
             agent_id: crate::parse_agent_id("forged-agent"),
         }),
-        Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-            session_id: "forged-session".into(),
+        Event::AgentLoading(tau_proto::AgentLoading {
+            agent_id: crate::parse_agent_id("forged-agent"),
+        }),
+        Event::AgentUnloaded(tau_proto::AgentUnloaded {
             agent_id: crate::parse_agent_id("forged-agent"),
         }),
         Event::AgentStarted(tau_proto::AgentStarted {
@@ -10867,7 +9975,6 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             "extension",
             TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(forged.clone()),
-                transient: false,
             }),
         )
         .expect("extension emit");
@@ -10878,7 +9985,6 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
         );
     }
 
-    assert!(h.store.session("forged-session").is_none());
     assert!(
         h.agent_store
             .agent_events("forged-agent")
@@ -10922,7 +10028,6 @@ fn provider_cache_miss_diagnostic_requires_prompt_owner() {
             event: Box::new(Event::ProviderCacheMissDiagnostic(
                 cache_miss_diagnostic_for_test("prompt-1"),
             )),
-            transient: false,
         }),
     )
     .expect("non-owner diagnostic emit");
@@ -10934,7 +10039,6 @@ fn provider_cache_miss_diagnostic_requires_prompt_owner() {
             event: Box::new(Event::ProviderCacheMissDiagnostic(
                 cache_miss_diagnostic_for_test("prompt-1"),
             )),
-            transient: false,
         }),
     )
     .expect("owner diagnostic emit");
@@ -11167,7 +10271,7 @@ fn agent_metadata_validation_rejects_bad_key_size_value_and_unknown_target() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let agent_id = tau_proto::AgentId::parse("metadata-target").expect("agent id");
-    h.session_loaded_agents.insert(agent_id.clone());
+    load_test_agent(&mut h, agent_id.as_str());
 
     let valid = tau_proto::AgentMetadataSet {
         agent_id: agent_id.clone(),
@@ -11223,13 +10327,18 @@ fn agent_metadata_validation_rejects_bad_key_size_value_and_unknown_target() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures inheritable parent metadata is recorded as child creation metadata.
+///
+/// Child-agent inherited metadata is part of the `agent.started` birth fact,
+/// not a later synthetic metadata mutation. This keeps the loaded boundary and
+/// the durable transcript fold aligned from the start.
 #[test]
-fn explicit_parent_agent_start_inherits_only_inheritable_metadata() {
+fn explicit_parent_agent_start_records_inherited_metadata_in_agent_started() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
-    h.submit_user_prompt("s1".into(), "parent prompt".to_owned())
+    h.dispatch_user_prompt("parent prompt".to_owned())
         .expect("submit parent");
     let parent_agent_id = h
         .agents
@@ -11275,22 +10384,129 @@ fn explicit_parent_agent_start_inherits_only_inheritable_metadata() {
         .and_then(|conversation| conversation.agent_id.clone())
         .expect("child agent id");
 
-    let child_events = h
+    let events = event_log_events(&h);
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            Event::AgentLoaded(loaded) if loaded.agent_id.as_str() == child_agent_id
+        )
+    }));
+    let started = events
+        .iter()
+        .find_map(|event| match event {
+            Event::AgentStarted(started) if started.agent_id.as_str() == child_agent_id => {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("child started event");
+    assert!(started.metadata.iter().any(|metadata| {
+        metadata.key == inherit_key
+            && metadata.value == CborValue::Text("inherited".to_owned())
+            && metadata.inheritable
+    }));
+    assert!(
+        started
+            .metadata
+            .iter()
+            .all(|metadata| metadata.key.as_str() != "local-key")
+    );
+    assert!(!events.iter().any(|event| {
+        matches!(
+            event,
+            Event::AgentMetadataSet(set)
+                if set.agent_id.as_str() == child_agent_id
+                    && set.key.as_str() == inherit_key.as_str()
+        )
+    }));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures explicit new-agent metadata overrides inherited parent defaults.
+///
+/// Parent metadata is a defaulting mechanism for child creation. If the child
+/// creation request supplies the same key, the explicit value and inheritable
+/// flag must win in the durable `agent.started` transcript fold.
+#[test]
+fn initial_agent_metadata_overrides_inherited_creation_metadata() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.dispatch_user_prompt("parent prompt".to_owned())
+        .expect("submit parent");
+    let parent_agent_id = h
+        .agents
+        .get(&test_user_agent(&h))
+        .and_then(|conversation| conversation.agent_id.clone())
+        .expect("parent agent id");
+    let parent = tau_proto::AgentId::parse(&parent_agent_id).expect("parent agent id");
+    let key = tau_proto::AgentMetadataKey::new("collision-key");
+
+    h.publish_event(
+        None,
+        Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+            agent_id: parent.clone(),
+            key: key.clone(),
+            value: CborValue::Text("parent".to_owned()),
+            inheritable: true,
+        }),
+    );
+
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        parent_agent: Some(parent.clone()),
+        role: h.selected_role.clone(),
+        model_override: None,
+        metadata: vec![tau_proto::AgentInitialMetadata {
+            key: key.clone(),
+            value: CborValue::Text("child".to_owned()),
+            inheritable: false,
+        }],
+        initial_prompt: None,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("create child");
+
+    let events = event_log_events(&h);
+    let started = events
+        .iter()
+        .find_map(|event| match event {
+            Event::AgentStarted(started) if started.parent_agent.as_ref() == Some(&parent) => {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("child started event");
+    let child_agent_id = started.agent_id.clone();
+    let started_metadata = started
+        .metadata
+        .iter()
+        .find(|metadata| metadata.key == key)
+        .expect("started metadata");
+    assert_eq!(started_metadata.value, CborValue::Text("child".to_owned()));
+    assert!(!started_metadata.inheritable);
+
+    assert!(events.iter().any(|event| {
+        matches!(event, Event::AgentLoaded(loaded) if loaded.agent_id == child_agent_id)
+    }));
+    assert!(!events.iter().any(|event| {
+        matches!(
+            event,
+            Event::AgentMetadataSet(set)
+                if set.agent_id == child_agent_id && set.key.as_str() == key.as_str()
+        )
+    }));
+    let tree = h
         .agent_store
-        .agent_events(&child_agent_id)
-        .expect("child events");
-    assert!(child_events.iter().any(|entry| matches!(
-        &entry.event,
-        Event::AgentMetadataSet(set)
-            if set.agent_id.as_str() == child_agent_id
-                && set.key == inherit_key
-                && set.value == CborValue::Text("inherited".to_owned())
-                && set.inheritable
-    )));
-    assert!(child_events.iter().all(|entry| !matches!(
-        &entry.event,
-        Event::AgentMetadataSet(set) if set.key.as_str() == "local-key"
-    )));
+        .load_agent(child_agent_id.as_str())
+        .expect("load child")
+        .expect("child tree");
+    let folded = tree.metadata().get(&key).expect("folded child metadata");
+    assert_eq!(folded.value, CborValue::Text("child".to_owned()));
+    assert!(!folded.inheritable);
 
     h.shutdown().expect("shutdown");
 }
@@ -11411,7 +10627,7 @@ fn ui_emitted_custom_event_routes_to_subscribed_extension() {
     h.handle_client_event_inner(
         "ui",
         Event::ExtensionEvent(
-            tau_proto::CustomEvent::try_new(command_name.clone(), None, CborValue::Null)
+            tau_proto::CustomEvent::try_new(command_name.clone(), CborValue::Null)
                 .expect("valid custom event"),
         ),
     )
@@ -11431,7 +10647,7 @@ fn ui_cannot_emit_custom_event_with_reserved_first_party_category() {
     // under `harness`/`agent`/`tool`/`extension` to spoof a first-party fact.
     let reserved: tau_proto::EventName = "harness.notice".parse().expect("event name");
     assert!(
-        tau_proto::CustomEvent::try_new(reserved, None, CborValue::Null).is_err(),
+        tau_proto::CustomEvent::try_new(reserved, CborValue::Null).is_err(),
         "reserved first-party category must be rejected at construction"
     );
 }

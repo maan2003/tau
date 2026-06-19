@@ -8,19 +8,6 @@ use std::time::Duration;
 
 use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus, cbor_field};
 
-#[cfg(test)]
-pub(crate) fn format_turn_stats_line(
-    usage: &tau_proto::ProviderTokenUsage,
-    previous_usage: Option<&tau_proto::ProviderTokenUsage>,
-    turn_latency: Option<Duration>,
-    total_latency: Option<Duration>,
-) -> String {
-    turn_stats_parts(usage, previous_usage, turn_latency, total_latency)
-        .into_iter()
-        .map(|part| part.text)
-        .collect()
-}
-
 pub(crate) fn render_turn_stats_block(
     theme: &tau_themes::Theme,
     usage: &tau_proto::ProviderTokenUsage,
@@ -785,7 +772,7 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
     }
 }
 
-/// Render a completed provider-side compaction item as a compact session
+/// Render a completed provider-side compaction item as a compact agent
 /// status line. Compaction is not a model-visible tool invocation, so this
 /// paints the small lifecycle line directly instead of fabricating a
 /// `ToolUseState`.
@@ -1321,25 +1308,6 @@ pub(crate) fn render_harness_notice(
 
 pub(crate) fn ui_dir_block(theme: &tau_themes::Theme, path: &Path) -> tau_cli_term::StyledBlock {
     system_path_block(theme, "ui dir: ", path, "/")
-}
-
-pub(crate) fn session_status_block(
-    theme: &tau_themes::Theme,
-    path: &Path,
-    suffix: &str,
-    status: &str,
-) -> tau_cli_term::StyledBlock {
-    use tau_themes::{ThemedText, names};
-
-    let mut text = ThemedText::new();
-    let lifecycle = text.add_style(names::EXTENSION_LIFECYCLE);
-    let status_style = text.add_style(names::SESSION_STATUS);
-    let path_style = text.add_style(names::SYSTEM_PATH);
-    text.push(lifecycle, "session dir: ");
-    text.push(path_style, format!("{}{}", display_path(path), suffix));
-    text.push(lifecycle, " ");
-    text.push(status_style, status);
-    tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }
 
 fn system_path_block(

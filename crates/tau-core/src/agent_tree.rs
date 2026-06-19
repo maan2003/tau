@@ -44,10 +44,10 @@ impl std::error::Error for AgentEventValidationError {}
 ///
 /// This sequence is relative only to one agent's `events.cbor` stream: the
 /// first record in that file has sequence 0, the second has sequence 1, and so
-/// on. It is not comparable to the harness runtime event sequence or to
-/// [`crate::PersistedSessionEventSeq`]. The value is persisted as corruption
-/// detection metadata; replay semantics are still defined by file order, so
-/// load code verifies that stored values match their implied position.
+/// on. It is not comparable to the harness runtime event sequence. The value is
+/// persisted as corruption detection metadata; replay semantics are still
+/// defined by file order, so load code verifies that stored values match their
+/// implied position.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PersistedAgentEventSeq(u64);
@@ -1089,15 +1089,6 @@ pub struct AgentMeta {
     /// Preview of the latest user-authored prompt, used by the resume picker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_user_prompt_preview: Option<String>,
-}
-
-/// Per-session sidecar metadata at `<sessions_dir>/<session_id>/meta.json`.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SessionMeta {
-    /// Unix epoch seconds when the session was first created.
-    pub created_at: u64,
-    /// Unix epoch seconds of the most recent membership append.
-    pub last_touched: u64,
 }
 
 #[cfg(test)]

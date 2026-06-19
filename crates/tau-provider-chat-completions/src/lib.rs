@@ -679,13 +679,14 @@ fn build_request(
     }
 }
 
-fn debug_provider_request_dir(session_id: &str) -> Option<PathBuf> {
+fn debug_provider_request_dir(agent_id: &tau_proto::AgentId) -> Option<PathBuf> {
     let state = tau_config::settings::state_dir()?;
     Some(
-        tau_config::settings::sessions_dir_of(&state)
-            .join(session_id)
+        state
             .join("debug")
-            .join("provider-requests"),
+            .join("provider-requests")
+            .join(agent_id.as_str())
+            .join("chat-completions"),
     )
 }
 
@@ -694,7 +695,7 @@ fn debug_file_prefix(
     model: &ChatCompletionsModel,
 ) -> serde_json::Value {
     serde_json::json!({
-        "session_id": prompt.session_id,
+        "agent_id": prompt.agent_id,
         "agent_prompt_id": prompt.agent_prompt_id,
         "transport": "http-sse",
         "backend": "chat_completions",
@@ -714,7 +715,7 @@ fn write_debug_json(
     suffix: &str,
     metadata: &serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(dir) = debug_provider_request_dir(prompt.session_id.as_str()) else {
+    let Some(dir) = debug_provider_request_dir(&prompt.agent_id) else {
         return Ok(());
     };
     std::fs::create_dir_all(&dir)?;
@@ -733,7 +734,7 @@ fn maybe_debug_write_provider_request(
     body: &ChatRequest,
 ) {
     let metadata = serde_json::json!({
-        "session_id": prompt.session_id,
+        "agent_id": prompt.agent_id,
         "agent_prompt_id": prompt.agent_prompt_id,
         "transport": "http-sse",
         "backend": "chat_completions",
@@ -746,7 +747,7 @@ fn maybe_debug_write_provider_request(
     if let Err(error) = write_debug_json(prompt, "request", &metadata) {
         tracing::warn!(
             target: LOG_TARGET,
-            session_id = %prompt.session_id,
+            agent_id = %prompt.agent_id,
             agent_prompt_id = %prompt.agent_prompt_id,
             "failed to write chat completions provider request debug log: {error}",
         );
@@ -781,7 +782,7 @@ fn maybe_debug_write_provider_response(
     if let Err(error) = write_debug_json(prompt, "response", &metadata) {
         tracing::warn!(
             target: LOG_TARGET,
-            session_id = %prompt.session_id,
+            agent_id = %prompt.agent_id,
             agent_prompt_id = %prompt.agent_prompt_id,
             "failed to write chat completions provider response debug log: {error}",
         );
@@ -802,7 +803,7 @@ fn maybe_debug_write_provider_http_error(
     if let Err(error) = write_debug_json(prompt, "response", &metadata) {
         tracing::warn!(
             target: LOG_TARGET,
-            session_id = %prompt.session_id,
+            agent_id = %prompt.agent_id,
             agent_prompt_id = %prompt.agent_prompt_id,
             "failed to write chat completions provider response debug log: {error}",
         );

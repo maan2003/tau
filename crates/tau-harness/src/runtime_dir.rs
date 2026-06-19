@@ -27,8 +27,6 @@ pub struct DaemonMetadata {
     pub pid: u32,
     /// Optional project root associated with the harness instance.
     pub project_root: Option<PathBuf>,
-    /// Session id bound to the daemon at startup.
-    pub session_id: String,
 }
 
 /// Returns the root runtime directory for all tau daemon instances.
@@ -100,17 +98,8 @@ pub fn read_metadata(harness_path: &Path) -> Option<DaemonMetadata> {
         .and_then(|s| serde_json::from_str(&s).ok())
 }
 
-/// Reads the session id a running daemon at `harness_path` is bound to.
-#[must_use]
-pub fn read_session_id(harness_path: &Path) -> Option<String> {
-    read_metadata(harness_path).map(|metadata| metadata.session_id)
-}
-
 /// Creates paths and metadata for the current process.
-pub fn prepare_harness_paths(
-    project_root: &Path,
-    session_id: &str,
-) -> Result<HarnessPaths, std::io::Error> {
+pub fn prepare_harness_paths(project_root: &Path) -> Result<HarnessPaths, std::io::Error> {
     let pid = std::process::id();
     let path = harnesses_dir().join(pid.to_string());
     std::fs::create_dir_all(harnesses_dir())?;
@@ -120,7 +109,6 @@ pub fn prepare_harness_paths(
             version: 1,
             pid,
             project_root: Some(project_root.to_path_buf()),
-            session_id: session_id.to_owned(),
         },
     })
 }

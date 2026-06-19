@@ -110,7 +110,6 @@ fn ws_stream_error_without_type_suffix_is_retryable() {
 
 fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> String {
     let context = tau_proto::PromptContext::default();
-    let session_id = tau_proto::SessionId::new("test-session");
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
     let payload = PromptPayload {
         system_prompt: "sys",
@@ -121,7 +120,6 @@ fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> Strin
         compaction: None,
         originator,
         share_user_cache_key,
-        session_id: &session_id,
         agent_id: &agent_id,
     };
     payload.prompt_cache_key("https://api.openai.com/v1")

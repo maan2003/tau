@@ -9,8 +9,8 @@ philosophy and motivation see [README.md](README.md); for design notes see
 
 - **Unix-native process architecture:** every UI, provider, extension, and tool
   integration is a replaceable process speaking the Tau protocol.
-- **Durable agent work:** event logs preserve sessions, transcripts, branch
-  trees, rewinds, detach, and resume.
+- **Durable agent work:** event logs preserve transcripts, branch trees,
+  rewinds, detach, and reattach.
 - **Multi-agent workflows:** agents can delegate to isolated sub-agents, exchange
   messages, and collect background tool work without blocking the main flow.
 - **PIM extensions:** controlled email and calendar tools expose useful personal
@@ -28,8 +28,8 @@ philosophy and motivation see [README.md](README.md); for design notes see
 
 ### Terminal slash commands and theming
 
-The terminal UI includes local slash commands for session, agent, role/model,
-and display control. `/theme <name>` switches the theme for the currently
+The terminal UI includes local slash commands for agent, role/model, and
+display control. `/theme <name>` switches the theme for the currently
 attached CLI UI process only; it does not write `cli.yaml`, update persisted UI
 state, or affect other attached UIs. Completion for `/theme` lists built-in
 selectors `tau-plain-dark`, `tau-plain-light`, and `tau-dpc`, plus valid user
@@ -63,34 +63,28 @@ The default `tau` binary bundles all first-party components and dispatches via
 
 ### Persisted event logs
 
-Tau separates session membership from agent transcripts. Session membership
-facts are appended to `<state_dir>/sessions/<session_id>/events.cbor`; agent
-transcript facts are appended to `<state_dir>/agents/<agent_id>/events.cbor`
-(length-prefixed CBOR streams). On resume, the harness folds the session
-membership journal, loads the current agents, and replays each loaded agent log
-once to rebuild its `AgentTree`. Because agent logs are streams of typed events
+Agent transcript facts are appended to `<state_dir>/agents/<agent_id>/events.cbor`
+(length-prefixed CBOR streams). On load, the harness replays durable agent logs
+to rebuild each `AgentTree`. Because agent logs are streams of typed events
 rather than flat transcripts, agents branch into trees: rewinding to an earlier
 turn keeps the abandoned branch on disk.
 
-```
-$ tau session-list
-$ tau session-show --session-id <id>
-$ tau -r                  # pick a recent session for this cwd
-$ tau -r <id>             # resume a specific one
-```
+Per-run debug logs live under `<state_dir>/debug/<run_id>/`. The harness mints a
+short typed run id, announces it with `harness.started`, and gives extensions a
+`debug_dir` in their `Configure` message so provider request captures and
+extension stderr share the same debug tree.
 
 Inside the UI, `/tree` prints the selected agent's branch graph and `/tree
 <node-id>` rewinds that agent's head to the node.
 
-Any subscriber that joins after a session is initialized — UI clients and
-extensions alike — gets the same subscribe-time catch-up: the current session
-snapshot plus durable transcript facts, delivered as frames carrying an
-explicit `replay` marker so side-effecting consumers (notifications, tool
-executors) can skip history while stateful ones fold it. Execution triggers
-such as `tool.started` are never replayed. Subscribers already connected when
-a resumed session finishes initializing get the same history catch-up at that
-moment (their `SessionStarted` arrived live), so a peer's view never depends
-on whether it subscribed before or after init.
+Any subscriber that joins after the harness is initialized — UI clients and
+extensions alike — gets the same subscribe-time catch-up: current harness state
+plus durable agent transcript facts, delivered as frames carrying an explicit
+`replay` marker so side-effecting consumers (notifications, tool executors) can
+skip history while stateful ones fold it. Execution triggers such as
+`tool.started` are never replayed. Loading an existing agent emits
+`agent.loading`, replays that agent's durable events and metadata, then emits
+`agent.loaded` after catch-up completes.
 
 ### Interception system
 
@@ -253,7 +247,7 @@ lower first) and then rule name. Tools and models only publish tags.
 `default_role` selects the startup role; if it is omitted Tau starts on the
 first role in `role_groups` order. Within a group, roles sort by `order` first
 and role name second. `tau --role <role>` overrides the startup role
-for one newly spawned session. `/model <provider>/<model>` switches the model
+for one newly spawned harness run. `/model <provider>/<model>` switches the model
 for the currently selected agent; `/role <role> <setting> <value>` edits role
 settings for the current process only. See
 [`docs/agent-roles.md`](docs/agent-roles.md).
@@ -266,8 +260,8 @@ level (e.g. `effort xhigh` on a mini model, `verbosity high` on a provider
 that doesn't support it) degrades and surfaces a `harness.notice` diagnostic rather
 than silently dropping the field.
 
-The status bar renders the current session id and selected agent role,
-falling back to the model id when no role is selected. Model knobs and
+The status bar renders the selected agent role, falling back to the model id
+when no role is selected. Model knobs and
 context usage stay out of the bar to keep it compact.
 
 ### Prompt input caching
@@ -407,7 +401,7 @@ custom_prompts:
   review: |
     Please review this change carefully.
   summarize: |
-    Summarize the current session.
+    Summarize the current agent transcript.
 ```
 
 Fragment templates also receive `agent_id` when rendering a concrete agent
@@ -551,9 +545,8 @@ Type `/` for menu autocompletion. The built-in set:
 
 | Command             | Effect                                               |
 | ------------------- | ---------------------------------------------------- |
-| `/quit`             | Exit the session                                     |
+| `/quit`             | Exit this UI process                                 |
 | `/detach`           | Leave the UI, keep the harness running for reattach  |
-| `/session new`      | Close the current session and start a fresh session |
 | `/agent new`        | Clear this UI's selected agent; next untargeted prompt mints a new agent |
 | `/agent switch <id>` | Switch this UI to a known loaded-agent transcript (`none` clears selection) |
 | `/agent suspend [id]` | Hide a loaded agent from this UI's active choices until resumed |
@@ -571,13 +564,11 @@ submitted as prompt text. This catches mistyped commands like `/modle` early,
 while ordinary prompts that contain slashes later in the line are still sent to
 the selected agent normally.
 
-A session is an agent-membership container backed by a durable membership log.
-Starting a new session resets harness/UI session state; prompts create/load
-agents whose transcripts are stored under `<state_dir>/agents/<agent_id>/`. The
-"current agent" selection is local to each attached UI: `/agent new`, `/agent
-switch`, `/agent suspend`, `/agent resume`, `/suspend`, and `/resume` do not
-synchronize selection or
-hidden-agent preferences to other UIs.
+Prompts create or load agents whose transcripts are stored under
+`<state_dir>/agents/<agent_id>/`. The "current agent" selection is local to each
+attached UI: `/agent new`, `/agent switch`, `/agent suspend`, `/agent resume`,
+`/suspend`, and `/resume` do not synchronize selection or hidden-agent
+preferences to other UIs.
 
 `/agent switch` completion lists active agents so suspended transcripts stay out
 of normal prompt-routing choices. If you explicitly type a known suspended agent
@@ -625,7 +616,7 @@ it forces an immediate full redraw so more history is restored right away.
 Submitted prompt lines are kept in prompt history for the current run and are
 also appended to `<state_dir>/prompt-history.cbor`. New `tau` processes seed
 Up/Down prompt recall from that file, so recent prompts from previous runs are
-available like in-session history.
+available like same-run history.
 
 ### Path autocompletion
 
@@ -828,13 +819,12 @@ reasoning blocks, …) to terminal attributes. Style attributes include `fg`,
 terminal supports it. See `crates/tau-themes/themes/tau-plain-dark.json5`,
 `tau-plain-light.json5`, and `tau-dpc.json5` for built-in examples.
 
-### Session resume and detach
+### Attach and detach
 
-`/detach` leaves the harness daemon running so the agent can keep working in
-the background; `tau --attach` reconnects later. `tau -r` opens a picker for
-recent sessions in the current `cwd` (showing lock status and the latest user
-prompt), `tau -r <id>` picks a specific one. Session membership and loaded agent
-trees, including abandoned branches, are preserved across restarts.
+`/detach` leaves the harness daemon running so agents can keep working in the
+background; `tau --attach` reconnects later to the running daemon for the current
+project. Agent transcript trees, including abandoned branches, are preserved
+across restarts.
 
 
 ## XMPP agent chat bridge
@@ -842,10 +832,10 @@ trees, including abandoned branches, are preserved across restarts.
 Tau includes a disabled-by-default `std-xmpp` extension for personal chat with
 agents over XMPP. Agents opt in with `xmpp_register`, reply with `xmpp_send`,
 and cannot choose arbitrary destination JIDs. The recommended configuration uses
-a MUC room per Tau session id and agent id, sends an XEP-0045 mediated invite
+a MUC room per Tau agent, sends an XEP-0045 mediated invite
 plus a direct fallback notice, and lets multiple Tau processes share one XMPP
 account without resource conflicts. Tau joins the room, leaves it on unregister
-or session shutdown, and enforces allowlisted real sender JIDs, but the MVP
+or agent unload, and enforces allowlisted real sender JIDs, but the MVP
 relies on server configuration/defaults for private, hidden, and members-only
 room policy. The MVP sends ordinary plaintext XMPP messages over TLS only; it
 does not provide OMEMO or other end-to-end encryption.

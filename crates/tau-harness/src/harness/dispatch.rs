@@ -7,7 +7,7 @@
 //! and lets the agent interleave them on its side.
 //!
 //! [`Harness::dispatch_user_prompt`] is the direct entry point for interactive
-//! submissions and creates/reuses the session's durable user agent;
+//! submissions and creates/reuses the durable user agent;
 //! [`Harness::dispatch_prompt_for_agent`] is the shared per-agent primitive
 //! (also used by side queries spawned via `StartAgentRequest`).
 //! [`Harness::try_advance_queue`] is the react-to-state- change drain that
@@ -16,32 +16,33 @@
 //! [`Harness::dispatch_blocked_for`] is the predicate the rest of the harness
 //! uses to decide whether to dispatch immediately or queue.
 
-use tau_proto::{AgentId, Event, SessionId};
+use tau_proto::{AgentId, Event};
 
 use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::error::HarnessError;
 use crate::harness::Harness;
 
 impl Harness {
-    pub(crate) fn dispatch_user_prompt(
-        &mut self,
-        session_id: SessionId,
-        text: String,
-    ) -> Result<(), HarnessError> {
-        let agent_id = self
+    pub(crate) fn dispatch_user_prompt(&mut self, text: String) -> Result<(), HarnessError> {
+        self.preempt_blocking_ext_side_agents();
+        let cid = self
             .agents
             .iter()
             .find_map(|(cid, conv)| {
-                (conv.session_id == session_id
-                    && conv.originator.is_user()
-                    && conv.agent_id.is_some())
-                .then_some(cid.clone())
+                (conv.originator.is_user() && conv.agent_id.is_some()).then_some(cid.clone())
             })
             .unwrap_or_else(|| {
                 let role = self.selected_role.clone();
-                self.create_durable_user_agent(session_id, &role)
+                self.create_durable_user_agent(&role)
             });
-        self.dispatch_prompt_for_agent(&agent_id, PendingPrompt::user(text))
+        let Some(agent_id) = self.ensure_agent_id_for_agent(&cid) else {
+            return Ok(());
+        };
+        let submission = self.submit_prompt_to_agent(&agent_id, PendingPrompt::user(text))?;
+        if matches!(submission, crate::turn::PromptSubmission::Queued) {
+            self.interrupt_active_waits();
+        }
+        Ok(())
     }
 
     /// Publish one pending prompt as an `AgentPromptSubmitted` event on one
@@ -139,10 +140,6 @@ impl Harness {
     /// its own consumption of `AgentPromptCreated`. The harness emits
     /// one prompt per runnable agent (Idle turn state, non-empty
     /// queue) and routes responses back via `prompt_agents`.
-    ///
-    /// Session initialization still happens before prompt dispatch, so
-    /// a fresh `chat-*` session can discover AGENTS.md and skills before
-    /// the agent sees the first user message.
     pub(crate) fn try_advance_queue(&mut self) {
         if !self.turn_state.is_idle()
             || !self.extensions_all_ready()
@@ -152,20 +149,6 @@ impl Harness {
         }
 
         while let Some(agent_id) = self.next_runnable_agent() {
-            let session_id = self
-                .agents
-                .get(&agent_id)
-                .map(|c| c.session_id.clone())
-                .expect("runnable agent exists");
-
-            if !self.session_initialized(&session_id) {
-                // Reachable only if the bound session somehow lost its
-                // `initialized_sessions` entry; treat as a re-init.
-                // Init is global, so stop draining until it completes.
-                self.start_session_init(session_id, tau_proto::SessionStartReason::Initial);
-                return;
-            }
-
             let prompt = self
                 .agents
                 .get_mut(&agent_id)

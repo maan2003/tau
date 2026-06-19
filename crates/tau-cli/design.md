@@ -63,7 +63,7 @@ Harness/UI notices are filtered in the terminal UI, not at the harness emission 
 Status: unconfirmed
 
 The terminal input loop has multiple slash-command owners. CLI-owned commands
-such as `/quit`, `/session`, `/agent`, `/role`, `/model`, `/set`, and `/theme`
+such as `/quit`, `/agent`, `/role`, `/model`, `/set`, and `/theme`
 are handled locally. Dynamic extension actions are parsed against the current
 published action schema and dispatched as `ActionInvoke` events. Harness-owned
 prompt commands, currently `/skill <name> ...` and `/skill:<name> ...`, are
@@ -126,8 +126,8 @@ real Tau config directory. Missing or empty testing config keeps the child
 local-only and must warn. Non-empty `testing_providers` names are exact provider
 profile allowlist entries; there is no "all providers" mode. The helper may copy
 only corresponding real `auth.d/<provider>.json` files into scratch state, must
-not copy provider lock files, general config, sessions, logs, or unrelated
-profiles, and must fail closed on path traversal, symlink, non-regular file, or
+not copy provider lock files, general config, agent state, debug logs, or
+unrelated profiles, and must fail closed on path traversal, symlink, non-regular file, or
 unsafe destination conditions. `provider-builtin` is enabled in the child only
 when the current allowlist is non-empty.
 

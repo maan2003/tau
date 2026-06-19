@@ -30,28 +30,12 @@ fn agent_completer_offers_subcommands_first() {
         entries,
         vec![
             ("new", "Clear the selected agent"),
-            ("switch", "Show a known agent transcript"),
+            ("load", "Load an existing durable agent by id"),
+            ("switch", "Route prompts to an active agent"),
             ("suspend", "Hide an active agent transcript"),
             ("resume", "Show a suspended agent transcript"),
             ("name", "Set an agent display name"),
         ]
-    );
-}
-
-#[test]
-fn session_completer_offers_new_subcommand() {
-    // `/session new` is the session-level fresh-start command; `/new` is
-    // reserved as an alias for `/agent new`.
-    let completer = build_session_arg_completer();
-
-    let entries: Vec<_> = completer(&[""])
-        .into_iter()
-        .map(|item| (item.value, item.description))
-        .collect();
-
-    assert_eq!(
-        entries,
-        vec![("new".to_owned(), "Start a fresh chat session".to_owned())]
     );
 }
 

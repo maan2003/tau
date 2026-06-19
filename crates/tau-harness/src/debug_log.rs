@@ -45,7 +45,7 @@ impl DebugEventLog {
             } => {
                 let name = match message.as_ref() {
                     tau_proto::HarnessInputMessage::Emit(emit) => {
-                        if emit.event.defaults_to_transient() {
+                        if !crate::harness::semantic_event_router::should_persist(&emit.event) {
                             return;
                         }
                         emit.event.name().to_string()
@@ -83,7 +83,7 @@ impl DebugEventLog {
     /// Logs an event the harness committed (broadcast onto the bus).
     /// Captures the *enriched* payload — for `ProviderResponseFinished`
     /// that's the harness-built `token_usage` with model and running
-    /// session stats, which the inbound `from_connection` line could
+    /// agent stats, which the inbound `from_connection` line could
     /// not carry. Together with `log_harness_event`, an offline reader
     /// can correlate the raw agent emit against the enriched committed
     /// copy.

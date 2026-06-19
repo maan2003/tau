@@ -3,13 +3,11 @@ use super::*;
 #[test]
 fn daemon_command_sets_and_clears_harness_config_override_env() {
     let override_ = tau_config::settings::HarnessConfigCliOverride {
-        key: "session_retention_days".to_owned(),
+        key: "debug_retention_days".to_owned(),
         raw_value: "3".to_owned(),
     };
     let with_override = build_daemon_command(DaemonCommandSpec {
         tau_binary: Path::new("tau"),
-        session_id: "session-1",
-        session_status: SessionLaunchStatus::New,
         stdout: Stdio::null(),
         stderr: Stdio::null(),
         stdin: Stdio::null(),
@@ -26,8 +24,6 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
 
     let without_override = build_daemon_command(DaemonCommandSpec {
         tau_binary: Path::new("tau"),
-        session_id: "session-1",
-        session_status: SessionLaunchStatus::New,
         stdout: Stdio::null(),
         stderr: Stdio::null(),
         stdin: Stdio::null(),
@@ -47,8 +43,6 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
 fn daemon_command_clears_socket_activation_env() {
     let command = build_daemon_command(DaemonCommandSpec {
         tau_binary: Path::new("tau"),
-        session_id: "session-1",
-        session_status: SessionLaunchStatus::New,
         stdout: Stdio::null(),
         stderr: Stdio::null(),
         stdin: Stdio::null(),
@@ -79,8 +73,6 @@ fn daemon_command_clears_socket_activation_env() {
 fn daemon_command_uses_initial_ui_stdio() {
     let command = build_daemon_command(DaemonCommandSpec {
         tau_binary: Path::new("tau"),
-        session_id: "session-1",
-        session_status: SessionLaunchStatus::New,
         stdout: Stdio::null(),
         stderr: Stdio::null(),
         stdin: Stdio::null(),

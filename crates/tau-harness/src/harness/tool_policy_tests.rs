@@ -58,15 +58,8 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
         config_dir: Some(temp_dir.path().join("config")),
         state_dir: Some(state_dir.join("runtime")),
     };
-    let mut harness = Harness::new_with_provider(
-        &state_dir,
-        dirs,
-        echo_runner,
-        Vec::new(),
-        "test-session",
-        tau_proto::SessionStartReason::Initial,
-    )
-    .expect("harness");
+    let mut harness =
+        Harness::new_with_provider(&state_dir, dirs, echo_runner, Vec::new()).expect("harness");
     harness.available_roles = HashMap::from([(ROLE.to_owned(), role)]);
     let model = ModelId::new(ProviderName::new("provider"), ModelName::new("model"));
     harness.provider_model_info = HashMap::from([(model.clone(), model_info(&model, model_tags))]);

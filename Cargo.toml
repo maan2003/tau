@@ -2,6 +2,7 @@
 members = [
   "crates/tau",
   "crates/tau-actions",
+  "crates/tau-agent-inspect",
   "crates/tau-blocking-notify-channel",
   "crates/tau-cli",
   "crates/tau-cli-picker",
@@ -26,7 +27,6 @@ members = [
   "crates/tau-provider",
   "crates/tau-provider-chat-completions",
   "crates/tau-provider-chatgpt",
-  "crates/tau-session-inspect",
   "crates/tau-skills",
   "crates/tau-socket",
   "crates/tau-supervisor",
@@ -61,6 +61,7 @@ unwrap_used = "deny"
 [workspace.dependencies]
 # Internal crates
 tau-actions = { path = "crates/tau-actions" }
+tau-agent-inspect = { path = "crates/tau-agent-inspect" }
 tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel" }
 tau-cli = { path = "crates/tau-cli" }
 tau-cli-picker = { path = "crates/tau-cli-picker" }
@@ -84,7 +85,6 @@ tau-proto = { path = "crates/tau-proto" }
 tau-provider = { path = "crates/tau-provider" }
 tau-provider-chat-completions = { path = "crates/tau-provider-chat-completions" }
 tau-provider-chatgpt = { path = "crates/tau-provider-chatgpt" }
-tau-session-inspect = { path = "crates/tau-session-inspect" }
 tau-skills = { path = "crates/tau-skills" }
 tau-socket = { path = "crates/tau-socket" }
 tau-supervisor = { path = "crates/tau-supervisor" }

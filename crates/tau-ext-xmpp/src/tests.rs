@@ -56,17 +56,12 @@ impl XmppBridge for FakeBridge {
         Ok(())
     }
 
-    fn register_agent(
-        &self,
-        cfg: &RuntimeConfig,
-        session_id: &SessionId,
-        agent_id: &AgentId,
-    ) -> Result<String, String> {
+    fn register_agent(&self, cfg: &RuntimeConfig, agent_id: &AgentId) -> Result<String, String> {
         let address = match cfg.routing_mode {
             RoutingMode::Muc => format!(
                 "{}-{}@conference.example.org",
                 cfg.muc.room_prefix,
-                muc_room_label(session_id, agent_id)
+                muc_room_label(agent_id)
             ),
             RoutingMode::DirectResource => "tau@example.org/tau-test".to_owned(),
         };
@@ -117,9 +112,9 @@ fn agent_id(text: &str) -> AgentId {
     AgentId::parse(text).expect("agent id")
 }
 
-fn assert_room_shape(room: &BareJid, session_slug: &str, agent_slug: &str) {
+fn assert_room_shape(room: &BareJid, agent_slug: &str) {
     let room = room.to_string();
-    let expected_prefix = format!("tau-{session_slug}-{agent_slug}-");
+    let expected_prefix = format!("tau-{agent_slug}-");
     assert!(room.starts_with(&expected_prefix), "{room}");
     assert!(room.ends_with("@conference.example.org"), "{room}");
     let localpart = room
@@ -225,7 +220,6 @@ fn extension() -> (
     bridge.set_ready(true);
     let ext = Extension::new(bridge.clone(), tx);
     ext.apply_config(cfg());
-    ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
     (ext, rx, bridge)
 }
 
@@ -376,7 +370,6 @@ fn xmpp_register_waits_for_online_readiness() {
     let bridge = FakeBridge::new();
     let ext = Extension::new(bridge.clone(), tx);
     ext.apply_config(cfg());
-    ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
 
     std::thread::scope(|scope| {
         let handle = scope.spawn(|| {
@@ -410,7 +403,6 @@ fn xmpp_register_readiness_timeout_is_clear_and_does_not_register() {
     );
     let ext = Extension::new(bridge.clone(), tx);
     ext.apply_config(cfg());
-    ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
 
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _progress = rx.recv().expect("progress");
@@ -430,32 +422,10 @@ fn xmpp_register_readiness_timeout_is_clear_and_does_not_register() {
     assert!(!state.conversations.contains_key(&agent_id("agent-1")));
 }
 
-/// MUC room identity needs the current Tau session id; registration should fail
-/// before starting XMPP if the extension has not observed `session.started`.
+/// In MUC mode, two agents can register at the same time and receive separate
+/// stable room addresses keyed by durable agent id.
 #[test]
-fn xmpp_register_requires_active_session_before_starting_bridge() {
-    let (tx, rx) = mpsc::channel();
-    let bridge = FakeBridge::new();
-    let ext = Extension::new(bridge.clone(), tx);
-    ext.apply_config(cfg());
-
-    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
-    let _progress = rx.recv().expect("progress");
-    let msg = rx.recv().expect("result");
-    let HarnessInputMessage::Emit(emit) = msg else {
-        panic!("emit")
-    };
-    let Event::ToolError(error) = *emit.event else {
-        panic!("tool error")
-    };
-    assert!(error.message.contains("active Tau session"));
-    assert_eq!(*bridge.started.lock().expect("lock"), 0);
-}
-
-/// In MUC mode, two agents in the same Tau session can register at the same
-/// time and receive separate stable room addresses keyed by session plus agent.
-#[test]
-fn xmpp_register_allows_two_muc_agents_in_same_session() {
+fn xmpp_register_allows_two_muc_agents() {
     let (ext, rx, bridge) = extension();
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _ = rx.recv();
@@ -468,17 +438,17 @@ fn xmpp_register_allows_two_muc_agents_in_same_session() {
     let agent_1 = registered.get(&agent_id("agent-1")).expect("agent 1");
     let agent_2 = registered.get(&agent_id("agent-2")).expect("agent 2");
     assert_ne!(agent_1, agent_2);
-    assert!(agent_1.starts_with("tau-session-1-agent-1-"), "{agent_1}");
+    assert!(agent_1.starts_with("tau-agent-1-"), "{agent_1}");
     assert!(agent_1.ends_with("@conference.example.org"));
     assert_eq!(
         agent_1.len(),
-        "tau-session-1-agent-1-".len() + 8 + "@conference.example.org".len()
+        "tau-agent-1-".len() + 8 + "@conference.example.org".len()
     );
-    assert!(agent_2.starts_with("tau-session-1-agent-2-"));
+    assert!(agent_2.starts_with("tau-agent-2-"));
     assert!(agent_2.ends_with("@conference.example.org"));
     assert_eq!(
         agent_2.len(),
-        "tau-session-1-agent-2-".len() + 8 + "@conference.example.org".len()
+        "tau-agent-2-".len() + 8 + "@conference.example.org".len()
     );
 }
 
@@ -801,20 +771,15 @@ fn muc_message_without_real_jid_is_not_routed() {
     assert!(rx.try_recv().is_err());
 }
 
-/// MUC room identity is deterministic from the Tau session and agent so a
-/// resumed session returns to the same XMPP conversation address without
-/// exposing raw Tau identifiers in the room localpart.
+/// MUC room identity is deterministic from the Tau agent so a reloaded agent
+/// returns to the same XMPP conversation address without exposing raw Tau
+/// identifiers alone in the room localpart.
 #[test]
-fn muc_room_identity_uses_stable_session_and_agent() {
+fn muc_room_identity_uses_stable_agent() {
     let (tx, _rx) = mpsc::channel();
     let worker = WorkerState::new(cfg(), tx);
-    let room = worker
-        .muc_room_for(&"session-1".into(), &agent_id("agent-1"))
-        .expect("room");
-    assert_eq!(
-        room.to_string(),
-        "tau-session-1-agent-1-ygeh7psj@conference.example.org"
-    );
+    let room = worker.muc_room_for(&agent_id("agent-1")).expect("room");
+    assert_room_shape(&room, "agent-1");
 }
 
 /// Full agent ids participate in the MUC room hash so long ids with identical
@@ -827,38 +792,12 @@ fn muc_room_identity_hashes_full_long_agent_ids() {
     let first = agent_id(&format!("{}{}", "a".repeat(48), "b".repeat(16)));
     let second = agent_id(&format!("{}{}", "a".repeat(48), "c".repeat(16)));
 
-    let first_room = worker
-        .muc_room_for(&"session-1".into(), &first)
-        .expect("first room");
-    let second_room = worker
-        .muc_room_for(&"session-1".into(), &second)
-        .expect("second room");
+    let first_room = worker.muc_room_for(&first).expect("first room");
+    let second_room = worker.muc_room_for(&second).expect("second room");
 
     assert_ne!(first_room, second_room);
     for room in [first_room, second_room] {
-        assert_room_shape(&room, "session-1", &"a".repeat(18));
-    }
-}
-
-/// Full session ids participate in the MUC room hash so long ids with identical
-/// display prefixes cannot collapse onto one room across Tau sessions.
-#[test]
-fn muc_room_identity_hashes_full_long_session_ids() {
-    let (tx, _rx) = mpsc::channel();
-    let worker = WorkerState::new(cfg(), tx);
-    let first = format!("{}{}", "s".repeat(48), "b".repeat(16));
-    let second = format!("{}{}", "s".repeat(48), "c".repeat(16));
-
-    let first_room = worker
-        .muc_room_for(&first.into(), &agent_id("agent-1"))
-        .expect("first room");
-    let second_room = worker
-        .muc_room_for(&second.into(), &agent_id("agent-1"))
-        .expect("second room");
-
-    assert_ne!(first_room, second_room);
-    for room in [first_room, second_room] {
-        assert_room_shape(&room, &"s".repeat(16), "agent-1");
+        assert_room_shape(&room, &"a".repeat(18));
     }
 }
 
@@ -870,20 +809,14 @@ fn muc_room_identity_is_stable_across_xmpp_nodeprep_casefolding() {
     let (tx, _rx) = mpsc::channel();
     let worker = WorkerState::new(cfg(), tx);
     let uppercase = worker
-        .muc_room_for(&"session-1".into(), &agent_id("AgentA"))
+        .muc_room_for(&agent_id("AgentA"))
         .expect("uppercase room");
     let lowercase = worker
-        .muc_room_for(&"session-1".into(), &agent_id("agenta"))
+        .muc_room_for(&agent_id("agenta"))
         .expect("lowercase room");
 
-    assert_eq!(
-        uppercase.to_string(),
-        "tau-session-1-agenta-kw7d0j32@conference.example.org"
-    );
-    assert_eq!(
-        lowercase.to_string(),
-        "tau-session-1-agenta-q22ae5bm@conference.example.org"
-    );
+    assert_room_shape(&uppercase, "agenta");
+    assert_room_shape(&lowercase, "agenta");
     assert_ne!(uppercase, lowercase);
 }
 
@@ -895,13 +828,10 @@ fn muc_room_identity_drops_generated_agent_suffix_from_slug() {
     let worker = WorkerState::new(cfg(), tx);
 
     let room = worker
-        .muc_room_for(&"duvp2c".into(), &agent_id("manager-Y3KG"))
+        .muc_room_for(&agent_id("manager-Y3KG"))
         .expect("room");
 
-    assert_eq!(
-        room.to_string(),
-        "tau-duvp2c-manager-m4tptqqs@conference.example.org"
-    );
+    assert_room_shape(&room, "manager");
 }
 
 /// If two generated identities ever collide onto the same normalized room JID,
@@ -910,9 +840,7 @@ fn muc_room_identity_drops_generated_agent_suffix_from_slug() {
 fn muc_room_collision_does_not_overwrite_existing_routing() {
     let (tx, _rx) = mpsc::channel();
     let mut worker = WorkerState::new(cfg(), tx);
-    let room = worker
-        .muc_room_for(&"session-1".into(), &agent_id("agent-1"))
-        .expect("room");
+    let room = worker.muc_room_for(&agent_id("agent-1")).expect("room");
     worker
         .room_to_agent
         .insert(room.clone(), agent_id("agent-2"));
@@ -931,9 +859,7 @@ fn muc_room_collision_does_not_overwrite_existing_routing() {
 fn muc_room_collision_does_not_overwrite_pending_join() {
     let (tx, _rx) = mpsc::channel();
     let mut worker = WorkerState::new(cfg(), tx);
-    let room = worker
-        .muc_room_for(&"session-1".into(), &agent_id("agent-1"))
-        .expect("room");
+    let room = worker.muc_room_for(&agent_id("agent-1")).expect("room");
     worker.pending_muc_joins.insert(
         agent_id("agent-2"),
         MucOccupant::new(room.clone(), "tau-other".to_owned()),
@@ -963,10 +889,7 @@ fn muc_room_identity_is_bounded_and_xmpp_localpart_safe() {
     let worker = WorkerState::new(cfg, tx);
 
     let room = worker
-        .muc_room_for(
-            &"session-with spaces and / punctuation".into(),
-            &agent_id("AgentA"),
-        )
+        .muc_room_for(&agent_id("AgentA"))
         .expect("room")
         .to_string();
     let localpart = room
@@ -974,7 +897,7 @@ fn muc_room_identity_is_bounded_and_xmpp_localpart_safe() {
         .map(|(localpart, _)| localpart)
         .expect("room localpart");
 
-    assert_eq!(localpart.len(), 48 + "-session-with-spa-agenta-".len() + 8);
+    assert_eq!(localpart.len(), 48 + "-agenta-".len() + 8);
     assert!(
         localpart
             .chars()
@@ -1251,7 +1174,7 @@ async fn direct_registration_rejects_second_agent() {
         "unused".to_owned(),
     );
     let err = worker
-        .register_agent("session-1".into(), agent_id("agent-2"), &mut client)
+        .register_agent(agent_id("agent-2"), &mut client)
         .await
         .expect_err("second direct registration rejected");
     assert!(err.contains("only one registered agent"));

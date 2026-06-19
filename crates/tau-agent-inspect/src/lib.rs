@@ -1,15 +1,15 @@
-//! Read-only session/policy inspection for CLI sub-commands and scripts.
+//! Read-only agent/policy inspection for CLI sub-commands and scripts.
 //!
-//! Operates entirely on `tau-core` types and the on-disk session/policy
+//! Operates entirely on `tau-core` types and the on-disk agent/policy
 //! format. Intentionally has no dependency on the harness daemon, so
-//! `tau session show` / `tau policy list` / similar commands don't drag
+//! `tau policy list` / similar commands don't drag
 //! in the agent, extension supervisor, or event-loop graph just to
 //! render an events.jsonl.
 
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
-use tau_core::{AgentEntry, PolicyStore, SessionMembership, SessionStore, SessionStoreError};
+use tau_core::{AgentEntry, PolicyStore, PolicyStoreError};
 use tau_proto::{
     CborValue, ContentPart, ContextItem, EventSelector, ToolCallItem, ToolResultStatus,
 };
@@ -18,14 +18,14 @@ use tau_proto::{
 #[derive(Debug)]
 pub enum InspectError {
     Io(io::Error),
-    SessionStore(SessionStoreError),
+    PolicyStore(PolicyStoreError),
 }
 
 impl fmt::Display for InspectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(source) => write!(f, "I/O error: {source}"),
-            Self::SessionStore(source) => write!(f, "session store error: {source}"),
+            Self::PolicyStore(source) => write!(f, "policy store error: {source}"),
         }
     }
 }
@@ -34,7 +34,7 @@ impl std::error::Error for InspectError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(source) => Some(source),
-            Self::SessionStore(source) => Some(source),
+            Self::PolicyStore(source) => Some(source),
         }
     }
 }
@@ -45,9 +45,9 @@ impl From<io::Error> for InspectError {
     }
 }
 
-impl From<SessionStoreError> for InspectError {
-    fn from(source: SessionStoreError) -> Self {
-        Self::SessionStore(source)
+impl From<PolicyStoreError> for InspectError {
+    fn from(source: PolicyStoreError) -> Self {
+        Self::PolicyStore(source)
     }
 }
 
@@ -59,58 +59,8 @@ pub fn default_state_dir() -> PathBuf {
     tau_config::settings::state_dir().unwrap_or_else(|| PathBuf::from(".tau").join("state"))
 }
 
-/// Returns the default per-session storage root: `default_state_dir()` joined
-/// with `sessions/`. Session subdirectories live one level deeper to keep the
-/// state-dir top level reserved for tau-wide scalar files (`policy.cbor`,
-/// `cli.json`, …).
-#[must_use]
-pub fn default_sessions_dir() -> PathBuf {
-    tau_config::settings::sessions_dir_of(&default_state_dir())
-}
-
-#[must_use]
-pub fn default_session_id() -> &'static str {
-    "default"
-}
-
-pub fn open_session_store(path: impl AsRef<Path>) -> Result<SessionStore, InspectError> {
-    SessionStore::open(path.as_ref()).map_err(InspectError::from)
-}
-
 pub fn open_policy_store(path: impl AsRef<Path>) -> Result<PolicyStore, InspectError> {
     PolicyStore::open(path.as_ref()).map_err(InspectError::from)
-}
-
-pub fn session_lines(
-    path: impl AsRef<Path>,
-    session_id: &str,
-) -> Result<Vec<String>, InspectError> {
-    let store = open_session_store(path)?;
-    let Some(tree) = store.session(session_id) else {
-        return Ok(vec![format!("session {session_id} not found")]);
-    };
-    Ok(tree
-        .loaded_agents()
-        .into_iter()
-        .enumerate()
-        .map(|(i, agent_id)| format!("{}: loaded agent {}", i + 1, agent_id))
-        .collect())
-}
-
-pub fn session_list_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError> {
-    let store = open_session_store(path)?;
-    let mut sessions = store.sessions();
-    sessions.sort_by(|a, b| a.session_id().cmp(b.session_id()));
-    if sessions.is_empty() {
-        return Ok(vec!["no sessions".to_owned()]);
-    }
-    Ok(sessions
-        .into_iter()
-        .map(|s| {
-            let loaded = s.loaded_agents();
-            format!("{} ({} loaded agent(s))", s.session_id(), loaded.len())
-        })
-        .collect())
 }
 
 pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError> {
@@ -140,10 +90,10 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError>
         .collect())
 }
 
-/// Pretty-print one session entry for line-oriented inspection output
-/// (`tau session show`, `/tree`, debug log).
+/// Pretty-print one agent entry for line-oriented inspection output (`/tree`,
+/// debug log).
 #[must_use]
-pub fn format_session_entry(entry: &AgentEntry) -> String {
+pub fn format_agent_entry(entry: &AgentEntry) -> String {
     match entry {
         AgentEntry::UserInput { items } => {
             format!("user: {}", first_message_text(items).unwrap_or_default())
@@ -191,10 +141,6 @@ fn format_tool_result_item(item: &tau_proto::ToolResultItem) -> String {
 }
 
 #[must_use]
-pub fn latest_agent_preview(_session: &SessionMembership) -> Option<String> {
-    None
-}
-
 fn assistant_output_preview(items: &[ContextItem]) -> Option<String> {
     let parts = items
         .iter()

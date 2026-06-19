@@ -103,7 +103,7 @@ fn tool_call(call_id: &str) -> tau_proto::ContextItem {
 }
 
 /// Ctrl-D must stay guarded across the assistant/tool boundary: a
-/// provider response that requests tools means the session is still
+/// provider response that requests tools means agent work is still
 /// busy even though the provider turn itself has finished.
 #[test]
 fn agent_activity_stays_busy_until_requested_tools_finish() {

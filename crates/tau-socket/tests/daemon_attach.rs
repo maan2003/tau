@@ -7,39 +7,34 @@ use tau_proto::{
 use tau_socket::{SocketPeer, SocketReceive};
 use tau_test_support::TestRuntime;
 
-/// Ensures later-attached socket clients can drive daemon sessions and persist
+/// Ensures later-attached socket clients can drive the daemon and persist
 /// the resulting conversation state.
 #[test]
 fn socket_transport_supports_later_attached_end_to_end_clients() {
     let runtime = TestRuntime::new().expect("runtime should be created");
-    let daemon = runtime.spawn_daemon("session-1", Some(2));
+    let daemon = runtime.spawn_daemon(Some(2));
     runtime
         .wait_until_ready(Duration::from_secs(2))
         .expect("daemon socket should appear");
 
     let first = runtime
-        .send_daemon_message("session-1", "hello")
+        .send_daemon_message("hello")
         .expect("first client message should succeed");
     let second = runtime
-        .send_daemon_message("session-1", "read Cargo.toml")
+        .send_daemon_message("read Cargo.toml")
         .expect("second client message should succeed");
 
     assert!(!first.is_empty(), "response should not be empty");
     assert!(!second.is_empty(), "read response should not be empty");
     daemon.join().expect("daemon should exit cleanly");
 
-    let store = runtime
-        .open_session_store()
-        .expect("session store should reopen");
-    let session = store.session("session-1").expect("session should exist");
     let agent_store = runtime
         .open_agent_store()
         .expect("agent store should reopen");
     // Optional AGENTS.md preambles + 2 × (user, tool.req, tool.res, agent).
-    let entry_count: usize = session
-        .loaded_agents()
+    let entry_count: usize = agent_store
+        .agents()
         .into_iter()
-        .filter_map(|agent_id| agent_store.agent(agent_id.as_str()))
         .map(|agent| agent.current_branch().len())
         .sum();
     assert!(
@@ -53,7 +48,7 @@ fn socket_transport_supports_later_attached_end_to_end_clients() {
 #[test]
 fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
     let runtime = TestRuntime::new().expect("runtime should be created");
-    let daemon = runtime.spawn_daemon("session-1", Some(2));
+    let daemon = runtime.spawn_daemon(Some(2));
     runtime
         .wait_until_ready(Duration::from_secs(2))
         .expect("daemon socket should appear");
@@ -91,7 +86,7 @@ fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
     assert!(reason.contains("subscription denied"));
 
     let response = runtime
-        .send_daemon_message("session-1", "hello")
+        .send_daemon_message("hello")
         .expect("daemon should still serve valid clients");
     assert!(!response.is_empty(), "response should not be empty");
     daemon.join().expect("daemon should exit cleanly");

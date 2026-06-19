@@ -535,9 +535,13 @@ impl CliState {
 /// test or fallback.
 #[derive(Clone, Debug)]
 pub struct HarnessSettings {
-    /// Number of days to keep inactive session state directories.
-    /// Set to `0` to disable session cleanup.
-    pub session_retention_days: u64,
+    /// Number of days to keep inactive agent state directories.
+    /// Set to `0` to disable agent cleanup.
+    pub agent_retention_days: u64,
+
+    /// Number of days to keep harness run debug directories.
+    /// Set to `0` to disable debug directory cleanup.
+    pub debug_retention_days: u64,
 
     /// Extension table, keyed by name. Built-in entries (`provider-builtin`,
     /// `core-shell`) come pre-baked at the harness level; anything the
@@ -599,7 +603,8 @@ pub struct HarnessSettings {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HarnessSettingsWire {
-    session_retention_days: u64,
+    agent_retention_days: u64,
+    debug_retention_days: u64,
     extensions: HashMap<String, ExtensionEntry>,
     #[serde(default, alias = "defaultRole")]
     default_role: Option<String>,
@@ -632,7 +637,8 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             validate_extension_name(extension_name).map_err(D::Error::custom)?;
         }
         let mut settings = Self {
-            session_retention_days: wire.session_retention_days,
+            agent_retention_days: wire.agent_retention_days,
+            debug_retention_days: wire.debug_retention_days,
             extensions: wire.extensions,
             default_role: wire.default_role,
             roles: HashMap::new(),
@@ -1161,17 +1167,31 @@ impl HarnessSettings {
         }
     }
 
-    /// Returns the configured session retention duration.
+    /// Returns the configured agent retention duration.
     ///
     /// A value of `0` disables time-based cleanup and returns `None`; otherwise
     /// the configured day count is converted to a saturating [`Duration`].
     #[must_use]
-    pub fn session_retention(&self) -> Option<Duration> {
-        if self.session_retention_days == 0 {
+    pub fn agent_retention(&self) -> Option<Duration> {
+        if self.agent_retention_days == 0 {
             return None;
         }
         Some(Duration::from_secs(
-            self.session_retention_days.saturating_mul(24 * 60 * 60),
+            self.agent_retention_days.saturating_mul(24 * 60 * 60),
+        ))
+    }
+
+    /// Returns the configured debug directory retention duration.
+    ///
+    /// A value of `0` disables time-based cleanup and returns `None`; otherwise
+    /// the configured day count is converted to a saturating [`Duration`].
+    #[must_use]
+    pub fn debug_retention(&self) -> Option<Duration> {
+        if self.debug_retention_days == 0 {
+            return None;
+        }
+        Some(Duration::from_secs(
+            self.debug_retention_days.saturating_mul(24 * 60 * 60),
         ))
     }
 }
@@ -1541,14 +1561,14 @@ pub fn state_dir() -> Option<PathBuf> {
         .map(|d| d.join("tau"))
 }
 
-/// Returns the per-session storage root inside `state_dir`. Each
-/// session lives in its own directory at
-/// `<state_dir>/sessions/<session_id>/`; grouping them under a
+/// Returns the per-agent storage root inside `state_dir`. Each
+/// agent lives in its own directory at
+/// `<state_dir>/agents/<agent_id>/`; grouping them under a
 /// dedicated subdirectory keeps the state dir's top level reserved
 /// for tau-wide scalar state (`policy.cbor`, `cli.json`, …).
 #[must_use]
-pub fn sessions_dir_of(state_dir: &Path) -> PathBuf {
-    state_dir.join("sessions")
+pub fn agents_dir_of(state_dir: &Path) -> PathBuf {
+    state_dir.join("agents")
 }
 
 /// Returns the persistent state directory reserved for one extension.
@@ -1616,11 +1636,11 @@ impl fmt::Display for InvalidExtensionName {
 
 impl std::error::Error for InvalidExtensionName {}
 
-/// Returns the default tau per-session storage root
-/// (`~/.local/state/tau/sessions`).
+/// Returns the default tau per-agent storage root
+/// (`~/.local/state/tau/agents`).
 #[must_use]
-pub fn sessions_dir() -> Option<PathBuf> {
-    state_dir().map(|d| sessions_dir_of(&d))
+pub fn agents_dir() -> Option<PathBuf> {
+    state_dir().map(|d| agents_dir_of(&d))
 }
 
 /// Overridable directory layout for tau. Use the defaults (`Self::default()`)

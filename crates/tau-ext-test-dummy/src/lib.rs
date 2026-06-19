@@ -168,7 +168,6 @@ where
                             level: NoticeLevel::Info,
                             always_show: false,
                         })),
-                        transient: true,
                     }))?;
                 }
                 let action = match mutated {

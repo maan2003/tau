@@ -77,7 +77,6 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Prefix("ui.".to_owned()),
         EventSelector::Prefix("action.".to_owned()),
         EventSelector::Prefix("agent.".to_owned()),
-        EventSelector::Prefix("session.".to_owned()),
         EventSelector::Prefix("provider.".to_owned()),
         EventSelector::Prefix("tool.".to_owned()),
         EventSelector::Prefix("extension.".to_owned()),

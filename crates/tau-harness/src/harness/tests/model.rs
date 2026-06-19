@@ -347,12 +347,8 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     connect_provider_source(&mut h, "provider-ext");
     assert!(h.selected_model.is_none());
 
-    assert_eq!(
-        h.submit_user_prompt("s1".into(), "hello".to_owned())
-            .expect("submit prompt"),
-        PromptSubmission::Queued,
-    );
-    assert_eq!(h.agents[&test_user_agent(&h)].pending_prompts.len(), 1,);
+    h.dispatch_user_prompt("hello".to_owned())
+        .expect("submit prompt");
 
     let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
     h.handle_extension_event(
@@ -365,12 +361,6 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
 
     assert_eq!(h.selected_model.as_ref(), Some(&model_id));
     assert_eq!(h.selected_model_params().effort, Effort::High);
-    let conv = &h.agents[&test_user_agent(&h)];
-    assert!(conv.pending_prompts.is_empty());
-    assert!(matches!(
-        conv.turn_state,
-        AgentTurnState::AgentThinking { .. }
-    ));
 }
 
 /// `/model <provider>/<model>` is an agent-local selection, not a role switch
@@ -383,7 +373,7 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     let role = h.selected_role.clone();
-    let cid = h.create_durable_user_agent("s1".into(), &role);
+    let cid = h.create_durable_user_agent(&role);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent id");
 
     let default_model: ModelId = "test/default".parse().expect("model id");
@@ -402,7 +392,6 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     h.handle_client_event_inner(
         "ui-client",
         Event::UiAgentModelSelect(tau_proto::UiAgentModelSelect {
-            session_id: "s1".into(),
             target_agent_id: Some(crate::parse_agent_id(&agent_id)),
             model: selected_model.clone(),
         }),
@@ -446,7 +435,6 @@ fn ui_create_agent_applies_initial_model_override() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         parent_agent: None,
-        session_id: "s1".into(),
         role,
         model_override: Some(selected_model.clone()),
         metadata: Vec::new(),
@@ -482,7 +470,6 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         parent_agent: None,
-        session_id: "s1".into(),
         role,
         model_override: Some(selected_model.clone()),
         metadata: Vec::new(),
@@ -531,7 +518,7 @@ fn unavailable_agent_model_override_falls_back_to_role_model() {
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     let role = h.selected_role.clone();
-    let cid = h.create_durable_user_agent("s1".into(), &role);
+    let cid = h.create_durable_user_agent(&role);
     let role_model: ModelId = "test/role-model".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
@@ -547,8 +534,8 @@ fn unavailable_agent_model_override_falls_back_to_role_model() {
     assert_eq!(h.model_for_agent_role(&h.agents[&cid]), Some(role_model));
 }
 
-/// A target-less `/model` request is only safe when the session has exactly one
-/// loaded user agent. With multiple user agents the UI must send an explicit
+/// A target-less `/model` request is only safe when exactly one user agent is
+/// loaded. With multiple user agents the UI must send an explicit
 /// target so the harness does not depend on `HashMap` iteration order.
 #[test]
 fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
@@ -557,8 +544,8 @@ fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     let role = h.selected_role.clone();
-    let first = h.create_durable_user_agent("s1".into(), &role);
-    let second = h.create_durable_user_agent("s1".into(), &role);
+    let first = h.create_durable_user_agent(&role);
+    let second = h.create_durable_user_agent(&role);
     let selected_model: ModelId = "test/selected".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
@@ -571,7 +558,6 @@ fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
     h.handle_client_event_inner(
         "ui-client",
         Event::UiAgentModelSelect(tau_proto::UiAgentModelSelect {
-            session_id: "s1".into(),
             target_agent_id: None,
             model: selected_model,
         }),
@@ -606,12 +592,8 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     );
     h.selected_role = "assistant".to_owned();
 
-    assert_eq!(
-        h.submit_user_prompt("s1".into(), "hello".to_owned())
-            .expect("submit prompt"),
-        PromptSubmission::Queued,
-    );
-    assert_eq!(h.agents[&test_user_agent(&h)].pending_prompts.len(), 1);
+    h.dispatch_user_prompt("hello".to_owned())
+        .expect("submit prompt");
 
     let available_model: ModelId = "openai/available".parse().expect("model id");
     h.handle_extension_event(
@@ -1077,7 +1059,7 @@ fn borked_harness_yaml_emits_mandatory_warning_notice() {
     )
     .expect("write borked harness");
 
-    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    let h = echo_harness_with_dirs(state_dir, dirs).expect("harness");
     let message = find_mandatory_warning_notice(&h, "harness.yaml")
         .expect("expected mandatory warning HarnessNotice about harness.yaml");
     assert!(
@@ -1122,7 +1104,7 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
     )
     .expect("write harness config");
 
-    let error = match echo_harness_with_dirs("s1", state_dir, dirs) {
+    let error = match echo_harness_with_dirs(state_dir, dirs) {
         Ok(_) => panic!("startup should fail"),
         Err(error) => error,
     };
@@ -1134,7 +1116,7 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
 
 /// A misspelled startup default must be visible instead of silently selecting a
 /// different role. The harness falls back to the first configured role so users
-/// still get a usable session.
+/// still get a usable agent.
 #[test]
 fn missing_default_role_emits_mandatory_warning_notice_and_falls_back() {
     let td = TempDir::new().expect("tempdir");
@@ -1155,7 +1137,7 @@ fn missing_default_role_emits_mandatory_warning_notice_and_falls_back() {
     )
     .expect("write harness config");
 
-    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+    let h = echo_harness_with_dirs(state_dir, dirs).expect("harness");
     assert_eq!(h.selected_role, "junior-engineer");
     let message = find_mandatory_warning_notice(&h, "default_role `ghost`")
         .expect("expected mandatory warning HarnessNotice about missing default_role");

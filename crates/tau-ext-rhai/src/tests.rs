@@ -48,6 +48,7 @@ fn configure_with_script(path: &Path) -> HarnessOutputMessage {
             CborValue::Text(path.display().to_string()),
         )]),
         state_dir: None,
+        debug_dir: None,
         secrets: BTreeMap::new(),
     })
 }
@@ -57,6 +58,7 @@ fn empty_configure() -> HarnessOutputMessage {
         instance_name: None,
         config: CborValue::Map(Vec::new()),
         state_dir: None,
+        debug_dir: None,
         secrets: BTreeMap::new(),
     })
 }
@@ -254,6 +256,7 @@ fn start_runs_after_ready_with_host_functions() {
             ),
         ]),
         state_dir: None,
+        debug_dir: None,
         secrets: BTreeMap::new(),
     });
 
@@ -486,12 +489,11 @@ fn intercept_callback_can_drop_event() {
                     }],
                 };
             }
-            fn on_intercept(event, transient) { return "drop"; }
+            fn on_intercept(event) { return "drop"; }
         "#,
     );
     let req = HarnessOutputMessage::InterceptRequest(InterceptRequest {
         event: Box::new(prompt_event("hello")),
-        transient: false,
     });
 
     let frames = run_frames(&[configure_with_script(&script), req]);
@@ -517,7 +519,7 @@ fn intercept_callback_can_return_replacement_event() {
                     }],
                 };
             }
-            fn on_intercept(event, transient) {
+            fn on_intercept(event) {
                 event.payload.text = "changed";
                 return #{ kind: "pass", event: event };
             }
@@ -525,7 +527,6 @@ fn intercept_callback_can_return_replacement_event() {
     );
     let req = HarnessOutputMessage::InterceptRequest(InterceptRequest {
         event: Box::new(prompt_event("hello")),
-        transient: false,
     });
 
     let frames = run_frames(&[configure_with_script(&script), req]);

@@ -31,7 +31,7 @@ fn assistant_preview_represents_multiple_messages_and_tool_calls_in_order() {
         Some("first tool.call read src/main.rs second")
     );
     assert_eq!(
-        format_session_entry(&AgentEntry::AssistantResponse {
+        format_agent_entry(&AgentEntry::AssistantResponse {
             provider_response_id: None,
             backend: None,
             output_items,
@@ -63,7 +63,7 @@ fn tool_results_preview_includes_every_result_in_round() {
     };
 
     assert_eq!(
-        format_session_entry(&entry),
+        format_agent_entry(&entry),
         "tool.result call-1 -> ok; tool.error call-2 -> failed"
     );
 }

@@ -1,5 +1,5 @@
 //! Snapshot records for skills and AGENTS.md files announced by extensions
-//! during session init.
+//! during agent initialization.
 
 use std::borrow::Cow;
 use std::path::PathBuf;

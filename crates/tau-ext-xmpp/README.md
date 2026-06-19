@@ -107,16 +107,16 @@ still requires an existing registered conversation after that wait.
 
 ## Routing modes
 
-- `muc` (recommended): creates/joins one room per Tau session id and agent id.
+- `muc` (recommended): creates/joins one room per Tau agent id.
   This gives ordinary XMPP clients a separate conversation per registered agent,
-  while resumed Tau sessions return to the same room address. The room localpart
-  is a short readable label like `tau-duvp2c-manager-m4tptqqs`:
-  `<room_prefix>-<session-slug>-<agent-slug>-<8-char-disambiguator>`. Slugs are
-  normalized lowercase hints capped to short lengths; generated-looking agent
+  while reloaded Tau agents return to the same room address. The room localpart
+  is a short readable label like `tau-manager-m4tptqqs`:
+  `<room_prefix>-<agent-slug>-<8-char-disambiguator>`. The slug is a normalized
+  lowercase hint capped to a short length; generated-looking agent
   suffixes such as `-Y3KG` are omitted from the visible slug. The disambiguator
-  is compact base32 over a domain-separated BLAKE3 label of the full Tau session
-  id plus full agent id, so distinct sessions/agents remain collision-resistant
-  after XMPP JID normalization without exposing long raw ids. Tau sends a formal
+  is compact base32 over a domain-separated BLAKE3 label of the full Tau agent
+  id, so distinct agents remain collision-resistant after XMPP JID normalization
+  without exposing long raw ids. Tau sends a formal
   XEP-0045 mediated invite to `default_recipient` plus a direct fallback notice
   with the room JID, and enforces `allowed_jids` from current real-JID presence
   when available. Registration waits for the exact post-join `room/nick`
@@ -125,7 +125,7 @@ still requires an existing registered conversation after that wait.
   returned from `xmpp_register` instead of silently claiming a usable room.
   Invite and fallback notice delivery are best-effort after the room is joined
   and unlocked; Tau still tracks and leaves the room on registration rollback,
-  unregister, or shutdown. Changing the room-name derivation means existing rooms
+  unregister, or agent unload. Changing the room-name derivation means existing rooms
   created by older Tau builds are not reused; users may leave or delete old
   `tau-s...-a...` rooms manually.
 - `direct_resource`: announces the current bound full JID to `default_recipient`
@@ -137,8 +137,8 @@ still requires an existing registered conversation after that wait.
 
 Tau requests zero MUC history on join and drops delayed/history message stanzas
 if they are still delivered, so initial room backlog is not converted into
-prompts. Tau sends unavailable presence when unregistering an agent or shutting
-down a session so the XMPP account leaves no-longer-registered MUC rooms.
+prompts. Tau sends unavailable presence when unregistering or unloading an agent
+so the XMPP account leaves no-longer-registered MUC rooms.
 
 ## Troubleshooting Conversations/Android MUC replies
 

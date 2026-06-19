@@ -30,8 +30,6 @@ pub enum EventCategory {
     Ui,
     /// Shell command lifecycle events.
     Shell,
-    /// Session lifecycle and membership events.
-    Session,
     /// Terminal-output side effects directed at the UI: escape
     /// sequences the UI should write straight through to its
     /// terminal (notifications, OSC user-vars, etc.).
@@ -54,7 +52,6 @@ impl EventCategory {
             Self::Harness => "harness",
             Self::Ui => "ui",
             Self::Shell => "shell",
-            Self::Session => "session",
             Self::Term => "term",
             Self::Other(s) => s.as_str(),
         }
@@ -73,7 +70,6 @@ impl EventCategory {
             "harness" => Self::Harness,
             "ui" => Self::Ui,
             "shell" => Self::Shell,
-            "session" => Self::Session,
             "term" => Self::Term,
             other => Self::Other(other.to_owned()),
         }
@@ -273,8 +269,8 @@ impl EventName {
         Self::from_static(EventCategory::Provider, "cache_miss_diagnostic");
 
     pub const HARNESS_NOTICE: Self = Self::from_static(EventCategory::Harness, "notice");
-    pub const HARNESS_SESSION_DIR: Self = Self::from_static(EventCategory::Harness, "session_dir");
     pub const HARNESS_UI_DIR: Self = Self::from_static(EventCategory::Harness, "ui_dir");
+    pub const HARNESS_STARTED: Self = Self::from_static(EventCategory::Harness, "started");
     pub const HARNESS_MODELS_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "models_available");
     pub const HARNESS_ROLES_AVAILABLE: Self =
@@ -299,7 +295,6 @@ impl EventName {
     pub const UI_ROLE_UPDATE: Self = Self::from_static(EventCategory::Ui, "role_update");
     pub const UI_DETACH_REQUEST: Self = Self::from_static(EventCategory::Ui, "detach_request");
     pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
-    pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
     pub const UI_CREATE_AGENT: Self = Self::from_static(EventCategory::Ui, "create_agent");
     pub const UI_TREE_REQUEST: Self = Self::from_static(EventCategory::Ui, "tree_request");
     pub const UI_NAVIGATE_TREE: Self = Self::from_static(EventCategory::Ui, "navigate_tree");
@@ -311,6 +306,11 @@ impl EventName {
         Self::from_static(EventCategory::Ui, "recall_queued_prompt");
     pub const UI_SET_AGENT_DISPLAY_NAME: Self =
         Self::from_static(EventCategory::Ui, "set_agent_display_name");
+
+    pub const AGENT_LOAD: Self = Self::from_static(EventCategory::Agent, "load");
+    pub const AGENT_LOADING: Self = Self::from_static(EventCategory::Agent, "loading");
+    pub const AGENT_LOADED: Self = Self::from_static(EventCategory::Agent, "loaded");
+    pub const AGENT_UNLOADED: Self = Self::from_static(EventCategory::Agent, "unloaded");
 
     pub const TERM_OSC1337_SET_USER_VAR: Self =
         Self::from_static(EventCategory::Term, "osc1337_set_user_var");
@@ -336,12 +336,6 @@ impl EventName {
     pub const AGENT_METADATA_SET: Self = Self::from_static(EventCategory::Agent, "metadata_set");
     pub const AGENT_METADATA_UNSET: Self =
         Self::from_static(EventCategory::Agent, "metadata_unset");
-    pub const SESSION_STARTED: Self = Self::from_static(EventCategory::Session, "started");
-    pub const SESSION_SHUTDOWN: Self = Self::from_static(EventCategory::Session, "shutdown");
-    pub const SESSION_AGENT_LOADED: Self =
-        Self::from_static(EventCategory::Session, "agent_loaded");
-    pub const SESSION_AGENT_UNLOADED: Self =
-        Self::from_static(EventCategory::Session, "agent_unloaded");
     pub const AGENT_PROMPT_CREATED: Self =
         Self::from_static(EventCategory::Agent, "prompt_created");
     pub const AGENT_PROMPT_TERMINATED: Self =

@@ -104,10 +104,10 @@ must come from server defaults or preconfiguration. MUC mode must verify real
 sender JIDs from room presence by default; if a server hides real JIDs, the
 extension fails closed unless the user explicitly configures trust in
 server-side room membership. Runtime registrations and room mappings are
-in-memory only; MUC room localparts use short readable session/agent slugs plus a
-compact lowercase-base32, domain-separated BLAKE3 disambiguator over the full Tau
-session id and validated agent id. The readable slugs are not authoritative for
-routing, and the intentionally short disambiguator is not injective: if generated
+in-memory only; MUC room localparts use a short readable agent slug plus a compact
+lowercase-base32, domain-separated BLAKE3 disambiguator over the full validated
+agent id. The readable slug is not authoritative for routing, and the
+intentionally short disambiguator is not injective: if generated
 rooms ever collide in-process after XMPP JID normalization, registration must
 fail closed instead of overwriting an existing room mapping. Successfully joined
 rooms must remain tracked until leave/unavailable presence can be sent or the
@@ -157,7 +157,7 @@ the user's permissions. Scratch cleanup must remain guarded by a helper marker
 and path validation so `--remove-scratch` cannot recursively delete arbitrary
 user directories. Target commands such as capture, send, and stop must validate
 the recognized helper marker and scratch-root shape before connecting to a tmux
-socket, and cleanup must validate that ownership before killing a session or
+socket, and cleanup must validate that ownership before killing a tmux session or
 removing the scratch root.
 
 Provider credentials for `tau dev tmux start` are local-only by default. The
@@ -166,7 +166,7 @@ provider state from the user's real Tau directories unless the user explicitly
 opts in through `testing.yaml`. That allowlist names exact provider profile
 names only; the helper may copy only the corresponding
 `auth.d/<provider>.json` files into scratch state, must not copy lock files,
-general config, sessions, logs, unrelated provider profiles, whole directories,
+general config, agent state, debug logs, unrelated provider profiles, whole directories,
 or "all providers", and must refuse symlink/path-traversal attempts around those
 files. Reused scratch destinations must be reconciled to the current allowlist
 and must not write through pre-existing symlinks, non-regular files, or

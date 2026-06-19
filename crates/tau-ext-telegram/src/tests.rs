@@ -556,6 +556,7 @@ fn run_exits_after_register_then_disconnect() {
                 "poll_timeout_seconds": 1,
             })),
             state_dir: None,
+            debug_dir: None,
             secrets,
         }))
         .expect("config");

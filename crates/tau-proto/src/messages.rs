@@ -74,7 +74,7 @@ pub struct Disconnect {
 /// or [`CborValue::Null`] / an empty map when no config was
 /// provided. `state_dir` is the harness-assigned persistent state
 /// directory for this extension instance, when the harness can provide
-/// one.
+/// one. `debug_dir` is this harness run's debug artifact directory.
 ///
 /// `Eq` is not derivable because the underlying CBOR value can
 /// contain floats; `PartialEq` is enough for tests.
@@ -88,6 +88,9 @@ pub struct Configure {
     /// Persistent directory reserved for this extension's runtime state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_dir: Option<PathBuf>,
+    /// Debug artifact directory for this harness run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_dir: Option<PathBuf>,
     /// Secret values explicitly authorized for this extension.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<String, SecretValue>,
@@ -134,7 +137,7 @@ pub struct ConfigError {
 
 /// Wall-clock timestamp as microseconds since the UNIX epoch.
 ///
-/// Stamped onto persisted session events and the JSONL debug log so
+/// Stamped onto persisted events and the JSONL debug log so
 /// offline inspection can compute inter-event gaps, RPM bursts, and
 /// correlations with provider-side cache misses. `u64` µs covers
 /// ~584,000 years past 1970, so saturation is not a concern in
@@ -282,12 +285,10 @@ impl EventDelivery {
     }
 }
 
-/// Extension/client request to emit one event with harness-owned delivery
-/// metadata.
+/// Extension/client request to emit one event.
 ///
-/// The inner `event` is the fact that subscribers see. `transient` controls
-/// whether the harness writes eligible semantic facts to durable session or
-/// agent event history; it is not part of the emitted fact itself.
+/// The inner `event` is the fact that subscribers see. The harness decides
+/// whether it enters durable semantic history.
 ///
 /// `Emit` is strictly for peer → harness event emission. Harness → peer event
 /// delivery uses [`HarnessOutputMessage::Deliver`] instead.
@@ -295,34 +296,21 @@ impl EventDelivery {
 pub struct Emit {
     /// Event the peer asks the harness to publish.
     pub event: Box<Event>,
-    /// True when the event should skip durable semantic logs.
-    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
-    pub transient: bool,
 }
 
 impl Emit {
-    /// Creates a durable-by-default emit request.
+    /// Creates an emit request.
     #[must_use]
     pub fn new(event: Event) -> Self {
         Self {
             event: Box::new(event),
-            transient: false,
         }
     }
 
-    /// Creates an emit request with explicit transient metadata.
+    /// Consumes this request and returns the inner event.
     #[must_use]
-    pub fn with_transient(event: Event, transient: bool) -> Self {
-        Self {
-            event: Box::new(event),
-            transient,
-        }
-    }
-
-    /// Consumes this request and returns the inner event plus transient flag.
-    #[must_use]
-    pub fn into_parts(self) -> (Event, bool) {
-        (*self.event, self.transient)
+    pub fn into_event(self) -> Event {
+        *self.event
     }
 }
 
@@ -334,9 +322,6 @@ impl Emit {
 pub struct InterceptRequest {
     /// Event being offered to the interceptor.
     pub event: Box<Event>,
-    /// Original transient metadata from the publish request.
-    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
-    pub transient: bool,
 }
 
 /// What an interceptor wants the harness to do with the event it was given.
@@ -372,8 +357,6 @@ pub struct InterceptReply {
 pub struct GetAgentPromptCreated {
     /// Request correlation id echoed by [`AgentPromptCreatedResult`].
     pub request_id: String,
-    /// Session containing the requested prompt.
-    pub session_id: crate::SessionId,
     /// Prompt to materialize.
     pub agent_prompt_id: crate::AgentPromptId,
 }
@@ -474,8 +457,6 @@ pub struct RenderedToolDefinitionsResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionDataScope {
-    /// Session-local data under `<session_data_dir>/ext/data/<ext-name>`.
-    Session,
     /// User-persistent data under `~/.local/state/tau/ext/<ext-name>`.
     User,
     /// User cache data under `~/.cache/tau/ext/<ext-name>`.
@@ -709,16 +690,10 @@ pub enum HarnessInputMessage {
 }
 
 impl HarnessInputMessage {
-    /// Wraps an event emission request with durable-by-default metadata.
+    /// Wraps an event emission request.
     #[must_use]
     pub fn emit(event: Event) -> Self {
         Self::Emit(Emit::new(event))
-    }
-
-    /// Wraps an event emission request with explicit transient metadata.
-    #[must_use]
-    pub fn emit_with_transient(event: Event, transient: bool) -> Self {
-        Self::Emit(Emit::with_transient(event, transient))
     }
 }
 

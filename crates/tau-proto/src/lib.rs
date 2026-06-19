@@ -118,8 +118,6 @@ macro_rules! string_newtype {
     };
 }
 
-string_newtype!(/// Session identifier.
-    SessionId);
 /// Maximum length for a durable agent identifier.
 pub const AGENT_ID_MAX_LEN: usize = 64;
 
@@ -291,8 +289,8 @@ pub struct ModelName(String);
 /// joined by the first `/` on the wire (e.g. `"openai/gpt-4o"`).
 ///
 /// Round-trips through serde as a flat `"provider/model"` string so
-/// existing CBOR events, JSON5 config files and persisted session
-/// logs keep working unchanged.
+/// existing CBOR events, JSON5 config files and persisted logs keep working
+/// unchanged.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct ModelId {
     pub provider: ProviderName,
@@ -948,6 +946,125 @@ impl std::fmt::Display for ExtensionInstanceId {
 impl From<u64> for ExtensionInstanceId {
     fn from(v: u64) -> Self {
         Self(v)
+    }
+}
+
+/// Parse failure for a harness run id.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HarnessRunIdParseError {
+    /// Run ids are fixed-width so debug directories sort and validate simply.
+    WrongLength {
+        /// Required byte length.
+        expected: usize,
+        /// Actual byte length.
+        actual: usize,
+    },
+    /// A byte was not ASCII alphanumeric.
+    InvalidByte {
+        /// Byte offset of the invalid byte.
+        index: usize,
+        /// Invalid byte value.
+        byte: u8,
+    },
+}
+
+impl std::fmt::Display for HarnessRunIdParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongLength { expected, actual } => {
+                write!(f, "harness run id must be {expected} bytes, got {actual}")
+            }
+            Self::InvalidByte { index, byte } => write!(
+                f,
+                "harness run id contains invalid byte 0x{byte:02x} at byte offset {index}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HarnessRunIdParseError {}
+
+/// Stable identifier for one harness process run.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct HarnessRunId(String);
+
+impl HarnessRunId {
+    /// Number of ASCII alphanumeric bytes in a harness run id.
+    pub const LEN: usize = 6;
+
+    /// Parses a harness run id from its wire/string representation.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, HarnessRunIdParseError> {
+        value.as_ref().parse()
+    }
+
+    /// Borrows the run id as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes this id into its string representation.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::str::FromStr for HarnessRunId {
+    type Err = HarnessRunIdParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.len() != Self::LEN {
+            return Err(HarnessRunIdParseError::WrongLength {
+                expected: Self::LEN,
+                actual: value.len(),
+            });
+        }
+        for (index, byte) in value.bytes().enumerate() {
+            if !byte.is_ascii_alphanumeric() {
+                return Err(HarnessRunIdParseError::InvalidByte { index, byte });
+            }
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl serde::Serialize for HarnessRunId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for HarnessRunId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for HarnessRunId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::ops::Deref for HarnessRunId {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for HarnessRunId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 

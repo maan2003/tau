@@ -57,10 +57,10 @@ impl ChatGptRuntime {
     /// Stream one prompt through the best available ChatGPT transport.
     ///
     /// WebSocket is tried first when supported. Known WS-capability or limit
-    /// failures disable WS for this session and transparently fall back to
+    /// failures disable WS for this agent and transparently fall back to
     /// HTTP/SSE; retryable WS failures are surfaced until this turn's internal
     /// retry budget is exhausted, then also fall back to HTTP/SSE for this
-    /// session.
+    /// agent.
     pub fn stream(
         &self,
         agent_prompt_id: &str,
@@ -72,12 +72,12 @@ impl ChatGptRuntime {
     ) -> Result<StreamDispatchResult, common::LlmError> {
         let ws_pool_before = self.ws_pool.stats();
         let mut transport = ProviderBackendTransport::HttpSse;
-        let session_id = request.session_id.as_str();
+        let agent_id = request.agent_id.as_str();
         let try_ws = config.supports_websocket
             && self
                 .ws_disabled
                 .lock()
-                .map(|disabled| !disabled.contains(session_id))
+                .map(|disabled| !disabled.contains(agent_id))
                 .unwrap_or(false);
         let state = if try_ws {
             match responses::pool::run_turn_through_shared_pool(
@@ -97,11 +97,11 @@ impl ChatGptRuntime {
                     let error = error.into_llm_error();
                     tracing::warn!(
                         target: LOG_TARGET,
-                        session_id,
-                        "WS path failed ({error}); falling back to HTTP for this session",
+                        agent_id,
+                        "WS path failed ({error}); falling back to HTTP for this agent",
                     );
                     if let Ok(mut disabled) = self.ws_disabled.lock() {
-                        disabled.insert(session_id.to_owned());
+                        disabled.insert(agent_id.to_owned());
                     }
                     responses::responses_stream(agent_prompt_id, config, request, on_update)?
                 }
@@ -112,7 +112,7 @@ impl ChatGptRuntime {
                         if turn_state.ws_failures <= turn_state.ws_retry_budget {
                             tracing::warn!(
                                 target: LOG_TARGET,
-                                session_id,
+                                agent_id,
                                 ws_retry_failures = turn_state.ws_failures,
                                 ws_retry_budget = turn_state.ws_retry_budget,
                                 "WS path failed with retryable error ({error}); retrying WS before HTTP fallback",
@@ -121,13 +121,13 @@ impl ChatGptRuntime {
                         }
                         tracing::warn!(
                             target: LOG_TARGET,
-                            session_id,
+                            agent_id,
                             ws_retry_failures = turn_state.ws_failures,
                             ws_retry_budget = turn_state.ws_retry_budget,
-                            "WS retry budget exhausted ({error}); falling back to HTTP for this session",
+                            "WS retry budget exhausted ({error}); falling back to HTTP for this agent",
                         );
                         if let Ok(mut disabled) = self.ws_disabled.lock() {
-                            disabled.insert(session_id.to_owned());
+                            disabled.insert(agent_id.to_owned());
                         }
                         transport = ProviderBackendTransport::HttpSse;
                         responses::responses_stream(agent_prompt_id, config, request, on_update)?
@@ -155,18 +155,18 @@ impl ChatGptRuntime {
     pub fn prewarm(
         &self,
         config: &responses::ResponsesConfig,
-        session_id: &str,
+        agent_id: &str,
         request: &common::PromptPayload<'_>,
     ) -> Result<(), common::LlmError> {
-        let ws_disabled_for_session = self
+        let ws_disabled_for_agent = self
             .ws_disabled
             .lock()
-            .map(|disabled| disabled.contains(session_id))
+            .map(|disabled| disabled.contains(agent_id))
             .unwrap_or(true);
-        if !config.supports_websocket || ws_disabled_for_session {
+        if !config.supports_websocket || ws_disabled_for_agent {
             tracing::debug!(
                 target: LOG_TARGET,
-                session_id,
+                agent_id,
                 "skipping prompt prewarm: websocket prewarm unsupported",
             );
             return Ok(());
@@ -175,13 +175,13 @@ impl ChatGptRuntime {
         match responses::pool::run_prewarm_through_shared_pool(
             &self.ws_pool,
             config,
-            session_id,
+            agent_id,
             request,
         ) {
             Ok(_) => Ok(()),
             Err(error) if should_disable_ws(&error) => {
                 if let Ok(mut disabled) = self.ws_disabled.lock() {
-                    disabled.insert(session_id.to_owned());
+                    disabled.insert(agent_id.to_owned());
                 }
                 Err(error)
             }
@@ -276,6 +276,7 @@ pub fn config_for_model(
         supports_websocket: true,
         supports_compaction: true,
         supports_prompt_cache_key: true,
+        debug_dir: None,
     }
 }
 
@@ -360,6 +361,3 @@ fn is_known_phase_capable_model_id(model_id: &str) -> bool {
 
     n >= 4 || (n == 3 && suffix.starts_with("codex"))
 }
-
-#[cfg(test)]
-mod tests;

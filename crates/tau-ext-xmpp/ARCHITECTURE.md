@@ -8,22 +8,22 @@ A single XMPP account may be used by multiple Tau processes concurrently because
 this extension always requests a generated, high-entropy resource and then uses
 the server-returned bound full JID.
 
-The preferred routing mode is one MUC room per registered Tau session id and
-agent id. Registration waits up to 30 seconds for the initial XMPP online state,
+The preferred routing mode is one MUC room per registered Tau agent id.
+Registration waits up to 30 seconds for the initial XMPP online state,
 joins the room, waits for exact `room/nick` self-presence, submits XEP-0045
 instant-room owner config if status 201 reports a newly-created room, sends an
 XEP-0045 mediated invite plus a direct fallback notice to the default recipient,
-and leaves the room with unavailable presence on unregister or session shutdown.
+and leaves the room with unavailable presence on unregister or agent unload.
 Room identity must remain stable and collision-resistant for registered routing
 keys after XMPP JID normalization: the room localpart is
-`<room_prefix>-<session-slug>-<agent-slug>-<8-char-disambiguator>`. The slugs are
-short, lowercase, localpart-safe hints derived from the Tau session id and agent
-id; generated-looking agent suffixes such as `-Y3KG` are omitted from the slug.
+`<room_prefix>-<agent-slug>-<8-char-disambiguator>`. The slug is a short,
+lowercase, localpart-safe hint derived from the Tau agent id; generated-looking
+agent suffixes such as `-Y3KG` are omitted from the slug.
 The disambiguator is a compact base32 encoding of a domain-separated BLAKE3 label
-over the full Tau session id and full validated `AgentId`, so truncated/readable
-slugs are not routing authority. The short disambiguator is collision-resistant,
-not injective; before joining, the worker rejects any normalized generated room
-already active or pending for a different agent instead of overwriting
+over the full validated `AgentId`, so truncated/readable slugs are not routing
+authority. The short disambiguator is collision-resistant, not injective; before
+joining, the worker rejects any normalized generated room already active or
+pending for a different agent instead of overwriting
 `room_to_agent`. Once MUC join presence is sent, the worker records pending
 non-routable room/nick state until setup succeeds so timeout,
 configuration failure, dropped registration response, unregister, or shutdown

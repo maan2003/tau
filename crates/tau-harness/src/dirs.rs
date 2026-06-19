@@ -1,5 +1,5 @@
-//! Internal directory helpers. Read-only session and policy inspection
-//! lives in the standalone `tau-session-inspect` crate.
+//! Internal directory helpers. Read-only agent and policy inspection
+//! lives in the standalone `tau-agent-inspect` crate.
 
 use std::path::{Path, PathBuf};
 

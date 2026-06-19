@@ -72,12 +72,10 @@ are messages — not events — because the wrapper is point-to-point protocol
 metadata, not the fact subscribers ultimately observe.
 
 - **`emit`** *(peer → harness)* — A peer's request to publish an event. Carries
-  the inner event and a `transient` flag controlling whether eligible semantic
-  facts should skip durable history. The harness owns source attribution,
-  interception, sequencing, persistence, and eventual delivery.
+  the inner event. The harness owns source attribution, interception,
+  sequencing, persistence, and eventual delivery.
 - **`intercept_request`** *(harness → interceptor)* — Directed delivery of an
-  emission that has not reached the event log yet. Carries the offered event and
-  the same transient metadata.
+  emission that has not reached the event log yet. Carries the offered event.
 - **`intercept_reply`** *(interceptor → harness)* — Exactly one response to an
   `intercept_request`: `pass` unchanged, `pass` with a replacement event, or
   `drop`.
@@ -91,7 +89,7 @@ to a late subscriber.
 
 The protocol no longer has an `ack` input message. The harness does not retain
 the runtime event stream in memory; late catch-up for any subscribed peer is
-rebuilt from durable session/agent stores and current harness snapshots. Peers
+rebuilt from durable agent stores and current harness snapshots. Peers
 that perform side effects must ignore `deliver` frames with `replay: true`. Some
 runtime events, such as `tool.started`, are not durable and are therefore not
 replayed.
@@ -113,7 +111,6 @@ constants currently live in
 
 Requests choose a storage scope and an operation:
 
-- `session` scope stores data under the extension's current-session root.
 - `user` scope stores persistent data under the harness state directory for that
   extension.
 - `cache` scope stores cache data under the user cache directory for that

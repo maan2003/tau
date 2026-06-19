@@ -8,9 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
+use rand::distributions::{Alphanumeric, DistString};
 use tau_config::settings::InvalidExtensionName;
 use tau_core::ConnectionOrigin;
-use tau_proto::ClientKind;
+use tau_proto::{ClientKind, HarnessRunId};
 
 use crate::error::HarnessError;
 use crate::event::{
@@ -149,35 +150,42 @@ where
     })
 }
 
-/// Per-session log directory: `<sessions_dir>/<session_id>/logs/`.
-/// Holds the harness daemon's own tracing output (`tau-harness.log`)
-/// plus one file per spawned extension. Lives next to `events.jsonl`
-/// so a session dir is self-contained for post-mortems.
-pub fn session_logs_dir(sessions_dir: &Path, session_id: &str) -> PathBuf {
-    sessions_dir.join(session_id).join("logs")
+/// Returns a short random id for one harness process/run.
+#[must_use]
+pub fn new_harness_run_id() -> HarnessRunId {
+    let value = Alphanumeric.sample_string(&mut rand::thread_rng(), HarnessRunId::LEN);
+    HarnessRunId::parse(value).expect("alphanumeric generator creates valid run ids")
 }
 
-/// Path of the per-session, per-extension stderr log:
-/// `<sessions_dir>/<session_id>/logs/<name>.log`.
+/// Returns the state root that contains per-run debug directories.
+#[must_use]
+pub fn debug_root(state_dir: &Path) -> PathBuf {
+    state_dir.join("debug")
+}
+
+/// Returns the debug directory for one harness run.
+#[must_use]
+pub fn debug_dir(state_dir: &Path, run_id: &HarnessRunId) -> PathBuf {
+    debug_root(state_dir).join(run_id.as_str())
+}
+
+/// Harness log directory under a run debug directory.
+/// Holds one stderr log file per spawned extension.
+pub fn harness_logs_dir(debug_dir: &Path) -> PathBuf {
+    debug_dir.join("logs")
+}
+
+/// Path of the per-extension stderr log:
+/// `<state-dir>/debug/<run-id>/logs/<name>.log`.
 ///
 /// Extension names come from user-authored config, so validate the name before
 /// treating it as a harness-owned path component.
 pub(crate) fn extension_stderr_log_path(
-    sessions_dir: &Path,
-    session_id: &str,
+    debug_dir: &Path,
     name: &str,
 ) -> Result<PathBuf, InvalidExtensionName> {
     tau_config::settings::validate_extension_name(name)?;
-    Ok(session_logs_dir(sessions_dir, session_id).join(format!("{name}.log")))
-}
-
-/// Path of the per-session harness daemon log:
-/// `<sessions_dir>/<session_id>/logs/tau-harness.log`. The CLI points
-/// the daemon's stderr at this file when spawning it, so the daemon's
-/// tracing output (which writes to stderr via `init_stderr_from_env`)
-/// lands alongside the per-extension logs.
-pub fn harness_log_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
-    session_logs_dir(sessions_dir, session_id).join("tau-harness.log")
+    Ok(harness_logs_dir(debug_dir).join(format!("{name}.log")))
 }
 
 fn supervised_command(config: &ExtensionConfig, pipe_stderr: bool) -> Command {

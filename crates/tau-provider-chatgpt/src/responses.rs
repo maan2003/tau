@@ -135,15 +135,15 @@ pub struct ResponsesConfig {
     /// The wire key is derived per `(base_url, agent lifetime)` and is stable
     /// across prompt originators for the same target agent.
     pub supports_prompt_cache_key: bool,
+    /// Harness-provided debug directory for this run, when available.
+    pub debug_dir: Option<PathBuf>,
 }
 
 /// Write the exact Responses request body Tau is about to send upstream.
 ///
 /// This records the full prompt transcript, including tool results. It never
-/// writes credentials or request headers. Files are written under the session
-/// debug directory:
-///
-/// `~/.local/state/tau/sessions/<session_id>/debug/provider-requests/`.
+/// writes credentials or request headers. Files are written under the provider
+/// debug directory keyed by agent id.
 pub(super) fn maybe_debug_write_provider_request(
     agent_prompt_id: &str,
     config: &ResponsesConfig,
@@ -156,20 +156,24 @@ pub(super) fn maybe_debug_write_provider_request(
     {
         tracing::warn!(
             target: crate::LOG_TARGET,
-            session_id = %request.session_id,
+            agent_id = %request.agent_id,
             agent_prompt_id,
             "failed to write provider request debug log: {error}",
         );
     }
 }
 
-pub fn debug_provider_request_dir(session_id: &str) -> Option<PathBuf> {
-    let state = tau_config::settings::state_dir()?;
+pub fn debug_provider_request_dir(
+    config: &ResponsesConfig,
+    agent_id: &tau_proto::AgentId,
+) -> Option<PathBuf> {
     Some(
-        tau_config::settings::sessions_dir_of(&state)
-            .join(session_id)
-            .join("debug")
-            .join("provider-requests"),
+        config
+            .debug_dir
+            .as_ref()?
+            .join("provider-requests")
+            .join(agent_id.as_str())
+            .join("chatgpt-responses"),
     )
 }
 
@@ -180,7 +184,7 @@ fn debug_write_provider_request(
     transport: tau_proto::ProviderBackendTransport,
     body: &impl Serialize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(dir) = debug_provider_request_dir(request.session_id) else {
+    let Some(dir) = debug_provider_request_dir(config, request.agent_id) else {
         return Ok(());
     };
     std::fs::create_dir_all(&dir)?;
@@ -194,7 +198,7 @@ fn debug_write_provider_request(
     ));
     let body = serde_json::to_value(body)?;
     let metadata = serde_json::json!({
-        "session_id": request.session_id,
+        "agent_id": request.agent_id,
         "agent_prompt_id": agent_prompt_id,
         "transport": transport_label,
         "backend": "responses",
@@ -404,7 +408,7 @@ pub(super) fn provider_vcr_key(
 ) -> String {
     format!(
         "{}-{}-{}",
-        request.session_id.as_str(),
+        request.agent_id.as_str(),
         agent_prompt_id,
         provider_backend_transport_label(transport)
     )

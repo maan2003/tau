@@ -102,9 +102,8 @@ publishes the original event instead. Current default must-pass events include
 user input and prompt lifecycle facts; agent response facts
 (`provider.response_finished`); terminal tool completion facts (`tool.result`,
 `tool.error`, `provider.tool_result`, `provider.tool_error`, `tool.cancelled`,
-`tool.background_result`, and `tool.background_error`); session lifecycle facts;
-durable session membership facts; `agent.started`; and harness-owned agent
-message projections. Treat
+`tool.background_result`, and `tool.background_error`); `agent.started`; loaded
+agent runtime facts; and harness-owned agent message projections. Treat
 `crates/tau-harness/src/harness/interception.rs` as the source of truth for that
 list. Individual harness call sites can also mark a publish as must-pass, as
 mandatory warning/critical `harness.notice` diagnostics do.
@@ -114,7 +113,7 @@ mandatory warning/critical `harness.notice` diagnostics do.
 The interceptor can reply with `pass` and no replacement event.
 
 The harness resumes the interception chain after the current interceptor, still
-using the original event and transient metadata.
+using the original event.
 
 ### Pass modified
 
@@ -125,12 +124,12 @@ replacement must have the same event type as the original; if it does not, the
 harness logs a warning and falls back to the original event. Some same-type
 replacements are also rejected to preserve immutable facts. For mandatory
 warning/critical `harness.notice` diagnostics, immutable prompt lifecycle facts,
-`provider.response_finished`, terminal tool completion facts, session
-lifecycle/membership facts, `agent.started`, and harness-owned agent message
+`provider.response_finished`, terminal tool completion facts, `agent.started`,
+loaded agent runtime facts, and harness-owned agent message
 projections, the harness publishes the original event instead. For mutable
 prompt text events, replacements may edit text but cannot change routing identity
-fields such as agent id or prompt metadata. The original
-transient metadata is preserved.
+fields such as agent id or prompt metadata. Persistence remains a harness
+decision for the final event.
 
 ## Same-priority chaining
 
@@ -172,23 +171,16 @@ registration, and continues the chain instead of parking the publish.
 If scanning finds no remaining matching interceptor, the harness finally commits
 the event normally:
 
-1. apply session persistence rules, unless `transient` is set
+1. apply harness persistence rules
 2. append to the harness runtime event log
 3. deliver the event to subscribers inside `deliver`
 
 Only this final step makes the event visible as an emitted fact.
 
-## Transience
+## Persistence
 
-The `transient` flag is carried through interception.
-
-An interceptor can inspect it in `intercept_request`, but replies cannot change
-it. The final event commits with the original transient metadata supplied by the
-initial publish.
-
-Events that default to transient still get that default when initially emitted
-through the normal harness path. While intercepted, that value is included in
-`intercept_request`.
+Persistence is not part of the peer protocol. The harness decides whether the
+final event enters semantic agent history when it commits.
 
 ## Debugging
 
@@ -213,8 +205,7 @@ Another peer requests emission:
 
 ```text
 emit {
-  event: ui.prompt_draft { ... },
-  transient: true
+  event: ui.prompt_draft { ... }
 }
 ```
 
@@ -222,8 +213,7 @@ The harness finds the interceptor and sends it:
 
 ```text
 intercept_request {
-  event: ui.prompt_draft { ... },
-  transient: true
+  event: ui.prompt_draft { ... }
 }
 ```
 

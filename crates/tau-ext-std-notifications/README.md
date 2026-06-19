@@ -22,7 +22,7 @@ configured, the four hook groups map to these trigger points:
 | `agent_start` | `agent.prompt_submitted` (originator: User) | `user-notification` | `protoss-probe-ack` |
 | `agent_end` | Final `provider.response_finished` (no pending tool calls, originator: User) | `user-notification` | `protoss-upgrade-complete` |
 | `agent_idle` | Idle window elapses after a final response | `user-text-notification` | JSON payload (see below) |
-| `agent_idle_all` | Idle window elapses after every loaded agent in a session is idle | `user-text-notification` | JSON payload (see below) |
+| `agent_idle_all` | Idle window elapses after every loaded agent is idle | `user-text-notification` | JSON payload (see below) |
 
 The "final response" filter only treats responses with `tool_calls`
 empty as the end of an agent turn. Mid-turn finishes (tool-call
@@ -39,8 +39,8 @@ After `delay_seconds` (default 60 when omitted on a configured idle hook) of
 inactivity following a final agent response, the example `agent_idle` hook fires
 the `user-text-notification` user-var with the static "Waiting for user
 input" body. `agent_idle_all` uses the same hook item schema, but arms only
-when a session transitions from at least one busy loaded agent to every loaded
-agent being idle.
+when the harness transitions from at least one busy loaded agent to every
+loaded agent being idle.
 
 If an idle hook sets `agent_summary` to `true`, the extension first asks the
 agent for a one-sentence summary before firing that hook:

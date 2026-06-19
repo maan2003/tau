@@ -16,13 +16,13 @@ Tau's built-in configuration enables no notifications by default. A typical OSC 
 - `agent_start`, on user prompt submit: `user-notification = protoss-probe-ack`.
 - `agent_end`, on final provider response when no tool call is requested and no main-agent background tools remain: `user-notification = protoss-upgrade-complete`.
 - `agent_idle`, after an idle window following a final response, whatever `user-text-notification` payload the user configured.
-- `agent_idle_all`, after an idle window once every loaded agent in the session is idle.
+- `agent_idle_all`, after an idle window once every loaded agent is idle.
 
 If an idle hook's `agent_summary` is true, the idle path first asks the agent for a one-sentence summary before firing that hook. Hook commands are detached argv arrays rendered as Handlebars templates.
 
 Hook items can also emit `term.bell` with `bell: true`.
 
-The extension reacts only to live events. Replay-marked frames (subscribe-time catch-up history the harness re-delivers when an extension joins an already-initialized session) are skipped, so old prompts and responses never ring sounds or fire idle notifications.
+The extension reacts only to live events. Replay-marked frames (subscribe-time catch-up history the harness re-delivers when an extension joins an already-initialized harness) are skipped, so old prompts and responses never ring sounds or fire idle notifications.
 
 
 ## Configuration

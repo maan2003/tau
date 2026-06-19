@@ -1,10 +1,10 @@
-//! End-to-end tests for tool-result deduplication.
-//!
-//! Each test drives `Harness::handle_extension_event` with synthetic
-//! `ToolResult` / `ToolError` frames and inspects the persisted
-//! agent tree to verify that the recorded entry is either the
-//! original content or a `[tau-internal]` pointer back to the first
-//! occurrence on the conversation's branch.
+// End-to-end tests for tool-result deduplication.
+//
+// Each test drives `Harness::handle_extension_event` with synthetic
+// `ToolResult` / `ToolError` frames and inspects the persisted
+// agent tree to verify that the recorded entry is either the
+// original content or a `[tau-internal]` pointer back to the first
+// occurrence on the conversation's branch.
 
 use super::*;
 use crate::INTERNAL_MARKER;
@@ -18,7 +18,6 @@ use crate::harness::PendingTool;
 /// `ToolResultItem` for the call from the agent tree.
 fn run_tool_result(
     h: &mut Harness,
-    _session_id: &str,
     cid: &crate::AgentId,
     call_id: &str,
     tool_name: &str,
@@ -74,7 +73,6 @@ fn run_tool_result(
 /// Like [`run_tool_result`] but for `ToolError`.
 fn run_tool_error(
     h: &mut Harness,
-    _session_id: &str,
     cid: &crate::AgentId,
     call_id: &str,
     tool_name: &str,
@@ -140,13 +138,13 @@ fn cross_turn_identical_result_collapses_to_pointer() {
     let cid = ensure_test_user_agent(&mut h);
     let big = CborValue::Text("a".repeat(2048));
 
-    let first = run_tool_result(&mut h, "s1", &cid, "call_first", "read", big.clone());
+    let first = run_tool_result(&mut h, &cid, "call_first", "read", big.clone());
     assert!(
         matches!(&first, ToolResultItem { status: ToolResultStatus::Success, output, .. } if output.raw == big),
         "first occurrence is recorded verbatim, got: {first:?}"
     );
 
-    let second = run_tool_result(&mut h, "s1", &cid, "call_second", "read", big.clone());
+    let second = run_tool_result(&mut h, &cid, "call_second", "read", big.clone());
     assert_eq!(second.status, ToolResultStatus::Success);
     let dedup_result = second.output;
     let CborValue::Text(text) = &dedup_result.raw else {
@@ -189,8 +187,8 @@ fn small_results_below_threshold_are_not_deduped() {
     let small = CborValue::Text("ok".repeat(25));
     assert!("ok".repeat(25).len() < DEFAULT_THRESHOLD_BYTES);
 
-    let first = run_tool_result(&mut h, "s1", &cid, "call_a", "shell", small.clone());
-    let second = run_tool_result(&mut h, "s1", &cid, "call_b", "shell", small.clone());
+    let first = run_tool_result(&mut h, &cid, "call_a", "shell", small.clone());
+    let second = run_tool_result(&mut h, &cid, "call_b", "shell", small.clone());
 
     assert_eq!(first.status, ToolResultStatus::Success);
     assert_eq!(second.status, ToolResultStatus::Success);
@@ -219,8 +217,8 @@ fn pointer_entries_are_not_themselves_dedup_anchors() {
 
     let cid = ensure_test_user_agent(&mut h);
     let big = CborValue::Text("z".repeat(2048));
-    let _ = run_tool_result(&mut h, "s1", &cid, "call_orig", "read", big.clone());
-    let _ = run_tool_result(&mut h, "s1", &cid, "call_dup", "read", big.clone());
+    let _ = run_tool_result(&mut h, &cid, "call_orig", "read", big.clone());
+    let _ = run_tool_result(&mut h, &cid, "call_dup", "read", big.clone());
 
     // Force a rebuild on the next intake by clearing the cached
     // dedup map. The next result will rebuild from the branch (which
@@ -230,7 +228,7 @@ fn pointer_entries_are_not_themselves_dedup_anchors() {
     h.agents.get_mut(&cid).expect("default conv").result_dedup =
         crate::dedup::ResultDedupMap::new();
 
-    let third = run_tool_result(&mut h, "s1", &cid, "call_third", "read", big.clone());
+    let third = run_tool_result(&mut h, &cid, "call_third", "read", big.clone());
     assert_eq!(third.status, ToolResultStatus::Success);
     let result = third.output;
     let CborValue::Text(text) = &result.raw else {
@@ -262,7 +260,6 @@ fn identical_errors_collapse_but_distinct_details_stay() {
 
     let first = run_tool_error(
         &mut h,
-        "s1",
         &cid,
         "call_e1",
         "shell",
@@ -276,7 +273,6 @@ fn identical_errors_collapse_but_distinct_details_stay() {
 
     let second = run_tool_error(
         &mut h,
-        "s1",
         &cid,
         "call_e2",
         "shell",
@@ -297,7 +293,6 @@ fn identical_errors_collapse_but_distinct_details_stay() {
 
     let third = run_tool_error(
         &mut h,
-        "s1",
         &cid,
         "call_e3",
         "shell",
@@ -310,87 +305,6 @@ fn identical_errors_collapse_but_distinct_details_stay() {
     assert_eq!(
         *m3, long_msg,
         "different details means the model needs the full content; must NOT dedup",
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
-/// On session resume / a new harness binding to an existing session
-/// tree, the dedup map is rebuilt lazily from the branch the first
-/// time a tool result intake needs it. A new identical result must
-/// dedup against the pre-existing entry from before the restore.
-#[test]
-fn dedup_map_rebuilds_on_session_restore() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-
-    let big = CborValue::Text("q".repeat(2048));
-
-    {
-        let mut h = echo_harness(&sp).expect("start");
-        let cid = ensure_test_user_agent(&mut h);
-        let _ = run_tool_result(&mut h, "s1", &cid, "call_pre_restore", "read", big.clone());
-        h.shutdown().expect("shutdown");
-        drop(h);
-        wait_for_session_unlock(&sp, "s1");
-    }
-
-    // New harness pointing at the same state dir + session id —
-    // simulates daemon restart / session resume. The default conv
-    // starts with `result_dedup` empty and `head=Some(N)` from the
-    // resumed tree; the first intake triggers a rebuild.
-    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-        .expect("resume");
-    let cid = ensure_test_user_agent(&mut h);
-    assert!(
-        h.agents.get(&cid).expect("default conv").head.is_some(),
-        "resumed default conversation must have a non-empty branch head",
-    );
-
-    let post = run_tool_result(&mut h, "s1", &cid, "call_post_restore", "read", big.clone());
-    assert_eq!(post.status, ToolResultStatus::Success);
-    let result = post.output;
-    let CborValue::Text(text) = &result.raw else {
-        panic!("post-restore identical result should dedup; got: {result:?}");
-    };
-    assert!(
-        text.contains("call_pre_restore"),
-        "post-restore dedup must point at the pre-restore call_id; got: {text:?}",
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
-/// `/session new` starts a fresh conversation branch. Even if the requested
-/// session id already has durable history (possible with a short-id
-/// collision, and modeled here by resetting to the same id), the first
-/// identical result in the fresh branch must be recorded verbatim.
-#[test]
-fn new_session_reset_does_not_dedup_against_previous_branch() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-
-    let cid = ensure_test_user_agent(&mut h);
-    let big = CborValue::Text("n".repeat(2048));
-    let _ = run_tool_result(&mut h, "s1", &cid, "call_before_new", "ls", big.clone());
-
-    h.switch_session("s1".into(), tau_proto::SessionStartReason::New)
-        .expect("same-id /session new reset");
-
-    let cid = ensure_test_user_agent(&mut h);
-    assert_eq!(
-        h.agents.get(&cid).expect("default conv").head,
-        None,
-        "a /session new reset must start from a fresh branch head",
-    );
-
-    let after = run_tool_result(&mut h, "s1", &cid, "call_after_new", "ls", big.clone());
-    assert_eq!(after.status, ToolResultStatus::Success);
-    let result = after.output;
-    assert_eq!(
-        result.raw, big,
-        "first result after /session new must not dedup against an older branch that the model cannot see",
     );
 
     h.shutdown().expect("shutdown");
@@ -411,14 +325,7 @@ fn dedup_is_scoped_to_a_single_branch() {
     let big = CborValue::Text("p".repeat(2048));
 
     // Land an entry on the default conversation's branch.
-    let _ = run_tool_result(
-        &mut h,
-        "s1",
-        &default_cid,
-        "call_default",
-        "read",
-        big.clone(),
-    );
+    let _ = run_tool_result(&mut h, &default_cid, "call_default", "read", big.clone());
 
     // Spawn a side conversation whose head is None (a fresh root —
     // not parented under the default conv's last node). Its dedup
@@ -431,7 +338,6 @@ fn dedup_is_scoped_to_a_single_branch() {
         side_cid.clone(),
         crate::agent::Agent::new(
             side_cid.clone(),
-            "s1".into(),
             tau_proto::PromptOriginator::Extension {
                 name: "core-subagents".into(),
                 query_id: "q-test".to_owned(),
@@ -441,7 +347,7 @@ fn dedup_is_scoped_to_a_single_branch() {
         ),
     );
 
-    let side_outcome = run_tool_result(&mut h, "s1", &side_cid, "call_side", "read", big.clone());
+    let side_outcome = run_tool_result(&mut h, &side_cid, "call_side", "read", big.clone());
     assert_eq!(side_outcome.status, ToolResultStatus::Success);
     let result = side_outcome.output;
     assert_eq!(
@@ -467,7 +373,7 @@ fn dedup_refuses_to_self_point() {
     let cid = ensure_test_user_agent(&mut h);
     let big = CborValue::Text("s".repeat(2048));
 
-    let _first = run_tool_result(&mut h, "s1", &cid, "call_solo", "read", big.clone());
+    let _first = run_tool_result(&mut h, &cid, "call_solo", "read", big.clone());
 
     // Manually run the dedup intake again on a result with the same
     // call_id and same content. Without the self-pointer guard this

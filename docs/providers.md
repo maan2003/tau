@@ -21,7 +21,7 @@ Provider extensions own provider-specific work:
 
 The harness owns orchestration:
 
-- sessions and prompt assembly
+- agent lifecycle and prompt assembly
 - role selection and resolving the selected role to a provider model
 - mapping `ModelId` to the provider extension that published it
 - direct prompt routing
@@ -147,6 +147,6 @@ Do not add public OpenAI API-key support, upstream model discovery, compat matri
 - provider extensions publish models and execute prompts
 - the harness routes prompts directly to the selected role's resolved model owner
 - execution events should be `provider.*`, not `agent.*`
-- the harness owns roles, selection, sessions, and tool routing
+- the harness owns roles, agent selection, and tool routing
 - provider state belongs to providers
 - the UI should not resolve providers itself

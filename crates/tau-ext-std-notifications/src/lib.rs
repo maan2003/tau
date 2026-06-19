@@ -180,8 +180,6 @@ struct PendingIdleHook {
     hook_index: usize,
     /// Agent whose completed work supplies template context.
     agent_id: tau_proto::AgentId,
-    /// Session that owns an `agent_idle_all` timer; absent for `agent_idle`.
-    session_id: Option<tau_proto::SessionId>,
     /// Last user prompt text rendered into idle templates.
     user_prompt: String,
     /// Last assistant response text rendered into idle templates.
@@ -198,81 +196,21 @@ struct AllIdleTurnContext {
     /// Last final assistant response seen for this agent.
     agent_response: String,
 }
-/// Per-session state used to detect all-agents-idle transitions.
+/// Global state used to detect all-agents-idle transitions.
 #[derive(Default)]
-struct SessionIdleTracker {
-    /// Loaded agents by session id.
-    session_agents: HashMap<tau_proto::SessionId, HashSet<tau_proto::AgentId>>,
-    /// Reverse index from loaded agent id to containing sessions.
-    agent_sessions: HashMap<tau_proto::AgentId, HashSet<tau_proto::SessionId>>,
+struct IdleTracker {
     /// Agents currently reported running by harness-owned agent state.
     busy_agents: HashSet<tau_proto::AgentId>,
 }
 
-impl SessionIdleTracker {
-    fn load_agent(&mut self, session_id: tau_proto::SessionId, agent_id: tau_proto::AgentId) {
-        self.session_agents
-            .entry(session_id.clone())
-            .or_default()
-            .insert(agent_id.clone());
-        self.agent_sessions
-            .entry(agent_id)
-            .or_default()
-            .insert(session_id);
-    }
-
-    fn unload_agent(
-        &mut self,
-        session_id: &tau_proto::SessionId,
-        agent_id: &tau_proto::AgentId,
-    ) -> Option<tau_proto::SessionId> {
-        let was_busy = self.busy_agents.remove(agent_id);
-        let mut session_is_idle = false;
-        if let Some(agents) = self.session_agents.get_mut(session_id) {
-            agents.remove(agent_id);
-            session_is_idle = !agents.is_empty() && agents.is_disjoint(&self.busy_agents);
-            if agents.is_empty() {
-                self.session_agents.remove(session_id);
-            }
-        }
-        if let Some(sessions) = self.agent_sessions.get_mut(agent_id) {
-            sessions.remove(session_id);
-            if sessions.is_empty() {
-                self.agent_sessions.remove(agent_id);
-            }
-        }
-        (was_busy && session_is_idle).then(|| session_id.clone())
-    }
-
+impl IdleTracker {
     fn mark_busy(&mut self, agent_id: tau_proto::AgentId) {
         self.busy_agents.insert(agent_id);
     }
 
-    fn mark_idle(&mut self, agent_id: &tau_proto::AgentId) -> Vec<tau_proto::SessionId> {
+    fn mark_idle(&mut self, agent_id: &tau_proto::AgentId) -> bool {
         let was_busy = self.busy_agents.remove(agent_id);
-        if was_busy {
-            self.idle_sessions_for_agent(agent_id)
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn sessions_for_agent(&self, agent_id: &tau_proto::AgentId) -> Vec<tau_proto::SessionId> {
-        self.agent_sessions
-            .get(agent_id)
-            .map(|sessions| sessions.iter().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    fn idle_sessions_for_agent(&self, agent_id: &tau_proto::AgentId) -> Vec<tau_proto::SessionId> {
-        self.sessions_for_agent(agent_id)
-            .into_iter()
-            .filter(|session_id| {
-                self.session_agents.get(session_id).is_some_and(|agents| {
-                    !agents.is_empty() && agents.is_disjoint(&self.busy_agents)
-                })
-            })
-            .collect()
+        was_busy && self.busy_agents.is_empty()
     }
 }
 fn display_name_for_agent(
@@ -323,7 +261,7 @@ struct ExtConfig {
     agent_end: Vec<HookConfig>,
     /// Actions to run after one agent remains idle past a configured delay.
     agent_idle: Vec<IdleHookConfig>,
-    /// Actions to run after every loaded agent in a session is idle.
+    /// Actions to run after every tracked agent is idle.
     agent_idle_all: Vec<IdleHookConfig>,
 }
 
@@ -455,8 +393,6 @@ where
             tau_proto::EventName::AGENT_STARTED,
             tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
             tau_proto::EventName::AGENT_STATE,
-            tau_proto::EventName::SESSION_AGENT_LOADED,
-            tau_proto::EventName::SESSION_AGENT_UNLOADED,
             tau_proto::EventName::AGENT_START_ACCEPTED,
             // Trailing-edge debounced typing pings from the UI:
             // bumps the idle deadline so the desktop notification
@@ -504,7 +440,7 @@ where
 
     let mut idle: Vec<PendingIdleHook> = Vec::new();
     let mut idle_all: Vec<PendingIdleHook> = Vec::new();
-    let mut session_idle = SessionIdleTracker::default();
+    let mut idle_tracker = IdleTracker::default();
     let mut all_idle_context: HashMap<tau_proto::AgentId, AllIdleTurnContext> = HashMap::new();
     // Pending idle-summary query id -> summary side-agent id. These agents are
     // owned by this extension, so they are excluded from all-idle membership and
@@ -618,59 +554,24 @@ where
                 };
                 tracing::trace!(target: LOG_TARGET, name = %inner.name(), "event received");
                 match &inner {
-                    Event::SessionAgentLoaded(loaded) => {
-                        if !ignored_summary_agents
-                            .values()
-                            .any(|agent_id| agent_id == &loaded.agent_id)
-                        {
-                            session_idle
-                                .load_agent(loaded.session_id.clone(), loaded.agent_id.clone());
-                        }
-                    }
-                    Event::SessionAgentUnloaded(unloaded) => {
-                        if let Some(session_id) =
-                            session_idle.unload_agent(&unloaded.session_id, &unloaded.agent_id)
-                        {
-                            let context = all_idle_context
-                                .get(&unloaded.agent_id)
-                                .cloned()
-                                .unwrap_or_default();
-                            arm_idle_all_hooks(
-                                &mut idle_all,
-                                session_id,
-                                idle_duration,
-                                &config,
-                                unloaded.agent_id.clone(),
-                                context.user_prompt,
-                                context.agent_response,
-                            );
-                        }
-                    }
                     Event::AgentState(state) => match state.state {
                         tau_proto::AgentRuntimeState::Running => {
                             if !ignored_summary_agents
                                 .values()
                                 .any(|agent_id| agent_id == &state.agent_id)
                             {
-                                session_idle.mark_busy(state.agent_id.clone());
-                                let running_sessions =
-                                    session_idle.sessions_for_agent(&state.agent_id);
-                                idle_all.retain(|pending| {
-                                    pending.session_id.as_ref().is_none_or(|session_id| {
-                                        !running_sessions.contains(session_id)
-                                    })
-                                });
+                                idle_tracker.mark_busy(state.agent_id.clone());
+                                idle_all.clear();
                             }
                         }
                         tau_proto::AgentRuntimeState::Idle => {
-                            for session_id in session_idle.mark_idle(&state.agent_id) {
+                            if idle_tracker.mark_idle(&state.agent_id) {
                                 let context = all_idle_context
                                     .get(&state.agent_id)
                                     .cloned()
                                     .unwrap_or_default();
                                 arm_idle_all_hooks(
                                     &mut idle_all,
-                                    session_id,
                                     idle_duration,
                                     &config,
                                     state.agent_id.clone(),
@@ -1197,7 +1098,6 @@ fn arm_idle_hooks(
             hook_kind: IdleHookKind::Agent,
             hook_index,
             agent_id: agent_id.clone(),
-            session_id: None,
             user_prompt: user_prompt.clone(),
             agent_response: agent_response.clone(),
             state: IdleState::WaitingIdle {
@@ -1212,21 +1112,19 @@ fn arm_idle_hooks(
 
 fn arm_idle_all_hooks(
     idle_all: &mut Vec<PendingIdleHook>,
-    session_id: tau_proto::SessionId,
     default_idle_duration: Duration,
     config: &ExtConfig,
     agent_id: tau_proto::AgentId,
     user_prompt: String,
     agent_response: String,
 ) {
-    idle_all.retain(|pending| pending.session_id.as_ref() != Some(&session_id));
+    idle_all.clear();
     let now = Instant::now();
     for (hook_index, hook) in config.agent_idle_all.iter().enumerate() {
         idle_all.push(PendingIdleHook {
             hook_kind: IdleHookKind::AgentAll,
             hook_index,
             agent_id: agent_id.clone(),
-            session_id: Some(session_id.clone()),
             user_prompt: user_prompt.clone(),
             agent_response: agent_response.clone(),
             state: IdleState::WaitingIdle {

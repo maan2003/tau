@@ -1,4 +1,5 @@
 use super::*;
+use crate::harness::semantic_event_router;
 
 fn assistant_output(text: &str) -> Vec<tau_proto::ContextItem> {
     vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
@@ -22,312 +23,13 @@ fn provider_response_contains_text(finished: &ProviderResponseFinished, needle: 
     })
 }
 
-fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
-    ProviderResponseFinished {
-        agent_prompt_id: "sp-restored-tools".into(),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        output_items: call_ids
-            .iter()
-            .map(|call_id| {
-                ContextItem::ToolCall(ToolCallItem {
-                    call_id: (*call_id).into(),
-                    name: ToolName::new("read"),
-                    tool_type: tau_proto::ToolType::Function,
-                    arguments: CborValue::Null,
-                })
-            })
-            .collect(),
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        error: None,
-        originator: tau_proto::PromptOriginator::User,
-        usage: None,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    }
-}
-
-fn successful_tool_result(call_id: &str) -> ToolResult {
-    ToolResult {
-        call_id: call_id.into(),
-        tool_name: ToolName::new("read"),
-        tool_type: tau_proto::ToolType::Function,
-        result: CborValue::Text(format!("result for {call_id}")),
-        kind: tau_proto::ToolResultKind::Final,
-        display: None,
-        originator: tau_proto::PromptOriginator::User,
-    }
-}
-
-fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_ids: &[&str]) {
-    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
-    store
-        .append_session_event(
-            "s1",
-            None,
-            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                session_id: "s1".into(),
-                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-            }),
-        )
-        .expect("seed session membership");
-    let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
-    agent_store
-        .append_agent_event(
-            "main",
-            None,
-            Event::AgentStarted(tau_proto::AgentStarted {
-                parent_agent: None,
-                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-                role: "engineer".to_owned(),
-                display_name: None,
-                metadata: Vec::new(),
-            }),
-        )
-        .expect("seed agent start");
-    agent_store
-        .append_agent_event(
-            "main",
-            None,
-            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-                text: "before restart".to_owned(),
-                message_class: tau_proto::PromptMessageClass::User,
-                originator: tau_proto::PromptOriginator::User,
-                display_name: None,
-                ctx_id: None,
-            }),
-        )
-        .expect("seed user prompt");
-    agent_store
-        .append_agent_event(
-            "main",
-            None,
-            Event::ProviderResponseFinished(response_with_tool_calls(call_ids)),
-        )
-        .expect("seed assistant tool calls");
-    for call_id in completed_call_ids {
-        agent_store
-            .append_agent_event(
-                "main",
-                None,
-                Event::ProviderToolResult(successful_tool_result(call_id)),
-            )
-            .expect("seed completed tool call");
-    }
-}
-
-fn seed_restored_tool_round_for_agent(
-    state_dir: &Path,
-    session_id: &str,
-    agent_id: &str,
-    call_ids: &[&str],
-    completed_call_ids: &[&str],
-) {
-    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
-    store
-        .append_session_event(
-            session_id,
-            None,
-            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                session_id: session_id.into(),
-                agent_id: crate::parse_agent_id(agent_id),
-            }),
-        )
-        .expect("seed session membership");
-    let mut agent_store =
-        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
-    agent_store
-        .append_agent_event(
-            agent_id,
-            None,
-            Event::AgentStarted(tau_proto::AgentStarted {
-                parent_agent: None,
-                agent_id: crate::parse_agent_id(agent_id),
-                role: "engineer".to_owned(),
-                display_name: None,
-                metadata: Vec::new(),
-            }),
-        )
-        .expect("seed agent start");
-    agent_store
-        .append_agent_event(
-            agent_id,
-            None,
-            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-                agent_id: crate::parse_agent_id(agent_id),
-                text: format!("before restart for {agent_id}"),
-                message_class: tau_proto::PromptMessageClass::User,
-                originator: tau_proto::PromptOriginator::User,
-                display_name: None,
-                ctx_id: None,
-            }),
-        )
-        .expect("seed user prompt");
-    agent_store
-        .append_agent_event(
-            agent_id,
-            None,
-            Event::ProviderResponseFinished(ProviderResponseFinished {
-                agent_prompt_id: format!("sp-{agent_id}").into(),
-                agent_id: crate::parse_agent_id(agent_id),
-                ..response_with_tool_calls(call_ids)
-            }),
-        )
-        .expect("seed assistant tool calls");
-    for call_id in completed_call_ids {
-        agent_store
-            .append_agent_event(
-                agent_id,
-                None,
-                Event::ProviderToolResult(successful_tool_result(call_id)),
-            )
-            .expect("seed completed tool call");
-    }
-}
-
-fn provider_tool_errors(h: &Harness, call_id: &str) -> Vec<tau_proto::ToolError> {
-    loaded_agent_events(h, "s1")
-        .into_iter()
-        .filter_map(|event| match event {
-            Event::ProviderToolError(error) if error.call_id.as_str() == call_id => Some(error),
-            _ => None,
-        })
-        .collect()
-}
-
-fn prompt_tool_result(prompt: &AgentPromptCreated, call_id: &str) -> Option<ToolResultItem> {
-    prompt
-        .context
-        .flatten()
-        .into_iter()
-        .find_map(|item| match item {
-            ContextItem::ToolResult(result) if result.call_id.as_str() == call_id => Some(result),
-            _ => None,
-        })
-}
-
-/// Regression: a cold resume used to leave the restored branch ending in an
-/// assistant tool call with no matching tool result. The next provider prompt
-/// then replayed an orphan tool call. Resume must close that foreground call
-/// before the user can extend the branch.
-#[test]
-fn resume_repairs_unresolved_tool_call_before_next_prompt_context() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_restored_tool_round(&sp, &["interrupted-call"], &[]);
-
-    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-        .expect("resume");
-
-    let errors = provider_tool_errors(&h, "interrupted-call");
-    assert_eq!(errors.len(), 1);
-    assert!(errors[0].message.contains("tau_internal: true"));
-    assert!(errors[0].message.contains("Side effects may have occurred"));
-
-    append_user_message_via_event(&mut h, "s1", "after restart");
-    let spid = h.send_prompt_to_agent("s1");
-    let prompt = read_prompt_created(&h, &spid);
-    let repaired = prompt_tool_result(&prompt, "interrupted-call")
-        .expect("synthetic tool result should be in provider context");
-    assert!(matches!(repaired.status, ToolResultStatus::Error { .. }));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Regression: a parallel tool round can be partly complete when the process
-/// dies. Resume must preserve completed calls and synthesize errors only for
-/// the missing foreground calls so the provider sees one balanced round.
-#[test]
-fn resume_repairs_only_missing_call_in_partial_parallel_round() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_restored_tool_round(&sp, &["done-call", "missing-call"], &["done-call"]);
-
-    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-        .expect("resume");
-
-    assert!(provider_tool_errors(&h, "done-call").is_empty());
-    assert_eq!(provider_tool_errors(&h, "missing-call").len(), 1);
-
-    append_user_message_via_event(&mut h, "s1", "after restart");
-    let spid = h.send_prompt_to_agent("s1");
-    let prompt = read_prompt_created(&h, &spid);
-    let completed = prompt_tool_result(&prompt, "done-call")
-        .expect("completed tool result should remain in provider context");
-    let repaired = prompt_tool_result(&prompt, "missing-call")
-        .expect("missing tool result should be synthesized in provider context");
-    assert!(matches!(completed.status, ToolResultStatus::Success));
-    assert!(matches!(repaired.status, ToolResultStatus::Error { .. }));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Regression: the resume repair writes durable events. A later cold resume
-/// must see the already-closed tool round and avoid appending another synthetic
-/// error for the same call.
-#[test]
-fn repeated_resume_does_not_duplicate_synthetic_tool_errors() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_restored_tool_round(&sp, &["interrupted-once"], &[]);
-
-    {
-        let mut h =
-            echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-                .expect("first resume");
-        assert_eq!(provider_tool_errors(&h, "interrupted-once").len(), 1);
-        h.shutdown().expect("shutdown");
-    }
-    wait_for_session_unlock(&sp, "s1");
-
-    {
-        let mut h =
-            echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-                .expect("second resume");
-        assert_eq!(provider_tool_errors(&h, "interrupted-once").len(), 1);
-        h.shutdown().expect("shutdown");
-    }
-}
-
-#[test]
-fn resume_repairs_unresolved_tool_call_on_non_default_loaded_agent() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_restored_tool_round_for_agent(&sp, "s1", "aaa_agent", &[], &[]);
-    seed_restored_tool_round_for_agent(&sp, "s1", "zzz_agent", &["side-interrupted-call"], &[]);
-
-    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-        .expect("resume");
-
-    let errors = provider_tool_errors(&h, "side-interrupted-call");
-    assert_eq!(errors.len(), 1);
-    assert!(errors[0].message.contains("Side effects may have occurred"));
-
-    h.shutdown().expect("shutdown");
-}
-
 #[test]
 fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.store
-        .append_session_event(
-            "s1",
-            Some(HARNESS_CONNECTION_ID.into()),
-            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                session_id: "s1".into(),
-                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            }),
-        )
-        .expect("seed session membership");
+    load_test_agent(&mut h, "agent-1");
     h.agent_store
         .append_agent_event(
             "agent-1",
@@ -389,15 +91,15 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
 }
 
 #[test]
-fn late_joining_ui_client_receives_replayed_session_events() {
+fn late_joining_ui_client_receives_replayed_agent_events() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.send_user_message("s1", "hello replay", None)
+    h.send_user_message("hello replay", None)
         .expect("send message");
 
-    let events = loaded_agent_events(&h, "s1");
+    let events = loaded_agent_events(&h);
     assert!(
         events
             .iter()
@@ -411,7 +113,7 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         "final agent response should be in a durable loaded-agent event log"
     );
     assert!(
-        events.iter().all(|event| !event.defaults_to_transient()),
+        events.iter().all(semantic_event_router::should_persist),
         "transient events must not be persisted"
     );
 
@@ -433,7 +135,6 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![
-                EventSelector::Prefix("session.".to_owned()),
                 EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
             ],
@@ -442,23 +143,21 @@ fn late_joining_ui_client_receives_replayed_session_events() {
     .expect("subscribe");
 
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
-    let mut got_session_started = false;
+    let mut got_agent_loaded = false;
     let mut got_agent_started = false;
     let mut got_prompt = false;
     let mut got_response = false;
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline
-        && !(got_session_started && got_agent_started && got_prompt && got_response)
+        && !(got_agent_loaded && got_agent_started && got_prompt && got_response)
     {
         let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
         let inner = frame.into_event_frame();
         match inner {
-            TestProtocolItem::Event(Event::SessionStarted(started))
-                if started.session_id.as_str() == "s1" =>
-            {
-                got_session_started = true;
+            TestProtocolItem::Event(Event::AgentLoaded(_)) => {
+                got_agent_loaded = true;
             }
             TestProtocolItem::Event(Event::AgentStarted(_)) => {
                 got_agent_started = true;
@@ -485,8 +184,8 @@ fn late_joining_ui_client_receives_replayed_session_events() {
     }
 
     assert!(
-        got_session_started,
-        "late UI should replay current session start"
+        got_agent_loaded,
+        "late UI should replay current loaded-agent boundary"
     );
     assert!(
         got_agent_started,
@@ -519,10 +218,10 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
     let mut h = echo_harness(&sp).expect("start");
 
     let past_text = "past extension replay guard";
-    h.send_user_message("s1", past_text, None)
+    h.send_user_message(past_text, None)
         .expect("send past message");
 
-    let durable_events = loaded_agent_events(&h, "s1");
+    let durable_events = loaded_agent_events(&h);
     assert!(
         durable_events.iter().any(|event| {
             matches!(event, Event::ProviderResponseFinished(finished)
@@ -560,7 +259,7 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
     }
 
     let live_text = "future live extension event";
-    h.send_user_message("s1", live_text, None)
+    h.send_user_message(live_text, None)
         .expect("send live message");
 
     {
@@ -583,28 +282,25 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
     h.shutdown().expect("shutdown");
 }
 
-/// A late extension subscribe announces the current session state — the same
-/// `SessionStarted`/`SessionAgentLoaded` snapshot a late UI gets. This is what
-/// lets a respawned extension rebuild per-agent state (e.g. agent context)
-/// after a mid-session crash instead of rejoining with amnesia.
+/// A late extension subscribe announces the same current loaded-agent boundary
+/// a late UI gets. This lets a respawned extension rebuild per-agent state
+/// (e.g. agent context) after a mid-run crash instead of rejoining with
+/// amnesia.
 #[test]
-fn extension_subscribe_announces_current_session_snapshot() {
+fn extension_subscribe_announces_current_loaded_agent_boundary() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    // Load an agent into the session before the extension subscribes.
-    h.send_user_message("s1", "hello snapshot", None)
+    // Load an agent before the extension subscribes.
+    h.send_user_message("hello snapshot", None)
         .expect("send message");
 
     let extension_events = connect_test_tool(&mut h, "respawned-extension");
     h.handle_extension_message(
         "respawned-extension",
         TestMessage::Subscribe(Subscribe {
-            selectors: vec![
-                EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
-                EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
-            ],
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_LOADED)],
         }),
     )
     .expect("extension subscribe");
@@ -612,19 +308,7 @@ fn extension_subscribe_announces_current_session_snapshot() {
     let events = extension_events.lock().expect("sink");
     assert!(
         events.iter().any(|routed| {
-            matches!(
-                peel_inner_event(&routed.frame),
-                Some(Event::SessionStarted(started)) if started.session_id.as_str() == "s1"
-            )
-        }),
-        "late extension should be told the current session",
-    );
-    assert!(
-        events.iter().any(|routed| {
-            matches!(
-                peel_inner_event(&routed.frame),
-                Some(Event::SessionAgentLoaded(loaded)) if loaded.session_id.as_str() == "s1"
-            )
+            matches!(peel_inner_event(&routed.frame), Some(Event::AgentLoaded(_)))
         }),
         "late extension should be told about already-loaded agents",
     );
@@ -636,7 +320,7 @@ fn extension_subscribe_announces_current_session_snapshot() {
 #[test]
 fn queued_and_recalled_prompt_lifecycle_is_not_durable() {
     // Queue/recall state is process-local scheduler/UI state. Persisting only
-    // part of that lifecycle makes cold resume resurrect prompts that already
+    // part of that lifecycle makes process restart resurrect prompts that already
     // dispatched or were recalled, so both events must remain transient.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -662,10 +346,10 @@ fn queued_and_recalled_prompt_lifecycle_is_not_durable() {
         }),
     );
 
-    let events = h.store.session_events("s1").expect("session events");
+    let events = loaded_agent_events(&h);
     assert!(
-        events.iter().all(|entry| !matches!(
-            entry.event,
+        events.iter().all(|event| !matches!(
+            event,
             Event::AgentPromptQueued(_) | Event::AgentPromptRecalled(_)
         )),
         "cold replay must not resurrect transient queue lifecycle events: {events:?}"
@@ -675,7 +359,7 @@ fn queued_and_recalled_prompt_lifecycle_is_not_durable() {
 }
 
 #[test]
-fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
+fn late_joining_ui_client_replays_final_but_not_stale_queued_agent_events() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -685,7 +369,6 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     let agent_id = h
         .ensure_agent_id_for_agent(&cid)
         .expect("default conversation has an agent id");
-    let session_id = h.agents[&cid].session_id.clone();
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.publish_event(
         None,
@@ -700,7 +383,6 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
         Event::AgentPromptCreated(AgentPromptCreated {
             agent_id: crate::parse_agent_id(&agent_id),
             agent_prompt_id: spid.clone(),
-            session_id: session_id.clone(),
             system_prompt: String::new(),
             context: tau_proto::PromptContext { blocks: Vec::new() }, // Vec::new(),
             tools: Vec::new(),
@@ -966,7 +648,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
         }),
     );
 
-    let durable_events = loaded_agent_events(&h, "s1");
+    let durable_events = loaded_agent_events(&h);
     assert!(
         durable_events.iter().any(|event| {
             matches!(event, Event::ToolBackgroundResult(result)
@@ -1060,9 +742,9 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
 #[test]
 fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
     // Extension discovery/context-ready events are runtime setup facts. The
-    // durable replay path now comes from session membership plus loaded-agent
-    // transcripts, so these extension events should neither land in the
-    // membership log nor be replayed from a transcript to late UI clients.
+    // durable replay path now comes from loaded-agent transcripts, so these
+    // extension events should neither land in durable agent logs nor be replayed
+    // from a transcript to late UI clients.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -1083,7 +765,6 @@ fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
     h.publish_event(
         Some(&tools_conn),
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
-            session_id: default_session_id().into(),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
         }),
     );
@@ -1115,16 +796,13 @@ fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
     )
     .expect("subscribe");
 
-    let session_events = h
-        .store
-        .session_events(h.current_session_id.as_str())
-        .expect("events");
+    let durable_events = loaded_agent_events(&h);
     assert!(
-        session_events.iter().all(|e| !matches!(
-            &e.event,
+        durable_events.iter().all(|event| !matches!(
+            event,
             Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_)
         )),
-        "runtime extension setup must not be persisted in the session membership log"
+        "runtime extension setup must not be persisted in durable agent history"
     );
 
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
@@ -1164,88 +842,6 @@ fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
 }
 
 #[test]
-fn resumed_harness_replays_persisted_session_history() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-
-    {
-        let mut h = echo_harness_for("s1", &sp).expect("start");
-        h.selected_model = Some("test/model".into());
-
-        h.submit_user_prompt("s1".into(), "remember potato".to_owned())
-            .expect("submit first prompt");
-        let spid = h
-            .prompt_agents
-            .keys()
-            .next()
-            .expect("first session prompt id")
-            .clone();
-        let cid = h
-            .prompt_agents
-            .get(&spid)
-            .expect("first prompt conversation")
-            .clone();
-        let agent_id = h
-            .agents
-            .get(&cid)
-            .and_then(|conv| conv.agent_id.as_ref())
-            .expect("first prompt agent id")
-            .clone();
-        h.handle_provider_response_finished(ProviderResponseFinished {
-            agent_prompt_id: spid,
-            agent_id: crate::parse_agent_id(&agent_id),
-            output_items: assistant_output("remembered potato"),
-            stop_reason: tau_proto::ProviderStopReason::EndTurn,
-            error: None,
-            originator: tau_proto::PromptOriginator::User,
-            usage: None,
-            compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
-            backend: None,
-            provider_response_id: None,
-            ws_pool_delta: None,
-        })
-        .expect("persist agent response");
-
-        h.shutdown().expect("shutdown");
-        drop(h);
-        wait_for_session_unlock(&sp, "s1");
-    }
-
-    let mut resumed =
-        echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-            .expect("resume");
-    resumed.selected_model = Some("test/model".into());
-
-    resumed
-        .submit_user_prompt("s1".into(), "what was it?".to_owned())
-        .expect("submit resumed prompt");
-    let spid = resumed
-        .prompt_agents
-        .keys()
-        .next()
-        .expect("resumed session prompt id")
-        .clone();
-    let prompt = read_prompt_created(&resumed, &spid);
-    let serialized = serde_json::to_string(&prompt.context.flatten()).expect("json");
-
-    assert!(
-        serialized.contains("remember potato"),
-        "resumed prompt must replay persisted user message: {serialized}",
-    );
-    assert!(
-        serialized.contains("remembered potato"),
-        "resumed prompt must replay persisted agent response: {serialized}",
-    );
-    assert!(
-        serialized.contains("what was it?"),
-        "resumed prompt must include the new prompt: {serialized}",
-    );
-
-    resumed.shutdown().expect("shutdown");
-}
-
-#[test]
 fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     // Linear-prefix and prompt-cache hygiene depends on
     // `assemble_conversation` ignoring the persisted thinking
@@ -1256,9 +852,9 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    append_user_message_via_event(&mut h, "s1", "first");
+    append_user_message_via_event(&mut h, "first");
 
-    let spid1 = h.send_prompt_to_agent("s1");
+    let spid1 = send_prompt_to_test_agent(&mut h);
     h.handle_provider_response_finished(ProviderResponseFinished {
         agent_prompt_id: spid1,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -1275,8 +871,8 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     })
     .expect("persist agent response");
 
-    append_user_message_via_event(&mut h, "s1", "second");
-    let spid2 = h.send_prompt_to_agent("s1");
+    append_user_message_via_event(&mut h, "second");
+    let spid2 = send_prompt_to_test_agent(&mut h);
     let prompt2 = read_prompt_created(&h, &spid2);
     let serialized = serde_json::to_string(&prompt2.context.flatten()).expect("json");
     assert!(
@@ -1287,154 +883,25 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     h.shutdown().expect("shutdown");
 }
 
-/// Peers that subscribed before a resumed session finished initializing must
-/// end up with the same view as a late subscriber: `SessionStarted(Resume)`
-/// live, then the loaded-agent roster and replay-marked transcript facts at
-/// init completion. Without the init-completion catch-up, the durable history
-/// of a resumed session — which predates the process and is never published
-/// live — would be visible only to peers that subscribed after init.
 #[test]
-fn resumed_session_init_catches_up_subscribers_that_joined_before_init() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-
-    let past_text = "remembered before resume";
-    {
-        let mut h = echo_harness_for("s1", &sp).expect("start");
-        h.selected_model = Some("test/model".into());
-        h.send_user_message("s1", past_text, None)
-            .expect("seed past message");
-        h.shutdown().expect("shutdown");
-        drop(h);
-        wait_for_session_unlock(&sp, "s1");
-    }
-
-    // Fresh harness bound to a different session; the extension subscribes
-    // while no s1 state is in play, mirroring a startup extension that is
-    // already subscribed when a resume initializes.
-    let mut h = echo_harness_for("s2", &sp).expect("start");
-    let extension_events = connect_test_tool(&mut h, "early-extension");
-    h.handle_extension_message(
-        "early-extension",
-        TestMessage::Subscribe(Subscribe {
-            selectors: vec![
-                EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
-                EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
-                EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
-            ],
-        }),
-    )
-    .expect("extension subscribe");
-    extension_events.lock().expect("sink").clear();
-
-    h.switch_session("s1".into(), tau_proto::SessionStartReason::Resume)
-        .expect("switch to resumed session");
-
-    let events = extension_events.lock().expect("sink");
-    let started_count = events
-        .iter()
-        .filter(|routed| {
-            matches!(
-                peel_inner_event(&routed.frame),
-                Some(Event::SessionStarted(started)) if started.session_id.as_str() == "s1"
-            )
-        })
-        .count();
-    assert_eq!(
-        started_count, 1,
-        "already-subscribed peer should see exactly one live SessionStarted, not a duplicate from catch-up",
-    );
-    assert!(
-        events.iter().any(|routed| {
-            matches!(
-                peel_inner_event(&routed.frame),
-                Some(Event::SessionAgentLoaded(loaded)) if loaded.session_id.as_str() == "s1"
-            )
-        }),
-        "already-subscribed peer should learn the resumed session's loaded agents at init completion",
-    );
-    assert!(
-        events.iter().any(|routed| {
-            peel_delivery(&routed.frame).is_some_and(|delivery| {
-                delivery.is_replay()
-                    && matches!(
-                        delivery.event(),
-                        Event::ProviderResponseFinished(finished)
-                            if provider_response_contains_text(finished, past_text)
-                    )
-            })
-        }),
-        "already-subscribed peer should receive the resumed transcript as replay-marked frames",
-    );
-    drop(events);
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Resume repair appends its synthetic tool errors to the durable log as it
-/// publishes them live. Init-completion catch-up therefore runs before
-/// repair, so a peer subscribed before init sees each synthetic error exactly
-/// once — live — and not again as a replay-marked frame.
-#[test]
-fn resumed_session_repair_errors_are_not_duplicated_for_pre_init_subscribers() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    seed_restored_tool_round(&sp, &["call-restored"], &[]);
-
-    let mut h = echo_harness_for("s2", &sp).expect("start");
-    let extension_events = connect_test_tool(&mut h, "early-extension");
-    h.handle_extension_message(
-        "early-extension",
-        TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_ERROR)],
-        }),
-    )
-    .expect("extension subscribe");
-    extension_events.lock().expect("sink").clear();
-
-    h.switch_session("s1".into(), tau_proto::SessionStartReason::Resume)
-        .expect("switch to resumed session");
-
-    let events = extension_events.lock().expect("sink");
-    let deliveries: Vec<bool> = events
-        .iter()
-        .filter_map(|routed| {
-            peel_delivery(&routed.frame).and_then(|delivery| match delivery.event() {
-                Event::ToolError(error) if error.call_id.as_str() == "call-restored" => {
-                    Some(delivery.is_replay())
-                }
-                _ => None,
-            })
-        })
-        .collect();
-    assert_eq!(
-        deliveries,
-        vec![false],
-        "synthetic repair error must arrive exactly once, live (got live/replay flags: {deliveries:?})",
-    );
-    drop(events);
-
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
-fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
+fn replay_emits_metadata_events_before_loaded_boundary() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     {
-        let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-        let mut sessions = tau_core::SessionStore::open(&sessions_dir).expect("session store");
-        sessions
-            .append_session_event(
-                "s1",
+        let mut agents = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+        agents
+            .append_agent_event(
+                "agent-replay-meta",
                 None,
-                Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                    session_id: "s1".into(),
+                Event::AgentStarted(tau_proto::AgentStarted {
                     agent_id: crate::parse_agent_id("agent-replay-meta"),
+                    parent_agent: None,
+                    role: "senior-engineer".to_owned(),
+                    display_name: None,
+                    metadata: Vec::new(),
                 }),
             )
-            .expect("seed session membership");
-        let mut agents = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+            .expect("seed agent start");
         agents
             .append_agent_event(
                 "agent-replay-meta",
@@ -1461,15 +928,18 @@ fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
             .expect("seed latest metadata");
     }
 
-    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
-        .expect("resume");
+    let mut h = echo_harness_for(&sp).expect("resume");
+    h.handle_agent_load(tau_proto::AgentLoad {
+        agent_id: crate::parse_agent_id("agent-replay-meta"),
+    })
+    .expect("load agent");
     let sink = connect_test_client(&mut h, "metadata-ui", tau_proto::ClientKind::Ui);
     h.handle_client_event(
         "metadata-ui",
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
-                EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_LOADED),
             ],
         })),
     )
@@ -1498,16 +968,11 @@ fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
         .position(|event| {
             matches!(
                 event,
-                Event::SessionAgentLoaded(loaded)
-                    if loaded.agent_id.as_str() == "agent-replay-meta"
+                Event::AgentLoaded(loaded) if loaded.agent_id.as_str() == "agent-replay-meta"
             )
         })
-        .expect("session loaded replayed");
+        .expect("agent.loaded replayed");
     assert!(metadata_index < loaded_index);
-    assert!(replayed.iter().all(|event| !matches!(
-        event,
-        Event::AgentMetadataSet(set) if set.value == CborValue::Text("/first".to_owned())
-    )));
 
     h.shutdown().expect("shutdown");
 }

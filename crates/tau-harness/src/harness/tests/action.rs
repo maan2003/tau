@@ -36,7 +36,6 @@ fn publish_action_schema(h: &mut Harness, source_id: &str, action_id: &str) {
 fn action_invoke(invocation_id: &str, extension_name: &str) -> tau_proto::ActionInvoke {
     tau_proto::ActionInvoke {
         invocation_id: invocation_id.into(),
-        session_id: "s1".into(),
         extension_name: extension_name.into(),
         instance_id: 0.into(),
         action_id: "email.list".to_owned(),
@@ -244,7 +243,7 @@ fn duplicate_action_invocation_id_cannot_steal_result_routing() {
 }
 
 #[test]
-fn action_invoke_rejects_non_ui_source_wrong_session_and_invalid_arguments() {
+fn action_invoke_rejects_non_ui_source_and_invalid_arguments() {
     let temp = TempDir::new().expect("temp dir");
     let mut h = quiet_provider_harness(temp.path()).expect("harness");
     let extension = connect_test_client(&mut h, "email-ext", tau_proto::ClientKind::Tool);
@@ -266,19 +265,6 @@ fn action_invoke_rejects_non_ui_source_wrong_session_and_invalid_arguments() {
             if error.invocation_id.as_str() == "tool-action" && error.message.contains("only UI")
     )));
     assert!(extension.lock().expect("extension sink").is_empty());
-
-    let mut wrong_session = action_invoke("wrong-session", "email-ext");
-    wrong_session.session_id = "other-session".into();
-    h.handle_client_event_inner("ui", Event::ActionInvoke(wrong_session))
-        .expect("wrong-session invoke should be handled as rejection");
-    assert!(ui.lock().expect("ui sink").iter().any(|routed| matches!(
-        peel_inner_event(&routed.frame),
-        Some(Event::ActionError(error))
-            if error.invocation_id.as_str() == "wrong-session"
-                && error.message.contains("current session")
-    )));
-    assert!(extension.lock().expect("extension sink").is_empty());
-    drain_sink(&ui);
 
     let mut invalid = action_invoke("bad-args", "email-ext");
     invalid.raw_line = "/email list unexpected".to_owned();

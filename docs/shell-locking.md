@@ -30,7 +30,7 @@ The wait queue is FIFO. If the front waiter is blocked, later waiters do not jum
 
 Manual locks track acquisition time, last-use time, and active automatic tools running under the lock. A front FIFO waiter performs a liveness check every 60 seconds. If the blocking manual lock has been idle for 120 seconds and has no active automatic tools inside it, the waiter returns `error: dir_lock_abandoned` with structured details headers: `blocking_directory`, `lock_owner_id`, `idle_seconds`, and `held_seconds`, plus a short text payload in `output`.
 
-Manual locks are released when ext-shell observes `agent.start_result` for a tracked delegate/side-agent, `SessionAgentUnloaded` for the owning agent, or `SessionShutdown` for the whole session. The extension also publishes a UI action `/shell-dir-force-unlock DIRECTORY` that canonicalizes an existing directory and force-releases all overlapping manual locks, regardless of owner. It does not cancel or release automatic locks held by currently running tools.
+Manual locks are released when ext-shell observes `agent.start_result` for a tracked delegate/side-agent or `agent.unloaded` for the owning agent. The extension also publishes a UI action `/shell-dir-force-unlock DIRECTORY` that canonicalizes an existing directory and force-releases all overlapping manual locks, regardless of owner. It does not cancel or release automatic locks held by currently running tools.
 
 
 ## Automatic locking for ext-shell tools

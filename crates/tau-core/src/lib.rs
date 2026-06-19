@@ -6,12 +6,11 @@
 
 mod action_registry;
 mod agent_store;
+mod agent_tree;
 mod bus;
 mod connection;
 mod memory;
 mod policy;
-mod session;
-mod session_store;
 mod tool_registry;
 
 #[cfg(test)]
@@ -23,6 +22,11 @@ pub use action_registry::{
 pub use agent_store::{
     AgentAppendOutcome, AgentStore, AgentStoreError, agent_is_locked, list_agent_metas,
 };
+pub use agent_tree::{
+    AgentEntry, AgentEventParent, AgentEventValidationError, AgentMessageDirection, AgentMeta,
+    AgentMetadataEntry, AgentNode, AgentTree, BackgroundToolCallState, BackgroundToolCompletion,
+    BackgroundToolPlaceholder, NodeId, PersistedAgentEvent, PersistedAgentEventSeq,
+};
 pub use bus::EventBus;
 pub use connection::{
     AllowAll, Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError,
@@ -30,17 +34,8 @@ pub use connection::{
 };
 pub use memory::{MemoryInbox, memory_connection};
 pub use policy::{
-    DefaultSubscriptionPolicy, PolicyStore, SubscriptionApproval, SubscriptionPolicy,
-    SubscriptionPolicyError,
-};
-pub use session::{
-    AgentEntry, AgentEventParent, AgentEventValidationError, AgentMessageDirection, AgentMeta,
-    AgentMetadataEntry, AgentNode, AgentTree, BackgroundToolCallState, BackgroundToolCompletion,
-    BackgroundToolPlaceholder, NodeId, PersistedAgentEvent, PersistedAgentEventSeq, SessionMeta,
-};
-pub use session_store::{
-    AppendOutcome, PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership,
-    SessionStore, SessionStoreError, list_session_metas, session_is_locked,
+    DefaultSubscriptionPolicy, PolicyStore, PolicyStoreError, SubscriptionApproval,
+    SubscriptionPolicy, SubscriptionPolicyError,
 };
 pub use tool_registry::{
     RegisterToolReport, ToolArgumentRepair, ToolArgumentValidationError, ToolProvider,

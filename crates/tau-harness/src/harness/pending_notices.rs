@@ -4,9 +4,9 @@
 //! they must be folded into the next real user prompt so the model sees them in
 //! context without an extra standalone turn.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
-use tau_proto::{SessionId, ToolName};
+use tau_proto::ToolName;
 
 use super::{tool_available_again_notice_prompt, tool_unavailable_notice_prompt};
 
@@ -14,13 +14,6 @@ use super::{tool_available_again_notice_prompt, tool_unavailable_notice_prompt};
 /// user prompt can fold it into context.
 #[derive(Debug, Default)]
 pub(crate) struct PendingPromptNoticeState {
-    /// Resumed sessions that still need a one-shot internal restore notice
-    /// folded immediately before the next real user prompt, with the last
-    /// durable event timestamp seen before resume when available.
-    pub(crate) restore_sessions: HashMap<SessionId, Option<tau_proto::UnixMicros>>,
-    /// Per-background-tool restore notes that should be folded immediately
-    /// before the next real user prompt, not dispatched as standalone turns.
-    pub(crate) restore_background_notices: HashMap<SessionId, Vec<String>>,
     /// Tool availability notices waiting to be folded before the next real user
     /// prompt on the target user agent, keyed by internal tool name for
     /// deterministic delivery.

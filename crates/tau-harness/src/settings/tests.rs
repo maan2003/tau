@@ -251,7 +251,7 @@ fn resolve_extensions_cli_enable_unknown_extension_errors() {
 #[test]
 fn validate_cli_overrides_rejects_invalid_harness_config_override() {
     let overrides = [
-        HarnessConfigCliOverride::from_str("session_retention_days=abc").expect("override syntax"),
+        HarnessConfigCliOverride::from_str("agent_retention_days=abc").expect("override syntax"),
     ];
 
     let err = validate_cli_overrides(&[], &[], &overrides).expect_err("wrong type fails");

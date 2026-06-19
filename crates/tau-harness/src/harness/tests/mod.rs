@@ -4,33 +4,330 @@
 //! The shared helpers and imports live here so each submodule can
 //! pull them in with `use super::*;`.
 
+use rand::SeedableRng as _;
+use rand::rngs::StdRng;
+
+use super::extension_data::{
+    append_extension_data_file, atomic_replace_extension_data_file, checked_extension_data_path,
+    create_extension_data_file, delete_extension_data_file, list_extension_data_entries,
+    rename_extension_data_file, sanitize_extension_data_path,
+};
+use super::{
+    HARNESS_CONNECTION_ID, Harness, mint_available_agent_id_for_role_with, prune_old_agent_dirs,
+    prune_old_debug_dirs,
+};
+
+fn deterministic_agent_id_rng() -> StdRng {
+    StdRng::seed_from_u64(0)
+}
+
+fn mint_agent_id_for_role(role: &str) -> String {
+    mint_available_agent_id_for_role_with(
+        role,
+        role,
+        "{{random_alphanumeric 6}}",
+        |_| false,
+        &mut deterministic_agent_id_rng(),
+        |_, _| {},
+    )
+}
+
+/// Active test harness fixture that keeps its temporary state directory alive.
+struct HarnessFixture {
+    /// Temporary root containing config, state, and agent store files.
+    _temp_dir: TempDir,
+    /// Harness under test.
+    harness: Harness,
+}
+
+/// In-memory bus sink that records every routed frame for assertions.
+struct RecordingSink {
+    /// Shared frame buffer populated by [`ConnectionSink::send`].
+    frames: Arc<Mutex<Vec<RoutedFrame>>>,
+}
+
+impl ConnectionSink for RecordingSink {
+    fn send(&mut self, frame: RoutedFrame) -> Result<(), ConnectionSendError> {
+        self.frames
+            .lock()
+            .expect("recorded frames lock")
+            .push(frame);
+        Ok(())
+    }
+}
+
+fn echo_runner(reader: UnixStream, writer: UnixStream) -> Result<(), String> {
+    super::run_echo_provider(reader, writer).map_err(|error| error.to_string())
+}
+
+fn harness_fixture() -> HarnessFixture {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let state_dir = temp_dir.path().join("state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(temp_dir.path().join("config")),
+        state_dir: Some(temp_dir.path().join("runtime")),
+    };
+    let harness =
+        Harness::new_with_provider(&state_dir, dirs, echo_runner, Vec::new()).expect("harness");
+    HarnessFixture {
+        _temp_dir: temp_dir,
+        harness,
+    }
+}
+
+fn write_events_jsonl_with_mtime(dir: &Path, modified: SystemTime) {
+    std::fs::create_dir_all(dir).expect("debug dir");
+    let events_path = dir.join("events.jsonl");
+    std::fs::write(&events_path, "{}\n").expect("events jsonl");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(events_path)
+        .expect("events jsonl file");
+    file.set_times(std::fs::FileTimes::new().set_modified(modified))
+        .expect("set mtime");
+}
+
+fn write_agent_events_cbor_with_mtime(dir: &Path, modified: SystemTime) {
+    std::fs::create_dir_all(dir).expect("agent dir");
+    let events_path = dir.join("events.cbor");
+    std::fs::write(&events_path, b"").expect("events cbor");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(events_path)
+        .expect("events cbor file");
+    file.set_times(std::fs::FileTimes::new().set_modified(modified))
+        .expect("set mtime");
+}
+
+#[test]
+fn agent_pruning_removes_old_agent_directories_by_events_mtime() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let state_dir = temp_dir.path().join("state");
+    let agents_dir = state_dir.join("agents");
+    let old_dir = agents_dir.join("old-agent");
+    let fresh_dir = agents_dir.join("fresh-agent");
+    let no_events_dir = agents_dir.join("no-events-agent");
+    let invalid_dir = agents_dir.join("not an agent");
+
+    write_agent_events_cbor_with_mtime(&old_dir, UNIX_EPOCH);
+    std::fs::write(old_dir.join("meta.json"), "{}").expect("old meta");
+    write_agent_events_cbor_with_mtime(&fresh_dir, SystemTime::now());
+    std::fs::create_dir_all(&no_events_dir).expect("no-events dir");
+    write_agent_events_cbor_with_mtime(&invalid_dir, UNIX_EPOCH);
+
+    prune_old_agent_dirs(&state_dir, Some(Duration::from_secs(24 * 60 * 60)))
+        .expect("prune agent dirs");
+
+    assert!(!old_dir.exists(), "stale agent dir should be pruned");
+    assert!(fresh_dir.exists(), "fresh agent dir should be kept");
+    assert!(
+        no_events_dir.exists(),
+        "agent dirs without events.cbor should not be age-pruned"
+    );
+    assert!(
+        invalid_dir.exists(),
+        "invalid agent ids should not be pruned by retention cleanup"
+    );
+}
+
+#[test]
+fn debug_pruning_removes_old_run_directories_by_events_mtime() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let state_dir = temp_dir.path().join("state");
+    let debug_root = crate::extension::debug_root(&state_dir);
+    let old_dir = debug_root.join("oldrun");
+    let current_dir = debug_root.join("current");
+    let fresh_dir = debug_root.join("fresh");
+    let no_events_dir = debug_root.join("no-events");
+
+    write_events_jsonl_with_mtime(&old_dir, UNIX_EPOCH);
+    std::fs::write(old_dir.join("nested-artifact"), "remove me").expect("nested artifact");
+    write_events_jsonl_with_mtime(&current_dir, UNIX_EPOCH);
+    write_events_jsonl_with_mtime(&fresh_dir, SystemTime::now());
+    std::fs::create_dir_all(&no_events_dir).expect("no-events dir");
+
+    prune_old_debug_dirs(
+        &state_dir,
+        Some(Duration::from_secs(24 * 60 * 60)),
+        &current_dir,
+    )
+    .expect("prune debug dirs");
+
+    assert!(!old_dir.exists(), "stale debug dir should be pruned");
+    assert!(current_dir.exists(), "current debug dir should be kept");
+    assert!(fresh_dir.exists(), "fresh debug dir should be kept");
+    assert!(
+        no_events_dir.exists(),
+        "dirs without events.jsonl should not be age-pruned"
+    );
+}
+
+fn seed_started_agent(harness: &mut Harness, agent_id: &tau_proto::AgentId) {
+    harness
+        .agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            Some(HARNESS_CONNECTION_ID.into()),
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: agent_id.clone(),
+                parent_agent: None,
+                role: "test".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+            }),
+        )
+        .expect("seed agent.started");
+}
+
+/// Ensures the load-boundary event is a metadata-free membership snapshot.
+///
+/// Durable metadata is reconstructed from replayed `agent.started` and
+/// `agent.metadata_*` events before this boundary; `agent.loaded` itself only
+/// announces runtime membership.
+#[test]
+fn agent_loaded_event_is_metadata_free_membership_snapshot() {
+    let mut fixture = harness_fixture();
+    let harness = &mut fixture.harness;
+    let agent_id = tau_proto::AgentId::parse("agent-loaded-membership").expect("agent id");
+
+    seed_started_agent(harness, &agent_id);
+    let Event::AgentLoaded(loaded) = harness.agent_loaded_event(&agent_id) else {
+        panic!("expected agent.loaded");
+    };
+
+    assert_eq!(loaded.agent_id, agent_id);
+}
+
+/// Ensures explicit `agent.load` brackets replayed history with load lifecycle
+/// events.
+///
+/// `agent.loading` announces that an existing durable agent is being caught up;
+/// replayed durable transcript facts follow; metadata-free `agent.loaded` marks
+/// the catch-up-complete boundary.
+#[test]
+fn agent_load_brackets_replayed_history_with_loading_and_loaded() {
+    let mut fixture = harness_fixture();
+    let harness = &mut fixture.harness;
+    let agent_id = tau_proto::AgentId::parse("agent-load-ordering").expect("agent id");
+    seed_started_agent(harness, &agent_id);
+    harness
+        .agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            Some(HARNESS_CONNECTION_ID.into()),
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                agent_id: agent_id.clone(),
+                text: "persisted prompt".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                display_name: None,
+                ctx_id: None,
+            }),
+        )
+        .expect("seed transcript prompt");
+
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let connection_id = harness.bus.connect(Connection::new(
+        ConnectionMetadata {
+            id: "agent-load-observer".into(),
+            name: "agent-load-observer".to_owned(),
+            kind: ClientKind::Tool,
+            origin: ConnectionOrigin::InMemory,
+        },
+        Box::new(RecordingSink {
+            frames: Arc::clone(&frames),
+        }),
+    ));
+    harness
+        .bus
+        .set_subscriptions(
+            &connection_id,
+            vec![EventSelector::Prefix("agent.".to_owned())],
+        )
+        .expect("subscribe observer");
+
+    harness
+        .handle_agent_load(tau_proto::AgentLoad {
+            agent_id: agent_id.clone(),
+        })
+        .expect("load agent");
+
+    let frames = frames.lock().expect("recorded frames");
+    let loading_index = frames
+        .iter()
+        .position(|routed| {
+            matches!(
+                &routed.frame,
+                HarnessOutputMessage::Deliver(delivery)
+                    if !delivery.replay
+                        && matches!(delivery.event.as_ref(), Event::AgentLoading(loading) if loading.agent_id == agent_id)
+            )
+        })
+        .expect("live agent.loading delivery");
+    let replay_index = frames
+        .iter()
+        .position(|routed| {
+            matches!(
+                &routed.frame,
+                HarnessOutputMessage::Deliver(delivery)
+                    if delivery.replay
+                        && matches!(
+                            delivery.event.as_ref(),
+                            Event::AgentPromptSubmitted(prompt)
+                                if prompt.agent_id == agent_id && prompt.text == "persisted prompt"
+                        )
+            )
+        })
+        .expect("replayed transcript delivery");
+    let loaded_index = frames
+        .iter()
+        .position(|routed| {
+            matches!(
+                &routed.frame,
+                HarnessOutputMessage::Deliver(delivery)
+                    if !delivery.replay
+                        && matches!(delivery.event.as_ref(), Event::AgentLoaded(loaded) if loaded.agent_id == agent_id)
+            )
+        })
+        .expect("live agent.loaded delivery");
+
+    assert!(
+        loading_index < replay_index,
+        "agent.loading must arrive before replayed history"
+    );
+    assert!(
+        replay_index < loaded_index,
+        "agent.loaded must arrive after replayed history"
+    );
+    assert!(
+        harness.pending_agent_loading_history_replays.is_empty(),
+        "load replay continuation should be consumed after commit"
+    );
+}
+
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use tau_agent_inspect::{format_agent_entry, policy_lines};
 use tau_core::{
     AgentEntry, AgentStore, AgentTree, Connection, ConnectionMetadata, ConnectionOrigin,
     ConnectionSendError, ConnectionSink, RoutedFrame,
 };
 use tau_proto::{
-    AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled, AgentPromptSteered,
-    CborValue, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventDelivery,
+    AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled, CborValue,
+    ClientKind, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventDelivery,
     EventSelector, HarnessInputMessage, HarnessInputWriter, HarnessOutputMessage,
     HarnessOutputReader, Intercept, InterceptAction, InterceptReply, InterceptionPriority,
     MessageItem, NodeId, ProviderResponseFinished, ProviderResponseUpdated, StartAgentRequest,
     Subscribe, ToolCallId, ToolCallItem, ToolName, ToolResult, ToolResultItem, ToolResultStatus,
     ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
-use tau_session_inspect::{
-    default_session_id, format_session_entry, open_session_store, policy_lines, session_lines,
-    session_list_lines,
-};
 use tempfile::TempDir;
 
-use super::{AgentState, AgentToolCall, HARNESS_CONNECTION_ID, Harness};
 use crate::AgentId;
 use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::daemon::{
@@ -41,11 +338,43 @@ use crate::daemon::{
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSource};
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
+use crate::harness::{AgentState, AgentToolCall};
 use crate::model::{
     clamp_effort, efforts_for_model, load_roles, role_infos, select_model_for_role,
     selected_params_for_role, thinking_summaries_for_model, verbosities_for_model,
 };
-use crate::turn::{PromptSubmission, TurnState};
+use crate::turn::TurnState;
+
+impl Harness {
+    fn handle_provider_response_finished(
+        &mut self,
+        response: ProviderResponseFinished,
+    ) -> Result<(), HarnessError> {
+        self.handle_provider_response_finished_from(Some("provider"), response)
+    }
+
+    fn extension_connection_id(&self, name: &str) -> Option<tau_proto::ConnectionId> {
+        self.bus
+            .connections()
+            .into_iter()
+            .find(|metadata| metadata.name == name)
+            .map(|metadata| metadata.id)
+    }
+
+    fn build_system_prompt_for_role(&self, role: &str) -> String {
+        self.build_system_prompt_for_role_preview(role)
+    }
+
+    fn gather_prompt_fragments(&self) -> Vec<tau_proto::PromptFragment> {
+        let (fragments, tool_fragments) =
+            self.gather_sourced_prompt_fragment_groups(&self.selected_role);
+        fragments
+            .into_iter()
+            .map(|sourced| sourced.fragment)
+            .chain(tool_fragments.into_iter().map(|sourced| sourced.fragment))
+            .collect()
+    }
+}
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
@@ -235,10 +564,6 @@ impl HarnessTestProtocolExt for Harness {
     ) -> Result<bool, HarnessError> {
         self.handle_client_message(client_id, frame.into_input_message())
     }
-}
-
-fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
-    crate::harness::run_echo_provider(r, w).map_err(|e| e.to_string())
 }
 
 fn assert_agent_id_chars(agent_id: &str) {
@@ -570,23 +895,23 @@ fn user_skill_command_rejects_non_user_invocable_skill() {
 
 #[test]
 fn extension_data_paths_reject_escape_components() {
-    assert!(super::sanitize_extension_data_path("notes/file.txt", false).is_ok());
-    assert!(super::sanitize_extension_data_path("", true).is_ok());
+    assert!(sanitize_extension_data_path("notes/file.txt", false).is_ok());
+    assert!(sanitize_extension_data_path("", true).is_ok());
     assert_eq!(
-        super::sanitize_extension_data_path("", false)
+        sanitize_extension_data_path("", false)
             .expect_err("empty file path")
             .kind,
         tau_proto::ExtensionDataErrorKind::InvalidPath
     );
     assert_eq!(
-        super::sanitize_extension_data_path("../secret", false)
+        sanitize_extension_data_path("../secret", false)
             .expect_err("parent escape")
             .kind,
         tau_proto::ExtensionDataErrorKind::InvalidPath
     );
-    assert!(super::sanitize_extension_data_path("notes/../secret", false).is_err());
-    assert!(super::sanitize_extension_data_path("/tmp/secret", false).is_err());
-    assert!(super::sanitize_extension_data_path("./secret", false).is_err());
+    assert!(sanitize_extension_data_path("notes/../secret", false).is_err());
+    assert!(sanitize_extension_data_path("/tmp/secret", false).is_err());
+    assert!(sanitize_extension_data_path("./secret", false).is_err());
 }
 
 #[test]
@@ -598,7 +923,7 @@ fn extension_data_list_skips_symlinks_and_returns_relative_entries() {
     #[cfg(unix)]
     std::os::unix::fs::symlink("/tmp", root.join("outside")).expect("symlink");
 
-    let entries = super::list_extension_data_entries(&root, &root).expect("list entries");
+    let entries = list_extension_data_entries(&root, &root).expect("list entries");
     assert!(
         entries.iter().any(|entry| entry.path.as_str() == "file.txt"
             && !entry.is_dir
@@ -621,8 +946,8 @@ fn extension_data_checked_path_rejects_symlink_leaf_and_ancestor() {
     {
         std::os::unix::fs::symlink("/tmp", root.join("leaf")).expect("leaf symlink");
         std::os::unix::fs::symlink("/tmp", root.join("parent")).expect("parent symlink");
-        assert!(super::checked_extension_data_path(&root, Path::new("leaf"), false).is_err());
-        assert!(super::checked_extension_data_path(&root, Path::new("parent/file"), true).is_err());
+        assert!(checked_extension_data_path(&root, Path::new("leaf"), false).is_err());
+        assert!(checked_extension_data_path(&root, Path::new("parent/file"), true).is_err());
     }
 }
 #[test]
@@ -637,8 +962,8 @@ fn extension_data_checked_path_rejects_symlink_root() {
         std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755))
             .expect("chmod real");
         std::os::unix::fs::symlink(&real, &root).expect("root symlink");
-        assert!(super::checked_extension_data_path(&root, Path::new("file"), true).is_err());
-        assert!(super::checked_extension_data_path(&root, Path::new(""), true).is_err());
+        assert!(checked_extension_data_path(&root, Path::new("file"), true).is_err());
+        assert!(checked_extension_data_path(&root, Path::new(""), true).is_err());
         let real_mode = std::fs::metadata(&real)
             .expect("real metadata")
             .permissions()
@@ -653,25 +978,25 @@ fn extension_data_file_helpers_create_append_replace_delete_private_files() {
     let root = tmp.path().join("root");
     let file = root.join("nested/file.txt");
 
-    super::create_extension_data_file(&file, b"first").expect("create file");
+    create_extension_data_file(&file, b"first").expect("create file");
     assert_eq!(std::fs::read(&file).expect("read created"), b"first");
-    let duplicate = super::create_extension_data_file(&file, b"second").expect_err("duplicate");
+    let duplicate = create_extension_data_file(&file, b"second").expect_err("duplicate");
     assert_eq!(duplicate.kind(), std::io::ErrorKind::AlreadyExists);
 
-    super::append_extension_data_file(&file, b"\nappended").expect("append file");
+    append_extension_data_file(&file, b"\nappended").expect("append file");
     assert_eq!(
         std::fs::read(&file).expect("read appended"),
         b"first\nappended"
     );
 
-    super::atomic_replace_extension_data_file(&file, b"replaced").expect("replace file");
+    atomic_replace_extension_data_file(&file, b"replaced").expect("replace file");
     assert_eq!(std::fs::read(&file).expect("read replaced"), b"replaced");
     let renamed = root.join("nested/renamed.txt");
-    super::rename_extension_data_file(&file, &renamed).expect("rename file");
+    rename_extension_data_file(&file, &renamed).expect("rename file");
     assert!(!file.exists());
     assert_eq!(std::fs::read(&renamed).expect("read renamed"), b"replaced");
 
-    super::delete_extension_data_file(&renamed).expect("delete file");
+    delete_extension_data_file(&renamed).expect("delete file");
     assert!(!renamed.exists());
 
     #[cfg(unix)]
@@ -683,7 +1008,7 @@ fn extension_data_file_helpers_create_append_replace_delete_private_files() {
             .mode()
             & 0o777;
         assert_eq!(dir_mode, 0o700);
-        super::create_extension_data_file(&file, b"private").expect("recreate file");
+        create_extension_data_file(&file, b"private").expect("recreate file");
         let file_mode = std::fs::metadata(&file)
             .expect("file metadata")
             .permissions()
@@ -694,7 +1019,7 @@ fn extension_data_file_helpers_create_append_replace_delete_private_files() {
 }
 #[test]
 fn minted_agent_ids_use_default_random_alphanumeric_template() {
-    let agent_id = super::mint_agent_id_for_role("engineer");
+    let agent_id = mint_agent_id_for_role("engineer");
 
     assert_eq!(agent_id.len(), 6);
     assert_agent_id_chars(&agent_id);
@@ -708,8 +1033,8 @@ fn minted_agent_ids_use_deterministic_test_rng_sequence() {
         let tmp = TempDir::new().expect("tempdir");
         let mut h = echo_harness(tmp.path()).expect("harness");
         let role = h.selected_role.clone();
-        let first = h.create_durable_user_agent("s1".into(), &role);
-        let second = h.create_durable_user_agent("s1".into(), &role);
+        let first = h.create_durable_user_agent(&role);
+        let second = h.create_durable_user_agent(&role);
         (first.to_string(), second.to_string())
     };
 
@@ -728,7 +1053,7 @@ fn minting_agent_ids_renders_configured_template() {
         "engineer",
         "{{role}}-{{random_alphanumeric 6}}",
         |_| false,
-        &mut super::deterministic_agent_id_rng(),
+        &mut deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -748,7 +1073,7 @@ fn minting_agent_ids_renders_role_group_in_configured_template() {
         "engineer",
         "{{role_group}}-{{role}}-{{random_alphanumeric 4}}",
         |_| false,
-        &mut super::deterministic_agent_id_rng(),
+        &mut deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -768,7 +1093,7 @@ fn minting_agent_ids_reject_display_name_only_template_fields() {
         "engineer",
         "{{role}}-{{task_name}}",
         |_| false,
-        &mut super::deterministic_agent_id_rng(),
+        &mut deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -785,7 +1110,7 @@ fn minting_agent_ids_reject_display_name_only_template_fields() {
 
 #[test]
 fn agent_template_uses_role_when_task_name_is_absent() {
-    let mut rng = super::deterministic_agent_id_rng();
+    let mut rng = deterministic_agent_id_rng();
     let rendered = super::render_agent_template(
         "{{#if task_name_present}}{{role}}: {{task_name}}{{else}}{{role}}{{/if}}",
         "staff-engineer",
@@ -802,7 +1127,7 @@ fn agent_template_uses_role_when_task_name_is_absent() {
 
 #[test]
 fn agent_template_renders_display_name_context() {
-    let mut rng = super::deterministic_agent_id_rng();
+    let mut rng = deterministic_agent_id_rng();
     let rendered = super::render_agent_template(
         "{{role_group}}/{{role}}/{{agent_id}}/{{task_name}}/{{task_name_present}}/{{random_alphanumeric 4}}",
         "staff-engineer",
@@ -831,7 +1156,7 @@ fn minting_agent_ids_falls_back_immediately_on_invalid_rendered_id() {
         "engineer",
         "bad/id",
         |_| false,
-        &mut super::deterministic_agent_id_rng(),
+        &mut deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -857,7 +1182,7 @@ fn minting_agent_ids_falls_back_after_configured_template_collisions() {
         "engineer",
         "taken",
         |agent_id| agent_id == "taken",
-        &mut super::deterministic_agent_id_rng(),
+        &mut deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -889,7 +1214,7 @@ fn minting_agent_ids_skips_persisted_agent_dirs() {
         "engineer",
         "engineer_0",
         |agent_id| store.agent_exists(agent_id),
-        &mut super::deterministic_agent_id_rng(),
+        &mut deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -904,14 +1229,16 @@ fn minting_agent_ids_skips_persisted_agent_dirs() {
     )));
 }
 
+/// Ensures the rendered config self-knowledge page includes the generated
+/// default config blocks and current runtime path shape.
 #[test]
 fn render_self_knowledge_config_content_inserts_config_defaults() {
     let rendered = crate::harness::render_self_knowledge_config_content();
 
     assert!(!rendered.contains("{harness_config}"));
     assert!(!rendered.contains("{ui_config}"));
-    assert!(rendered.contains("${XDG_RUNTIME_DIR}/tau/<pid>/"));
-    assert!(rendered.contains("session_retention_days: 60"));
+    assert!(rendered.contains("${XDG_RUNTIME_DIR}/tau/harnesses/"));
+    assert!(rendered.contains("agent_retention_days: 60"));
     assert!(rendered.contains("show_thinking: true"));
     assert!(rendered.contains("{{role_group}}-{{random_alphanumeric 4}}"));
     assert!(rendered.contains("{{role_group}}: {{task_name}}"));
@@ -945,14 +1272,13 @@ fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
         .iter()
         .find_map(|(cid, conv)| conv.originator.is_user().then_some(cid.clone()))
         .unwrap_or_else(|| {
-            let session_id = h.current_session_id.clone();
             let role = h.selected_role.clone();
-            h.create_durable_user_agent(session_id, &role)
+            h.create_durable_user_agent(&role)
         });
     // Most harness unit tests use this helper to focus on tool/provider state,
     // not extension-provided prompt context. Treat the synthetic agent as if
     // registered context providers have already acknowledged it; tests that
-    // exercise context readiness drive `session.agent_loaded` explicitly.
+    // exercise context readiness drive `agent.loaded` explicitly.
     if let Some(agent_id) = h
         .agents
         .get(&cid)
@@ -1009,13 +1335,9 @@ fn event_log_events(h: &Harness) -> Vec<Event> {
     events
 }
 
-fn loaded_agent_events(h: &Harness, session_id: &str) -> Vec<Event> {
-    let Some(session) = h.store.session(session_id) else {
-        return Vec::new();
-    };
-
-    session
-        .loaded_agents()
+fn loaded_agent_events(h: &Harness) -> Vec<Event> {
+    let loaded_agents: Vec<_> = h.agent_routes.keys().cloned().collect();
+    loaded_agents
         .into_iter()
         .filter_map(|agent_id| h.agent_store.agent_events(agent_id.as_str()).ok())
         .flatten()
@@ -1023,21 +1345,19 @@ fn loaded_agent_events(h: &Harness, session_id: &str) -> Vec<Event> {
         .collect()
 }
 
-fn persisted_agent_branch(state_dir: &Path, session_id: &str) -> Vec<AgentEntry> {
-    persisted_agent_branches(state_dir, session_id)
+fn persisted_agent_branch(state_dir: &Path) -> Vec<AgentEntry> {
+    persisted_agent_branches(state_dir)
         .into_iter()
         .next()
         .expect("loaded agent")
 }
 
-fn persisted_agent_branches(state_dir: &Path, session_id: &str) -> Vec<Vec<AgentEntry>> {
-    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
-    let store = open_session_store(&sessions_dir).expect("session store");
-    let session = store.session(session_id).expect("session membership");
+fn persisted_agent_branches(state_dir: &Path) -> Vec<Vec<AgentEntry>> {
     let mut agent_store = AgentStore::open(state_dir.join("agents")).expect("agent store");
-    session
-        .loaded_agents()
-        .into_iter()
+    std::fs::read_dir(state_dir.join("agents"))
+        .expect("agents dir")
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
         .map(|agent_id| {
             let tree = agent_store
                 .load_agent(agent_id.as_str())
@@ -1050,60 +1370,65 @@ fn persisted_agent_branches(state_dir: &Path, session_id: &str) -> Vec<Vec<Agent
 
 /// Test-only helper that appends a user message through the harness's normal
 /// agent-transcript publish path without driving a provider turn.
-fn append_user_message_via_event(h: &mut Harness, session_id: &str, text: &str) {
-    assert_eq!(session_id, h.current_session_id.as_str());
+fn append_user_message_via_event(h: &mut Harness, text: &str) {
     let cid = ensure_test_user_agent(h);
     h.publish_pending_prompt_for_agent(&cid, PendingPrompt::user(text.to_owned()))
         .expect("append user message");
 }
 
-fn echo_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
-    echo_harness_for("s1", state_dir)
+fn send_prompt_to_test_agent(h: &mut Harness) -> AgentPromptId {
+    let cid = test_user_agent(h);
+    h.send_prompt_to_agent_for(&cid).expect("agent prompt id")
 }
 
-fn echo_harness_for(
-    session_id: &str,
-    state_dir: impl Into<PathBuf>,
-) -> Result<Harness, HarnessError> {
+fn read_agent_prompt_created(h: &Harness, spid: &AgentPromptId) -> Option<AgentPromptCreated> {
+    let mut cursor = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(cursor) {
+        cursor = entry.seq.next();
+        if let Event::AgentPromptCreated(prompt) = entry.event
+            && &prompt.agent_prompt_id == spid
+        {
+            return Some(prompt);
+        }
+    }
+    None
+}
+
+fn load_test_agent(h: &mut Harness, agent_id: &str) {
+    let agent_id = tau_proto::AgentId::parse(agent_id).expect("agent id");
+    h.agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            Some(HARNESS_CONNECTION_ID.into()),
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: agent_id.clone(),
+                parent_agent: None,
+                role: "senior-engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+            }),
+        )
+        .expect("seed agent.started");
+    h.handle_agent_load(tau_proto::AgentLoad { agent_id })
+        .expect("load test agent");
+}
+
+fn echo_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
+    echo_harness_for(state_dir)
+}
+
+fn echo_harness_for(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
     let state_dir = state_dir.into();
     let dirs = tau_config::settings::TauDirs {
         config_dir: Some(state_dir.join("config")),
         state_dir: Some(state_dir.join("runtime")),
     };
-    echo_harness_with_dirs(session_id, state_dir, dirs)
+    echo_harness_with_dirs(state_dir, dirs)
 }
 
 fn echo_harness_with_dirs(
-    session_id: &str,
     state_dir: impl Into<PathBuf>,
     dirs: tau_config::settings::TauDirs,
-) -> Result<Harness, HarnessError> {
-    echo_harness_with_dirs_and_start_reason(
-        session_id,
-        state_dir,
-        dirs,
-        tau_proto::SessionStartReason::Initial,
-    )
-}
-
-fn echo_harness_with_start_reason(
-    session_id: &str,
-    state_dir: impl Into<PathBuf>,
-    start_reason: tau_proto::SessionStartReason,
-) -> Result<Harness, HarnessError> {
-    let state_dir = state_dir.into();
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(state_dir.join("config")),
-        state_dir: Some(state_dir.join("runtime")),
-    };
-    echo_harness_with_dirs_and_start_reason(session_id, state_dir, dirs, start_reason)
-}
-
-fn echo_harness_with_dirs_and_start_reason(
-    session_id: &str,
-    state_dir: impl Into<PathBuf>,
-    dirs: tau_config::settings::TauDirs,
-    start_reason: tau_proto::SessionStartReason,
 ) -> Result<Harness, HarnessError> {
     fn shell_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         tau_ext_shell::run(r, w).map_err(|e| e.to_string())
@@ -1116,10 +1441,8 @@ fn echo_harness_with_dirs_and_start_reason(
             name: "shell",
             runner: shell_runner,
         }],
-        session_id,
-        start_reason,
     )?;
-    h.agent_id_rng = super::deterministic_agent_id_rng();
+    h.agent_id_rng = deterministic_agent_id_rng();
     h.enable_echo_tool_for_tests();
     // not let its startup context-provider registration defer unrelated prompt
     // dispatch assertions; readiness-specific tests register providers directly.
@@ -1129,13 +1452,6 @@ fn echo_harness_with_dirs_and_start_reason(
 }
 
 fn quiet_provider_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
-    quiet_provider_harness_with_start_reason(state_dir, tau_proto::SessionStartReason::Initial)
-}
-
-fn quiet_provider_harness_with_start_reason(
-    state_dir: impl Into<PathBuf>,
-    start_reason: tau_proto::SessionStartReason,
-) -> Result<Harness, HarnessError> {
     fn quiet_provider_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         fn inner(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::Error>> {
             let mut reader = TestOutputReader::new(BufReader::new(r));
@@ -1187,15 +1503,8 @@ fn quiet_provider_harness_with_start_reason(
         config_dir: Some(state_dir.join("config")),
         state_dir: Some(state_dir.join("runtime")),
     };
-    let mut h = Harness::new_with_provider(
-        state_dir,
-        dirs,
-        quiet_provider_runner,
-        Vec::new(),
-        "s1",
-        start_reason,
-    )?;
-    h.agent_id_rng = super::deterministic_agent_id_rng();
+    let mut h = Harness::new_with_provider(state_dir, dirs, quiet_provider_runner, Vec::new())?;
+    h.agent_id_rng = deterministic_agent_id_rng();
     Ok(h)
 }
 
@@ -1239,7 +1548,7 @@ fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<RoutedFrame>>
 /// directly.
 fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
     // Tests that bypass prompt dispatch still need the same loaded-agent and
-    // session-membership side effects that a real dispatch would establish.
+    // runtime-membership side effects that a real dispatch would establish.
     let agent_id = h
         .ensure_agent_id_for_agent(cid)
         .expect("conversation agent id");
@@ -1388,23 +1697,6 @@ fn drive_harness_until_tool_turn_empty(h: &mut Harness) {
     }
 }
 
-fn wait_for_session_unlock(state_dir: &Path, session_id: &str) {
-    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
-    let started = Instant::now();
-    loop {
-        let locked =
-            tau_core::session_is_locked(&sessions_dir, session_id).expect("session lock probe");
-        if !locked {
-            return;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "timed out waiting for session `{session_id}` lock to clear"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 /// Find the conversation id of the outer side conversation (the one
 /// whose originator is the delegate extension's first query). Used by
 /// the cross-conversation regression test above to disambiguate
@@ -1506,8 +1798,7 @@ fn read_nth_prompt_created(h: &Harness, index: usize) -> AgentPromptCreated {
         cursor = entry.seq.next();
         if let Event::AgentPromptCreated(prompt) = entry.event {
             if seen == index {
-                return h
-                    .read_agent_prompt_created(&prompt.session_id, &prompt.agent_prompt_id)
+                return read_agent_prompt_created(h, &prompt.agent_prompt_id)
                     .expect("materialized prompt event");
             }
             seen += 1;
@@ -1516,12 +1807,10 @@ fn read_nth_prompt_created(h: &Harness, index: usize) -> AgentPromptCreated {
 }
 
 fn read_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCreated {
-    let raw = read_raw_prompt_created(h, spid);
-    h.read_agent_prompt_created(&raw.session_id, spid)
-        .expect("materialized prompt event")
+    read_agent_prompt_created(h, spid).expect("materialized prompt event")
 }
 
-fn intercepted_payload(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> (Event, bool) {
+fn intercepted_payload(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> Event {
     let events = events.lock().expect("events mutex");
     let intercepted = events
         .iter()
@@ -1530,12 +1819,11 @@ fn intercepted_payload(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> (Event, bool) {
             _ => None,
         })
         .expect("intercept request delivered");
-    ((*intercepted.event).clone(), intercepted.transient)
+    (*intercepted.event).clone()
 }
 
 fn draft_event(text: &str) -> Event {
     Event::UiPromptDraft(UiPromptDraft {
-        session_id: "s1".into(),
         text: text.to_owned(),
     })
 }

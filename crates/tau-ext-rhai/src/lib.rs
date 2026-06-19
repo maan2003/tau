@@ -253,7 +253,7 @@ where
             RuntimeInput::Harness(HarnessOutputMessage::InterceptRequest(req)) => {
                 let action = runtime
                     .as_mut()
-                    .map(|runtime| runtime.on_intercept(*req.event, req.transient, &tx))
+                    .map(|runtime| runtime.on_intercept(*req.event, &tx))
                     .unwrap_or_else(|| InterceptAction::Pass(None));
                 let _ = tx.send(HarnessInputMessage::InterceptReply(InterceptReply {
                     action,
@@ -450,18 +450,7 @@ fn register_host_functions(
         "tau_emit",
         move |event: Dynamic| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&emit_state, "tau_emit")?;
-            enqueue_event(&emit_tx, event, false);
-            Ok(())
-        },
-    );
-
-    let emit_tx = tx.clone();
-    let emit_state = host_state.clone();
-    engine.register_fn(
-        "tau_emit_transient",
-        move |event: Dynamic| -> Result<(), Box<EvalAltResult>> {
-            ensure_not_init(&emit_state, "tau_emit_transient")?;
-            enqueue_event(&emit_tx, event, true);
+            enqueue_event(&emit_tx, event);
             Ok(())
         },
     );
@@ -472,7 +461,7 @@ fn register_host_functions(
         "tau_info",
         move |message: ImmutableString| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&info_state, "tau_info")?;
-            enqueue_info(&info_tx, message.as_str(), NoticeLevel::Info, true);
+            enqueue_info(&info_tx, message.as_str(), NoticeLevel::Info);
             Ok(())
         },
     );
@@ -483,12 +472,7 @@ fn register_host_functions(
         "tau_info",
         move |message: ImmutableString, level: ImmutableString| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&info_state, "tau_info")?;
-            enqueue_info(
-                &info_tx,
-                message.as_str(),
-                parse_info_level(level.as_str()),
-                true,
-            );
+            enqueue_info(&info_tx, message.as_str(), parse_info_level(level.as_str()));
             Ok(())
         },
     );
@@ -700,12 +684,12 @@ fn optional_int_field(map: &Map, key: &str) -> Result<Option<i64>, String> {
         .transpose()
 }
 
-fn enqueue_event(tx: &mpsc::Sender<HarnessInputMessage>, event: Dynamic, transient: bool) {
+fn enqueue_event(tx: &mpsc::Sender<HarnessInputMessage>, event: Dynamic) {
     match dynamic_to_json(&event)
         .and_then(|value| serde_json::from_value::<Event>(value).map_err(|e| e.to_string()))
     {
         Ok(event) => {
-            let _ = tx.send(HarnessInputMessage::emit_with_transient(event, transient));
+            let _ = tx.send(HarnessInputMessage::emit(event));
         }
         Err(message) => {
             tracing::warn!(target: LOG_TARGET, error = %message, "script emitted invalid event");
@@ -713,27 +697,20 @@ fn enqueue_event(tx: &mpsc::Sender<HarnessInputMessage>, event: Dynamic, transie
                 tx,
                 &format!("rhai invalid event: {message}"),
                 NoticeLevel::Warning,
-                true,
             );
         }
     }
 }
 
-fn enqueue_info(
-    tx: &mpsc::Sender<HarnessInputMessage>,
-    message: &str,
-    level: NoticeLevel,
-    transient: bool,
-) {
-    let _ = tx.send(HarnessInputMessage::emit_with_transient(
-        Event::HarnessNotice(HarnessNotice {
+fn enqueue_info(tx: &mpsc::Sender<HarnessInputMessage>, message: &str, level: NoticeLevel) {
+    let _ = tx.send(HarnessInputMessage::emit(Event::HarnessNotice(
+        HarnessNotice {
             kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
             message: message.to_owned(),
             level,
             always_show: false,
-        }),
-        transient,
-    ));
+        },
+    )));
 }
 
 fn parse_info_level(level: &str) -> NoticeLevel {
@@ -892,7 +869,6 @@ impl ScriptRuntime {
     fn on_intercept(
         &mut self,
         event: Event,
-        transient: bool,
         tx: &mpsc::Sender<HarnessInputMessage>,
     ) -> InterceptAction {
         let event = match serde_json::to_value(event)
@@ -905,15 +881,13 @@ impl ScriptRuntime {
                 return InterceptAction::Pass(None);
             }
         };
-        if !self.has_function("on_intercept", 2) {
+        if !self.has_function("on_intercept", 1) {
             return InterceptAction::Pass(None);
         }
-        match self.engine.call_fn::<Dynamic>(
-            &mut self.scope,
-            &self.ast,
-            "on_intercept",
-            (event, transient),
-        ) {
+        match self
+            .engine
+            .call_fn::<Dynamic>(&mut self.scope, &self.ast, "on_intercept", (event,))
+        {
             Ok(value) => parse_intercept_action(value).unwrap_or_else(|message| {
                 report_callback_error(tx, format!("invalid on_intercept result: {message}"));
                 InterceptAction::Pass(None)
@@ -1122,7 +1096,7 @@ impl ScriptRuntime {
 
 fn report_callback_error(tx: &mpsc::Sender<HarnessInputMessage>, message: String) {
     tracing::warn!(target: LOG_TARGET, error = %message, "rhai callback failed");
-    enqueue_info(tx, &message, NoticeLevel::Warning, true);
+    enqueue_info(tx, &message, NoticeLevel::Warning);
 }
 
 fn meta_json(replay: bool, recorded_at: Option<UnixMicros>) -> serde_json::Value {
